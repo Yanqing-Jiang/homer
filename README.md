@@ -161,7 +161,40 @@ npm run dev
 
 ## Status
 
+**Current:** Phase 4 Complete (Daemon operational)
+
 See [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md) for current implementation status.
+
+---
+
+## Phase 5 Roadmap
+
+### Architecture Decision
+
+Messages go directly to Claude Executor (Opus). Claude can spawn Haiku sub-agents for memory search to avoid context blowup. No separate triage layer.
+
+```
+Message → Claude Executor (Opus) → Response
+               ↓
+         CLAUDE.md instructs:
+         • Spawn Haiku for memory grep (selective)
+         • Avoid loading full context
+         • Use session continuity (--resume)
+```
+
+### Planned Features
+
+| Phase | Feature | Status |
+|-------|---------|--------|
+| 5.1 | CLAUDE.md instruction system | Planned |
+| 5.2 | Voice interface (Whisper STT + ElevenLabs TTS) | Planned |
+| 5.3 | Local search (grep on memory files) | Planned |
+| 5.4 | Google Calendar API integration | Planned |
+| 5.5 | Gmail API with Pub/Sub | Planned |
+| 5.6 | Browser automation (Playwright + CDP) | Planned |
+| 5.7 | Advanced search (pgvector + embeddings) | Planned |
+
+See [docs/PHASE5_PLAN.md](docs/PHASE5_PLAN.md) for detailed implementation plan.
 
 ## License
 
