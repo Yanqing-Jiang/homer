@@ -1,4 +1,6 @@
+import { existsSync } from "fs";
 import type { LaneId } from "./types.js";
+import { detectContext, contextTypeToMemoryContext, type DetectedContext } from "../context/detector.js";
 
 // Context paths
 const CONTEXT_PATHS: Record<string, string> = {
@@ -21,18 +23,19 @@ export interface ParsedRoute {
   subagent?: "gemini" | "codex";
   newSession: boolean;       // Start fresh session
   prefix: string;
+  detectedContext?: DetectedContext; // Context detection result
 }
 
 /**
  * Parse a message into routing information
  *
  * Supported formats:
- *   /new [context] [query]     - Start fresh session
- *   /work [project] [query]    - Work context, optional project subfolder
- *   /life [area] [query]       - Life context, optional area subfolder
- *   /g [query]                 - Use Gemini subagent
- *   /x [query]                 - Use Codex subagent
- *   [query]                    - Continue in current context
+ *   /new [query]             - Start fresh session
+ *   /g [query]               - Use Gemini subagent
+ *   /x [query]               - Use Codex subagent
+ *   [query]                  - Auto-detect context from query
+ *
+ * Removed: /work, /life prefixes (now auto-detected)
  */
 export function parseRoute(message: string): ParsedRoute | null {
   const trimmed = message.trim();
@@ -42,50 +45,61 @@ export function parseRoute(message: string): ParsedRoute | null {
 
   // Check for /new command (start fresh session)
   if (trimmed.startsWith("/new")) {
-    const rest = trimmed.slice(4).trim();
+    const query = trimmed.slice(4).trim();
 
-    // /new work [project] [query]
-    if (rest.startsWith("work")) {
-      const afterWork = rest.slice(4).trim();
-      const { subcontext, query } = parseSubcontextAndQuery(afterWork);
-      return {
-        context: "work",
-        subcontext,
-        query,
-        cwd: buildCwd("work", subcontext),
-        newSession: true,
-        prefix: "/new work",
-      };
-    }
+    // Detect context from the query
+    const detected = query ? detectContext(query) : null;
 
-    // /new life [area] [query]
-    if (rest.startsWith("life")) {
-      const afterLife = rest.slice(4).trim();
-      const { subcontext, query } = parseSubcontextAndQuery(afterLife);
-      return {
-        context: "life",
-        subcontext,
-        query,
-        cwd: buildCwd("life", subcontext),
-        newSession: true,
-        prefix: "/new life",
-      };
-    }
-
-    // /new [query] - fresh session in default context
     return {
-      context: "default",
-      query: rest,
-      cwd: defaultCwd,
+      context: detected ? contextTypeToMemoryContext(detected.type) : "default",
+      subcontext: detected?.project || detected?.area,
+      query,
+      cwd: detected?.suggestedCwd ?? defaultCwd,
       newSession: true,
       prefix: "/new",
+      detectedContext: detected ?? undefined,
     };
   }
 
-  // Check for /work command
+  // Check for /g command (Gemini subagent)
+  if (trimmed.startsWith("/g ") || trimmed === "/g") {
+    const query = trimmed.slice(2).trim();
+    const detected = query ? detectContext(query) : null;
+
+    return {
+      context: detected ? contextTypeToMemoryContext(detected.type) : "default",
+      subcontext: detected?.project || detected?.area,
+      query,
+      cwd: detected?.suggestedCwd ?? defaultCwd,
+      subagent: "gemini",
+      newSession: false,
+      prefix: "/g",
+      detectedContext: detected ?? undefined,
+    };
+  }
+
+  // Check for /x command (Codex subagent)
+  if (trimmed.startsWith("/x ") || trimmed === "/x") {
+    const query = trimmed.slice(2).trim();
+    const detected = query ? detectContext(query) : null;
+
+    return {
+      context: detected ? contextTypeToMemoryContext(detected.type) : "default",
+      subcontext: detected?.project || detected?.area,
+      query,
+      cwd: detected?.suggestedCwd ?? defaultCwd,
+      subagent: "codex",
+      newSession: false,
+      prefix: "/x",
+      detectedContext: detected ?? undefined,
+    };
+  }
+
+  // Legacy support: /work and /life still work but are deprecated
+  // They now just use context detection with a hint
   if (trimmed.startsWith("/work")) {
     const rest = trimmed.slice(5).trim();
-    const { subcontext, query } = parseSubcontextAndQuery(rest);
+    const { subcontext, query } = parseSubcontextAndQuery(rest, "work");
     return {
       context: "work",
       subcontext,
@@ -96,10 +110,9 @@ export function parseRoute(message: string): ParsedRoute | null {
     };
   }
 
-  // Check for /life command
   if (trimmed.startsWith("/life")) {
     const rest = trimmed.slice(5).trim();
-    const { subcontext, query } = parseSubcontextAndQuery(rest);
+    const { subcontext, query } = parseSubcontextAndQuery(rest, "life");
     return {
       context: "life",
       subcontext,
@@ -110,58 +123,46 @@ export function parseRoute(message: string): ParsedRoute | null {
     };
   }
 
-  // Check for /g command (Gemini subagent)
-  if (trimmed.startsWith("/g ") || trimmed === "/g") {
-    const query = trimmed.slice(2).trim();
-    return {
-      context: "default",
-      query,
-      cwd: defaultCwd,
-      subagent: "gemini",
-      newSession: false,
-      prefix: "/g",
-    };
-  }
+  // No prefix - auto-detect context from query content
+  const detected = detectContext(trimmed);
 
-  // Check for /x command (Codex subagent)
-  if (trimmed.startsWith("/x ") || trimmed === "/x") {
-    const query = trimmed.slice(2).trim();
-    return {
-      context: "default",
-      query,
-      cwd: defaultCwd,
-      subagent: "codex",
-      newSession: false,
-      prefix: "/x",
-    };
-  }
-
-  // No prefix - continue in current context (will use most recent session)
-  return null;
+  return {
+    context: contextTypeToMemoryContext(detected.type),
+    subcontext: detected.project || detected.area,
+    query: trimmed,
+    cwd: detected.suggestedCwd,
+    newSession: false,
+    prefix: "",
+    detectedContext: detected,
+  };
 }
 
 /**
  * Parse "[subcontext] [query]" or just "[query]"
- * Subcontext is detected if first word looks like a folder name (no spaces, reasonable length)
+ * Subcontext is detected if first word matches an existing directory
  */
-function parseSubcontextAndQuery(text: string): { subcontext?: string; query: string } {
+function parseSubcontextAndQuery(text: string, context?: string): { subcontext?: string; query: string } {
   if (!text) return { query: "" };
 
   const parts = text.split(/\s+/);
   const firstWord = parts[0];
 
-  // Heuristic: if first word is short, alphanumeric with dashes/underscores, treat as subcontext
+  // Only treat first word as subcontext if:
+  // 1. It's alphanumeric with dashes/underscores and reasonable length
+  // 2. The corresponding directory actually exists
   if (firstWord && /^[a-zA-Z0-9_-]+$/.test(firstWord) && firstWord.length <= 30) {
-    // Check if it could be a project/area name
-    // If there's more text after, treat first word as subcontext
     if (parts.length > 1) {
-      return {
-        subcontext: firstWord,
-        query: parts.slice(1).join(" "),
-      };
+      // Check if the directory exists before treating as subcontext
+      const basePath = CONTEXT_PATHS[context ?? "default"] ?? "/Users/yj";
+      const subPath = `${basePath}/${firstWord}`;
+      if (existsSync(subPath)) {
+        return {
+          subcontext: firstWord,
+          query: parts.slice(1).join(" "),
+        };
+      }
     }
-    // Single word - could be subcontext with empty query, or just a query
-    // Treat as query to be safe (user can send another message)
+    // Directory doesn't exist or single word - treat as query
     return { query: text };
   }
 
@@ -170,11 +171,17 @@ function parseSubcontextAndQuery(text: string): { subcontext?: string; query: st
 
 /**
  * Build the cwd path for a context and optional subcontext
+ * Falls back to base path if subcontext directory doesn't exist
  */
 function buildCwd(context: string, subcontext?: string): string {
   const basePath = CONTEXT_PATHS[context] ?? CONTEXT_PATHS.default ?? "/Users/yj";
   if (subcontext) {
-    return `${basePath}/${subcontext}`;
+    const subPath = `${basePath}/${subcontext}`;
+    // Only use subcontext path if the directory actually exists
+    if (existsSync(subPath)) {
+      return subPath;
+    }
+    // Directory doesn't exist - fall back to base path
   }
   return basePath;
 }
@@ -218,5 +225,5 @@ export function getAllLanes(): LaneId[] {
 }
 
 export function getAllPrefixes(): string[] {
-  return ["/new", "/work", "/life", "/g", "/x"];
+  return ["/new", "/g", "/x", "/work", "/life"]; // /work /life kept for legacy
 }

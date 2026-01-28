@@ -1,51 +1,35 @@
-import { appendFile, access, mkdir } from "fs/promises";
-import { constants } from "fs";
-import { dirname } from "path";
 import { logger } from "../utils/logger.js";
+import { appendDailyLog, createDailyEntry } from "./daily.js";
 
 /**
- * Memory file paths by target
+ * Map target to context type for daily log
  */
-const MEMORY_PATHS: Record<string, string> = {
-  work: "/Users/yj/work/memory.md",
-  life: "/Users/yj/life/memory.md",
-  global: "/Users/yj/memory/facts.md",
-  default: "/Users/yj/memory/facts.md",
-};
-
-/**
- * Ensure directory exists for a file path
- */
-async function ensureDirectory(filePath: string): Promise<void> {
-  const dir = dirname(filePath);
-  try {
-    await access(dir, constants.W_OK);
-  } catch {
-    await mkdir(dir, { recursive: true });
+function targetToContext(target: string): "work" | "life" | "general" {
+  switch (target) {
+    case "work":
+      return "work";
+    case "life":
+      return "life";
+    case "global":
+    case "default":
+    default:
+      return "general";
   }
 }
 
 /**
- * Append content to a memory file with timestamp
+ * Append content to daily log instead of direct memory files
+ * The 3 AM organization job will move entries to appropriate memory files
  */
 async function appendToMemoryFile(target: string, content: string): Promise<void> {
-  const filePath = MEMORY_PATHS[target] ?? MEMORY_PATHS.default;
-
-  if (!filePath) {
-    logger.warn({ target }, "No memory file path for target");
-    return;
-  }
+  const context = targetToContext(target);
 
   try {
-    await ensureDirectory(filePath);
-
-    const timestamp = new Date().toISOString().split("T")[0];
-    const formattedContent = `\n\n<!-- Updated: ${timestamp} -->\n${content}`;
-
-    await appendFile(filePath, formattedContent, "utf-8");
-    logger.info({ target, filePath, contentLength: content.length }, "Memory file updated");
+    const entry = createDailyEntry(content, context, "conversation");
+    await appendDailyLog(entry);
+    logger.info({ target, context, contentLength: content.length }, "Memory update added to daily log");
   } catch (error) {
-    logger.error({ error, target, filePath }, "Failed to write memory file");
+    logger.error({ error, target }, "Failed to write to daily log");
     throw error;
   }
 }
