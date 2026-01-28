@@ -1,4 +1,4 @@
-import { createBot, startBot, setScheduler, getReminderManager } from "./bot/index.js";
+import { createBot, startBot, setScheduler, getReminderManager, setBrowserManager } from "./bot/index.js";
 import { logger } from "./utils/logger.js";
 import cron from "node-cron";
 import { StateManager } from "./state/manager.js";
@@ -7,6 +7,10 @@ import { QueueManager } from "./queue/manager.js";
 import { QueueWorker } from "./queue/worker.js";
 import { createWebServer, startWebServer, stopWebServer } from "./web/server.js";
 import { Scheduler } from "./scheduler/index.js";
+import { BrowserManager } from "./browser/index.js";
+import { checkAndFlushExpiringSessions } from "./memory/flush.js";
+import { organizeMemory } from "./scheduler/jobs/organize-memory.js";
+import { getMemoryIndexer, closeMemoryIndexer } from "./memory/indexer.js";
 import type { FastifyInstance } from "fastify";
 import type { Bot } from "grammy";
 
@@ -37,7 +41,7 @@ async function checkAndSendReminders(bot: Bot): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  logger.info("H.O.M.E.R Phase 4 starting up...");
+  logger.info("H.O.M.E.R Phase 5 starting up...");
 
   // Initialize state manager
   const stateManager = new StateManager(config.paths.database);
@@ -45,13 +49,59 @@ async function main(): Promise<void> {
   // Initialize queue manager
   const queueManager = new QueueManager(stateManager);
 
-  // Schedule session cleanup every hour
-  cron.schedule("0 * * * *", () => {
-    logger.debug("Running scheduled session cleanup");
+  // Initialize browser manager
+  const browserManager = new BrowserManager(stateManager["db"], {
+    profilesPath: config.paths.browserProfiles,
+    defaultTimeout: 30000,
+    headless: true,
+  });
+  setBrowserManager(browserManager);
+
+  // Schedule session cleanup and memory flush every hour
+  const ttlMs = config.session.ttlHours * 60 * 60 * 1000;
+  cron.schedule("0 * * * *", async () => {
+    logger.debug("Running scheduled session cleanup and flush");
     stateManager.cleanupExpiredSessions();
     stateManager.cleanupOldJobs();
     stateManager.cleanupOldReminders();
+
+    // Check for sessions about to expire and flush their context
+    try {
+      await checkAndFlushExpiringSessions(stateManager, ttlMs);
+    } catch (error) {
+      logger.error({ error }, "Failed to flush expiring sessions");
+    }
   });
+
+  // Schedule memory organization at 3 AM daily
+  cron.schedule("0 3 * * *", async () => {
+    logger.info("Running scheduled memory organization");
+    try {
+      const result = await organizeMemory();
+      logger.info(
+        {
+          date: result.date,
+          entriesProcessed: result.entriesProcessed,
+          updatesWritten: result.updatesWritten,
+        },
+        "Memory organization completed"
+      );
+    } catch (error) {
+      logger.error({ error }, "Memory organization failed");
+    }
+  });
+
+  // Initialize memory indexer (creates FTS5 tables if needed)
+  try {
+    const indexer = getMemoryIndexer(config.paths.database);
+    logger.info("Memory indexer initialized");
+    // Index files on startup
+    indexer.indexAllMemoryFiles().catch((err) => {
+      logger.warn({ error: err }, "Initial memory indexing failed");
+    });
+  } catch (error) {
+    logger.warn({ error }, "Failed to initialize memory indexer");
+  }
 
   // Create the bot
   const bot = createBot(stateManager);
@@ -82,10 +132,12 @@ async function main(): Promise<void> {
     logger.info({ signal }, "Shutting down...");
     scheduler.stop();
     queueWorker.stop();
+    await browserManager.close();
     await bot.stop();
     if (webServer) {
       await stopWebServer(webServer);
     }
+    closeMemoryIndexer();
     stateManager.close();
     process.exit(0);
   };
