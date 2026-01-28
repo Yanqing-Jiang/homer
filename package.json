@@ -1,6 +1,6 @@
 {
   "name": "homer",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "description": "Hybrid Orchestration for Multi-model Execution and Routing",
   "type": "module",
   "main": "dist/index.js",
@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
     "better-sqlite3": "^11.3.0",
     "blessed": "^0.1.81",
     "chrono-node": "^2.9.0",
@@ -19,8 +20,11 @@
     "fastify": "^4.28.0",
     "grammy": "^1.21.1",
     "node-cron": "^3.0.3",
+    "openai": "^4.24.0",
+    "pg": "^8.17.2",
     "pino": "^9.4.0",
     "pino-pretty": "^11.2.2",
+    "playwright": "^1.40.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

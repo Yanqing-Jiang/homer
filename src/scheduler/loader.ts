@@ -62,6 +62,9 @@ function validateJob(job: unknown, sourceFile: string): ScheduledJobConfig | nul
     lane,
     enabled: j.enabled !== false, // default to true
     timeout: typeof j.timeout === "number" ? j.timeout : undefined,
+    model: typeof j.model === "string" ? j.model : undefined,
+    contextFiles: Array.isArray(j.contextFiles) ? j.contextFiles : undefined,
+    streamProgress: j.streamProgress === true,
     notifyOnSuccess: j.notifyOnSuccess !== false, // default to true
     notifyOnFailure: j.notifyOnFailure !== false, // default to true
   };
@@ -154,7 +157,8 @@ export class ScheduleWatcher {
 
   async start(): Promise<void> {
     for (const { path } of SCHEDULE_LOCATIONS) {
-      await this.watchFile(path);
+      // Don't await - watchFile runs indefinitely watching for changes
+      this.watchFile(path);
     }
   }
 

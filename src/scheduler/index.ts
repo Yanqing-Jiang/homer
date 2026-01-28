@@ -5,7 +5,10 @@ import { CronManager } from "./manager.js";
 import { executeScheduledJob } from "./executor.js";
 import { notifyJobResult } from "./notifier.js";
 import type { StateManager } from "../state/manager.js";
-import type { RegisteredJob } from "./types.js";
+import type { RegisteredJob, ProgressEvent } from "./types.js";
+
+// Throttle progress messages to avoid Telegram rate limits
+const PROGRESS_THROTTLE_MS = 2000; // Min 2s between progress updates
 
 /**
  * Main Scheduler class that orchestrates scheduled job execution
@@ -17,6 +20,8 @@ export class Scheduler {
   private cronManager: CronManager;
   private watcher: ScheduleWatcher;
   private isRunning = false;
+  private progressMessageId: Map<string, number> = new Map(); // jobId -> messageId
+  private lastProgressTime: Map<string, number> = new Map(); // jobId -> timestamp
 
   constructor(bot: Bot, chatId: number, stateManager: StateManager) {
     this.bot = bot;
@@ -120,6 +125,62 @@ export class Scheduler {
   }
 
   /**
+   * Send or update progress message in Telegram
+   */
+  private async sendProgress(jobId: string, event: ProgressEvent): Promise<void> {
+    logger.info({ jobId, eventType: event.type, message: event.message }, "Progress event received");
+
+    // Skip non-essential events if throttled
+    const now = Date.now();
+    const lastTime = this.lastProgressTime.get(jobId) || 0;
+    const isThrottled = now - lastTime < PROGRESS_THROTTLE_MS;
+
+    // Always send started/completed, throttle tool_use events
+    if (event.type !== "started" && event.type !== "completed" && isThrottled) {
+      return;
+    }
+
+    this.lastProgressTime.set(jobId, now);
+
+    try {
+      const existingMsgId = this.progressMessageId.get(jobId);
+
+      if (event.type === "started") {
+        // Send new progress message
+        const msg = await this.bot.api.sendMessage(this.chatId, event.message, {
+          parse_mode: "Markdown",
+        });
+        this.progressMessageId.set(jobId, msg.message_id);
+        logger.info({ jobId, messageId: msg.message_id }, "Sent progress start message");
+      } else if (event.type === "completed") {
+        // Delete progress message on completion (final result will be sent separately)
+        if (existingMsgId) {
+          try {
+            await this.bot.api.deleteMessage(this.chatId, existingMsgId);
+          } catch {
+            // Message may already be deleted
+          }
+          this.progressMessageId.delete(jobId);
+        }
+        this.lastProgressTime.delete(jobId);
+      } else if (existingMsgId) {
+        // Update existing progress message
+        const progressText = `🔄 *${event.jobName}*\n\n${event.message}`;
+        try {
+          await this.bot.api.editMessageText(this.chatId, existingMsgId, progressText, {
+            parse_mode: "Markdown",
+          });
+          logger.info({ jobId, eventType: event.type }, "Updated progress message");
+        } catch (editError) {
+          logger.debug({ editError, jobId }, "Message edit failed (likely unchanged)");
+        }
+      }
+    } catch (error) {
+      logger.warn({ error, jobId, eventType: event.type }, "Failed to send progress update");
+    }
+  }
+
+  /**
    * Execute a job and handle results
    */
   private async executeJob(job: RegisteredJob, _manual: boolean): Promise<void> {
@@ -127,8 +188,13 @@ export class Scheduler {
       // Record job start
       this.stateManager.recordScheduledJobStart(job.config.id, job.config.name, job.sourceFile);
 
+      // Only stream progress if explicitly enabled (most jobs don't need it)
+      const onProgress = job.config.streamProgress
+        ? (event: ProgressEvent) => void this.sendProgress(job.config.id, event)
+        : undefined;
+
       // Execute the job
-      const result = await executeScheduledJob(job);
+      const result = await executeScheduledJob(job, onProgress);
 
       // Update job state
       this.cronManager.updateJobState(job.config.id, result.success);
@@ -142,10 +208,21 @@ export class Scheduler {
         result.exitCode
       );
 
-      // Notify via Telegram
+      // Notify via Telegram (final result)
       await notifyJobResult(this.bot, this.chatId, result, job);
     } catch (error) {
       logger.error({ jobId: job.config.id, error }, "Failed to execute scheduled job");
+
+      // Clean up progress message
+      const existingMsgId = this.progressMessageId.get(job.config.id);
+      if (existingMsgId) {
+        try {
+          await this.bot.api.deleteMessage(this.chatId, existingMsgId);
+        } catch {
+          // Ignore
+        }
+        this.progressMessageId.delete(job.config.id);
+      }
 
       // Update failure state
       this.cronManager.updateJobState(job.config.id, false);
@@ -177,4 +254,4 @@ export class Scheduler {
 }
 
 // Re-export types
-export type { RegisteredJob, ScheduledJobConfig, JobExecutionResult } from "./types.js";
+export type { RegisteredJob, ScheduledJobConfig, JobExecutionResult, ProgressEvent } from "./types.js";

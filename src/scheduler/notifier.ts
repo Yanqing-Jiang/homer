@@ -3,10 +3,21 @@ import { logger } from "../utils/logger.js";
 import { chunkMessage } from "../utils/chunker.js";
 import type { JobExecutionResult, RegisteredJob } from "./types.js";
 
-const MAX_OUTPUT_LENGTH = 3500; // Leave room for formatting
+const MAX_OUTPUT_LENGTH = 4000; // Telegram limit is 4096
+
+/**
+ * Escape HTML special characters
+ */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 
 /**
  * Send job execution result to Telegram
+ * Uses HTML formatting for better compatibility
  */
 export async function notifyJobResult(
   bot: Bot,
@@ -26,77 +37,54 @@ export async function notifyJobResult(
     return;
   }
 
-  const message = formatJobResult(result);
-  await sendMessage(bot, chatId, message);
+  // For successful jobs, send output directly (already formatted by Claude)
+  // For failed jobs, add error context
+  if (result.success) {
+    await sendMessage(bot, chatId, result.output, true);
+  } else {
+    const errorMsg = `❌ <b>${escapeHtml(job.config.name)}</b> failed\n\n${escapeHtml(result.error || "Unknown error")}`;
+    await sendMessage(bot, chatId, errorMsg, false);
+  }
 }
 
 /**
- * Format job result for Telegram
+ * Send a message to Telegram with HTML formatting
  */
-function formatJobResult(result: JobExecutionResult): string {
-  const icon = result.success ? "✅" : "❌";
-  const status = result.success ? "completed" : "failed";
-  const duration = formatDuration(result.duration);
-
-  let message = `${icon} *${escapeMarkdown(result.jobName)}* ${status}\n`;
-  message += `_Duration: ${duration}_\n\n`;
-
-  if (result.success) {
-    // Truncate output if too long
-    let output = result.output;
-    if (output.length > MAX_OUTPUT_LENGTH) {
-      output = output.slice(0, MAX_OUTPUT_LENGTH) + "\n\n... (truncated)";
-    }
-    message += output;
-  } else {
-    message += `*Error:* ${escapeMarkdown(result.error || "Unknown error")}`;
-    if (result.output && result.output !== "(No output)") {
-      let output = result.output;
-      if (output.length > MAX_OUTPUT_LENGTH / 2) {
-        output = output.slice(0, MAX_OUTPUT_LENGTH / 2) + "\n\n... (truncated)";
-      }
-      message += `\n\n*Output:*\n${output}`;
-    }
+async function sendMessage(
+  bot: Bot,
+  chatId: number,
+  message: string,
+  enableLinkPreview: boolean
+): Promise<void> {
+  // Truncate if needed
+  let text = message;
+  if (text.length > MAX_OUTPUT_LENGTH) {
+    text = text.slice(0, MAX_OUTPUT_LENGTH - 20) + "\n\n<i>(truncated)</i>";
   }
 
-  return message;
-}
+  const chunks = chunkMessage(text);
 
-/**
- * Format duration in human-readable format
- */
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  const seconds = Math.round(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = seconds % 60;
-  return `${minutes}m ${remainingSeconds}s`;
-}
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i] ?? "";
+    if (!chunk) continue;
 
-/**
- * Escape Markdown special characters
- */
-function escapeMarkdown(text: string): string {
-  return text.replace(/[_*[\]()~`>#+=|{}.!-]/g, "\\$&");
-}
+    // Only enable link preview for last chunk
+    const showPreview = enableLinkPreview && i === chunks.length - 1;
 
-/**
- * Send a message to Telegram, handling chunking and errors
- */
-async function sendMessage(bot: Bot, chatId: number, message: string): Promise<void> {
-  const chunks = chunkMessage(message);
-
-  for (const chunk of chunks) {
     try {
       await bot.api.sendMessage(chatId, chunk, {
-        parse_mode: "Markdown",
+        parse_mode: "HTML",
+        link_preview_options: showPreview
+          ? { is_disabled: false, prefer_large_media: true }
+          : { is_disabled: true },
       });
     } catch (error) {
-      // Retry without markdown if parsing fails
-      logger.debug({ error }, "Markdown parsing failed, retrying plain text");
+      // Retry without HTML if parsing fails
+      logger.debug({ error }, "HTML failed, trying plain");
       try {
-        await bot.api.sendMessage(chatId, chunk.replace(/[_*`[\]]/g, ""));
+        await bot.api.sendMessage(chatId, chunk.replace(/<[^>]*>/g, ""), {
+          link_preview_options: { is_disabled: true },
+        });
       } catch (plainError) {
         logger.error({ error: plainError }, "Failed to send notification");
       }
@@ -112,5 +100,5 @@ export async function sendNotification(
   chatId: number,
   message: string
 ): Promise<void> {
-  await sendMessage(bot, chatId, message);
+  await sendMessage(bot, chatId, message, false);
 }
