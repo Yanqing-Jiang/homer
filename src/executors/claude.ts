@@ -2,7 +2,7 @@ import { spawn } from "child_process";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
 
-const DEFAULT_TIMEOUT = 120_000; // 2 minutes
+const DEFAULT_TIMEOUT = 600_000; // 10 minutes
 const KILL_GRACE_MS = 5_000;
 const CLOSE_GRACE_MS = 1_000;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024; // 2MB capture cap
@@ -57,7 +57,8 @@ export async function executeClaudeCommand(
   }
 
   // Build args with stream-json output and optional resume
-  const args = ["--output-format", "stream-json", "--dangerously-skip-permissions"];
+  // --print and --verbose are required for --output-format=stream-json
+  const args = ["--print", "--verbose", "--output-format", "stream-json", "--dangerously-skip-permissions"];
 
   if (claudeSessionId) {
     args.push("--resume", claudeSessionId);

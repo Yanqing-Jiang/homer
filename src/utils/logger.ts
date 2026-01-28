@@ -8,6 +8,7 @@ export const logger = pino({
           target: "pino-pretty",
           options: {
             colorize: true,
+            sync: true, // Disable buffering for immediate output
           },
         }
       : undefined,
