@@ -16,7 +16,10 @@ export interface ScheduledJobConfig {
   query: string;
   lane: "work" | "life" | "default";
   enabled: boolean;
-  timeout?: number; // ms, defaults to 300000 (5 min)
+  timeout?: number; // ms, defaults to 600000 (10 min)
+  model?: string; // e.g. "sonnet", "haiku", "opus" - defaults to sonnet
+  contextFiles?: string[]; // files to load and inject as system prompt context
+  streamProgress?: boolean; // stream tool usage to Telegram (default: false)
   notifyOnSuccess?: boolean; // defaults to true
   notifyOnFailure?: boolean; // defaults to true
 }
@@ -50,6 +53,41 @@ export interface JobExecutionResult {
 }
 
 /**
+ * Progress event types for streaming updates
+ */
+export type ProgressEventType =
+  | "started"
+  | "tool_use"
+  | "tool_result"
+  | "subagent_start"
+  | "subagent_done"
+  | "thinking"
+  | "searching"
+  | "completed";
+
+/**
+ * Progress event for real-time streaming
+ */
+export interface ProgressEvent {
+  type: ProgressEventType;
+  jobId: string;
+  jobName: string;
+  timestamp: Date;
+  message: string;
+  details?: {
+    tool?: string;
+    query?: string;
+    duration?: number;
+    success?: boolean;
+  };
+}
+
+/**
+ * Progress callback for streaming updates
+ */
+export type ProgressCallback = (event: ProgressEvent) => void;
+
+/**
  * Schedule locations for loading
  */
 export const SCHEDULE_LOCATIONS = [
@@ -68,6 +106,6 @@ export const LANE_CWD: Record<string, string> = {
 };
 
 /**
- * Default job timeout (5 minutes)
+ * Default job timeout (10 minutes)
  */
-export const DEFAULT_JOB_TIMEOUT = 300_000;
+export const DEFAULT_JOB_TIMEOUT = 600_000;

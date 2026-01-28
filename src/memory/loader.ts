@@ -7,6 +7,7 @@ import { logger } from "../utils/logger.js";
  * Memory file locations
  */
 const GLOBAL_MEMORY_FILES = [
+  "/Users/yj/memory/user.md",
   "/Users/yj/memory/facts.md",
   "/Users/yj/memory/preferences.md",
 ];
