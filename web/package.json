@@ -27,6 +27,9 @@
 		"vite": "^7.3.1"
 	},
 	"dependencies": {
+		"@fullcalendar/core": "^6.1.20",
+		"@fullcalendar/daygrid": "^6.1.20",
+		"@fullcalendar/interaction": "^6.1.20",
 		"@supabase/ssr": "^0.8.0",
 		"@supabase/supabase-js": "^2.93.3",
 		"dompurify": "^3.3.1",

@@ -4,12 +4,26 @@ import { QueueManager } from "../queue/manager.js";
 import { readFileSync } from "fs";
 import { config } from "../config/index.js";
 import type { Scheduler, RegisteredJob } from "../scheduler/index.js";
+import { getClaudeAuthStatus } from "../utils/claude-auth.js";
+import { registerSessionRoutes } from "./api/sessions.js";
+import { registerStreamingRoutes } from "./api/streaming.js";
+import { registerIdeasRoutes } from "./api/ideas.js";
+import { registerPlansRoutes } from "./api/plans.js";
+import { registerJobsRoutes, setJobsScheduler } from "./api/jobs.js";
+import { registerMeetingsRoutes, setMeetingsManager } from "./api/meetings.js";
+import { registerUploadsRoutes } from "./api/uploads.js";
+import { registerClaudeHistoryRoutes } from "./api/claude-history.js";
 
 // Scheduler reference (set after initialization)
 let schedulerRef: Scheduler | null = null;
 
 export function setWebScheduler(scheduler: Scheduler): void {
   schedulerRef = scheduler;
+  setJobsScheduler(scheduler);
+}
+
+export function setWebMeetingsManager(manager: any): void {
+  setMeetingsManager(manager);
 }
 
 // Store recent log entries for SSE
@@ -21,9 +35,42 @@ export function createRoutes(
   stateManager: StateManager,
   queueManager: QueueManager
 ): void {
+  // Register Web UI API routes (chat sessions, threads, messages)
+  registerSessionRoutes(server, stateManager);
+
+  // Register streaming routes for chat
+  registerStreamingRoutes(server, stateManager);
+
+  // Register ideas routes
+  registerIdeasRoutes(server, stateManager);
+
+  // Register plans routes
+  registerPlansRoutes(server, stateManager);
+
+  // Register jobs routes (calendar view, job management)
+  registerJobsRoutes(server, stateManager);
+
+  // Register meetings routes
+  registerMeetingsRoutes(server, stateManager);
+
+  // Register uploads routes
+  registerUploadsRoutes(server);
+
+  // Register Claude Code history routes
+  registerClaudeHistoryRoutes(server);
+
   // Health check
   server.get("/health", async () => {
     return { status: "ok", uptime: process.uptime() };
+  });
+
+  // Health check: Claude Code auth + CLI presence
+  server.get("/health/auth", async () => {
+    const status = await getClaudeAuthStatus();
+    return {
+      status: status.keychainItemFound && status.claudeBinaryExists ? "ok" : "degraded",
+      ...status,
+    };
   });
 
   // API: Get active sessions
