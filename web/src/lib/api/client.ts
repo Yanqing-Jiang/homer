@@ -20,8 +20,25 @@ function getAuthHeaders(): HeadersInit {
 	return headers;
 }
 
+// Event emitter for auth state changes
+type AuthEventHandler = () => void;
+const authExpiredHandlers: AuthEventHandler[] = [];
+
+export function onAuthExpired(handler: AuthEventHandler): () => void {
+	authExpiredHandlers.push(handler);
+	return () => {
+		const index = authExpiredHandlers.indexOf(handler);
+		if (index !== -1) authExpiredHandlers.splice(index, 1);
+	};
+}
+
+function emitAuthExpired() {
+	authExpiredHandlers.forEach(handler => handler());
+}
+
 /**
  * Generic fetch wrapper with auth
+ * Handles 401 responses by emitting auth:expired event
  */
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
 	const url = `${API_BASE}${path}`;
@@ -35,6 +52,12 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
 		headers
 	});
 
+	// Handle 401 - token expired or invalid
+	if (response.status === 401) {
+		emitAuthExpired();
+		throw new Error('Session expired. Please sign in again.');
+	}
+
 	if (!response.ok) {
 		const error = await response.json().catch(() => ({ error: 'Request failed' }));
 		throw new Error(error.error || error.message || `HTTP ${response.status}`);
@@ -45,7 +68,22 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
 		return undefined as T;
 	}
 
-	return response.json();
+	// Safely parse JSON response, handling empty bodies
+	const text = await response.text();
+	if (!text || text.trim() === '') {
+		// Empty response body - return undefined or throw based on context
+		// This handles cases where the backend returns 200 OK with no body
+		console.warn(`Empty response body for ${path}`);
+		return undefined as T;
+	}
+
+	try {
+		return JSON.parse(text) as T;
+	} catch (e) {
+		// Log the problematic response for debugging
+		console.error(`Failed to parse JSON response for ${path}:`, text.substring(0, 200));
+		throw new Error(`Invalid JSON response from server: ${(e as Error).message}`);
+	}
 }
 
 // ============================================
@@ -105,7 +143,9 @@ export async function listSessions(options?: {
 	if (options?.cursor) params.set('cursor', options.cursor);
 
 	const query = params.toString();
-	return apiFetch(`/api/chat-sessions${query ? `?${query}` : ''}`);
+	const result = await apiFetch<{ sessions: ChatSession[]; nextCursor: string | null } | undefined>(`/api/chat-sessions${query ? `?${query}` : ''}`);
+	// Handle empty response gracefully
+	return result ?? { sessions: [], nextCursor: null };
 }
 
 // Create session
@@ -143,7 +183,8 @@ export async function deleteSession(id: string): Promise<void> {
 
 // List threads for a session
 export async function listThreads(sessionId: string): Promise<{ threads: Thread[] }> {
-	return apiFetch(`/api/chat-sessions/${sessionId}/threads`);
+	const result = await apiFetch<{ threads: Thread[] } | undefined>(`/api/chat-sessions/${sessionId}/threads`);
+	return result ?? { threads: [] };
 }
 
 // Create thread
@@ -195,7 +236,8 @@ export async function listMessages(
 	if (options?.beforeId) params.set('beforeId', options.beforeId);
 
 	const query = params.toString();
-	return apiFetch(`/api/threads/${threadId}/messages${query ? `?${query}` : ''}`);
+	const result = await apiFetch<{ messages: ThreadMessage[] } | undefined>(`/api/threads/${threadId}/messages${query ? `?${query}` : ''}`);
+	return result ?? { messages: [] };
 }
 
 // Create message (non-streaming)
@@ -260,7 +302,8 @@ export interface CalendarEvent {
 
 // List all scheduled jobs
 export async function listScheduledJobs(): Promise<{ jobs: ScheduledJob[] }> {
-	return apiFetch('/api/jobs/scheduled');
+	const result = await apiFetch<{ jobs: ScheduledJob[] } | undefined>('/api/jobs/scheduled');
+	return result ?? { jobs: [] };
 }
 
 // Get job details with history
@@ -295,7 +338,8 @@ export async function getJobHistory(
 	if (options?.limit) params.set('limit', String(options.limit));
 
 	const query = params.toString();
-	return apiFetch(`/api/jobs/scheduled/${id}/history${query ? `?${query}` : ''}`);
+	const result = await apiFetch<{ history: JobRun[] } | undefined>(`/api/jobs/scheduled/${id}/history${query ? `?${query}` : ''}`);
+	return result ?? { history: [] };
 }
 
 // Get calendar events
@@ -308,7 +352,8 @@ export async function getJobCalendar(options?: {
 	if (options?.end) params.set('end', options.end);
 
 	const query = params.toString();
-	return apiFetch(`/api/jobs/calendar${query ? `?${query}` : ''}`);
+	const result = await apiFetch<{ start: string; end: string; events: CalendarEvent[] } | undefined>(`/api/jobs/calendar${query ? `?${query}` : ''}`);
+	return result ?? { start: options?.start || '', end: options?.end || '', events: [] };
 }
 
 // ============================================
@@ -341,7 +386,8 @@ export async function listIdeas(options?: {
 	if (options?.limit) params.set('limit', String(options.limit));
 
 	const query = params.toString();
-	return apiFetch(`/api/ideas${query ? `?${query}` : ''}`);
+	const result = await apiFetch<{ ideas: Idea[]; migrated: boolean } | undefined>(`/api/ideas${query ? `?${query}` : ''}`);
+	return result ?? { ideas: [], migrated: false };
 }
 
 // Get single idea
@@ -433,7 +479,8 @@ export async function listPlans(options?: {
 	if (options?.limit) params.set('limit', String(options.limit));
 
 	const query = params.toString();
-	return apiFetch(`/api/plans${query ? `?${query}` : ''}`);
+	const result = await apiFetch<{ plans: Plan[] } | undefined>(`/api/plans${query ? `?${query}` : ''}`);
+	return result ?? { plans: [] };
 }
 
 // Get single plan with full details
@@ -512,7 +559,8 @@ export async function listClaudeHistory(options?: {
 	if (options?.limit) params.set('limit', String(options.limit));
 
 	const query = params.toString();
-	return apiFetch(`/api/claude-history${query ? `?${query}` : ''}`);
+	const result = await apiFetch<{ sessions: ClaudeCodeSession[]; total: number } | undefined>(`/api/claude-history${query ? `?${query}` : ''}`);
+	return result ?? { sessions: [], total: 0 };
 }
 
 // Get Claude Code session detail
@@ -559,17 +607,29 @@ export async function uploadFile(
 		throw new Error(error.error || 'Upload failed');
 	}
 
-	return response.json();
+	// Handle empty response for uploads too
+	const text = await response.text();
+	if (!text || text.trim() === '') {
+		throw new Error('Upload succeeded but received empty response');
+	}
+
+	try {
+		return JSON.parse(text) as Upload;
+	} catch (e) {
+		throw new Error(`Invalid JSON response from upload: ${(e as Error).message}`);
+	}
 }
 
 // List uploads for session
 export async function listUploads(sessionId: string): Promise<{ uploads: Upload[] }> {
-	return apiFetch(`/api/uploads/${sessionId}`);
+	const result = await apiFetch<{ uploads: Upload[] } | undefined>(`/api/uploads/${sessionId}`);
+	return result ?? { uploads: [] };
 }
 
 // Delete upload
 export async function deleteUpload(sessionId: string, uploadId: string): Promise<{ deleted: boolean }> {
-	return apiFetch(`/api/uploads/${sessionId}/${uploadId}`, { method: 'DELETE' });
+	const result = await apiFetch<{ deleted: boolean } | undefined>(`/api/uploads/${sessionId}/${uploadId}`, { method: 'DELETE' });
+	return result ?? { deleted: false };
 }
 
 // ============================================
@@ -589,7 +649,46 @@ export interface StreamOptions {
 }
 
 /**
+ * Parse SSE stream properly handling event types and multi-line data
+ */
+interface SSEEvent {
+	event: string;
+	data: string;
+}
+
+function parseSSEStream(buffer: string): { events: SSEEvent[]; remaining: string } {
+	const events: SSEEvent[] = [];
+	const blocks = buffer.split('\n\n');
+	const remaining = blocks.pop() || '';
+
+	for (const block of blocks) {
+		if (!block.trim()) continue;
+
+		let eventType = 'message';
+		const dataLines: string[] = [];
+
+		for (const line of block.split('\n')) {
+			if (line.startsWith('event:')) {
+				eventType = line.slice(6).trim();
+			} else if (line.startsWith('data:')) {
+				dataLines.push(line.slice(5).trim());
+			}
+		}
+
+		if (dataLines.length > 0) {
+			events.push({
+				event: eventType,
+				data: dataLines.join('\n')
+			});
+		}
+	}
+
+	return { events, remaining };
+}
+
+/**
  * Send a message and stream the response via SSE
+ * Returns an object with abort function for cleanup
  */
 export function streamMessage(
 	threadId: string,
@@ -599,6 +698,8 @@ export function streamMessage(
 ): { abort: () => void } {
 	const controller = new AbortController();
 	const currentSession = get(session);
+	let isAborted = false;
+	let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
 	const url = `${API_BASE}/api/threads/${threadId}/stream`;
 
@@ -619,13 +720,20 @@ export function streamMessage(
 		signal: controller.signal
 	})
 		.then(async (response) => {
+			// Handle 401 - token expired
+			if (response.status === 401) {
+				emitAuthExpired();
+				callbacks.onError?.({ message: 'Session expired. Please sign in again.', recoverable: false, code: 'AUTH_EXPIRED' });
+				return;
+			}
+
 			if (!response.ok) {
 				const error = await response.json().catch(() => ({ error: 'Stream failed' }));
 				callbacks.onError?.({ message: error.error || 'Stream failed', recoverable: false });
 				return;
 			}
 
-			const reader = response.body?.getReader();
+			reader = response.body?.getReader() || null;
 			if (!reader) {
 				callbacks.onError?.({ message: 'No response body', recoverable: false });
 				return;
@@ -634,49 +742,67 @@ export function streamMessage(
 			const decoder = new TextDecoder();
 			let buffer = '';
 
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
+			try {
+				while (!isAborted) {
+					const { done, value } = await reader.read();
+					if (done) break;
 
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split('\n');
-				buffer = lines.pop() || '';
+					buffer += decoder.decode(value, { stream: true });
+					const { events, remaining } = parseSSEStream(buffer);
+					buffer = remaining;
 
-				for (const line of lines) {
-					if (line.startsWith('event: ')) {
-						const eventType = line.slice(7);
-						// Next line should be data
-						continue;
-					}
-
-					if (line.startsWith('data: ')) {
-						const data = line.slice(6);
+					for (const sseEvent of events) {
 						try {
-							const parsed = JSON.parse(data);
-							// The event type is on the previous line, but we can infer from data shape
-							if ('userMessageId' in parsed) {
-								callbacks.onStart?.(parsed);
-							} else if ('content' in parsed && !('messageId' in parsed)) {
-								callbacks.onDelta?.(parsed);
-							} else if ('messageId' in parsed) {
-								callbacks.onComplete?.(parsed);
-							} else if ('message' in parsed && 'recoverable' in parsed) {
-								callbacks.onError?.(parsed);
+							const parsed = JSON.parse(sseEvent.data);
+
+							// Route based on event type or infer from data shape
+							switch (sseEvent.event) {
+								case 'start':
+									callbacks.onStart?.(parsed);
+									break;
+								case 'delta':
+									callbacks.onDelta?.(parsed);
+									break;
+								case 'complete':
+									callbacks.onComplete?.(parsed);
+									break;
+								case 'error':
+									callbacks.onError?.(parsed);
+									break;
+								default:
+									// Fallback: infer from data shape
+									if ('userMessageId' in parsed) {
+										callbacks.onStart?.(parsed);
+									} else if ('content' in parsed && !('messageId' in parsed)) {
+										callbacks.onDelta?.(parsed);
+									} else if ('messageId' in parsed) {
+										callbacks.onComplete?.(parsed);
+									} else if ('message' in parsed && 'recoverable' in parsed) {
+										callbacks.onError?.(parsed);
+									}
 							}
 						} catch {
-							// Ignore parse errors
+							// Ignore parse errors for individual events
 						}
 					}
 				}
+			} finally {
+				// Ensure reader is released
+				reader?.releaseLock();
 			}
 		})
 		.catch((error) => {
-			if (error.name !== 'AbortError') {
+			if (error.name !== 'AbortError' && !isAborted) {
 				callbacks.onError?.({ message: error.message, recoverable: false });
 			}
 		});
 
 	return {
-		abort: () => controller.abort()
+		abort: () => {
+			isAborted = true;
+			controller.abort();
+			// Cancel and release the reader if it exists
+			reader?.cancel().catch(() => {});
+		}
 	};
 }
