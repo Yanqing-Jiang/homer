@@ -1,15 +1,19 @@
 <script lang="ts">
 	import { user, signOut } from '$lib/supabase';
 	import { goto } from '$app/navigation';
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import * as api from '$lib/api/client';
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
 	import { useAuth } from '$lib/hooks/useAuth.svelte';
-	import { AuthOverlay } from '$lib/components';
+	import { AuthOverlay, RemoteDesktopTabs } from '$lib/components';
 	import FileUpload from '$lib/components/FileUpload.svelte';
 
 	const auth = useAuth();
+
+	// Main view tabs
+	type MainTab = 'copilot' | 'remote';
+	let activeMainTab = $state<MainTab>('copilot');
 
 	let searchQuery = $state('');
 	let chatInput = $state('');
@@ -48,21 +52,51 @@
 		gfm: true
 	});
 
+	// DOMPurify configuration with explicit allowlist for XSS protection
+	const DOMPURIFY_CONFIG = {
+		ALLOWED_TAGS: ['p', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'em', 'b', 'i', 'a', 'code', 'pre', 'ul', 'ol', 'li', 'blockquote', 'img', 'table', 'thead', 'tbody', 'tr', 'td', 'th', 'hr', 'span', 'div'],
+		ALLOWED_ATTR: ['href', 'src', 'alt', 'class', 'target', 'rel', 'title'],
+		ALLOW_DATA_ATTR: false
+	};
+
+	// Hook to force safe link attributes on all anchors
+	DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+		if (node.tagName === 'A') {
+			node.setAttribute('target', '_blank');
+			node.setAttribute('rel', 'noopener noreferrer');
+		}
+	});
+
 	function renderMarkdown(content: string): string {
 		const html = marked.parse(content) as string;
-		return DOMPurify.sanitize(html);
+		return DOMPurify.sanitize(html, DOMPURIFY_CONFIG) as string;
 	}
 
 	// Track if we've checked for context
 	let contextChecked = $state(false);
 
+	// Race condition guards for auto-loading
+	let isAutoLoading = $state(false);
+	let autoLoadAttempted = $state(false);
+
+	// Cleanup on component destroy to prevent memory leaks
+	onDestroy(() => {
+		if (currentAbort) {
+			currentAbort.abort();
+			currentAbort = null;
+		}
+	});
+
+	// Stored context from sessionStorage (read once, use when auth completes)
+	let pendingContext = $state<{ type: 'idea' | 'session'; data: string } | null>(null);
+
 	// Check for context passed from Ideas or Sessions pages
+	// Read values immediately but defer removal until auth confirms
 	onMount(() => {
 		// Check for idea context
 		const ideaContext = sessionStorage.getItem('copilot_context');
 		if (ideaContext) {
-			sessionStorage.removeItem('copilot_context');
-			chatInput = ideaContext;
+			pendingContext = { type: 'idea', data: ideaContext };
 			contextChecked = true;
 			return;
 		}
@@ -70,18 +104,7 @@
 		// Check for session resume
 		const resumeSession = sessionStorage.getItem('resume_session');
 		if (resumeSession) {
-			sessionStorage.removeItem('resume_session');
-			try {
-				const sessionData = JSON.parse(resumeSession);
-				sessionId = sessionData.sessionId || null;
-				threadId = sessionData.threadId || null;
-				// Load thread messages if we have a threadId
-				if (threadId) {
-					loadThreadMessages(threadId);
-				}
-			} catch (e) {
-				console.error('Failed to restore session:', e);
-			}
+			pendingContext = { type: 'session', data: resumeSession };
 			contextChecked = true;
 			return;
 		}
@@ -89,9 +112,37 @@
 		contextChecked = true;
 	});
 
-	// Auto-load most recent thread after auth passes (if no context was provided)
+	// Apply pending context after auth confirms and clear sessionStorage
 	$effect(() => {
-		if (!auth.loading && auth.isAuthorized && contextChecked && !threadId && !chatInput) {
+		if (!auth.loading && auth.isAuthorized && pendingContext) {
+			const ctx = pendingContext;
+			pendingContext = null; // Clear to prevent re-processing
+
+			if (ctx.type === 'idea') {
+				sessionStorage.removeItem('copilot_context');
+				chatInput = ctx.data;
+			} else if (ctx.type === 'session') {
+				sessionStorage.removeItem('resume_session');
+				try {
+					const sessionData = JSON.parse(ctx.data);
+					sessionId = sessionData.sessionId || null;
+					threadId = sessionData.threadId || null;
+					// Load thread messages if we have a threadId
+					if (threadId) {
+						loadThreadMessages(threadId);
+					}
+				} catch (e) {
+					console.error('Failed to restore session:', e);
+				}
+			}
+		}
+	});
+
+	// Auto-load most recent thread after auth passes (if no context was provided)
+	// Guards prevent concurrent calls and duplicate attempts
+	$effect(() => {
+		if (!auth.loading && auth.isAuthorized && contextChecked && !threadId && !chatInput && !isAutoLoading && !autoLoadAttempted) {
+			autoLoadAttempted = true;
 			loadMostRecentThread();
 		}
 	});
@@ -113,6 +164,9 @@
 	}
 
 	async function loadMostRecentThread() {
+		if (isAutoLoading) return; // Prevent concurrent calls
+		isAutoLoading = true;
+
 		try {
 			const { sessions: loadedSessions } = await api.listSessions({ limit: 1 });
 			if (loadedSessions.length === 0) return;
@@ -128,6 +182,8 @@
 		} catch (e) {
 			console.error('Failed to auto-load:', e);
 			// Fail silently - user can manually select
+		} finally {
+			isAutoLoading = false;
 		}
 	}
 
@@ -184,6 +240,13 @@
 
 		const userMessage = chatInput.trim();
 		const currentAttachments = attachedFiles.map(f => f.id);
+
+		// Store previous state for rollback on failure
+		const previousMessages = [...messages];
+		const previousChatInput = chatInput;
+		const previousAttachedFiles = [...attachedFiles];
+
+		// Optimistic update
 		chatInput = '';
 		chatError = null;
 		messages = [...messages, { role: 'user', content: userMessage }];
@@ -242,6 +305,12 @@
 		} catch (e) {
 			console.error('Failed to send message:', e);
 			chatError = e instanceof Error ? e.message : 'Failed to send message. Check if the daemon is running.';
+
+			// Rollback optimistic update on failure
+			messages = previousMessages;
+			chatInput = previousChatInput;
+			attachedFiles = previousAttachedFiles;
+
 			isStreaming = false;
 		}
 	}
@@ -371,8 +440,34 @@
 			</div>
 		</header>
 
-		<!-- Blue Ribbon (Session Selector) -->
+		<!-- Blue Ribbon (Main Tabs + Session Selector) -->
 		<div class="directory-ribbon">
+			<!-- Main Tab Switcher -->
+			<div class="main-tabs">
+				<button
+					class="main-tab"
+					class:active={activeMainTab === 'copilot'}
+					onclick={() => activeMainTab = 'copilot'}
+				>
+					<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+						<path d="M12 2L9.5 9.5L2 12L9.5 14.5L12 22L14.5 14.5L22 12L14.5 9.5L12 2Z"/>
+					</svg>
+					<span>Copilot</span>
+				</button>
+				<button
+					class="main-tab"
+					class:active={activeMainTab === 'remote'}
+					onclick={() => activeMainTab = 'remote'}
+				>
+					<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+						<path d="M21 2H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h7l-2 3v1h8v-1l-2-3h7c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H3V4h18v12z"/>
+					</svg>
+					<span>Remote Desktop</span>
+				</button>
+			</div>
+
+			<div class="ribbon-divider"></div>
+
 			<div class="session-selector">
 				<button class="session-dropdown-btn" onclick={() => showSessionDropdown = !showSessionDropdown}>
 					<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
@@ -462,6 +557,12 @@
 
 		<!-- Main Content -->
 		<main class="main-content">
+			{#if activeMainTab === 'remote'}
+				<!-- Remote Desktop View -->
+				<section class="remote-desktop-section">
+					<RemoteDesktopTabs />
+				</section>
+			{:else}
 			<!-- Copilot Chat Interface (Full Width) -->
 			<section class="copilot-section">
 				<div class="copilot-chat">
@@ -586,6 +687,7 @@
 					</div>
 				</div>
 			</section>
+			{/if}
 		</main>
 	</div>
 {/if}
@@ -846,14 +948,53 @@
 		background: #f5f5f5;
 	}
 
-	/* Blue Ribbon with Session Selector */
+	/* Blue Ribbon with Main Tabs and Session Selector */
 	.directory-ribbon {
 		background: #0078d4;
 		padding: 6px 16px;
 		display: flex;
 		align-items: center;
+		gap: 8px;
 		position: relative;
 		z-index: 50;
+	}
+
+	/* Main Tab Switcher */
+	.main-tabs {
+		display: flex;
+		gap: 4px;
+	}
+
+	.main-tab {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 6px 12px;
+		background: rgba(255, 255, 255, 0.1);
+		border: none;
+		border-radius: 4px;
+		color: rgba(255, 255, 255, 0.8);
+		font-size: 13px;
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 0.15s;
+	}
+
+	.main-tab:hover {
+		background: rgba(255, 255, 255, 0.2);
+		color: white;
+	}
+
+	.main-tab.active {
+		background: rgba(255, 255, 255, 0.25);
+		color: white;
+	}
+
+	.ribbon-divider {
+		width: 1px;
+		height: 20px;
+		background: rgba(255, 255, 255, 0.3);
+		margin: 0 8px;
 	}
 
 	.session-selector {
@@ -1056,6 +1197,14 @@
 		height: calc(100vh - 78px); /* viewport minus header and ribbon */
 		display: flex;
 		flex-direction: column;
+	}
+
+	/* Remote Desktop Section */
+	.remote-desktop-section {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
 	}
 
 	/* Copilot Section - Full Width */
@@ -1438,6 +1587,18 @@
 
 		.session-name {
 			max-width: 120px;
+		}
+
+		.main-tab span {
+			display: none;
+		}
+
+		.main-tab {
+			padding: 6px 10px;
+		}
+
+		.ribbon-divider {
+			margin: 0 4px;
 		}
 	}
 </style>
