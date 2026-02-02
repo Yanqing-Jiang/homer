@@ -42,8 +42,12 @@
 	});
 
 	// Guacamole configuration
-	// In production, these would come from environment or API
-	const guacamoleUrl = $state('/guac');
+	// In development: use relative /guac (proxied by Vite)
+	// In production: use Azure Container Apps proxy
+	const GUAC_PROXY_URL = import.meta.env.VITE_GUAC_PROXY_URL || 'https://homer-proxy.icycoast-7ad83edf.westus2.azurecontainerapps.io/guac/guacamole';
+	const guacamoleUrl = $state(
+		import.meta.env.DEV ? '/guac/guacamole' : GUAC_PROXY_URL
+	);
 
 	function selectTab(tabId: string) {
 		activeTab = tabId;
