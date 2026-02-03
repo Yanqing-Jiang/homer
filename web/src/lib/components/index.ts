@@ -8,5 +8,3 @@ export { default as JobCalendar } from './JobCalendar.svelte';
 export { default as FileUpload } from './FileUpload.svelte';
 export { default as Toast } from './Toast.svelte';
 export { default as ToastContainer } from './ToastContainer.svelte';
-export { default as GuacamoleViewer } from './GuacamoleViewer.svelte';
-export { default as RemoteDesktopTabs } from './RemoteDesktopTabs.svelte';
