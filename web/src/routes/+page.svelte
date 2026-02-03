@@ -34,6 +34,54 @@
 	let attachedFiles = $state<api.Upload[]>([]);
 	let fileUploadComponent: FileUpload;
 
+	// Slash command state
+	let showSlashCommands = $state(false);
+	let selectedCommandIndex = $state(0);
+	const slashCommands = [
+		{ name: '/chatgpt', description: 'Send message to ChatGPT via browser agent', example: '/chatgpt What is the weather?' },
+		{ name: '/gemini', description: 'Send message to Gemini via browser agent', example: '/gemini Explain quantum computing' },
+		{ name: '/claude', description: 'Send message to Claude web via browser agent', example: '/claude Write a poem' },
+		{ name: '/search', description: 'Search memory files', example: '/search project ideas' },
+		{ name: '/jobs', description: 'List scheduled jobs', example: '/jobs' },
+		{ name: '/trigger', description: 'Trigger a scheduled job', example: '/trigger morning-brief' },
+	];
+
+	// Filter commands based on input
+	let filteredCommands = $derived(
+		chatInput.startsWith('/')
+			? slashCommands.filter(cmd => cmd.name.toLowerCase().includes(chatInput.toLowerCase()))
+			: []
+	);
+
+	function handleInputChange(e: Event) {
+		const value = (e.target as HTMLInputElement).value;
+		chatInput = value;
+		showSlashCommands = value.startsWith('/') && !value.includes(' ');
+		selectedCommandIndex = 0;
+	}
+
+	function selectCommand(cmd: typeof slashCommands[0]) {
+		chatInput = cmd.name + ' ';
+		showSlashCommands = false;
+	}
+
+	function handleCommandKeydown(e: KeyboardEvent) {
+		if (!showSlashCommands || filteredCommands.length === 0) return;
+
+		if (e.key === 'ArrowDown') {
+			e.preventDefault();
+			selectedCommandIndex = Math.min(selectedCommandIndex + 1, filteredCommands.length - 1);
+		} else if (e.key === 'ArrowUp') {
+			e.preventDefault();
+			selectedCommandIndex = Math.max(selectedCommandIndex - 1, 0);
+		} else if (e.key === 'Tab' || (e.key === 'Enter' && showSlashCommands)) {
+			e.preventDefault();
+			selectCommand(filteredCommands[selectedCommandIndex]);
+		} else if (e.key === 'Escape') {
+			showSlashCommands = false;
+		}
+	}
+
 	// Sidebar navigation items
 	const sidebarItems = [
 		{ name: 'Sessions', icon: 'chat', href: '/sessions' },
@@ -626,13 +674,31 @@
 								onFilesChange={(files) => attachedFiles = files}
 							/>
 							<div class="input-container">
+								{#if showSlashCommands && filteredCommands.length > 0}
+									<div class="slash-command-dropdown">
+										{#each filteredCommands as cmd, i}
+											<button
+												class="slash-command-item"
+												class:selected={i === selectedCommandIndex}
+												onclick={() => selectCommand(cmd)}
+											>
+												<span class="cmd-name">{cmd.name}</span>
+												<span class="cmd-desc">{cmd.description}</span>
+											</button>
+										{/each}
+									</div>
+								{/if}
 								<input
 									type="text"
-									placeholder="Ask me anything..."
+									placeholder="Ask me anything... (type / for commands)"
 									class="chat-input"
 									bind:value={chatInput}
 									disabled={isStreaming}
-									onkeydown={(e) => e.key === 'Enter' && handleSendMessage()}
+									oninput={handleInputChange}
+									onkeydown={(e) => {
+										handleCommandKeydown(e);
+										if (e.key === 'Enter' && !showSlashCommands) handleSendMessage();
+									}}
 								/>
 								<button class="send-btn" onclick={handleSendMessage} disabled={!chatInput.trim() || isStreaming} aria-label="Send">
 									{#if isStreaming}
@@ -1307,11 +1373,58 @@
 		border-radius: 4px;
 		padding: 4px 8px 4px 12px;
 		flex: 1;
+		position: relative;
 	}
 
 	.input-container:focus-within {
 		border-color: #6264a7;
 		box-shadow: 0 0 0 1px #6264a7;
+	}
+
+	/* Slash Command Dropdown */
+	.slash-command-dropdown {
+		position: absolute;
+		bottom: 100%;
+		left: 0;
+		right: 0;
+		background: white;
+		border: 1px solid #e0e0e0;
+		border-radius: 8px;
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+		margin-bottom: 4px;
+		max-height: 240px;
+		overflow-y: auto;
+		z-index: 100;
+	}
+
+	.slash-command-item {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 2px;
+		width: 100%;
+		padding: 10px 14px;
+		border: none;
+		background: transparent;
+		cursor: pointer;
+		text-align: left;
+		transition: background 0.1s;
+	}
+
+	.slash-command-item:hover,
+	.slash-command-item.selected {
+		background: #f0f4ff;
+	}
+
+	.slash-command-item .cmd-name {
+		font-weight: 600;
+		font-size: 14px;
+		color: #6264a7;
+	}
+
+	.slash-command-item .cmd-desc {
+		font-size: 12px;
+		color: #666;
 	}
 
 	.chat-input {
