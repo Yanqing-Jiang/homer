@@ -1,7 +1,9 @@
-// Super user access control
-export const ALLOWED_EMAIL = 'jiangyanqing90@gmail.com';
+// Client-side authorization is purely cosmetic - server enforces actual authorization
+// via 403 responses. This file is kept for API compatibility but always returns true.
+// Authorization is handled server-side in src/web/auth.ts
 
-export function isAuthorizedUser(email: string | undefined): boolean {
-	if (!email) return false;
-	return email.toLowerCase().trim() === ALLOWED_EMAIL.toLowerCase();
+export function isAuthorizedUser(_email: string | undefined): boolean {
+	// All authorization is enforced server-side
+	// Client just needs to handle 403 responses appropriately
+	return true;
 }

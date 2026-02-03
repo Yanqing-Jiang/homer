@@ -16,10 +16,13 @@ export interface ParsedIdea {
   context?: string;
   link?: string;
   notes?: string;
+  exploration?: string;
   tags: string[];
   timestamp: string;
   filePath?: string;
   contentHash?: string;
+  linkedExplorationThreadId?: string;
+  linkedPlanId?: string;
 }
 
 /**
@@ -173,6 +176,12 @@ export function parseIdeaFile(filePath: string): ParsedIdea | null {
       case "link":
         idea.link = value;
         break;
+      case "linkedexplorationthreadid":
+        idea.linkedExplorationThreadId = value;
+        break;
+      case "linkedplanid":
+        idea.linkedPlanId = value;
+        break;
     }
   }
 
@@ -191,6 +200,12 @@ export function parseIdeaFile(filePath: string): ParsedIdea | null {
     idea.notes = notesMatch[1].trim();
   }
 
+  // Extract exploration notes if present (after "## Exploration")
+  const explorationMatch = body.match(/## Exploration\n([\s\S]*?)(?=\n## |$)/);
+  if (explorationMatch && explorationMatch[1]) {
+    idea.exploration = explorationMatch[1].trim();
+  }
+
   if (!idea.id || !idea.title) {
     logger.warn({ filePath }, "Idea file missing required fields");
     return null;
@@ -205,15 +220,27 @@ export function parseIdeaFile(filePath: string): ParsedIdea | null {
 export function formatIdeaFile(idea: ParsedIdea): string {
   const tags = idea.tags?.length ? `[${idea.tags.join(", ")}]` : "[]";
 
-  let content = `---
+  let frontmatter = `---
 id: ${idea.id}
 title: ${idea.title}
 status: ${idea.status}
 source: ${idea.source}
 created: ${idea.timestamp}
-tags: ${tags}
-${idea.link ? `link: ${idea.link}` : ""}
----
+tags: ${tags}`;
+
+  if (idea.link) {
+    frontmatter += `\nlink: ${idea.link}`;
+  }
+  if (idea.linkedExplorationThreadId) {
+    frontmatter += `\nlinkedExplorationThreadId: ${idea.linkedExplorationThreadId}`;
+  }
+  if (idea.linkedPlanId) {
+    frontmatter += `\nlinkedPlanId: ${idea.linkedPlanId}`;
+  }
+
+  frontmatter += `\n---`;
+
+  let content = `${frontmatter}
 
 ${idea.content}
 `;
@@ -224,6 +251,10 @@ ${idea.content}
 
   if (idea.notes) {
     content += `\n## Notes\n\n${idea.notes}\n`;
+  }
+
+  if (idea.exploration) {
+    content += `\n## Exploration\n\n${idea.exploration}\n`;
   }
 
   return content;
@@ -283,4 +314,33 @@ export function getIdeasPaths(): { legacyFile: string; directory: string } {
     legacyFile: IDEAS_FILE,
     directory: IDEAS_DIR,
   };
+}
+
+/**
+ * Append exploration notes to an idea file
+ */
+export function appendExploration(filePath: string, notes: string): boolean {
+  if (!existsSync(filePath)) return false;
+
+  const idea = parseIdeaFile(filePath);
+  if (!idea) return false;
+
+  // Format exploration entry with date
+  const now = new Date();
+  const dateStr = now.toISOString().split("T")[0];
+  const entry = `### ${dateStr}\n${notes}`;
+
+  // Append to existing exploration or create new section
+  if (idea.exploration) {
+    idea.exploration = `${idea.exploration}\n\n${entry}`;
+  } else {
+    idea.exploration = entry;
+  }
+
+  // Save updated idea
+  const content = formatIdeaFile(idea);
+  writeFileSync(filePath, content, "utf-8");
+  logger.debug({ filePath }, "Appended exploration notes to idea");
+
+  return true;
 }

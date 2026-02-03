@@ -22,7 +22,7 @@ export interface DailyLog {
 }
 
 // Base path for daily logs
-const DAILY_LOG_BASE = "/Users/yj/memory";
+const DAILY_LOG_BASE = "/Users/yj/memory/daily";
 
 /**
  * Get the file path for a daily log

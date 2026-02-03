@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from "fs";
 import type { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
 import { getUploadContent } from "./uploads.js";
+import { processResponse } from "../../utils/response-processor.js";
 
 const CLAUDE_PATH = process.env.CLAUDE_PATH ?? "/Users/yj/.local/bin/claude";
 const DEFAULT_TIMEOUT = 1200_000; // 20 minutes
@@ -139,6 +140,8 @@ export function registerStreamingRoutes(
       let assistantContent = "";
       let capturedSessionId: string | undefined;
 
+      let proc: ReturnType<typeof spawn> | undefined;
+
       const sendEvent = (type: string, data: Record<string, unknown>) => {
         eventId++;
         reply.raw.write(`id: ${eventId}\n`);
@@ -150,6 +153,18 @@ export function registerStreamingRoutes(
         if (heartbeatInterval) {
           clearInterval(heartbeatInterval);
         }
+        // Kill spawned process if still running
+        if (proc && proc.exitCode === null) {
+          logger.debug({ threadId }, "Killing Claude process due to cleanup");
+          proc.kill("SIGTERM");
+          // Force kill after 5s if still running
+          setTimeout(() => {
+            if (proc && proc.exitCode === null) {
+              logger.warn({ threadId }, "Force killing Claude process");
+              proc.kill("SIGKILL");
+            }
+          }, 5000);
+        }
       };
 
       // Heartbeat to prevent proxy timeouts
@@ -157,9 +172,15 @@ export function registerStreamingRoutes(
         reply.raw.write(": heartbeat\n\n");
       }, HEARTBEAT_INTERVAL);
 
-      // Handle client disconnect
+      // Handle client disconnect - clean up resources
       request.raw.on("close", () => {
         logger.debug({ threadId }, "SSE client disconnected");
+        cleanup();
+      });
+
+      // Handle client abort (e.g., browser navigation away)
+      request.raw.on("aborted", () => {
+        logger.debug({ threadId }, "SSE client aborted");
         cleanup();
       });
 
@@ -208,7 +229,7 @@ export function registerStreamingRoutes(
         sendEvent("start", { userMessageId });
 
         // Spawn Claude CLI
-        const proc = spawn(CLAUDE_PATH, args, {
+        proc = spawn(CLAUDE_PATH, args, {
           cwd: process.env.HOME ?? "/Users/yj",
           env,
           stdio: ["pipe", "pipe", "pipe"],
@@ -271,7 +292,7 @@ export function registerStreamingRoutes(
         });
 
         // Handle process completion
-        proc.on("close", (code) => {
+        proc.on("close", async (code) => {
           cleanup();
 
           // Detect session expiry from stderr
@@ -291,14 +312,17 @@ export function registerStreamingRoutes(
             return;
           }
 
-          // Save assistant message
+          // Process memory updates and save assistant message
           const assistantMessageId = randomUUID();
           if (assistantContent.trim()) {
+            // Process memory updates before saving
+            const { cleanedContent } = await processResponse(assistantContent.trim(), "general");
+
             stateManager.createThreadMessage({
               id: assistantMessageId,
               threadId,
               role: "assistant",
-              content: assistantContent.trim(),
+              content: cleanedContent,
               metadata: {
                 exitCode: code,
                 sessionId: capturedSessionId,
@@ -335,12 +359,14 @@ export function registerStreamingRoutes(
         // Timeout handling
         const timeoutTimer = setTimeout(() => {
           logger.warn({ threadId }, "Claude CLI timed out");
-          proc.kill("SIGTERM");
-          setTimeout(() => {
-            if (proc.exitCode === null) {
-              proc.kill("SIGKILL");
-            }
-          }, 5000);
+          if (proc) {
+            proc.kill("SIGTERM");
+            setTimeout(() => {
+              if (proc && proc.exitCode === null) {
+                proc.kill("SIGKILL");
+              }
+            }, 5000);
+          }
         }, DEFAULT_TIMEOUT);
 
         proc.on("close", () => {

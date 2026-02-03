@@ -8,8 +8,10 @@ import {
   saveIdeaFile,
   getIdeasPaths,
   isIdeasMigrated,
+  appendExploration,
   type ParsedIdea,
 } from "../../ideas/parser.js";
+import { join } from "path";
 
 let ideasIndexer: IdeasIndexer | null = null;
 
@@ -294,8 +296,8 @@ export function registerIdeasRoutes(
     };
   });
 
-  // Convert idea to plan
-  server.post("/api/ideas/:id/plan", async (request: FastifyRequest, reply: FastifyReply) => {
+  // Explore idea (create exploration thread with context)
+  server.post("/api/ideas/:id/explore", async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = request.params as { id: string };
 
     if (!ideasIndexer) {
@@ -309,12 +311,210 @@ export function registerIdeasRoutes(
       return { error: "Idea not found" };
     }
 
-    // TODO: Implement plan creation
-    // This would create a new plan file in ~/memory/plans/
-    // and link it to the idea
+    // Get full idea content
+    const parsed = idea.filePath ? parseIdeaFile(idea.filePath) : null;
+    if (!parsed) {
+      reply.status(500);
+      return { error: "Could not read idea file" };
+    }
 
-    reply.status(501);
-    return { error: "Plan creation not yet implemented" };
+    // Check if already has linked exploration thread - allow resuming
+    if (parsed.linkedExplorationThreadId) {
+      // Check if thread still exists
+      const existingThread = stateManager.getThread(parsed.linkedExplorationThreadId);
+      if (existingThread) {
+        return {
+          sessionId: existingThread.chatSessionId,
+          threadId: parsed.linkedExplorationThreadId,
+          message: "Resuming existing exploration thread",
+          resumed: true,
+        };
+      }
+    }
+
+    // Create a session and thread for exploring this idea
+    const sessionId = randomUUID();
+    stateManager.createChatSession({
+      id: sessionId,
+      name: `Explore: ${idea.title}`,
+    });
+
+    const threadId = randomUUID();
+    stateManager.createThread({
+      id: threadId,
+      chatSessionId: sessionId,
+      title: `Exploring: ${idea.title}`,
+      provider: "claude",
+    });
+
+    // Build exploration system message
+    const systemMessage = `# Exploration Context
+
+You are helping explore and develop this idea into an actionable plan.
+
+## Idea Details
+**Title:** ${parsed.title}
+**Content:** ${parsed.content}
+${parsed.context ? `**Context:** ${parsed.context}` : ""}
+${parsed.link ? `**Link:** ${parsed.link}` : ""}
+
+## Your Role
+
+Have a freeform conversation to understand this idea. Explore:
+- Goals & Outcomes - What does success look like?
+- Scope - What's in scope vs out of scope?
+- Phases - How might this break down into phases?
+- Resources - What's needed?
+- Risks & Dependencies
+
+When the user indicates they're ready ("ready", "create plan", "let's do it"),
+generate a structured plan and offer to save it.`;
+
+    // Add system message to thread
+    stateManager.createThreadMessage({
+      id: randomUUID(),
+      threadId,
+      role: "system",
+      content: systemMessage,
+    });
+
+    // Link thread to idea
+    stateManager.createThreadLink({
+      threadId,
+      linkType: "idea",
+      linkId: id,
+    });
+
+    // Update idea with exploration thread link
+    parsed.linkedExplorationThreadId = threadId;
+    parsed.status = "exploring";
+    saveIdeaFile(parsed);
+    ideasIndexer.updateIdea(idea.filePath!);
+
+    return {
+      sessionId,
+      threadId,
+      message: "Exploration thread created",
+      resumed: false,
+    };
+  });
+
+  // Convert idea to plan
+  interface CreatePlanBody {
+    title: string;
+    description?: string;
+    phases?: Array<{
+      name: string;
+      tasks?: string[];
+    }>;
+    explorationSummary?: string;
+  }
+
+  server.post("/api/ideas/:id/plan", async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const body = request.body as CreatePlanBody;
+
+    if (!ideasIndexer) {
+      reply.status(503);
+      return { error: "Ideas indexer not initialized" };
+    }
+
+    const idea = ideasIndexer.get(id);
+    if (!idea) {
+      reply.status(404);
+      return { error: "Idea not found" };
+    }
+
+    // Get full idea content
+    const parsed = idea.filePath ? parseIdeaFile(idea.filePath) : null;
+    if (!parsed) {
+      reply.status(500);
+      return { error: "Could not read idea file" };
+    }
+
+    // Use provided title or idea title
+    const planTitle = body.title || parsed.title;
+    const planDescription = body.description || parsed.content;
+
+    // Create slug from title
+    const slug = planTitle
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+
+    // Build plan file content
+    const now = new Date().toISOString().split("T")[0];
+    const MEMORY_PATH = process.env.MEMORY_PATH ?? "/Users/yj/memory";
+    const PLANS_DIR = join(MEMORY_PATH, "plans");
+    const planPath = join(PLANS_DIR, `${slug}.md`);
+
+    let planContent = `# ${planTitle}
+
+**Status:** planning
+**Created:** ${now}
+**Updated:** ${now}
+**Source Idea:** ${parsed.id}
+`;
+
+    if (body.phases && body.phases.length > 0) {
+      planContent += `**Current Phase:** ${body.phases[0]?.name || "Phase 1"}\n`;
+    }
+
+    planContent += `\n## Description\n\n${planDescription}\n`;
+
+    // Add phases with tasks
+    if (body.phases && body.phases.length > 0) {
+      for (let i = 0; i < body.phases.length; i++) {
+        const phase = body.phases[i];
+        if (!phase) continue;
+        planContent += `\n## Phase ${i + 1}: ${phase.name}\n\n`;
+        if (phase.tasks && phase.tasks.length > 0) {
+          for (const task of phase.tasks) {
+            planContent += `- [ ] ${task}\n`;
+          }
+        } else {
+          planContent += `- [ ] Define tasks for this phase\n`;
+        }
+      }
+    } else {
+      // Default phases if none provided
+      planContent += `\n## Phase 1: Planning\n\n- [ ] Define detailed requirements\n- [ ] Identify resources needed\n`;
+      planContent += `\n## Phase 2: Execution\n\n- [ ] Implement core functionality\n- [ ] Test and validate\n`;
+      planContent += `\n## Phase 3: Review\n\n- [ ] Review outcomes\n- [ ] Document learnings\n`;
+    }
+
+    // Ensure plans directory exists
+    const { mkdirSync, existsSync, writeFileSync } = await import("fs");
+    if (!existsSync(PLANS_DIR)) {
+      mkdirSync(PLANS_DIR, { recursive: true });
+    }
+
+    // Write plan file
+    writeFileSync(planPath, planContent, "utf-8");
+
+    // Append exploration summary to idea if provided
+    if (body.explorationSummary && idea.filePath) {
+      appendExploration(idea.filePath, `**Plan Created:** ${slug}\n\n${body.explorationSummary}`);
+    }
+
+    // Update idea status and link to plan
+    const updatedParsed = parseIdeaFile(idea.filePath!);
+    if (updatedParsed) {
+      updatedParsed.status = "planning";
+      updatedParsed.linkedPlanId = slug;
+      saveIdeaFile(updatedParsed);
+    }
+
+    // Update index
+    ideasIndexer.linkPlan(id, slug);
+    ideasIndexer.updateIdea(idea.filePath!);
+
+    reply.status(201);
+    return {
+      planId: slug,
+      planPath,
+      message: "Plan created successfully",
+    };
   });
 
   // Reindex ideas

@@ -1,5 +1,43 @@
+# Dependencies
 node_modules/
 dist/
+
+# Environment & secrets
 .env
-data/*.db
-logs/*.log
+.env.local
+.env.production
+
+# Runtime data
+data/
+logs/
+uploads/
+night_mode/
+config/
+
+# Personal documentation
+architecture.md
+
+# Browser profiles
+profiles/
+
+# Backups
+*.backup.*
+*.bak
+*.backup
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+
+# Test artifacts
+coverage/
+.nyc_output/
+
+# Temporary files
+*.tmp
+*.temp
