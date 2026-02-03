@@ -18,6 +18,7 @@ export interface ScheduledJobConfig {
   enabled: boolean;
   timeout?: number; // ms, defaults to 600000 (10 min)
   model?: string; // e.g. "sonnet", "haiku", "opus" - defaults to sonnet
+  executor?: "claude" | "kimi" | "gemini"; // defaults to claude; kimi for cheap API; gemini for free CLI
   contextFiles?: string[]; // files to load and inject as system prompt context
   streamProgress?: boolean; // stream tool usage to Telegram (default: false)
   notifyOnSuccess?: boolean; // defaults to true

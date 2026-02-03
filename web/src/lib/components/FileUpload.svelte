@@ -1,5 +1,6 @@
 <script lang="ts">
 	import * as api from '$lib/api/client';
+	import { toast } from '$lib/stores/toasts.svelte';
 
 	interface Props {
 		sessionId: string | null;
@@ -24,23 +25,40 @@
 		onFilesChange?.(attachedFiles);
 	}
 
-	async function handleFiles(files: FileList | null) {
-		if (!files || files.length === 0 || !sessionId) return;
+	// Queue for sequential file uploads to prevent interleaving
+	let uploadQueue = $state<File[]>([]);
+	let isProcessingQueue = $state(false);
 
+	async function processUploadQueue() {
+		if (isProcessingQueue || uploadQueue.length === 0 || !sessionId) return;
+
+		isProcessingQueue = true;
 		uploading = true;
 		uploadError = null;
 
 		try {
-			for (const file of Array.from(files)) {
+			while (uploadQueue.length > 0) {
+				const file = uploadQueue.shift()!;
 				const result = await api.uploadFile(file, sessionId);
 				attachedFiles = [...attachedFiles, result];
+				onFilesChange?.(attachedFiles);
 			}
-			onFilesChange?.(attachedFiles);
 		} catch (e) {
 			uploadError = e instanceof Error ? e.message : 'Upload failed';
+			// Clear remaining queue on error
+			uploadQueue = [];
 		} finally {
+			isProcessingQueue = false;
 			uploading = false;
 		}
+	}
+
+	async function handleFiles(files: FileList | null) {
+		if (!files || files.length === 0 || !sessionId) return;
+
+		// Add to queue and process
+		uploadQueue = [...uploadQueue, ...Array.from(files)];
+		processUploadQueue();
 	}
 
 	function handleDrop(e: DragEvent) {
@@ -74,6 +92,7 @@
 			onFilesChange?.(attachedFiles);
 		} catch (e) {
 			console.error('Failed to remove file:', e);
+			toast.error(`Failed to remove file: ${e instanceof Error ? e.message : 'Unknown error'}`);
 		}
 	}
 

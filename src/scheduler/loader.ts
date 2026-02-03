@@ -63,6 +63,9 @@ function validateJob(job: unknown, sourceFile: string): ScheduledJobConfig | nul
     enabled: j.enabled !== false, // default to true
     timeout: typeof j.timeout === "number" ? j.timeout : undefined,
     model: typeof j.model === "string" ? j.model : undefined,
+    executor: typeof j.executor === "string" && ["claude", "kimi", "gemini"].includes(j.executor)
+      ? j.executor as "claude" | "kimi" | "gemini"
+      : undefined,
     contextFiles: Array.isArray(j.contextFiles) ? j.contextFiles : undefined,
     streamProgress: j.streamProgress === true,
     notifyOnSuccess: j.notifyOnSuccess !== false, // default to true

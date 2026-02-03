@@ -37,14 +37,25 @@
 	// Slash command state
 	let showSlashCommands = $state(false);
 	let selectedCommandIndex = $state(0);
-	const slashCommands = [
-		{ name: '/chatgpt', description: 'Send message to ChatGPT via browser agent', example: '/chatgpt What is the weather?' },
-		{ name: '/gemini', description: 'Send message to Gemini via browser agent', example: '/gemini Explain quantum computing' },
-		{ name: '/claude', description: 'Send message to Claude web via browser agent', example: '/claude Write a poem' },
-		{ name: '/search', description: 'Search memory files', example: '/search project ideas' },
-		{ name: '/jobs', description: 'List scheduled jobs', example: '/jobs' },
-		{ name: '/trigger', description: 'Trigger a scheduled job', example: '/trigger morning-brief' },
+	let dynamicCommands = $state<api.CommandDefinition[]>([]);
+	let executorCommands = $state<Array<{ name: string; executor: api.ExecutorType; description: string; model?: string }>>([]);
+
+	// Fallback commands (used until dynamic ones load)
+	const fallbackCommands = [
+		{ name: '/gemini', category: 'executor', description: 'Switch to Gemini CLI', executor: 'gemini' as api.ExecutorType },
+		{ name: '/codex', category: 'executor', description: 'Switch to Codex (deep reasoning)', executor: 'codex' as api.ExecutorType },
+		{ name: '/claude', category: 'executor', description: 'Switch to Claude (default)', executor: 'claude' as api.ExecutorType },
+		{ name: '/new', category: 'session', description: 'Start fresh session (reset executor)' },
+		{ name: '/search', category: 'search', description: 'Search memory files' },
 	];
+
+	// Use dynamic commands if loaded, otherwise fallback
+	let slashCommands = $derived(dynamicCommands.length > 0 ? dynamicCommands : fallbackCommands);
+
+	// Executor state
+	let currentExecutor = $state<api.ExecutorType>('claude');
+	let currentModel = $state<string | undefined>(undefined);
+	let executorMessageCount = $state(0);
 
 	// Filter commands based on input
 	let filteredCommands = $derived(
@@ -53,6 +64,73 @@
 			: []
 	);
 
+	// Load commands from API
+	async function loadCommands() {
+		try {
+			const response = await api.getCommands();
+			dynamicCommands = response.commands;
+			executorCommands = response.executors;
+		} catch (error) {
+			console.warn('Failed to load commands, using fallback:', error);
+		}
+	}
+
+	// Load executor state for current session
+	async function loadExecutorState() {
+		if (!sessionId) {
+			currentExecutor = 'claude';
+			currentModel = undefined;
+			executorMessageCount = 0;
+			return;
+		}
+		try {
+			const state = await api.getExecutorState(sessionId);
+			currentExecutor = state.executor;
+			currentModel = state.model;
+			executorMessageCount = state.messageCount ?? 0;
+		} catch (error) {
+			console.warn('Failed to load executor state:', error);
+		}
+	}
+
+	// Switch executor
+	async function switchExecutor(executor: api.ExecutorType) {
+		if (!sessionId) return;
+		try {
+			if (currentAbort) {
+				currentAbort.abort();
+				currentAbort = null;
+			}
+			isStreaming = false;
+			streamingContent = '';
+			const result = await api.setExecutor(sessionId, executor);
+			currentExecutor = result.executor;
+			currentModel = result.model;
+			executorMessageCount = 0;
+		} catch (error) {
+			console.error('Failed to switch executor:', error);
+		}
+	}
+
+	// Clear executor (reset to Claude)
+	async function resetExecutor() {
+		if (!sessionId) return;
+		try {
+			if (currentAbort) {
+				currentAbort.abort();
+				currentAbort = null;
+			}
+			isStreaming = false;
+			streamingContent = '';
+			const result = await api.clearExecutor(sessionId);
+			currentExecutor = result.executor;
+			currentModel = result.model;
+			executorMessageCount = 0;
+		} catch (error) {
+			console.error('Failed to reset executor:', error);
+		}
+	}
+
 	function handleInputChange(e: Event) {
 		const value = (e.target as HTMLInputElement).value;
 		chatInput = value;
@@ -60,7 +138,26 @@
 		selectedCommandIndex = 0;
 	}
 
-	function selectCommand(cmd: typeof slashCommands[0]) {
+	function selectCommand(cmd: api.CommandDefinition) {
+		// For executor commands, switch immediately if no additional input needed
+		if (cmd.category === 'executor' && cmd.executor) {
+			switchExecutor(cmd.executor);
+			chatInput = '';
+			showSlashCommands = false;
+			return;
+		}
+
+		// For /new, reset executor
+		if (cmd.name === '/new') {
+			resetExecutor();
+			chatInput = '';
+			showSlashCommands = false;
+			// Also start a new session
+			selectSession(null);
+			return;
+		}
+
+		// For other commands, fill the input
 		chatInput = cmd.name + ' ';
 		showSlashCommands = false;
 	}
@@ -191,10 +288,11 @@
 		}
 	});
 
-	// Load sessions for dropdown when authorized
+	// Load sessions and commands when authorized
 	$effect(() => {
 		if (!auth.loading && auth.isAuthorized) {
 			loadSessions();
+			loadCommands();
 		}
 	});
 
@@ -223,6 +321,7 @@
 
 			threadId = session.threads[0].id;
 			await loadThreadMessages(threadId);
+			await loadExecutorState();
 		} catch (e) {
 			console.error('Failed to auto-load:', e);
 			// Fail silently - user can manually select
@@ -234,12 +333,22 @@
 	async function selectSession(session: api.ChatSession | null) {
 		showSessionDropdown = false;
 
+		if (currentAbort) {
+			currentAbort.abort();
+			currentAbort = null;
+			isStreaming = false;
+			streamingContent = '';
+		}
+
 		if (!session) {
-			// New session
+			// New session - also reset executor
 			sessionId = null;
 			threadId = null;
 			messages = [];
 			currentSessionName = 'New Session';
+			currentExecutor = 'claude';
+			currentModel = undefined;
+			executorMessageCount = 0;
 			return;
 		}
 
@@ -255,6 +364,9 @@
 				threadId = null;
 				messages = [];
 			}
+
+			// Load executor state for this session
+			await loadExecutorState();
 		} catch (e) {
 			console.error('Failed to select session:', e);
 		}
@@ -283,7 +395,43 @@
 		if (!chatInput.trim() || isStreaming) return;
 
 		const userMessage = chatInput.trim();
-		const currentAttachments = attachedFiles.map(f => f.id);
+		const currentAttachments = attachedFiles.map(f => f.path);
+
+		// Parse typed slash commands (e.g., "/gemini hello")
+		if (userMessage.startsWith('/')) {
+			const spaceIdx = userMessage.indexOf(' ');
+			const cmdPart = spaceIdx > 0 ? userMessage.slice(0, spaceIdx) : userMessage;
+			const queryPart = spaceIdx > 0 ? userMessage.slice(spaceIdx + 1).trim() : '';
+
+			// Find matching command
+			const aliasMap: Record<string, string> = { '/g': '/gemini', '/x': '/codex' };
+			const resolvedCmd = aliasMap[cmdPart.toLowerCase()] || cmdPart;
+			const matchedCmd = slashCommands.find(c => c.name.toLowerCase() === resolvedCmd.toLowerCase());
+
+			if (matchedCmd) {
+				// Handle executor switch commands
+				if (matchedCmd.category === 'executor' && matchedCmd.executor) {
+					await switchExecutor(matchedCmd.executor);
+
+					// If there's a query after the command, send it
+					if (queryPart) {
+						chatInput = queryPart;
+						await handleSendMessage();
+					} else {
+						chatInput = '';
+					}
+					return;
+				}
+
+				// Handle /new command
+				if (matchedCmd.name === '/new') {
+					await resetExecutor();
+					selectSession(null);
+					chatInput = queryPart || '';
+					return;
+				}
+			}
+		}
 
 		// Store previous state for rollback on failure
 		const previousMessages = [...messages];
@@ -310,42 +458,53 @@
 
 			// Create thread if needed
 			if (!threadId) {
-				const thread = await api.createThread(sessionId, { provider: 'claude' });
+				const thread = await api.createThread(sessionId, { provider: currentExecutor });
 				threadId = thread.id;
 			}
 
-			// Start streaming
+			// Non-streaming execution for all CLIs
 			isStreaming = true;
-			streamingContent = '';
+			streamingContent = 'Running...';
 
-			currentAbort = api.streamMessage(threadId, userMessage, {
-				onStart: () => {
-					// Message started
-				},
-				onDelta: (data) => {
-					streamingContent += data.content;
-				},
-				onComplete: () => {
-					// Finalize the assistant message
-					messages = [...messages, { role: 'assistant', content: streamingContent }];
-					streamingContent = '';
-					isStreaming = false;
-					currentAbort = null;
-				},
-				onError: (data) => {
-					console.error('Stream error:', data.message);
-					chatError = data.message;
-					if (streamingContent) {
-						messages = [...messages, { role: 'assistant', content: streamingContent }];
+			try {
+				const result = await api.executeMessage(threadId, userMessage, currentAttachments.length > 0 ? currentAttachments : undefined);
+				const runId = result.runId;
+
+				currentAbort = api.streamRunEvents(runId, {
+					onStatus: async (data) => {
+						if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
+							try {
+								const run = await api.getRun(runId);
+								const output = run.run.output || (run.run.error ?? '');
+								if (output) {
+									messages = [...messages, { role: 'assistant', content: output }];
+								} else if (run.run.status === 'cancelled') {
+									chatError = 'Run cancelled.';
+								}
+							} catch (e) {
+								chatError = e instanceof Error ? e.message : 'Failed to load run output';
+							} finally {
+								streamingContent = '';
+								isStreaming = false;
+								currentAbort?.abort();
+								currentAbort = null;
+								executorMessageCount++;
+							}
+						}
+					},
+					onError: (err) => {
+						chatError = err.message;
+						streamingContent = '';
+						isStreaming = false;
+						currentAbort = null;
 					}
-					streamingContent = '';
-					isStreaming = false;
-					currentAbort = null;
-				}
-			}, {
-				attachments: currentAttachments.length > 0 ? currentAttachments : undefined,
-				sessionId: sessionId || undefined
-			});
+				});
+			} catch (execError) {
+				console.error('Execute error:', execError);
+				chatError = execError instanceof Error ? execError.message : 'Execution failed';
+				streamingContent = '';
+				isStreaming = false;
+			}
 		} catch (e) {
 			console.error('Failed to send message:', e);
 			chatError = e instanceof Error ? e.message : 'Failed to send message. Check if the daemon is running.';
@@ -484,7 +643,7 @@
 			</div>
 		</header>
 
-		<!-- Blue Ribbon (Session Selector) -->
+		<!-- Blue Ribbon (Session Selector + Executor Indicator) -->
 		<div class="directory-ribbon">
 			<div class="session-selector">
 				<button class="session-dropdown-btn" onclick={() => showSessionDropdown = !showSessionDropdown}>
@@ -496,37 +655,54 @@
 						<path d="M7 10l5 5 5-5z"/>
 					</svg>
 				</button>
-				{#if showSessionDropdown}
-					<div class="session-dropdown">
-						<button class="session-dropdown-item new-session" onclick={() => selectSession(null)}>
-							<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-								<path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
-							</svg>
-							New Session
-						</button>
-						<div class="session-dropdown-divider"></div>
-						{#if sessions.length === 0}
-							<div class="session-dropdown-empty">No recent sessions</div>
-						{:else}
-							{#each sessions as sess}
-								<button
-									class="session-dropdown-item"
-									class:active={sess.id === sessionId}
-									onclick={() => selectSession(sess)}
-								>
-									<span class="session-item-name">{sess.name}</span>
-									<span class="session-item-date">{new Date(sess.updatedAt).toLocaleDateString()}</span>
-								</button>
-							{/each}
-						{/if}
-						<div class="session-dropdown-divider"></div>
-						<a href="/sessions" class="session-dropdown-item view-all">
-							View All Sessions
-							<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
-								<path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/>
-							</svg>
-						</a>
-					</div>
+			</div>
+
+			{#if showSessionDropdown}
+				<div class="session-dropdown">
+					<button class="session-dropdown-item new-session" onclick={() => selectSession(null)}>
+						<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+							<path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+						</svg>
+						New Session
+					</button>
+					<div class="session-dropdown-divider"></div>
+					{#if sessions.length === 0}
+						<div class="session-dropdown-empty">No recent sessions</div>
+					{:else}
+						{#each sessions as sess}
+							<button
+								class="session-dropdown-item"
+								class:active={sess.id === sessionId}
+								onclick={() => selectSession(sess)}
+							>
+								<span class="session-item-name">{sess.name}</span>
+								<span class="session-item-date">{new Date(sess.updatedAt).toLocaleDateString()}</span>
+							</button>
+						{/each}
+					{/if}
+					<div class="session-dropdown-divider"></div>
+					<a href="/sessions" class="session-dropdown-item view-all">
+						View All Sessions
+						<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+							<path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/>
+						</svg>
+					</a>
+				</div>
+			{/if}
+
+			<!-- Executor Indicator -->
+			<div class="executor-indicator">
+				<span class="executor-label">Executor:</span>
+				<span class="executor-badge" class:executor-claude={currentExecutor === 'claude'}
+					class:executor-gemini={currentExecutor === 'gemini'}
+					class:executor-codex={currentExecutor === 'codex'}>
+					{currentExecutor}
+					{#if currentModel}
+						<span class="executor-model">({currentModel})</span>
+					{/if}
+				</span>
+				{#if executorMessageCount > 0}
+					<span class="executor-count">{executorMessageCount} msgs</span>
 				{/if}
 			</div>
 		</div>
@@ -683,6 +859,11 @@
 												onclick={() => selectCommand(cmd)}
 											>
 												<span class="cmd-name">{cmd.name}</span>
+												{#if cmd.category === 'executor'}
+													<span class="cmd-badge executor">switch</span>
+												{:else if cmd.category === 'session'}
+													<span class="cmd-badge session">session</span>
+												{/if}
 												<span class="cmd-desc">{cmd.description}</span>
 											</button>
 										{/each}
@@ -1111,6 +1292,56 @@
 		z-index: 49;
 	}
 
+	/* Executor Indicator */
+	.executor-indicator {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-left: auto;
+		padding-right: 8px;
+	}
+
+	.executor-label {
+		color: rgba(255, 255, 255, 0.7);
+		font-size: 12px;
+	}
+
+	.executor-badge {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		padding: 3px 10px;
+		border-radius: 12px;
+		font-size: 12px;
+		font-weight: 600;
+		text-transform: capitalize;
+	}
+
+	.executor-badge.executor-claude {
+		background: rgba(255, 255, 255, 0.9);
+		color: #8b5cf6;
+	}
+
+	.executor-badge.executor-gemini {
+		background: #4285f4;
+		color: white;
+	}
+
+	.executor-badge.executor-codex {
+		background: #10b981;
+		color: white;
+	}
+
+	.executor-model {
+		font-weight: 400;
+		opacity: 0.8;
+	}
+
+	.executor-count {
+		color: rgba(255, 255, 255, 0.7);
+		font-size: 11px;
+	}
+
 	/* Sidebar */
 	.sidebar-overlay {
 		position: fixed;
@@ -1399,9 +1630,9 @@
 
 	.slash-command-item {
 		display: flex;
-		flex-direction: column;
-		align-items: flex-start;
-		gap: 2px;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 4px 8px;
 		width: 100%;
 		padding: 10px 14px;
 		border: none;
@@ -1425,6 +1656,26 @@
 	.slash-command-item .cmd-desc {
 		font-size: 12px;
 		color: #666;
+		width: 100%;
+		flex-basis: 100%;
+	}
+
+	.slash-command-item .cmd-badge {
+		font-size: 10px;
+		padding: 2px 6px;
+		border-radius: 10px;
+		font-weight: 500;
+		text-transform: uppercase;
+	}
+
+	.slash-command-item .cmd-badge.executor {
+		background: #ddd6fe;
+		color: #7c3aed;
+	}
+
+	.slash-command-item .cmd-badge.session {
+		background: #fef3c7;
+		color: #d97706;
 	}
 
 	.chat-input {

@@ -104,7 +104,7 @@ export interface Thread {
 	id: string;
 	chatSessionId: string;
 	title: string | null;
-	provider: 'claude' | 'chatgpt' | 'gemini';
+	provider: 'claude' | 'gemini' | 'codex';
 	model: string | null;
 	status: 'active' | 'expired' | 'archived';
 	externalSessionId: string | null;
@@ -192,7 +192,7 @@ export async function createThread(
 	sessionId: string,
 	options: {
 		title?: string;
-		provider: 'claude' | 'chatgpt' | 'gemini';
+		provider: 'claude' | 'gemini' | 'codex';
 		model?: string;
 		parentThreadId?: string;
 		branchPointMessageId?: string;
@@ -363,17 +363,20 @@ export async function getJobCalendar(options?: {
 export interface Idea {
 	id: string;
 	title: string;
-	status: 'draft' | 'researching' | 'review' | 'planning' | 'execution' | 'archived';
+	status: 'draft' | 'researching' | 'exploring' | 'review' | 'planning' | 'execution' | 'archived';
 	source: string;
 	content: string;
 	context?: string | null;
 	link?: string | null;
 	notes?: string | null;
+	exploration?: string | null;
 	tags?: string[];
 	timestamp?: string;
 	createdAt?: string;
 	filePath?: string;
 	linkedThreadId?: string | null;
+	linkedExplorationThreadId?: string | null;
+	linkedPlanId?: string | null;
 }
 
 // List ideas
@@ -439,6 +442,34 @@ export async function startIdeaResearch(
 	id: string
 ): Promise<{ sessionId: string; threadId: string; message: string }> {
 	return apiFetch(`/api/ideas/${id}/research`, { method: 'POST' });
+}
+
+// Start exploration on an idea (creates exploration thread with context)
+export async function startIdeaExploration(
+	id: string
+): Promise<{ sessionId: string; threadId: string; message: string; resumed: boolean }> {
+	return apiFetch(`/api/ideas/${id}/explore`, { method: 'POST' });
+}
+
+// Create a plan from an idea
+export interface CreatePlanFromIdeaRequest {
+	title?: string;
+	description?: string;
+	phases?: Array<{
+		name: string;
+		tasks?: string[];
+	}>;
+	explorationSummary?: string;
+}
+
+export async function createPlanFromIdea(
+	id: string,
+	data: CreatePlanFromIdeaRequest
+): Promise<{ planId: string; planPath: string; message: string }> {
+	return apiFetch(`/api/ideas/${id}/plan`, {
+		method: 'POST',
+		body: JSON.stringify(data)
+	});
 }
 
 // ============================================
@@ -802,6 +833,186 @@ export function streamMessage(
 			isAborted = true;
 			controller.abort();
 			// Cancel and release the reader if it exists
+			reader?.cancel().catch(() => {});
+		}
+	};
+}
+
+// ============================================
+// Commands & Executor API
+// ============================================
+
+export type ExecutorType = 'claude' | 'gemini' | 'codex';
+
+export interface CommandDefinition {
+	name: string;
+	category: string;
+	description: string;
+	executor?: ExecutorType;
+	model?: string;
+}
+
+export interface CommandsResponse {
+	commands: CommandDefinition[];
+	executors: Array<{
+		name: string;
+		executor: ExecutorType;
+		description: string;
+		model?: string;
+	}>;
+}
+
+export interface ExecutorState {
+	sessionId: string;
+	executor: ExecutorType;
+	model?: string;
+	switchedAt?: number;
+	messageCount?: number;
+	isDefault: boolean;
+}
+
+/**
+ * Get available commands and executors
+ */
+export async function getCommands(): Promise<CommandsResponse> {
+	return apiFetch<CommandsResponse>('/api/commands');
+}
+
+/**
+ * Get the current executor state for a session
+ */
+export async function getExecutorState(sessionId: string): Promise<ExecutorState> {
+	return apiFetch<ExecutorState>(`/api/executor/${encodeURIComponent(sessionId)}`);
+}
+
+/**
+ * Set the executor for a session
+ */
+export async function setExecutor(
+	sessionId: string,
+	executor: ExecutorType,
+	model?: string
+): Promise<ExecutorState & { success: boolean }> {
+	return apiFetch<ExecutorState & { success: boolean }>(`/api/executor/${encodeURIComponent(sessionId)}`, {
+		method: 'POST',
+		body: JSON.stringify({ executor, model })
+	});
+}
+
+/**
+ * Clear executor state (reset to default Claude)
+ */
+export async function clearExecutor(sessionId: string): Promise<ExecutorState & { success: boolean }> {
+	return apiFetch<ExecutorState & { success: boolean }>(`/api/executor/${encodeURIComponent(sessionId)}`, {
+		method: 'DELETE'
+	});
+}
+
+/**
+ * Execute a message via CLI run manager (non-streaming)
+ */
+export interface ExecuteResult {
+	runId: string;
+	userMessageId?: string;
+}
+
+export interface CLIRunRecord {
+	id: string;
+	lane: string;
+	executor: string;
+	threadId: string | null;
+	status: string;
+	startedAt: number;
+	completedAt: number | null;
+	exitCode: number | null;
+	output: string | null;
+	error: string | null;
+}
+
+export async function executeMessage(
+	threadId: string,
+	content: string,
+	attachments?: string[]
+): Promise<ExecuteResult> {
+	return apiFetch<ExecuteResult>(`/api/threads/${threadId}/execute`, {
+		method: 'POST',
+		body: JSON.stringify({ content, attachments })
+	});
+}
+
+export async function getRun(runId: string): Promise<{ run: CLIRunRecord }> {
+	return apiFetch<{ run: CLIRunRecord }>(`/api/runs/${encodeURIComponent(runId)}`);
+}
+
+export function streamRunEvents(
+	runId: string,
+	callbacks: {
+		onStatus?: (data: { runId: string; status: string; executor?: string }) => void;
+		onHeartbeat?: () => void;
+		onError?: (err: { message: string }) => void;
+	}
+): { abort: () => void } {
+	const controller = new AbortController();
+	const currentSession = get(session);
+	let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+	let isAborted = false;
+
+	fetch(`${API_BASE}/api/runs/${encodeURIComponent(runId)}/events`, {
+		method: 'GET',
+		headers: {
+			...(currentSession?.access_token
+				? { Authorization: `Bearer ${currentSession.access_token}` }
+				: {})
+		},
+		signal: controller.signal
+	})
+		.then(async (response) => {
+			if (!response.ok) {
+				callbacks.onError?.({ message: `SSE failed: ${response.status}` });
+				return;
+			}
+			reader = response.body?.getReader() || null;
+			if (!reader) return;
+
+			const decoder = new TextDecoder();
+			let buffer = '';
+
+			try {
+				while (!isAborted) {
+					const { done, value } = await reader.read();
+					if (done) break;
+
+					buffer += decoder.decode(value, { stream: true });
+					const { events, remaining } = parseSSEStream(buffer);
+					buffer = remaining;
+
+					for (const sseEvent of events) {
+						if (sseEvent.event === 'status') {
+							try {
+								const parsed = JSON.parse(sseEvent.data);
+								callbacks.onStatus?.(parsed);
+							} catch {
+								// ignore parse errors
+							}
+						} else if (sseEvent.event === 'heartbeat') {
+							callbacks.onHeartbeat?.();
+						}
+					}
+				}
+			} finally {
+				reader?.releaseLock();
+			}
+		})
+		.catch((error) => {
+			if (error.name !== 'AbortError' && !isAborted) {
+				callbacks.onError?.({ message: error.message });
+			}
+		});
+
+	return {
+		abort: () => {
+			isAborted = true;
+			controller.abort();
 			reader?.cancel().catch(() => {});
 		}
 	};

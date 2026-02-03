@@ -4,6 +4,7 @@
 	import { useAuth } from '$lib/hooks/useAuth.svelte';
 	import * as api from '$lib/api/client';
 	import type { PlanStatus } from '$lib/types';
+	import { toast } from '$lib/stores/toasts.svelte';
 
 	const auth = useAuth();
 
@@ -67,14 +68,23 @@
 		return Math.round((completed / phase.tasks.length) * 100);
 	}
 
+	// Track pending plan selection to prevent out-of-order responses
+	let pendingPlanId = $state<string | null>(null);
+
 	async function openPlan(plan: api.Plan) {
+		pendingPlanId = plan.id;
 		try {
 			const detail = await api.getPlan(plan.id);
-			selectedPlan = detail;
-			expandedPhases = new Set([0]);
+			// Only apply if this is still the plan we're waiting for
+			if (pendingPlanId === plan.id) {
+				selectedPlan = detail;
+				expandedPhases = new Set([0]);
+			}
 		} catch (e) {
-			console.error('Failed to load plan details:', e);
-			error = e instanceof Error ? e.message : 'Failed to load plan';
+			if (pendingPlanId === plan.id) {
+				console.error('Failed to load plan details:', e);
+				error = e instanceof Error ? e.message : 'Failed to load plan';
+			}
 		}
 	}
 
@@ -122,7 +132,7 @@
 			editMode = false;
 		} catch (e) {
 			console.error('Failed to save plan:', e);
-			alert(`Failed to save: ${e instanceof Error ? e.message : 'Unknown error'}`);
+			toast.error(`Failed to save: ${e instanceof Error ? e.message : 'Unknown error'}`);
 		} finally {
 			savingPlan = false;
 		}
@@ -161,32 +171,48 @@
 		expandedPhases = new Set(expandedPhases);
 	}
 
+	// Track which task is being toggled using compound identifier
+	let togglingTaskKey = $state<string | null>(null);
+
+	function getTaskKey(phaseIndex: number, taskIndex: number, taskText: string): string {
+		return `${phaseIndex}-${taskIndex}-${taskText}`;
+	}
+
 	async function toggleTask(phaseIndex: number, taskIndex: number) {
 		if (!selectedPlan || togglingTask) return;
 
 		const task = selectedPlan.phases[phaseIndex].tasks[taskIndex];
 		const newCompleted = !task.completed;
+		const taskKey = getTaskKey(phaseIndex, taskIndex, task.text);
 
 		togglingTask = true;
+		togglingTaskKey = taskKey;
+
 		try {
 			const updated = await api.togglePlanTask(selectedPlan.id, task.text, newCompleted);
 
-			// Update local state
-			selectedPlan = {
-				...selectedPlan,
-				phases: updated.phases
-			};
+			// Only apply if this is the task we expected to toggle
+			if (togglingTaskKey === taskKey) {
+				// Update local state
+				selectedPlan = {
+					...selectedPlan,
+					phases: updated.phases
+				};
 
-			// Update in the plans list too
-			const planIndex = plans.findIndex(p => p.id === selectedPlan?.id);
-			if (planIndex !== -1) {
-				plans[planIndex] = { ...plans[planIndex], phases: updated.phases };
+				// Update in the plans list too
+				const planIndex = plans.findIndex(p => p.id === selectedPlan?.id);
+				if (planIndex !== -1) {
+					plans[planIndex] = { ...plans[planIndex], phases: updated.phases };
+				}
 			}
 		} catch (e) {
 			console.error('Failed to toggle task:', e);
-			alert(`Failed to update task: ${e instanceof Error ? e.message : 'Unknown error'}`);
+			toast.error(`Failed to update task: ${e instanceof Error ? e.message : 'Unknown error'}`);
 		} finally {
-			togglingTask = false;
+			if (togglingTaskKey === taskKey) {
+				togglingTask = false;
+				togglingTaskKey = null;
+			}
 		}
 	}
 
@@ -204,7 +230,7 @@
 			window.location.href = '/';
 		} catch (e) {
 			console.error('Failed to create work thread:', e);
-			alert(`Failed to start work session: ${e instanceof Error ? e.message : 'Unknown error'}`);
+			toast.error(`Failed to start work session: ${e instanceof Error ? e.message : 'Unknown error'}`);
 		} finally {
 			startingWork = false;
 		}

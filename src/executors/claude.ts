@@ -1,29 +1,39 @@
 import { spawn } from "child_process";
+import { readFileSync, existsSync } from "fs";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
 
-const DEFAULT_TIMEOUT = 600_000; // 10 minutes
+const DEFAULT_TIMEOUT = 1200_000; // 20 minutes
 const KILL_GRACE_MS = 5_000;
 const CLOSE_GRACE_MS = 1_000;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024; // 2MB capture cap
-const CLAUDE_PATH = "/Users/yj/.local/bin/claude";
+const CLAUDE_PATH = process.env.CLAUDE_PATH ?? "/Users/yj/.local/bin/claude";
+
+// Note: Keychain token extraction was removed.
+// In Aqua session, Claude CLI can access keychain directly and handle
+// token refresh automatically. This is more reliable than extracting
+// and injecting the (often expired) access token.
 
 // Subagent-specific timeouts (longer for complex tasks)
 const SUBAGENT_TIMEOUTS: Record<string, number> = {
-  gemini: 10 * 60 * 1000, // 10 minutes
-  codex: 15 * 60 * 1000,  // 15 minutes
+  gemini: 15 * 60 * 1000, // 15 minutes
+  codex: 20 * 60 * 1000,  // 20 minutes
+  kimi: 10 * 60 * 1000,   // 10 minutes (faster parallel execution)
 };
 
 // Subagent prompt templates
 const SUBAGENT_PROMPTS: Record<string, string> = {
   gemini: "[Use the gemini subagent for this task] ",
   codex: "[Use the codex subagent for this task] ",
+  kimi: "[Use the kimi subagent for this task - specialized in parallel research, front-end design, and visual analysis] ",
 };
 
 export interface ClaudeExecutorOptions {
   cwd: string;
   claudeSessionId?: string;
-  subagent?: "gemini" | "codex";
+  subagent?: "gemini" | "codex" | "kimi";
+  model?: string; // Model override (e.g., "sonnet", "opus")
+  signal?: AbortSignal;
 }
 
 export interface ClaudeExecutorResult extends ExecutorResult {
@@ -45,7 +55,7 @@ export async function executeClaudeCommand(
   options: ClaudeExecutorOptions
 ): Promise<ClaudeExecutorResult> {
   const startTime = Date.now();
-  const { cwd, claudeSessionId, subagent } = options;
+  const { cwd, claudeSessionId, subagent, model, signal } = options;
 
   // Use subagent-specific timeout if applicable
   const timeout = subagent ? (SUBAGENT_TIMEOUTS[subagent] ?? DEFAULT_TIMEOUT) : DEFAULT_TIMEOUT;
@@ -60,12 +70,22 @@ export async function executeClaudeCommand(
   // --print and --verbose are required for --output-format=stream-json
   const args = ["--print", "--verbose", "--output-format", "stream-json", "--dangerously-skip-permissions"];
 
+  // Add model override if specified
+  if (model) {
+    args.push("--model", model);
+    logger.debug({ model }, "Using model override");
+  }
+
   if (claudeSessionId) {
     args.push("--resume", claudeSessionId);
     logger.debug({ claudeSessionId }, "Resuming Claude session");
   }
 
   args.push(finalQuery);
+
+  // In Aqua session, Claude CLI can access keychain directly for OAuth.
+  // Don't inject token via env var - let Claude handle refresh automatically.
+  // Only the CLAUDE_CODE_ENTRYPOINT is needed to identify Homer as the caller.
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -75,7 +95,20 @@ export async function executeClaudeCommand(
     NO_COLOR: process.env.NO_COLOR ?? "1",
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
     TMPDIR: process.env.TMPDIR ?? "/tmp",
+    HOME: process.env.HOME ?? "/Users/yj",
   };
+  // Load OAuth token from file if not in env
+  const tokenFile = `${process.env.HOME ?? "/Users/yj"}/.homer-claude-token`;
+  if (!env.CLAUDE_CODE_OAUTH_TOKEN && existsSync(tokenFile)) {
+    try {
+      const token = readFileSync(tokenFile, "utf-8").trim();
+      if (token) {
+        env.CLAUDE_CODE_OAUTH_TOKEN = token;
+      }
+    } catch {
+      // Ignore token file read errors
+    }
+  }
 
   logger.debug(
     {
@@ -92,6 +125,7 @@ export async function executeClaudeCommand(
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
+      detached: true, // Create new process group for proper cleanup
     });
 
     let stdout = "";
@@ -116,6 +150,7 @@ export async function executeClaudeCommand(
     let killTimer: NodeJS.Timeout | undefined;
     let hardTimeoutTimer: NodeJS.Timeout | undefined;
     let closeFallbackTimer: NodeJS.Timeout | undefined;
+    let aborted = false;
 
     const clearTimers = () => {
       if (timeoutTimer) clearTimeout(timeoutTimer);
@@ -181,6 +216,11 @@ export async function executeClaudeCommand(
         },
         "Claude CLI completed"
       );
+
+      if (aborted) {
+        reject(new Error("Cancelled"));
+        return;
+      }
 
       if (timedOut) {
         reject(new Error(`Claude command timed out after ${timeout / 1000}s`));
@@ -293,7 +333,49 @@ export async function executeClaudeCommand(
       reject(new Error(`Failed to spawn Claude: ${error.message}`));
     });
 
-    // Timeout with SIGTERM -> SIGKILL escalation
+    // Helper to kill process group (negative PID kills all processes in group)
+    const killProcessGroup = (signal: NodeJS.Signals): boolean => {
+      if (!proc.pid) return false;
+      try {
+        // Kill the entire process group by sending signal to negative PID
+        process.kill(-proc.pid, signal);
+        return true;
+      } catch (error) {
+        // Fallback to killing just the process if group kill fails
+        try {
+          proc.kill(signal);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    };
+
+    const abortHandler = () => {
+      if (settled) return;
+      aborted = true;
+      logger.warn({ pid: proc.pid }, "Claude CLI aborted");
+      if (!killProcessGroup("SIGTERM")) {
+        logger.warn({ pid: proc.pid }, "Failed to SIGTERM Claude CLI process group on abort");
+      }
+      setTimeout(() => {
+        if (proc.exitCode == null && proc.signalCode == null) {
+          if (killProcessGroup("SIGKILL")) {
+            logger.warn({ pid: proc.pid }, "Sent SIGKILL to Claude CLI process group on abort");
+          }
+        }
+      }, KILL_GRACE_MS);
+    };
+
+    if (signal) {
+      if (signal.aborted) {
+        abortHandler();
+      } else {
+        signal.addEventListener("abort", abortHandler, { once: true });
+      }
+    }
+
+    // Timeout with SIGTERM -> SIGKILL escalation (kills entire process group)
     timeoutTimer = setTimeout(() => {
       timedOut = true;
       logger.error(
@@ -301,19 +383,16 @@ export async function executeClaudeCommand(
         "Claude CLI timed out"
       );
 
-      try {
-        proc.kill("SIGTERM");
-      } catch (error) {
-        logger.warn({ error }, "Failed to SIGTERM Claude CLI");
+      if (!killProcessGroup("SIGTERM")) {
+        logger.warn({ pid: proc.pid }, "Failed to SIGTERM Claude CLI process group");
       }
 
       killTimer = setTimeout(() => {
         if (proc.exitCode == null && proc.signalCode == null) {
-          try {
-            proc.kill("SIGKILL");
-            logger.warn({ pid: proc.pid }, "Sent SIGKILL to Claude CLI");
-          } catch (error) {
-            logger.warn({ error }, "Failed to SIGKILL Claude CLI");
+          if (killProcessGroup("SIGKILL")) {
+            logger.warn({ pid: proc.pid }, "Sent SIGKILL to Claude CLI process group");
+          } else {
+            logger.warn({ pid: proc.pid }, "Failed to SIGKILL Claude CLI process group");
           }
         }
       }, KILL_GRACE_MS);
