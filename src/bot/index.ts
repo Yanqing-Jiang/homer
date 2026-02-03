@@ -3,18 +3,19 @@ import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { parseRoute, getSubagentPrefix } from "../router/prefix-router.js";
+import { registerApprovalHandlers, registerPlanApprovalHandlers, registerPlanApprovalCallbacks } from "./handlers/approval.js";
+import { registerQuickCommands, registerProposalCallbacks } from "./handlers/proposal-approval.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { StateManager } from "../state/manager.js";
 import { sendThinkingIndicator, editWithResponse } from "./streaming.js";
 import { loadBootstrapFiles } from "../memory/loader.js";
 import { searchMemory, formatSearchResults } from "../memory/search.js";
-import { hybridSearch, formatHybridResults, indexMemoryFiles, getIndexStatus } from "../search/index.js";
+import { hybridSearch, formatHybridResults } from "../search/index.js";
 import type { SearchConfig } from "../search/types.js";
 import { transcribeAudio, synthesizeSpeech, truncateForTTS } from "../voice/index.js";
-import type { VoiceConfig } from "../voice/types.js";
+import type { VoiceConfig, SynthesisOptions } from "../voice/types.js";
 import { InputFile } from "grammy";
-import { BrowserManager } from "../browser/index.js";
 import { processMemoryUpdates } from "../memory/writer.js";
 import type { Scheduler } from "../scheduler/index.js";
 import {
@@ -23,14 +24,15 @@ import {
   formatRelativeTime as reminderRelativeTime,
   formatDateTime,
 } from "../reminders/index.js";
+import { MeetingManager, formatDuration } from "../meetings/index.js";
 
-// Enable hybrid streaming mode (thinking indicator -> edit with response)
 const ENABLE_STREAMING = true;
+const SESSION_KEY = "default"; // Single session key
 
-// Scheduler reference (set after bot creation)
 let schedulerRef: Scheduler | null = null;
 let reminderManagerRef: ReminderManager | null = null;
-let browserManagerRef: BrowserManager | null = null;
+let meetingManagerRef: MeetingManager | null = null;
+let voiceOutputEnabled = false; // Toggle for voice output responses
 
 export function setScheduler(scheduler: Scheduler): void {
   schedulerRef = scheduler;
@@ -40,83 +42,93 @@ export function setReminderManager(reminderManager: ReminderManager): void {
   reminderManagerRef = reminderManager;
 }
 
-export function setBrowserManager(browserManager: BrowserManager): void {
-  browserManagerRef = browserManager;
+export function setMeetingManager(meetingManager: MeetingManager): void {
+  meetingManagerRef = meetingManager;
 }
 
 export function createBot(stateManager: StateManager): Bot {
   const bot = new Bot(config.telegram.botToken);
 
-  // Create reminder manager
   const reminderManager = new ReminderManager(stateManager);
   reminderManagerRef = reminderManager;
 
-  // Auth middleware - must be first
   bot.use(authMiddleware);
 
-  // Handle /start command
+  // Register approval callback handlers for idea review buttons
+  registerApprovalHandlers(bot);
+
+  // Register plan approval handlers (/approve, /reject, /plans)
+  registerPlanApprovalHandlers(bot, stateManager);
+  registerPlanApprovalCallbacks(bot, stateManager);
+
+  // Register proposal quick commands (/a, /r, /s, /aa, /proposals) and inline button callbacks
+  registerQuickCommands(bot, stateManager);
+  registerProposalCallbacks(bot, stateManager);
+
+  // /start - help
   bot.command("start", async (ctx) => {
     await ctx.reply(
-      "H.O.M.E.R Phase 6 ready.\n\n" +
-        "*Routing (auto-detected):*\n" +
-        "Just type - context detected from query\n" +
+      "H.O.M.E.R ready.\n\n" +
+        "*Commands:*\n" +
         "/new - Start fresh session\n" +
-        "/g - Gemini subagent\n" +
-        "/x - Codex subagent\n\n" +
+        "/g <query> - Gemini subagent\n" +
+        "/x <query> - Codex subagent\n" +
+        "/voice - Toggle voice output\n\n" +
         "*Session:*\n" +
-        "/status - Active sessions\n" +
+        "/status - Active session\n" +
         "/jobs - Scheduled jobs\n" +
         "/trigger <id> - Run job\n\n" +
+        "*Meetings:*\n" +
+        "/meeting <title> with <attendees>\n" +
+        "/meetings - List recent\n\n" +
         "*Reminders:*\n" +
         "/remind <time> <msg>\n" +
         "/reminders - List\n" +
         "/cancel <id>\n\n" +
         "*Search:*\n" +
-        "/search <query> - Hybrid search\n" +
-        "/index - Reindex memory\n" +
-        "/indexstatus - Index status\n\n" +
-        "*Browser:*\n" +
-        "/browse [profile] <url>\n" +
-        "/snap [profile]\n" +
-        "/act [profile] <action>\n" +
-        "/auth [profile] [target]\n" +
-        "/profiles - List profiles\n\n" +
-        "Just type or speak - I'll figure out the context.",
+        "/search <query>\n\n" +
+        "Just type - I'll handle context.",
       { parse_mode: "Markdown" }
     );
   });
 
-  // Handle /status command
+  // /voice - toggle voice output
+  bot.command("voice", async (ctx) => {
+    voiceOutputEnabled = !voiceOutputEnabled;
+    const status = voiceOutputEnabled ? "ON" : "OFF";
+    const icon = voiceOutputEnabled ? "🔊" : "🔇";
+    await ctx.reply(`${icon} Voice output: *${status}*\n\nVoice input always works - just send a voice message.`, {
+      parse_mode: "Markdown",
+    });
+    logger.info({ voiceOutputEnabled }, "Voice output toggled");
+  });
+
+  // /status
   bot.command("status", async (ctx) => {
     const sessions = stateManager.getActiveSessions();
     const jobStats = stateManager.getJobStats();
+    const claudeSessionId = stateManager.getClaudeSessionId(SESSION_KEY);
 
     let statusText = "";
-
     if (sessions.length === 0) {
       statusText += "No active sessions.\n";
     } else {
-      statusText += "Active sessions:\n";
       for (const s of sessions) {
         const age = Math.round((Date.now() - s.lastActivityAt) / 1000 / 60);
-        const claudeSessionId = stateManager.getClaudeSessionId(s.lane);
         const sessionInfo = claudeSessionId ? ` [${claudeSessionId.slice(0, 8)}...]` : "";
-        statusText += `  ${s.lane}: ${age}m ago (${s.messageCount} msgs)${sessionInfo}\n`;
+        statusText += `Session: ${age}m ago (${s.messageCount} msgs)${sessionInfo}\n`;
       }
     }
-
     statusText += `\nJobs: ${jobStats.pending} pending, ${jobStats.running} running`;
-
     await ctx.reply(statusText);
   });
 
-  // Handle /jobs command - list scheduled jobs
+  // /jobs
   bot.command("jobs", async (ctx) => {
     if (!schedulerRef) {
       await ctx.reply("Scheduler not initialized.");
       return;
     }
-
     const jobs = schedulerRef.getJobs();
     if (jobs.length === 0) {
       await ctx.reply("No scheduled jobs configured.");
@@ -126,20 +138,14 @@ export function createBot(stateManager: StateManager): Bot {
     let response = "*Scheduled Jobs*\n\n";
     for (const job of jobs) {
       const status = job.config.enabled ? "✅" : "⏸️";
-      const lastRun = job.lastRun
-        ? formatRelativeTime(job.lastRun)
-        : "never";
-      const failures = job.consecutiveFailures > 0
-        ? ` (${job.consecutiveFailures} failures)`
-        : "";
-
+      const lastRun = job.lastRun ? formatRelativeTime(job.lastRun) : "never";
+      const failures = job.consecutiveFailures > 0 ? ` (${job.consecutiveFailures} failures)` : "";
       response += `${status} *${job.config.id}*\n`;
       response += `  └ ${job.config.name}\n`;
-      response += `  └ \`${job.config.cron}\` | ${job.config.lane}\n`;
+      response += `  └ \`${job.config.cron}\`\n`;
       response += `  └ Last: ${lastRun}${failures}\n\n`;
     }
-
-    response += "_Use /trigger <id> to run a job manually_";
+    response += "_Use /trigger <id> to run manually_";
 
     try {
       await ctx.reply(response, { parse_mode: "Markdown" });
@@ -148,25 +154,22 @@ export function createBot(stateManager: StateManager): Bot {
     }
   });
 
-  // Handle /trigger command - manually trigger a job
+  // /trigger
   bot.command("trigger", async (ctx) => {
     if (!schedulerRef) {
       await ctx.reply("Scheduler not initialized.");
       return;
     }
-
     const jobId = ctx.match?.trim();
     if (!jobId) {
-      await ctx.reply("Usage: /trigger <job-id>\n\nUse /jobs to see available jobs.");
+      await ctx.reply("Usage: /trigger <job-id>");
       return;
     }
-
     const job = schedulerRef.getJob(jobId);
     if (!job) {
-      await ctx.reply(`Job not found: ${jobId}\n\nUse /jobs to see available jobs.`);
+      await ctx.reply(`Job not found: ${jobId}`);
       return;
     }
-
     const triggered = schedulerRef.triggerJob(jobId);
     if (triggered) {
       await ctx.reply(`⏳ Triggered: *${job.config.name}*`, { parse_mode: "Markdown" });
@@ -175,79 +178,249 @@ export function createBot(stateManager: StateManager): Bot {
     }
   });
 
-  // Handle /remind command - create a reminder
+  // /remind
   bot.command("remind", async (ctx) => {
     const input = ctx.match?.trim() || "";
-
     if (!input) {
-      await ctx.reply(
-        "Usage: /remind <time> <message>\n\n" +
-          "Examples:\n" +
-          "  /remind in 30 minutes check the oven\n" +
-          "  /remind tomorrow at 9am call dentist\n" +
-          "  /remind at 5pm review PR"
-      );
+      await ctx.reply("Usage: /remind <time> <message>\n\nExample: /remind in 30 minutes check oven");
       return;
     }
-
     const parsed = parseReminder(input);
-
     if (!parsed.time) {
-      await ctx.reply(
-        "Could not parse a time from your input.\n\n" +
-          "Try: /remind in 30 minutes <message>\n" +
-          "Or: /remind tomorrow at 9am <message>"
-      );
+      await ctx.reply("Could not parse time. Try: /remind in 30 minutes <message>");
       return;
     }
-
-    // Check if time is in the past
     if (parsed.time.getTime() <= Date.now()) {
       await ctx.reply("The reminder time must be in the future.");
       return;
     }
-
     const id = reminderManager.create({
       chatId: ctx.chat.id,
       message: parsed.message,
       dueAt: parsed.time,
       context: "default",
     });
-
-    const relativeTime = reminderRelativeTime(parsed.time);
-    const absoluteTime = formatDateTime(parsed.time);
-
     await ctx.reply(
-      `⏰ Reminder set for ${absoluteTime} (${relativeTime})\n\n` +
-        `"${parsed.message}"\n\n` +
-        `ID: \`${id.slice(0, 8)}\``,
+      `⏰ Reminder set for ${formatDateTime(parsed.time)} (${reminderRelativeTime(parsed.time)})\n\n"${parsed.message}"\n\nID: \`${id.slice(0, 8)}\``,
       { parse_mode: "Markdown" }
     );
   });
 
-  // Handle /reminders command - list pending reminders
+  // /reminders
   bot.command("reminders", async (ctx) => {
     const pending = reminderManager.getPendingByChat(ctx.chat.id);
-
     if (pending.length === 0) {
       await ctx.reply("No pending reminders.");
       return;
     }
-
     let response = "*Pending Reminders*\n\n";
     for (const r of pending) {
-      const relativeTime = reminderRelativeTime(r.dueAt);
-      const absoluteTime = formatDateTime(r.dueAt);
-      const preview = r.message.length > 40
-        ? r.message.slice(0, 40) + "..."
-        : r.message;
-
-      response += `⏰ *${relativeTime}* (${absoluteTime})\n`;
+      const preview = r.message.length > 40 ? r.message.slice(0, 40) + "..." : r.message;
+      response += `⏰ *${reminderRelativeTime(r.dueAt)}* (${formatDateTime(r.dueAt)})\n`;
       response += `   ${preview}\n`;
       response += `   ID: \`${r.id.slice(0, 8)}\`\n\n`;
     }
+    response += "_Use /cancel <id> to cancel_";
+    try {
+      await ctx.reply(response, { parse_mode: "Markdown" });
+    } catch {
+      await ctx.reply(response.replace(/[*_`]/g, ""));
+    }
+  });
 
-    response += "_Use /cancel <id> to cancel a reminder_";
+  // /cancel
+  bot.command("cancel", async (ctx) => {
+    const idPrefix = ctx.match?.trim();
+    if (!idPrefix) {
+      await ctx.reply("Usage: /cancel <reminder-id>");
+      return;
+    }
+    const pending = reminderManager.getPendingByChat(ctx.chat.id);
+    const match = pending.find((r) => r.id.startsWith(idPrefix));
+    if (!match) {
+      await ctx.reply(`Reminder not found: ${idPrefix}`);
+      return;
+    }
+    const cancelled = reminderManager.cancel(match.id);
+    if (cancelled) {
+      await ctx.reply(`✅ Cancelled: "${match.message.slice(0, 50)}..."`);
+    } else {
+      await ctx.reply(`Failed to cancel: ${idPrefix}`);
+    }
+  });
+
+  // /debug - system status for remote diagnosis
+  bot.command("debug", async (ctx) => {
+    try {
+      const healthRes = await fetch("http://127.0.0.1:3000/health");
+      const health = await healthRes.json() as {
+        status: string;
+        checks: Record<string, boolean>;
+      };
+      const uptime = Math.round(process.uptime() / 60);
+      const mem = process.memoryUsage();
+      const sessions = stateManager.getActiveSessions();
+      const jobStats = stateManager.getJobStats();
+
+      const checksStr = Object.entries(health.checks)
+        .map(([k, v]) => `${k}: ${v ? "✓" : "✗"}`)
+        .join("\n");
+
+      const debugInfo = `*Homer Debug*
+Uptime: ${uptime}m
+Status: ${health.status}
+Memory: ${Math.round(mem.heapUsed / 1024 / 1024)}MB / ${Math.round(mem.heapTotal / 1024 / 1024)}MB
+Sessions: ${sessions.length}
+Jobs: ${jobStats.pending} pending, ${jobStats.running} running
+
+*Checks:*
+${checksStr}`;
+
+      await ctx.reply(debugInfo, { parse_mode: "Markdown" });
+    } catch (error) {
+      await ctx.reply(`Debug failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+    }
+  });
+
+  // /restart - trigger graceful restart (launchd will respawn)
+  bot.command("restart", async (ctx) => {
+    await ctx.reply("Initiating graceful restart...");
+    logger.info("Manual restart requested via Telegram");
+    setTimeout(() => process.exit(0), 1000);
+  });
+
+  // /chatgpt - Send message to ChatGPT via browser agent
+  bot.command("chatgpt", async (ctx) => {
+    const message = ctx.match?.trim();
+    if (!message) {
+      await ctx.reply("Usage: /chatgpt <message>\n\nSends your message to ChatGPT via browser automation.");
+      return;
+    }
+
+    // Create a route that uses the chatgpt skill
+    const route: ParsedRoute = {
+      prefix: "",
+      cwd: process.env.HOME ?? "/Users/yj",
+      query: `/chatgpt ${message}`,
+      newSession: true, // Always fresh for browser automation
+    };
+
+    await handleExecution(ctx, route, stateManager, false);
+  });
+
+  // /meeting - process audio document
+  bot.command("meeting", async (ctx) => {
+    if (!meetingManagerRef) {
+      await ctx.reply("Meeting system not initialized.");
+      return;
+    }
+
+    const input = ctx.match?.trim() || "";
+
+    // Parse: "title with attendee1, attendee2" or just "title"
+    let title = "Meeting";
+    let attendees: string[] = [];
+
+    const withMatch = input.match(/^(.+?)\s+with\s+(.+)$/i);
+    if (withMatch) {
+      title = (withMatch[1] || "").trim();
+      attendees = (withMatch[2] || "").split(/[,;]/).map((a) => a.trim()).filter(Boolean);
+    } else if (input) {
+      title = input;
+    }
+
+    // Check if there's a reply to a document
+    const replyMsg = ctx.message?.reply_to_message;
+    if (replyMsg && "document" in replyMsg && replyMsg.document) {
+      const doc = replyMsg.document;
+      const mimeType = doc.mime_type || "";
+
+      // Check if it's an audio file
+      if (!mimeType.startsWith("audio/") && !mimeType.includes("ogg") && !mimeType.includes("mpeg")) {
+        await ctx.reply("Please reply to an audio file (MP3, M4A, OGG, WAV).");
+        return;
+      }
+
+      // Check file size (20MB limit for bot API)
+      if (doc.file_size && doc.file_size > 20 * 1024 * 1024) {
+        await ctx.reply("Audio file too large. Maximum 20MB (~80 minutes of audio).");
+        return;
+      }
+
+      try {
+        const file = await ctx.api.getFile(doc.file_id);
+        const fileUrl = `https://api.telegram.org/file/bot${config.telegram.botToken}/${file.file_path}`;
+        const response = await fetch(fileUrl);
+        const audioBuffer = Buffer.from(await response.arrayBuffer());
+
+        const fileName = doc.file_name || "audio.m4a";
+
+        // Start background processing
+        const meetingId = await meetingManagerRef.startMeetingProcessing({
+          title,
+          audioBuffer,
+          audioFileName: fileName,
+          attendees,
+          chatId: ctx.chat.id,
+        });
+
+        await ctx.reply(
+          `*Processing Meeting*\n\n` +
+            `Title: ${title}\n` +
+            `Attendees: ${attendees.length > 0 ? attendees.join(", ") : "(none specified)"}\n` +
+            `File: ${fileName}\n` +
+            `Size: ${(audioBuffer.length / 1024 / 1024).toFixed(1)} MB\n\n` +
+            `ID: \`${meetingId}\`\n\n` +
+            `_Processing in background. You'll be notified when complete._`,
+          { parse_mode: "Markdown" }
+        );
+
+        logger.info({ meetingId, title, attendees }, "Meeting processing started");
+      } catch (error) {
+        logger.error({ error }, "Failed to process meeting document");
+        await ctx.reply(`Error: ${error instanceof Error ? error.message : "Failed to download file"}`);
+      }
+      return;
+    }
+
+    // No document - show usage
+    await ctx.reply(
+      "*Meeting Recording*\n\n" +
+        "To transcribe a meeting:\n" +
+        "1. Send an audio file (MP3, M4A, OGG, WAV)\n" +
+        "2. Reply to it with: `/meeting Title with Attendee1, Attendee2`\n\n" +
+        "Example:\n" +
+        "`/meeting Weekly Standup with Sarah, Mike, Alex`\n\n" +
+        "_Attendees help identify speakers in the transcript._",
+      { parse_mode: "Markdown" }
+    );
+  });
+
+  // /meetings - list recent meetings
+  bot.command("meetings", async (ctx) => {
+    if (!meetingManagerRef) {
+      await ctx.reply("Meeting system not initialized.");
+      return;
+    }
+
+    const meetings = meetingManagerRef.listMeetings({ limit: 10 });
+
+    if (meetings.length === 0) {
+      await ctx.reply("No meetings recorded yet.\n\nSend an audio file and reply with `/meeting Title with Attendees`");
+      return;
+    }
+
+    let response = "*Recent Meetings*\n\n";
+    for (const m of meetings) {
+      const date = new Date(m.date).toLocaleDateString();
+      const duration = formatDuration(m.durationSeconds);
+      const statusIcon = m.status === "complete" ? "✅" : m.status === "error" ? "❌" : "⏳";
+
+      response += `${statusIcon} *${m.title}*\n`;
+      response += `   ${date} • ${duration}\n`;
+      response += `   Attendees: ${m.attendees.join(", ") || "—"}\n`;
+      response += `   ID: \`${m.id}\`\n\n`;
+    }
 
     try {
       await ctx.reply(response, { parse_mode: "Markdown" });
@@ -256,41 +429,94 @@ export function createBot(stateManager: StateManager): Bot {
     }
   });
 
-  // Handle /cancel command - cancel a reminder
-  bot.command("cancel", async (ctx) => {
-    const idPrefix = ctx.match?.trim();
+  // Handle audio documents (alternative trigger)
+  bot.on("message:document", async (ctx) => {
+    const doc = ctx.message.document;
+    const mimeType = doc.mime_type || "";
+    const caption = ctx.message.caption || "";
 
-    if (!idPrefix) {
-      await ctx.reply("Usage: /cancel <reminder-id>\n\nUse /reminders to see pending reminders.");
+    // Check if it's an audio file
+    if (!mimeType.startsWith("audio/") && !mimeType.includes("ogg") && !mimeType.includes("mpeg")) {
+      return; // Not an audio file, ignore
+    }
+
+    // Check if caption has /meeting command
+    if (!caption.toLowerCase().startsWith("/meeting")) {
+      // Prompt user
+      await ctx.reply(
+        `Audio file detected: *${doc.file_name || "audio"}*\n\n` +
+          `To transcribe, reply to this message with:\n` +
+          `/meeting Title with Attendee1, Attendee2`,
+        { parse_mode: "Markdown" }
+      );
       return;
     }
 
-    // Find reminder by ID prefix
-    const pending = reminderManager.getPendingByChat(ctx.chat.id);
-    const match = pending.find((r) => r.id.startsWith(idPrefix));
-
-    if (!match) {
-      await ctx.reply(`Reminder not found: ${idPrefix}\n\nUse /reminders to see pending reminders.`);
+    // Process the /meeting command with this document
+    if (!meetingManagerRef) {
+      await ctx.reply("Meeting system not initialized.");
       return;
     }
 
-    const cancelled = reminderManager.cancel(match.id);
-    if (cancelled) {
-      await ctx.reply(`✅ Cancelled reminder: "${match.message.slice(0, 50)}..."`);
-    } else {
-      await ctx.reply(`Failed to cancel reminder: ${idPrefix}`);
+    // Parse caption: "/meeting title with attendees"
+    const input = caption.slice(8).trim(); // Remove "/meeting"
+    let title = "Meeting";
+    let attendees: string[] = [];
+
+    const withMatch = input.match(/^(.+?)\s+with\s+(.+)$/i);
+    if (withMatch) {
+      title = (withMatch[1] || "").trim();
+      attendees = (withMatch[2] || "").split(/[,;]/).map((a) => a.trim()).filter(Boolean);
+    } else if (input) {
+      title = input;
+    }
+
+    // Check file size
+    if (doc.file_size && doc.file_size > 20 * 1024 * 1024) {
+      await ctx.reply("Audio file too large. Maximum 20MB (~80 minutes of audio).");
+      return;
+    }
+
+    try {
+      const file = await ctx.getFile();
+      const fileUrl = `https://api.telegram.org/file/bot${config.telegram.botToken}/${file.file_path}`;
+      const response = await fetch(fileUrl);
+      const audioBuffer = Buffer.from(await response.arrayBuffer());
+
+      const fileName = doc.file_name || "audio.m4a";
+
+      const meetingId = await meetingManagerRef.startMeetingProcessing({
+        title,
+        audioBuffer,
+        audioFileName: fileName,
+        attendees,
+        chatId: ctx.chat.id,
+      });
+
+      await ctx.reply(
+        `*Processing Meeting*\n\n` +
+          `Title: ${title}\n` +
+          `Attendees: ${attendees.length > 0 ? attendees.join(", ") : "(none specified)"}\n` +
+          `File: ${fileName}\n\n` +
+          `ID: \`${meetingId}\`\n\n` +
+          `_Processing in background. You'll be notified when complete._`,
+        { parse_mode: "Markdown" }
+      );
+
+      logger.info({ meetingId, title, attendees }, "Meeting processing started from caption");
+    } catch (error) {
+      logger.error({ error }, "Failed to process meeting document");
+      await ctx.reply(`Error: ${error instanceof Error ? error.message : "Failed to download file"}`);
     }
   });
 
-  // Handle /search command - search memory files (hybrid vector + keyword)
+  // /search
   bot.command("search", async (ctx) => {
     const query = ctx.match?.trim();
-
     if (!query) {
-      await ctx.reply("Usage: /search <query>\n\nSearches across all memory files using hybrid search.");
+      await ctx.reply("Usage: /search <query>");
       return;
     }
-
     const searchConfig: SearchConfig = {
       supabaseUrl: config.search.supabaseUrl,
       supabaseAnonKey: config.search.supabaseAnonKey,
@@ -301,579 +527,198 @@ export function createBot(stateManager: StateManager): Bot {
     };
 
     try {
-      // Try hybrid search first, falls back to grep internally
       const results = await hybridSearch(query, searchConfig);
       const formatted = formatHybridResults(results, query);
-
       try {
         await ctx.reply(formatted, { parse_mode: "Markdown" });
       } catch {
         await ctx.reply(formatted.replace(/[*_`]/g, ""));
       }
     } catch (error) {
-      // Ultimate fallback to simple grep
-      logger.warn({ error, query }, "Hybrid search failed, using grep fallback");
+      logger.warn({ error, query }, "Hybrid search failed, using grep");
       try {
         const results = await searchMemory(query);
         const formatted = formatSearchResults(results, query);
         await ctx.reply(formatted);
       } catch (grepError) {
-        logger.error({ error: grepError, query }, "All search methods failed");
-        await ctx.reply(`Search failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+        logger.error({ error: grepError, query }, "Search failed");
+        await ctx.reply(`Search failed: ${error instanceof Error ? error.message : "Unknown"}`);
       }
     }
   });
 
-  // Handle /index command - reindex memory files
-  bot.command("index", async (ctx) => {
-    const searchConfig: SearchConfig = {
-      supabaseUrl: config.search.supabaseUrl,
-      supabaseAnonKey: config.search.supabaseAnonKey,
-      openaiApiKey: config.voice.openaiApiKey,
-      embeddingModel: config.search.embeddingModel,
-      chunkSize: config.search.chunkSize,
-      chunkOverlap: config.search.chunkOverlap,
-    };
-
-    if (!searchConfig.supabaseUrl || !searchConfig.supabaseAnonKey) {
-      await ctx.reply("Supabase not configured. Search will use grep fallback.");
-      return;
-    }
-
-    if (!searchConfig.openaiApiKey) {
-      await ctx.reply("OpenAI API key not configured for embeddings.");
-      return;
-    }
-
-    await ctx.reply("Indexing memory files...");
-
-    try {
-      const result = await indexMemoryFiles(searchConfig);
-      await ctx.reply(
-        `Indexing complete:\n` +
-        `  - Indexed: ${result.indexed}\n` +
-        `  - Skipped: ${result.skipped}\n` +
-        `  - Errors: ${result.errors}`
-      );
-    } catch (error) {
-      logger.error({ error }, "Indexing failed");
-      await ctx.reply(`Indexing failed: ${error instanceof Error ? error.message : "Unknown error"}`);
-    }
-  });
-
-  // Handle /indexstatus command - show index status
-  bot.command("indexstatus", async (ctx) => {
-    const searchConfig: SearchConfig = {
-      supabaseUrl: config.search.supabaseUrl,
-      supabaseAnonKey: config.search.supabaseAnonKey,
-      openaiApiKey: config.voice.openaiApiKey,
-      embeddingModel: config.search.embeddingModel,
-      chunkSize: config.search.chunkSize,
-      chunkOverlap: config.search.chunkOverlap,
-    };
-
-    try {
-      const status = await getIndexStatus(searchConfig);
-
-      if (status.totalDocuments === 0) {
-        await ctx.reply("No documents indexed. Use /index to index memory files.");
-        return;
-      }
-
-      let response = `*Index Status*\n\n`;
-      response += `Total chunks: ${status.totalDocuments}\n\n`;
-
-      for (const stat of status.fileStats) {
-        const fileName = stat.filePath.split("/").pop();
-        const date = new Date(stat.lastIndexed).toLocaleDateString();
-        response += `*${fileName}*: ${stat.chunks} chunks (${date})\n`;
-      }
-
-      try {
-        await ctx.reply(response, { parse_mode: "Markdown" });
-      } catch {
-        await ctx.reply(response.replace(/[*_`]/g, ""));
-      }
-    } catch (error) {
-      logger.error({ error }, "Failed to get index status");
-      await ctx.reply(`Failed: ${error instanceof Error ? error.message : "Unknown error"}`);
-    }
-  });
-
-  // Handle /browse command - navigate and screenshot
-  bot.command("browse", async (ctx) => {
-    if (!browserManagerRef) {
-      await ctx.reply("Browser manager not initialized.");
-      return;
-    }
-
-    const args = ctx.match?.trim() || "";
-    const parts = args.split(/\s+/);
-
-    // Parse: /browse [profile] <url>
-    let profileName = "default";
-    let url = parts[0] || "";
-
-    if (parts.length >= 2) {
-      // Check if first arg looks like a URL
-      const firstArg = parts[0] || "";
-      if (!firstArg.startsWith("http")) {
-        profileName = firstArg;
-        url = parts[1] || "";
-      }
-    }
-
-    if (!url || !url.startsWith("http")) {
-      await ctx.reply("Usage: /browse [profile] <url>\n\nExample: /browse https://google.com");
-      return;
-    }
-
-    try {
-      await ctx.replyWithChatAction("upload_photo");
-      const result = await browserManagerRef.browse(profileName, url);
-
-      await ctx.replyWithPhoto(new InputFile(result.screenshot.buffer, "screenshot.png"), {
-        caption: `${result.title}\n${url}`,
-      });
-    } catch (error) {
-      logger.error({ error, url, profile: profileName }, "Browse failed");
-      await ctx.reply(`Browse failed: ${error instanceof Error ? error.message : "Unknown error"}`);
-    }
-  });
-
-  // Handle /snap command - screenshot current page
-  bot.command("snap", async (ctx) => {
-    if (!browserManagerRef) {
-      await ctx.reply("Browser manager not initialized.");
-      return;
-    }
-
-    const profileName = ctx.match?.trim() || "default";
-
-    try {
-      await ctx.replyWithChatAction("upload_photo");
-      const result = await browserManagerRef.snap(profileName);
-
-      await ctx.replyWithPhoto(new InputFile(result.screenshot.buffer, "screenshot.png"), {
-        caption: `${result.title}\n${result.url}`,
-      });
-    } catch (error) {
-      logger.error({ error, profile: profileName }, "Snap failed");
-      await ctx.reply(`Snap failed: ${error instanceof Error ? error.message : "Unknown error"}`);
-    }
-  });
-
-  // Handle /act command - execute browser action
-  bot.command("act", async (ctx) => {
-    if (!browserManagerRef) {
-      await ctx.reply("Browser manager not initialized.");
-      return;
-    }
-
-    const args = ctx.match?.trim() || "";
-    const parts = args.split(/\s+/);
-
-    // Parse: /act [profile] <action>
-    let profileName = "default";
-    let actionStr = args;
-
-    // Check if first arg is a profile name (not an action keyword)
-    const actionKeywords = ["click", "type", "scroll", "wait", "navigate", "goto", "go"];
-    const firstPart = parts[0] || "";
-    if (parts.length >= 2 && !actionKeywords.includes(firstPart.toLowerCase())) {
-      profileName = firstPart;
-      actionStr = parts.slice(1).join(" ");
-    }
-
-    if (!actionStr) {
-      await ctx.reply(
-        "Usage: /act [profile] <action>\n\n" +
-        "Actions:\n" +
-        "  click <selector>\n" +
-        "  type <selector> <text>\n" +
-        "  scroll up|down\n" +
-        "  wait <ms>\n" +
-        "  navigate <url>"
-      );
-      return;
-    }
-
-    try {
-      const result = await browserManagerRef.act(profileName, actionStr);
-      await ctx.reply(result);
-    } catch (error) {
-      logger.error({ error, action: actionStr, profile: profileName }, "Action failed");
-      await ctx.reply(`Action failed: ${error instanceof Error ? error.message : "Unknown error"}`);
-    }
-  });
-
-  // Handle /auth command - start headed auth flow
-  bot.command("auth", async (ctx) => {
-    if (!browserManagerRef) {
-      await ctx.reply("Browser manager not initialized.");
-      return;
-    }
-
-    const args = ctx.match?.trim() || "";
-    const parts = args.split(/\s+/);
-
-    // Parse: /auth [profile] [target]
-    const firstPart = parts[0] || "";
-    const secondPart = parts[1] || "";
-    let profileName = firstPart || "google";
-    let target: "google" | "notebooklm" = "google";
-
-    if (secondPart === "notebooklm" || firstPart === "notebooklm") {
-      target = "notebooklm";
-      if (firstPart === "notebooklm") {
-        profileName = "google";
-      }
-    }
-
-    try {
-      const result = await browserManagerRef.startAuth(profileName, target);
-      await ctx.reply(result);
-    } catch (error) {
-      logger.error({ error, profile: profileName, target }, "Auth start failed");
-      await ctx.reply(`Auth failed: ${error instanceof Error ? error.message : "Unknown error"}`);
-    }
-  });
-
-  // Handle /profiles command - list browser profiles
-  bot.command("profiles", async (ctx) => {
-    if (!browserManagerRef) {
-      await ctx.reply("Browser manager not initialized.");
-      return;
-    }
-
-    const profiles = browserManagerRef.listProfiles();
-
-    if (profiles.length === 0) {
-      await ctx.reply("No browser profiles. Use /browse or /auth to create one.");
-      return;
-    }
-
-    let response = "*Browser Profiles*\n\n";
-    for (const p of profiles) {
-      const authIcon = p.authState === "authenticated" ? "✅" : p.authState === "pending" ? "⏳" : "❌";
-      const age = Math.round((Date.now() - p.lastUsedAt) / 1000 / 60);
-      response += `${authIcon} *${p.name}*\n`;
-      response += `  └ Last used: ${age}m ago\n`;
-      response += `  └ Headless: ${p.headlessCapable ? "yes" : "no"}\n\n`;
-    }
-
-    try {
-      await ctx.reply(response, { parse_mode: "Markdown" });
-    } catch {
-      await ctx.reply(response.replace(/[*_`]/g, ""));
-    }
-  });
-
-  // Handle voice messages
+  // Voice messages
   bot.on("message:voice", async (ctx) => {
     if (!config.voice.enabled) {
-      await ctx.reply("Voice messages are disabled.");
+      await ctx.reply("Voice messages disabled.");
       return;
     }
-
     const voiceConfig: VoiceConfig = {
-      openaiApiKey: config.voice.openaiApiKey,
       elevenLabsApiKey: config.voice.elevenLabsApiKey,
       elevenLabsVoiceId: config.voice.elevenLabsVoiceId,
       elevenLabsModel: config.voice.elevenLabsModel,
     };
-
-    if (!voiceConfig.openaiApiKey) {
-      await ctx.reply("OpenAI API key not configured for voice transcription.");
+    if (!voiceConfig.elevenLabsApiKey) {
+      await ctx.reply("ElevenLabs API key not configured.");
       return;
     }
 
     try {
-      // Download voice message
       const file = await ctx.getFile();
       const fileUrl = `https://api.telegram.org/file/bot${config.telegram.botToken}/${file.file_path}`;
       const response = await fetch(fileUrl);
       const audioBuffer = Buffer.from(await response.arrayBuffer());
 
-      // Transcribe
       await ctx.replyWithChatAction("typing");
       const transcription = await transcribeAudio(audioBuffer, voiceConfig);
 
       if (!transcription.text.trim()) {
-        await ctx.reply("Could not transcribe audio. Please try again.");
+        await ctx.reply("Could not transcribe audio.");
         return;
       }
 
       logger.info({ text: transcription.text.slice(0, 50) }, "Voice transcribed");
 
-      // Process as text message
-      const text = transcription.text;
-      const route = parseRoute(text);
-
-      let responseText: string;
-
-      if (!route) {
-        // This shouldn't happen with auto-detection
-        responseText = "Could not parse your voice message. Please try again.";
-      } else if (!route.query) {
-        responseText = `Switched to ${route.context}${route.subcontext ? `/${route.subcontext}` : ""}. Send your query.`;
-        stateManager.getOrCreateSession(route.context);
-      } else {
-        responseText = await handleVoiceExecution(
-          ctx,
-          route.context,
-          route.cwd,
-          route.query,
-          stateManager,
-          {
-            newSession: route.newSession,
-            subagent: route.subagent,
-            subcontext: route.subcontext,
-          }
-        );
+      const route = parseRoute(transcription.text);
+      if (!route || !route.query) {
+        await ctx.reply("Could not parse voice message.");
+        return;
       }
 
-      // Synthesize response if ElevenLabs is configured
-      if (voiceConfig.elevenLabsApiKey && responseText) {
+      const responseText = await handleExecution(ctx, route, stateManager, true);
+
+      // Only output voice if toggle is enabled
+      if (voiceOutputEnabled && voiceConfig.elevenLabsApiKey && responseText) {
         try {
           const ttsText = truncateForTTS(responseText);
-          const synthesis = await synthesizeSpeech(ttsText, voiceConfig);
-          await ctx.replyWithVoice(new InputFile(synthesis.audio, "response.mp3"));
+          // Use OGG/Opus format for proper Telegram voice notes with turbo model for low latency
+          const ttsOptions: SynthesisOptions = { format: "ogg_opus", turbo: true };
+          const synthesis = await synthesizeSpeech(ttsText, voiceConfig, ttsOptions);
+          await ctx.replyWithVoice(new InputFile(synthesis.audio, "response.ogg"));
         } catch (ttsError) {
-          logger.warn({ error: ttsError }, "TTS failed, sending text instead");
+          logger.warn({ error: ttsError }, "TTS failed");
           await ctx.reply(responseText);
         }
-      } else {
+      } else if (responseText) {
         await ctx.reply(responseText);
       }
     } catch (error) {
       logger.error({ error }, "Voice processing failed");
-      await ctx.reply(`Voice error: ${error instanceof Error ? error.message : "Unknown error"}`);
+      await ctx.reply(`Voice error: ${error instanceof Error ? error.message : "Unknown"}`);
     }
   });
 
-  // Handle all text messages
+  // Text messages
   bot.on("message:text", async (ctx) => {
-    const text = ctx.message.text;
-
-    // Parse the route (now always returns a route with auto-detection)
-    const route = parseRoute(text);
-
+    const route = parseRoute(ctx.message.text);
     if (!route) {
-      // This shouldn't happen with the new router, but handle gracefully
-      await ctx.reply("Could not parse your message. Try again.");
+      await ctx.reply("Could not parse message.");
       return;
     }
-
-    // Empty query after prefix - just switch context
     if (!route.query) {
-      await ctx.reply(`Switched to ${route.context}${route.subcontext ? `/${route.subcontext}` : ""}. Send your query.`);
-      // Create/touch session for this context
-      stateManager.getOrCreateSession(route.context);
+      await ctx.reply("Send a message to continue.");
       return;
     }
-
-    // Log context detection info for debugging
-    if (route.detectedContext) {
-      logger.debug(
-        {
-          type: route.detectedContext.type,
-          confidence: route.detectedContext.confidence,
-          project: route.detectedContext.project,
-          area: route.detectedContext.area,
-          cwd: route.cwd,
-        },
-        "Context auto-detected"
-      );
-    }
-
-    await handleExecution(ctx, route.context, route.cwd, route.query, stateManager, {
-      newSession: route.newSession,
-      subagent: route.subagent,
-      subcontext: route.subcontext,
-    });
+    await handleExecution(ctx, route, stateManager, false);
   });
 
   return bot;
 }
 
-interface ExecutionOptions {
+interface ParsedRoute {
+  query: string;
+  cwd: string;
+  subagent?: "gemini" | "codex" | "kimi";
   newSession: boolean;
-  subagent?: "gemini" | "codex";
-  subcontext?: string;
-}
-
-/**
- * Handle execution for voice messages - returns response text instead of sending
- */
-async function handleVoiceExecution(
-  _ctx: Context,
-  context: string,
-  cwd: string,
-  query: string,
-  stateManager: StateManager,
-  options: ExecutionOptions
-): Promise<string> {
-  const { newSession, subagent, subcontext } = options;
-
-  const session = stateManager.getOrCreateSession(context);
-
-  let claudeSessionId: string | undefined;
-  if (!newSession) {
-    claudeSessionId = stateManager.getClaudeSessionId(context, subcontext) ?? undefined;
-  }
-
-  logger.info(
-    {
-      context,
-      subcontext,
-      cwd,
-      sessionId: session.id,
-      claudeSessionId: claudeSessionId?.slice(0, 8),
-      newSession,
-      subagent,
-      queryPreview: query.slice(0, 50),
-      source: "voice",
-    },
-    "Executing voice command"
-  );
-
-  try {
-    let memoryContext = "";
-    if (newSession || !claudeSessionId) {
-      const bootstrap = await loadBootstrapFiles(context, cwd);
-      if (bootstrap) {
-        memoryContext = `<context>\n${bootstrap}\n</context>\n\n`;
-      }
-    }
-
-    const subagentPrefix = getSubagentPrefix(subagent);
-    const finalQuery = memoryContext + subagentPrefix + query;
-
-    const result = await executeClaudeCommand(finalQuery, {
-      cwd,
-      claudeSessionId,
-      subagent,
-    });
-
-    if (result.claudeSessionId) {
-      stateManager.setClaudeSessionId(context, result.claudeSessionId, subcontext);
-    } else if (claudeSessionId) {
-      stateManager.updateClaudeSessionActivity(context, subcontext);
-    }
-
-    stateManager.updateSessionActivity(session.id);
-
-    const { cleanedResponse } = await processMemoryUpdates(result.output, context);
-
-    return cleanedResponse;
-  } catch (error) {
-    logger.error({ error, context, query }, "Voice execution failed");
-    return `Error: ${error instanceof Error ? error.message : "Unknown error"}`;
-  }
+  prefix: string;
 }
 
 async function handleExecution(
   ctx: Context,
-  context: string,
-  cwd: string,
-  query: string,
+  route: ParsedRoute,
   stateManager: StateManager,
-  options: ExecutionOptions
-): Promise<void> {
-  const { newSession, subagent, subcontext } = options;
+  returnResponse: boolean
+): Promise<string | void> {
+  const session = stateManager.getOrCreateSession(SESSION_KEY);
 
-  // Get or create session for this context
-  const session = stateManager.getOrCreateSession(context);
-
-  // Get Claude session ID (unless starting fresh)
-  // Uses composite key (context:subcontext) for project isolation
   let claudeSessionId: string | undefined;
-  if (!newSession) {
-    claudeSessionId = stateManager.getClaudeSessionId(context, subcontext) ?? undefined;
+  if (!route.newSession) {
+    claudeSessionId = stateManager.getClaudeSessionId(SESSION_KEY) ?? undefined;
   }
 
   logger.info(
     {
-      context,
-      subcontext,
-      cwd,
-      sessionId: session.id,
+      cwd: route.cwd,
       claudeSessionId: claudeSessionId?.slice(0, 8),
-      newSession,
-      subagent,
-      queryPreview: query.slice(0, 50),
+      newSession: route.newSession,
+      subagent: route.subagent,
+      queryPreview: route.query.slice(0, 50),
     },
     "Executing command"
   );
 
-  // Send thinking indicator or typing action
   let streamingMsg = null;
-  if (ENABLE_STREAMING) {
-    streamingMsg = await sendThinkingIndicator(ctx);
-  } else {
-    await ctx.replyWithChatAction("typing");
+  if (!returnResponse) {
+    if (ENABLE_STREAMING) {
+      streamingMsg = await sendThinkingIndicator(ctx);
+    } else {
+      await ctx.replyWithChatAction("typing");
+    }
   }
 
   try {
-    // Load memory context for new sessions (including project CLAUDE.md)
+    // Load memory context for new sessions
     let memoryContext = "";
-    if (newSession || !claudeSessionId) {
-      const bootstrap = await loadBootstrapFiles(context, cwd);
+    if (route.newSession || !claudeSessionId) {
+      const bootstrap = await loadBootstrapFiles();
       if (bootstrap) {
         memoryContext = `<context>\n${bootstrap}\n</context>\n\n`;
-        logger.debug({ context, cwd, length: bootstrap.length }, "Loaded memory context");
+        logger.debug({ length: bootstrap.length }, "Loaded memory context");
       }
     }
 
-    // Add subagent prefix if needed
-    const subagentPrefix = getSubagentPrefix(subagent);
-    const finalQuery = memoryContext + subagentPrefix + query;
+    const subagentPrefix = getSubagentPrefix(route.subagent);
+    const finalQuery = memoryContext + subagentPrefix + route.query;
 
     const result = await executeClaudeCommand(finalQuery, {
-      cwd,
+      cwd: route.cwd,
       claudeSessionId,
-      subagent,
+      subagent: route.subagent,
     });
 
-    // Store new Claude session ID if captured (with subcontext for project isolation)
     if (result.claudeSessionId) {
-      stateManager.setClaudeSessionId(context, result.claudeSessionId, subcontext);
+      stateManager.setClaudeSessionId(SESSION_KEY, result.claudeSessionId);
     } else if (claudeSessionId) {
-      // Update activity on existing session
-      stateManager.updateClaudeSessionActivity(context, subcontext);
+      stateManager.updateClaudeSessionActivity(SESSION_KEY);
     }
 
-    // Update session activity
     stateManager.updateSessionActivity(session.id);
 
-    // Process memory updates from response
-    const { cleanedResponse, updatesWritten, targets } = await processMemoryUpdates(
-      result.output,
-      context
-    );
-    if (updatesWritten > 0) {
-      logger.info({ context, updatesWritten, targets }, "Memory updated from response");
+    const { cleanedResponse } = await processMemoryUpdates(result.output, SESSION_KEY);
+
+    if (returnResponse) {
+      return cleanedResponse;
     }
 
-    // Send response (with memory tags stripped)
     if (ENABLE_STREAMING && streamingMsg) {
       await editWithResponse(ctx, streamingMsg, cleanedResponse);
     } else {
-      // Chunk and send response (with memory tags stripped)
       const chunks = chunkMessage(cleanedResponse);
       for (const chunk of chunks) {
         try {
           await ctx.reply(chunk, { parse_mode: "Markdown" });
         } catch {
-          // Fallback without markdown
           await ctx.reply(chunk);
         }
       }
     }
   } catch (error) {
-    logger.error({ error, context, query }, "Execution failed");
+    logger.error({ error, query: route.query }, "Execution failed");
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
+
+    if (returnResponse) {
+      return `Error: ${errorMessage}`;
+    }
 
     if (ENABLE_STREAMING && streamingMsg) {
       await editWithResponse(ctx, streamingMsg, `Error: ${errorMessage}`);
@@ -884,26 +729,30 @@ async function handleExecution(
 }
 
 function formatRelativeTime(date: Date): string {
-  const now = Date.now();
-  const diff = now - date.getTime();
-  const seconds = Math.floor(diff / 1000);
-  const minutes = Math.floor(seconds / 60);
+  const diff = Date.now() - date.getTime();
+  const minutes = Math.floor(diff / 1000 / 60);
   const hours = Math.floor(minutes / 60);
   const days = Math.floor(hours / 24);
-
   if (days > 0) return `${days}d ago`;
   if (hours > 0) return `${hours}h ago`;
   if (minutes > 0) return `${minutes}m ago`;
-  return `${seconds}s ago`;
+  return "just now";
 }
 
 export async function startBot(bot: Bot): Promise<void> {
   logger.info("Starting H.O.M.E.R bot...");
 
+  // Clear any existing webhooks to prevent 409 conflicts after restart
+  try {
+    await bot.api.deleteWebhook({ drop_pending_updates: false });
+    logger.info("Webhook cleared for clean polling start");
+  } catch (error) {
+    logger.warn({ error }, "Failed to clear webhook (may not exist)");
+  }
+
   bot.catch((err) => {
     logger.error({ error: err }, "Bot error");
   });
-
   await bot.start({
     onStart: (botInfo) => {
       logger.info({ username: botInfo.username }, "Bot started");
@@ -913,4 +762,8 @@ export async function startBot(bot: Bot): Promise<void> {
 
 export function getReminderManager(): ReminderManager | null {
   return reminderManagerRef;
+}
+
+export function getMeetingManager(): MeetingManager | null {
+  return meetingManagerRef;
 }
