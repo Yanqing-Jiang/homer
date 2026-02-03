@@ -4,6 +4,7 @@
 	import { useAuth } from '$lib/hooks/useAuth.svelte';
 	import * as api from '$lib/api/client';
 	import type { IdeaStatus } from '$lib/types';
+	import { toast } from '$lib/stores/toasts.svelte';
 
 	const auth = useAuth();
 
@@ -17,6 +18,7 @@
 	let error = $state<string | null>(null);
 	let creatingIdea = $state(false);
 	let startingResearch = $state(false);
+	let startingExploration = $state(false);
 	let editMode = $state(false);
 	let savingIdea = $state(false);
 	let deletingIdea = $state(false);
@@ -39,21 +41,32 @@
 		source: 'user-request'
 	});
 
+	// Request versioning to prevent race conditions
+	let loadVersion = $state(0);
+
 	// Load ideas on mount
 	onMount(async () => {
 		await loadIdeas();
 	});
 
 	async function loadIdeas() {
+		const thisVersion = ++loadVersion;
 		loading = true;
 		error = null;
 		try {
 			const result = await api.listIdeas();
-			ideas = result.ideas;
+			// Only apply result if this is still the latest request
+			if (thisVersion === loadVersion) {
+				ideas = result.ideas;
+			}
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load ideas';
+			if (thisVersion === loadVersion) {
+				error = e instanceof Error ? e.message : 'Failed to load ideas';
+			}
 		} finally {
-			loading = false;
+			if (thisVersion === loadVersion) {
+				loading = false;
+			}
 		}
 	}
 
@@ -131,7 +144,7 @@
 			editMode = false;
 		} catch (e) {
 			console.error('Failed to save idea:', e);
-			alert(`Failed to save: ${e instanceof Error ? e.message : 'Unknown error'}`);
+			toast.error(`Failed to save: ${e instanceof Error ? e.message : 'Unknown error'}`);
 		} finally {
 			savingIdea = false;
 		}
@@ -147,7 +160,7 @@
 			closeIdea();
 		} catch (e) {
 			console.error('Failed to delete idea:', e);
-			alert(`Failed to delete: ${e instanceof Error ? e.message : 'Unknown error'}`);
+			toast.error(`Failed to delete: ${e instanceof Error ? e.message : 'Unknown error'}`);
 		} finally {
 			deletingIdea = false;
 			showDeleteConfirm = false;
@@ -166,7 +179,7 @@
 			}
 		} catch (e) {
 			console.error('Failed to update idea status:', e);
-			alert(`Failed to update status: ${e instanceof Error ? e.message : 'Unknown error'}`);
+			toast.error(`Failed to update status: ${e instanceof Error ? e.message : 'Unknown error'}`);
 		}
 	}
 
@@ -182,9 +195,30 @@
 			window.location.href = '/';
 		} catch (e) {
 			console.error('Failed to start research:', e);
-			alert(`Failed to start research: ${e instanceof Error ? e.message : 'Unknown error'}`);
+			toast.error(`Failed to start research: ${e instanceof Error ? e.message : 'Unknown error'}`);
 		} finally {
 			startingResearch = false;
+		}
+	}
+
+	async function startExploration(idea: api.Idea) {
+		startingExploration = true;
+		try {
+			const result = await api.startIdeaExploration(idea.id);
+			// Navigate to chat with the exploration thread
+			sessionStorage.setItem('resume_session', JSON.stringify({
+				sessionId: result.sessionId,
+				threadId: result.threadId
+			}));
+			if (result.resumed) {
+				toast.success('Resuming exploration thread');
+			}
+			window.location.href = '/';
+		} catch (e) {
+			console.error('Failed to start exploration:', e);
+			toast.error(`Failed to start exploration: ${e instanceof Error ? e.message : 'Unknown error'}`);
+		} finally {
+			startingExploration = false;
 		}
 	}
 
@@ -214,7 +248,7 @@
 			newIdea = { title: '', content: '', context: '', source: 'user-request' };
 		} catch (e) {
 			console.error('Failed to create idea:', e);
-			alert(`Failed to create idea: ${e instanceof Error ? e.message : 'Unknown error'}`);
+			toast.error(`Failed to create idea: ${e instanceof Error ? e.message : 'Unknown error'}`);
 		} finally {
 			creatingIdea = false;
 		}
@@ -303,6 +337,13 @@
 				onclick={() => filterStatus = 'review'}
 			>
 				Review <span class="tab-count">{statusCounts().review || 0}</span>
+			</button>
+			<button
+				class="tab"
+				class:active={filterStatus === 'exploring'}
+				onclick={() => filterStatus = 'exploring'}
+			>
+				Exploring <span class="tab-count">{statusCounts().exploring || 0}</span>
 			</button>
 			<button
 				class="tab"
@@ -512,14 +553,23 @@
 						</div>
 					{/if}
 
+					{#if selectedIdea.linkedPlanId}
+						<div class="modal-section">
+							<h4>Linked Plan</h4>
+							<a href="/plans?id={selectedIdea.linkedPlanId}" class="plan-link">
+								View Plan: {selectedIdea.linkedPlanId}
+							</a>
+						</div>
+					{/if}
+
 					<div class="modal-section">
 						<h4>Update Status</h4>
 						<div class="status-buttons">
-							{#each ['draft', 'review', 'planning', 'execution', 'archived'] as status}
+							{#each ['draft', 'review', 'exploring', 'planning', 'execution', 'archived'] as status}
 								<button
 									class="status-btn {status}"
 									class:active={selectedIdea.status === status}
-									onclick={() => updateIdeaStatus(selectedIdea, status as IdeaStatus)}
+									onclick={() => selectedIdea && updateIdeaStatus(selectedIdea, status as IdeaStatus)}
 								>
 									{status}
 								</button>
@@ -537,6 +587,20 @@
 								<path d="M21 21l-4.35-4.35"/>
 							</svg>
 							{startingResearch ? 'Starting...' : 'Start Research'}
+						</button>
+					{/if}
+					{#if selectedIdea && (selectedIdea.status === 'draft' || selectedIdea.status === 'review' || selectedIdea.status === 'researching' || selectedIdea.status === 'exploring')}
+						<button class="secondary-btn explore-btn" onclick={() => selectedIdea && startExploration(selectedIdea)} disabled={startingExploration}>
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+								<path d="M12 2L2 7l10 5 10-5-10-5z"/>
+								<path d="M2 17l10 5 10-5"/>
+								<path d="M2 12l10 5 10-5"/>
+							</svg>
+							{#if selectedIdea.linkedExplorationThreadId}
+								{startingExploration ? 'Opening...' : 'Resume Exploration'}
+							{:else}
+								{startingExploration ? 'Starting...' : 'Develop into Plan'}
+							{/if}
 						</button>
 					{/if}
 					<button class="primary-btn" onclick={() => selectedIdea && chatAboutIdea(selectedIdea)}>
@@ -1178,6 +1242,41 @@
 	.research-btn:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+	}
+
+	/* Explore button styling */
+	.explore-btn {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		color: #8b5cf6;
+		border-color: #8b5cf6;
+	}
+
+	.explore-btn:hover:not(:disabled) {
+		background: #f3e8ff;
+	}
+
+	.explore-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	/* Plan link styling */
+	.plan-link {
+		color: #0078d4;
+		text-decoration: none;
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		padding: 6px 12px;
+		background: #e5f1fb;
+		border-radius: 4px;
+		font-size: 14px;
+	}
+
+	.plan-link:hover {
+		background: #cce4f7;
 	}
 
 	/* Delete confirmation */

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { StateManager } from "../state/manager.js";
 import { QueueManager } from "../queue/manager.js";
 import { readFileSync } from "fs";
+import { execSync } from "child_process";
 import { config } from "../config/index.js";
 import type { Scheduler, RegisteredJob } from "../scheduler/index.js";
 import { getClaudeAuthStatus } from "../utils/claude-auth.js";
@@ -13,9 +14,16 @@ import { registerJobsRoutes, setJobsScheduler } from "./api/jobs.js";
 import { registerMeetingsRoutes, setMeetingsManager } from "./api/meetings.js";
 import { registerUploadsRoutes } from "./api/uploads.js";
 import { registerClaudeHistoryRoutes } from "./api/claude-history.js";
+import { registerProposalRoutes } from "./routes/proposals.js";
+import { registerCommandRoutes } from "./api/commands.js";
+import { registerRunRoutes } from "./api/runs.js";
+import type { CLIRunManager } from "../executors/cli-runner.js";
+import type { Bot } from "grammy";
 
 // Scheduler reference (set after initialization)
 let schedulerRef: Scheduler | null = null;
+let botRef: Bot | null = null;
+let cliRunManagerRef: CLIRunManager | null = null;
 
 export function setWebScheduler(scheduler: Scheduler): void {
   schedulerRef = scheduler;
@@ -24,6 +32,14 @@ export function setWebScheduler(scheduler: Scheduler): void {
 
 export function setWebMeetingsManager(manager: any): void {
   setMeetingsManager(manager);
+}
+
+export function setWebBot(bot: Bot): void {
+  botRef = bot;
+}
+
+export function setWebCLIRunManager(manager: CLIRunManager): void {
+  cliRunManagerRef = manager;
 }
 
 // Store recent log entries for SSE
@@ -59,9 +75,100 @@ export function createRoutes(
   // Register Claude Code history routes
   registerClaudeHistoryRoutes(server);
 
-  // Health check
+  // Register proposal management routes (discovery -> approval workflow)
+  registerProposalRoutes(server, stateManager);
+
+  // Register command and executor management routes
+  registerCommandRoutes(server, stateManager, cliRunManagerRef);
+
+  // Register CLI run routes (non-streaming)
+  if (cliRunManagerRef) {
+    registerRunRoutes(server, stateManager, cliRunManagerRef);
+  }
+
+  // Health check counter for periodic integrity checks
+  let healthCheckCounter = 0;
+
+  // Health check with functional checks
   server.get("/health", async () => {
-    return { status: "ok", uptime: process.uptime() };
+    healthCheckCounter++;
+
+    const checks = {
+      database: false,
+      dbIntegrity: true, // Assume OK unless checked
+      telegram: false,
+      memory: false,
+      disk: false,
+    };
+
+    // Check database connectivity (SQLite ping)
+    try {
+      const db = stateManager.getDb();
+      const result = db.prepare("SELECT 1 as ok").get() as { ok: number } | undefined;
+      checks.database = result?.ok === 1;
+
+      // Run integrity check every 10th health check (not every request)
+      if (healthCheckCounter % 10 === 0) {
+        const integrity = db.prepare("PRAGMA quick_check").get() as { quick_check: string } | undefined;
+        checks.dbIntegrity = integrity?.quick_check === "ok";
+      }
+    } catch {
+      checks.database = false;
+    }
+
+    // Check Telegram bot connectivity
+    // We check if bot reference exists and if getMe works
+    if (botRef) {
+      try {
+        await botRef.api.getMe();
+        checks.telegram = true;
+      } catch {
+        checks.telegram = false;
+      }
+    }
+
+    // Check memory usage (heap < 80% of max ~1.5GB)
+    const memUsage = process.memoryUsage();
+    const heapLimit = 1.5 * 1024 * 1024 * 1024; // 1.5GB
+    checks.memory = memUsage.heapUsed < heapLimit * 0.8;
+
+    // Check disk space (> 10% free)
+    try {
+      const homeDir = process.env.HOME || "/Users/yj";
+      const dfOutput = execSync(`df -P "${homeDir}" | awk 'NR==2 {print 100-$5}'`, {
+        encoding: "utf-8",
+        timeout: 5000,
+      }).trim().replace("%", "");
+      const freePercent = parseInt(dfOutput, 10);
+      checks.disk = !isNaN(freePercent) && freePercent >= 10;
+    } catch {
+      checks.disk = false;
+    }
+
+    // Determine overall status
+    const criticalChecks = [checks.database, checks.dbIntegrity, checks.disk];
+    const allChecks = Object.values(checks);
+
+    let status: "healthy" | "degraded" | "unhealthy";
+    if (criticalChecks.every(Boolean) && allChecks.every(Boolean)) {
+      status = "healthy";
+    } else if (criticalChecks.every(Boolean)) {
+      status = "degraded";
+    } else {
+      status = "unhealthy";
+    }
+
+    return {
+      status,
+      uptime: process.uptime(),
+      checks,
+      memory: {
+        heapUsed: memUsage.heapUsed,
+        heapTotal: memUsage.heapTotal,
+        rss: memUsage.rss,
+        external: memUsage.external,
+      },
+    };
   });
 
   // Health check: Claude Code auth + CLI presence

@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import os from "os";
 import { StateManager, type Job } from "../state/manager.js";
 import { logger } from "../utils/logger.js";
 import { EventEmitter } from "events";
@@ -21,9 +22,17 @@ export class QueueManager extends EventEmitter {
   private stateManager: StateManager;
   private processing = false;
 
+  // Worker ID for job locking
+  private readonly workerId: string;
+
   constructor(stateManager: StateManager) {
     super();
     this.stateManager = stateManager;
+
+    // Generate unique worker ID: hostname-pid
+    this.workerId = `${os.hostname()}-${process.pid}`;
+
+    logger.debug({ workerId: this.workerId }, "QueueManager initialized");
   }
 
   /**
@@ -50,7 +59,7 @@ export class QueueManager extends EventEmitter {
   }
 
   /**
-   * Get the next available job for processing
+   * Get the next available job for processing using atomic claiming
    * Respects concurrency limits per lane and globally
    */
   getNextAvailableJob(): Job | null {
@@ -71,9 +80,10 @@ export class QueueManager extends EventEmitter {
         continue;
       }
 
-      // Get next pending job for this lane
-      const job = this.stateManager.getNextPendingJob(lane);
+      // Atomically claim next pending job for this lane
+      const job = this.stateManager.claimNextPendingJob(this.workerId, lane);
       if (job) {
+        logger.info({ jobId: job.id, workerId: this.workerId }, "Job claimed atomically");
         return job;
       }
     }
@@ -170,5 +180,45 @@ export class QueueManager extends EventEmitter {
     } finally {
       this.processing = false;
     }
+  }
+
+  /**
+   * Start heartbeat for a running job
+   * Updates heartbeat every 10 seconds
+   *
+   * @param jobId Job ID
+   * @returns Interval ID (to be cleared when job completes)
+   */
+  startJobHeartbeat(jobId: string): NodeJS.Timeout {
+    const interval = setInterval(() => {
+      try {
+        const updated = this.stateManager.touchJobHeartbeat(jobId);
+        if (!updated) {
+          logger.warn({ jobId }, "Failed to update job heartbeat (job may have completed)");
+          clearInterval(interval);
+        }
+      } catch (error) {
+        logger.error({ jobId, error }, "Error updating job heartbeat - will retry on next interval");
+        // Don't crash daemon - just log and retry on next interval
+      }
+    }, 10_000); // 10 seconds
+
+    return interval;
+  }
+
+  /**
+   * Stop heartbeat for a job
+   *
+   * @param interval Interval ID from startJobHeartbeat()
+   */
+  stopJobHeartbeat(interval: NodeJS.Timeout): void {
+    clearInterval(interval);
+  }
+
+  /**
+   * Get worker ID (for atomic job claiming)
+   */
+  getWorkerId(): string {
+    return this.workerId;
   }
 }

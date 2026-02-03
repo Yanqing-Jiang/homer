@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.homer.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- caffeinate -i prevents idle sleep while HOMER runs -->
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>/opt/homebrew/bin/node</string>
+        <string>/Users/yj/homer/dist/index.js</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/yj/homer</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NODE_ENV</key>
+        <string>production</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/yj/.local/bin</string>
+        <key>HOME</key>
+        <string>/Users/yj</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Unconditional KeepAlive - restart on ANY exit -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Grace period before SIGKILL on stop -->
+    <key>ExitTimeOut</key>
+    <integer>60</integer>
+
+    <!-- Minimum seconds between restarts -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/yj/homer/logs/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/yj/homer/logs/stderr.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- Run as this user (for LaunchDaemons) -->
+    <key>UserName</key>
+    <string>yj</string>
+
+    <!-- Nice level for scheduling priority -->
+    <key>Nice</key>
+    <integer>0</integer>
+</dict>
+</plist>

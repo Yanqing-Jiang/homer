@@ -2,25 +2,30 @@ import type { Bot } from "grammy";
 import { QueueManager } from "./manager.js";
 import { StateManager, type Job } from "../state/manager.js";
 import { executeClaudeCommand } from "../executors/claude.js";
-import { getLanePath } from "../router/prefix-router.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { logger } from "../utils/logger.js";
+
+const HOME = process.env.HOME || "/Users/yj";
 
 export class QueueWorker {
   private queueManager: QueueManager;
   private stateManager: StateManager;
   private bot: Bot;
   private running = false;
+  private jobReadyHandler: (job: Job) => void;
 
   constructor(queueManager: QueueManager, stateManager: StateManager, bot: Bot) {
     this.queueManager = queueManager;
     this.stateManager = stateManager;
     this.bot = bot;
 
-    // Listen for ready jobs
-    this.queueManager.on("job:ready", (job: Job) => {
+    // Store handler reference for cleanup
+    this.jobReadyHandler = (job: Job) => {
       this.processJob(job);
-    });
+    };
+
+    // Listen for ready jobs
+    this.queueManager.on("job:ready", this.jobReadyHandler);
   }
 
   /**
@@ -30,6 +35,14 @@ export class QueueWorker {
     if (this.running) return;
     this.running = true;
     logger.info("Queue worker started");
+
+    // Check for pending jobs immediately on startup
+    const stats = this.queueManager.getStats();
+    if (stats.pending > 0) {
+      logger.info({ pendingJobs: stats.pending }, "Found pending jobs on worker start, triggering pump");
+      // Trigger job pump by emitting event
+      this.queueManager.emit("job:enqueued");
+    }
   }
 
   /**
@@ -37,6 +50,8 @@ export class QueueWorker {
    */
   stop(): void {
     this.running = false;
+    // Remove event listener to prevent memory leaks
+    this.queueManager.off("job:ready", this.jobReadyHandler);
     logger.info("Queue worker stopped");
   }
 
@@ -48,8 +63,9 @@ export class QueueWorker {
 
     logger.info({ jobId: job.id, lane: job.lane, executor: job.executor }, "Processing job");
 
-    // Mark as running
-    this.queueManager.startJob(job.id);
+    // Job is already marked as running and locked by atomic claim
+    // Start heartbeat interval
+    const heartbeatInterval = this.queueManager.startJobHeartbeat(job.id);
 
     try {
       // Determine subagent
@@ -62,11 +78,10 @@ export class QueueWorker {
 
       // Get Claude session ID for resume
       const claudeSessionId = this.stateManager.getClaudeSessionId(job.lane);
-      const lanePath = getLanePath(job.lane as "work" | "invest" | "personal" | "learning");
 
       // Execute
       const result = await executeClaudeCommand(job.query, {
-        cwd: lanePath,
+        cwd: HOME,
         claudeSessionId: claudeSessionId ?? undefined,
         subagent,
       });
@@ -127,6 +142,9 @@ export class QueueWorker {
 
       // Mark failed
       this.queueManager.failJob(job.id, errorMessage);
+    } finally {
+      // Always stop heartbeat when job completes
+      this.queueManager.stopJobHeartbeat(heartbeatInterval);
     }
   }
 }
