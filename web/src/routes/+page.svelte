@@ -6,14 +6,10 @@
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
 	import { useAuth } from '$lib/hooks/useAuth.svelte';
-	import { AuthOverlay, RemoteDesktopTabs } from '$lib/components';
+	import { AuthOverlay } from '$lib/components';
 	import FileUpload from '$lib/components/FileUpload.svelte';
 
 	const auth = useAuth();
-
-	// Main view tabs
-	type MainTab = 'copilot' | 'remote';
-	let activeMainTab = $state<MainTab>('copilot');
 
 	let searchQuery = $state('');
 	let chatInput = $state('');
@@ -440,34 +436,8 @@
 			</div>
 		</header>
 
-		<!-- Blue Ribbon (Main Tabs + Session Selector) -->
+		<!-- Blue Ribbon (Session Selector) -->
 		<div class="directory-ribbon">
-			<!-- Main Tab Switcher -->
-			<div class="main-tabs">
-				<button
-					class="main-tab"
-					class:active={activeMainTab === 'copilot'}
-					onclick={() => activeMainTab = 'copilot'}
-				>
-					<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-						<path d="M12 2L9.5 9.5L2 12L9.5 14.5L12 22L14.5 14.5L22 12L14.5 9.5L12 2Z"/>
-					</svg>
-					<span>Copilot</span>
-				</button>
-				<button
-					class="main-tab"
-					class:active={activeMainTab === 'remote'}
-					onclick={() => activeMainTab = 'remote'}
-				>
-					<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-						<path d="M21 2H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h7l-2 3v1h8v-1l-2-3h7c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H3V4h18v12z"/>
-					</svg>
-					<span>Remote Desktop</span>
-				</button>
-			</div>
-
-			<div class="ribbon-divider"></div>
-
 			<div class="session-selector">
 				<button class="session-dropdown-btn" onclick={() => showSessionDropdown = !showSessionDropdown}>
 					<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
@@ -557,12 +527,6 @@
 
 		<!-- Main Content -->
 		<main class="main-content">
-			{#if activeMainTab === 'remote'}
-				<!-- Remote Desktop View -->
-				<section class="remote-desktop-section">
-					<RemoteDesktopTabs />
-				</section>
-			{:else}
 			<!-- Copilot Chat Interface (Full Width) -->
 			<section class="copilot-section">
 				<div class="copilot-chat">
@@ -687,7 +651,6 @@
 					</div>
 				</div>
 			</section>
-			{/if}
 		</main>
 	</div>
 {/if}
@@ -959,44 +922,6 @@
 		z-index: 50;
 	}
 
-	/* Main Tab Switcher */
-	.main-tabs {
-		display: flex;
-		gap: 4px;
-	}
-
-	.main-tab {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 6px 12px;
-		background: rgba(255, 255, 255, 0.1);
-		border: none;
-		border-radius: 4px;
-		color: rgba(255, 255, 255, 0.8);
-		font-size: 13px;
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 0.15s;
-	}
-
-	.main-tab:hover {
-		background: rgba(255, 255, 255, 0.2);
-		color: white;
-	}
-
-	.main-tab.active {
-		background: rgba(255, 255, 255, 0.25);
-		color: white;
-	}
-
-	.ribbon-divider {
-		width: 1px;
-		height: 20px;
-		background: rgba(255, 255, 255, 0.3);
-		margin: 0 8px;
-	}
-
 	.session-selector {
 		position: relative;
 	}
@@ -1197,14 +1122,6 @@
 		height: calc(100vh - 78px); /* viewport minus header and ribbon */
 		display: flex;
 		flex-direction: column;
-	}
-
-	/* Remote Desktop Section */
-	.remote-desktop-section {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		min-height: 0;
 	}
 
 	/* Copilot Section - Full Width */
@@ -1587,18 +1504,6 @@
 
 		.session-name {
 			max-width: 120px;
-		}
-
-		.main-tab span {
-			display: none;
-		}
-
-		.main-tab {
-			padding: 6px 10px;
-		}
-
-		.ribbon-divider {
-			margin: 0 4px;
 		}
 	}
 </style>
