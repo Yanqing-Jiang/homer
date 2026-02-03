@@ -13,6 +13,7 @@
 		type ScheduledJobDetail,
 		type CalendarEvent
 	} from '$lib/api/client';
+	import { toast } from '$lib/stores/toasts.svelte';
 
 	// State
 	let jobs = $state<ScheduledJob[]>([]);
@@ -112,7 +113,7 @@
 			}
 		} catch (e) {
 			console.error('Failed to toggle job:', e);
-			alert(`Failed to ${job.enabled ? 'disable' : 'enable'} job: ${e instanceof Error ? e.message : 'Unknown error'}`);
+			toast.error(`Failed to ${job.enabled ? 'disable' : 'enable'} job: ${e instanceof Error ? e.message : 'Unknown error'}`);
 		}
 	}
 
@@ -120,11 +121,11 @@
 		try {
 			const response = await triggerScheduledJob(job.id);
 			if (response.success) {
-				alert(`Job "${response.jobName}" triggered successfully!`);
+				toast.success(`Job "${response.jobName}" triggered successfully!`);
 			}
 		} catch (e) {
 			console.error('Failed to trigger job:', e);
-			alert(`Failed to trigger job: ${e instanceof Error ? e.message : 'Unknown error'}`);
+			toast.error(`Failed to trigger job: ${e instanceof Error ? e.message : 'Unknown error'}`);
 		}
 	}
 
@@ -521,10 +522,10 @@
 
 			<div class="modal-footer">
 				<button class="secondary-btn" onclick={closeJob}>Close</button>
-				<button class="secondary-btn" onclick={() => toggleJobStatus(selectedJob)}>
+				<button class="secondary-btn" onclick={() => selectedJob && toggleJobStatus(selectedJob)}>
 					{selectedJob.enabled ? 'Disable' : 'Enable'}
 				</button>
-				<button class="primary-btn" onclick={() => triggerJob(selectedJob)}>
+				<button class="primary-btn" onclick={() => selectedJob && triggerJob(selectedJob)}>
 					<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
 						<path d="M8 5v14l11-7z" />
 					</svg>

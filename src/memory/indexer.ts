@@ -2,12 +2,15 @@ import Database from "better-sqlite3";
 import { readFile } from "fs/promises";
 import { existsSync, readdirSync } from "fs";
 import { logger } from "../utils/logger.js";
+import { chunkText } from "../search/chunker.js";
+import { generateEmbedding, generateQueryEmbedding, cosineSimilarity, mergeRRF } from "./embeddings.js";
 
 /**
  * Memory index search result
  */
 export interface MemorySearchResult {
   filePath: string;
+  chunkIndex: number;
   content: string;
   context: "work" | "life" | "general";
   entryDate: string | null;
@@ -29,13 +32,14 @@ export class MemoryIndexer {
   }
 
   private init(): void {
-    // Create FTS5 virtual table for memory search
+    // Create FTS5 virtual table for memory search with chunk support
     this.db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
         file_path,
+        chunk_index UNINDEXED,
         content,
-        context,
-        entry_date,
+        context UNINDEXED,
+        entry_date UNINDEXED,
         tokenize='porter unicode61'
       );
 
@@ -43,8 +47,19 @@ export class MemoryIndexer {
       CREATE TABLE IF NOT EXISTS memory_index_meta (
         file_path TEXT PRIMARY KEY,
         content_hash TEXT NOT NULL,
+        chunk_count INTEGER NOT NULL DEFAULT 1,
         indexed_at TEXT NOT NULL,
         context TEXT NOT NULL
+      );
+
+      -- Embeddings table for semantic search (Gemini embedding-001)
+      CREATE TABLE IF NOT EXISTS memory_embeddings (
+        file_path TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        embedding BLOB NOT NULL,
+        dimensions INTEGER NOT NULL DEFAULT 768,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (file_path, chunk_index)
       );
     `);
 
@@ -52,7 +67,7 @@ export class MemoryIndexer {
   }
 
   /**
-   * Index a single memory file
+   * Index a single memory file with chunking for efficient retrieval
    */
   async indexFile(
     filePath: string,
@@ -78,31 +93,40 @@ export class MemoryIndexer {
         return false;
       }
 
-      // Remove old entries for this file
+      // Remove old entries for this file (FTS and embeddings)
       this.db
         .prepare("DELETE FROM memory_fts WHERE file_path = ?")
         .run(filePath);
+      this.db
+        .prepare("DELETE FROM memory_embeddings WHERE file_path = ?")
+        .run(filePath);
 
-      // Insert new content
+      // Chunk the content (512 tokens, 50 token overlap)
+      const chunks = chunkText(content, 512, 50);
+
+      // Insert each chunk
+      const insert = this.db.prepare(
+        "INSERT INTO memory_fts (file_path, chunk_index, content, context, entry_date) VALUES (?, ?, ?, ?, ?)"
+      );
+
+      for (const chunk of chunks) {
+        insert.run(filePath, chunk.chunkIndex, chunk.content, context, entryDate || null);
+      }
+
+      // Update metadata with chunk count
       this.db
         .prepare(
-          "INSERT INTO memory_fts (file_path, content, context, entry_date) VALUES (?, ?, ?, ?)"
-        )
-        .run(filePath, content, context, entryDate || null);
-
-      // Update metadata
-      this.db
-        .prepare(
-          `INSERT INTO memory_index_meta (file_path, content_hash, indexed_at, context)
-           VALUES (?, ?, ?, ?)
+          `INSERT INTO memory_index_meta (file_path, content_hash, chunk_count, indexed_at, context)
+           VALUES (?, ?, ?, ?, ?)
            ON CONFLICT(file_path) DO UPDATE SET
              content_hash = excluded.content_hash,
+             chunk_count = excluded.chunk_count,
              indexed_at = excluded.indexed_at,
              context = excluded.context`
         )
-        .run(filePath, contentHash, new Date().toISOString(), context);
+        .run(filePath, contentHash, chunks.length, new Date().toISOString(), context);
 
-      logger.info({ filePath, context, contentLength: content.length }, "Indexed memory file");
+      logger.info({ filePath, context, contentLength: content.length, chunkCount: chunks.length }, "Indexed memory file");
       return true;
     } catch (error) {
       logger.error({ error, filePath }, "Failed to index file");
@@ -116,30 +140,16 @@ export class MemoryIndexer {
   async indexAllMemoryFiles(): Promise<{ indexed: number; skipped: number; errors: number }> {
     const stats = { indexed: 0, skipped: 0, errors: 0 };
 
-    // Global memory files
-    const globalFiles = [
-      "/Users/yj/memory/user.md",
-      "/Users/yj/memory/facts.md",
-      "/Users/yj/memory/preferences.md",
+    // Core memory files (identity, preferences, tools)
+    const coreFiles: Array<{ path: string; context: "work" | "life" | "general" }> = [
+      { path: "/Users/yj/memory/me.md", context: "general" },
+      { path: "/Users/yj/memory/work.md", context: "work" },
+      { path: "/Users/yj/memory/life.md", context: "life" },
+      { path: "/Users/yj/memory/preferences.md", context: "general" },
+      { path: "/Users/yj/memory/tools.md", context: "general" },
     ];
 
-    for (const file of globalFiles) {
-      try {
-        const indexed = await this.indexFile(file, "general");
-        if (indexed) stats.indexed++;
-        else stats.skipped++;
-      } catch {
-        stats.errors++;
-      }
-    }
-
-    // Context memory files
-    const contextFiles: Array<{ path: string; context: "work" | "life" }> = [
-      { path: "/Users/yj/work/memory.md", context: "work" },
-      { path: "/Users/yj/life/memory.md", context: "life" },
-    ];
-
-    for (const { path, context } of contextFiles) {
+    for (const { path, context } of coreFiles) {
       try {
         const indexed = await this.indexFile(path, context);
         if (indexed) stats.indexed++;
@@ -150,10 +160,10 @@ export class MemoryIndexer {
     }
 
     // Daily log files
-    const dailyLogsDir = "/Users/yj/memory";
+    const dailyLogsDir = "/Users/yj/memory/daily";
     if (existsSync(dailyLogsDir)) {
       const files = readdirSync(dailyLogsDir);
-      const datePattern = /^\d{4}-\d{2}-\d{2}\.md$/;
+      const datePattern = /^\d{4}-\d{2}-\d{2}.*\.md$/;
 
       for (const file of files) {
         if (datePattern.test(file)) {
@@ -170,12 +180,33 @@ export class MemoryIndexer {
       }
     }
 
+    // Meeting transcripts
+    const meetingsDir = "/Users/yj/memory/meetings";
+    if (existsSync(meetingsDir)) {
+      const files = readdirSync(meetingsDir);
+      const meetingPattern = /^\d{4}-\d{2}-\d{2}-.*\.md$/;
+
+      for (const file of files) {
+        if (meetingPattern.test(file)) {
+          const meetingDate = file.slice(0, 10); // Extract YYYY-MM-DD
+          const filePath = `${meetingsDir}/${file}`;
+          try {
+            const indexed = await this.indexFile(filePath, "work", meetingDate);
+            if (indexed) stats.indexed++;
+            else stats.skipped++;
+          } catch {
+            stats.errors++;
+          }
+        }
+      }
+    }
+
     logger.info(stats, "Completed memory file indexing");
     return stats;
   }
 
   /**
-   * Search memory files using FTS5
+   * Search memory files using FTS5 with chunked results
    */
   search(query: string, limit = 10, context?: "work" | "life" | "general"): MemorySearchResult[] {
     try {
@@ -185,10 +216,11 @@ export class MemoryIndexer {
       let sql = `
         SELECT
           file_path as filePath,
-          snippet(memory_fts, 1, '>>>', '<<<', '...', 50) as content,
+          chunk_index as chunkIndex,
+          snippet(memory_fts, 2, '>>>', '<<<', '...', 50) as content,
           context,
           entry_date as entryDate,
-          rank
+          bm25(memory_fts) as rank
         FROM memory_fts
         WHERE memory_fts MATCH ?
       `;
@@ -217,21 +249,23 @@ export class MemoryIndexer {
    * Get index statistics
    */
   getStats(): {
-    totalDocuments: number;
-    fileStats: Array<{ filePath: string; context: string; indexedAt: string }>;
+    totalChunks: number;
+    totalFiles: number;
+    fileStats: Array<{ filePath: string; context: string; chunkCount: number; indexedAt: string }>;
   } {
-    const total = this.db
+    const totalChunks = this.db
       .prepare("SELECT COUNT(*) as count FROM memory_fts")
       .get() as { count: number };
 
     const files = this.db
       .prepare(
-        "SELECT file_path as filePath, context, indexed_at as indexedAt FROM memory_index_meta ORDER BY indexed_at DESC"
+        "SELECT file_path as filePath, context, chunk_count as chunkCount, indexed_at as indexedAt FROM memory_index_meta ORDER BY indexed_at DESC"
       )
-      .all() as Array<{ filePath: string; context: string; indexedAt: string }>;
+      .all() as Array<{ filePath: string; context: string; chunkCount: number; indexedAt: string }>;
 
     return {
-      totalDocuments: total.count,
+      totalChunks: totalChunks.count,
+      totalFiles: files.length,
       fileStats: files,
     };
   }
@@ -242,6 +276,7 @@ export class MemoryIndexer {
   removeFile(filePath: string): boolean {
     try {
       this.db.prepare("DELETE FROM memory_fts WHERE file_path = ?").run(filePath);
+      this.db.prepare("DELETE FROM memory_embeddings WHERE file_path = ?").run(filePath);
       this.db.prepare("DELETE FROM memory_index_meta WHERE file_path = ?").run(filePath);
       logger.info({ filePath }, "Removed file from memory index");
       return true;
@@ -257,7 +292,186 @@ export class MemoryIndexer {
   clear(): void {
     this.db.exec("DELETE FROM memory_fts");
     this.db.exec("DELETE FROM memory_index_meta");
+    this.db.exec("DELETE FROM memory_embeddings");
     logger.info("Cleared memory index");
+  }
+
+  /**
+   * Generate embeddings for all chunks that don't have them yet
+   * Call this after indexing to enable semantic search
+   */
+  async generateEmbeddings(): Promise<{ generated: number; skipped: number; errors: number }> {
+    const stats = { generated: 0, skipped: 0, errors: 0 };
+
+    // Get all chunks without embeddings
+    const chunks = this.db.prepare(`
+      SELECT f.file_path, f.chunk_index, f.content
+      FROM memory_fts f
+      LEFT JOIN memory_embeddings e ON f.file_path = e.file_path AND f.chunk_index = e.chunk_index
+      WHERE e.file_path IS NULL
+    `).all() as Array<{ file_path: string; chunk_index: number; content: string }>;
+
+    logger.info({ totalChunks: chunks.length }, "Generating embeddings for chunks");
+
+    const insertStmt = this.db.prepare(`
+      INSERT OR REPLACE INTO memory_embeddings (file_path, chunk_index, embedding, dimensions, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+
+    for (const chunk of chunks) {
+      try {
+        const result = await generateEmbedding(chunk.content);
+        const buffer = Buffer.from(result.embedding.buffer);
+
+        insertStmt.run(
+          chunk.file_path,
+          chunk.chunk_index,
+          buffer,
+          result.dimensions,
+          Date.now()
+        );
+
+        stats.generated++;
+
+        if (stats.generated % 10 === 0) {
+          logger.debug({ generated: stats.generated }, "Embedding progress");
+        }
+      } catch (error) {
+        logger.error({ error, filePath: chunk.file_path, chunkIndex: chunk.chunk_index }, "Failed to generate embedding");
+        stats.errors++;
+      }
+    }
+
+    logger.info(stats, "Embedding generation complete");
+    return stats;
+  }
+
+  /**
+   * Hybrid search combining FTS5 keyword search with vector similarity
+   * Returns ranked results using Reciprocal Rank Fusion (RRF)
+   */
+  async hybridSearch(
+    query: string,
+    limit = 10,
+    context?: "work" | "life" | "general"
+  ): Promise<Array<MemorySearchResult & { score: number; source: "vector" | "fts" | "both" }>> {
+    try {
+      // Get FTS5 results
+      const ftsResults = this.search(query, limit * 2, context);
+
+      // Generate query embedding and search vector store
+      const queryEmbedding = await generateQueryEmbedding(query);
+
+      // Get all embeddings from database
+      let embeddingSql = `
+        SELECT e.file_path, e.chunk_index, e.embedding, e.dimensions,
+               f.content, f.context, f.entry_date
+        FROM memory_embeddings e
+        JOIN memory_fts f ON e.file_path = f.file_path AND e.chunk_index = f.chunk_index
+      `;
+      const params: string[] = [];
+
+      if (context) {
+        embeddingSql += " WHERE f.context = ?";
+        params.push(context);
+      }
+
+      const embeddingRows = this.db.prepare(embeddingSql).all(...params) as Array<{
+        file_path: string;
+        chunk_index: number;
+        embedding: Buffer;
+        dimensions: number;
+        content: string;
+        context: string;
+        entry_date: string | null;
+      }>;
+
+      // Calculate similarities and normalize to common type
+      type SearchItem = { filePath: string; chunkIndex: number; content: string; context: "work" | "life" | "general"; entryDate: string | null };
+      type SearchItemWithScore = SearchItem & { _similarity: number };
+
+      const vectorResults: SearchItem[] = embeddingRows
+        .map(row => {
+          try {
+            const embedding = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.dimensions);
+            const similarity = cosineSimilarity(queryEmbedding, embedding);
+            return {
+              filePath: row.file_path,
+              chunkIndex: row.chunk_index,
+              content: row.content,
+              context: row.context as "work" | "life" | "general",
+              entryDate: row.entry_date,
+              _similarity: similarity,
+            } as SearchItemWithScore;
+          } catch (err) {
+            logger.warn({ filePath: row.file_path, chunkIndex: row.chunk_index, error: err }, "Skipping bad embedding");
+            return null;
+          }
+        })
+        .filter((r): r is SearchItemWithScore => r !== null)
+        .sort((a, b) => b._similarity - a._similarity)
+        .slice(0, limit * 2)
+        .map(({ _similarity: _, ...rest }) => rest);
+
+      // Normalize FTS results to common type
+      const ftsItems: SearchItem[] = ftsResults.map(r => ({
+        filePath: r.filePath,
+        chunkIndex: r.chunkIndex,
+        content: r.content,
+        context: r.context,
+        entryDate: r.entryDate,
+      }));
+
+      // Merge using RRF (both arrays are already sorted by their respective scores)
+      const merged = mergeRRF(vectorResults, ftsItems, 60, limit);
+
+      // Map back to result format
+      const results = merged.map(m => ({
+        filePath: m.filePath,
+        chunkIndex: m.chunkIndex,
+        content: m.content,
+        context: m.context,
+        entryDate: m.entryDate,
+        rank: 0,
+        score: m.rrfScore,
+        source: m.source,
+      }));
+
+      logger.debug({
+        query,
+        ftsCount: ftsResults.length,
+        vectorCount: vectorResults.length,
+        mergedCount: results.length,
+      }, "Hybrid search completed");
+
+      return results;
+    } catch (error) {
+      logger.error({ error, query }, "Hybrid search failed, falling back to FTS");
+      // Fallback to FTS-only search
+      return this.search(query, limit, context).map(r => ({
+        ...r,
+        score: Math.abs(r.rank),
+        source: "fts" as const,
+      }));
+    }
+  }
+
+  /**
+   * Get embedding statistics
+   */
+  getEmbeddingStats(): { totalEmbeddings: number; dimensions: number | null } {
+    const count = this.db
+      .prepare("SELECT COUNT(*) as count FROM memory_embeddings")
+      .get() as { count: number };
+
+    const dims = this.db
+      .prepare("SELECT dimensions FROM memory_embeddings LIMIT 1")
+      .get() as { dimensions: number } | undefined;
+
+    return {
+      totalEmbeddings: count.count,
+      dimensions: dims?.dimensions ?? null,
+    };
   }
 
   /**
@@ -298,6 +512,13 @@ export class MemoryIndexer {
 
     // Join with OR for broader matching
     return terms.join(" OR ");
+  }
+
+  /**
+   * Reindex all memory files (alias for indexAllMemoryFiles)
+   */
+  async reindexAll(): Promise<void> {
+    await this.indexAllMemoryFiles();
   }
 }
 

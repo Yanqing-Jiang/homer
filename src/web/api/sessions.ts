@@ -13,7 +13,7 @@ interface UpdateSessionBody {
 
 interface CreateThreadBody {
   title?: string;
-  provider: "claude" | "chatgpt" | "gemini";
+  provider: "claude" | "gemini" | "codex";
   model?: string;
   parentThreadId?: string;
   branchPointMessageId?: string;
@@ -187,9 +187,9 @@ export function registerSessionRoutes(
         return { error: "Session not found" };
       }
 
-      if (!body.provider || !["claude", "chatgpt", "gemini"].includes(body.provider)) {
+      if (!body.provider || !["claude", "gemini", "codex"].includes(body.provider)) {
         reply.status(400);
-        return { error: "provider must be one of: claude, chatgpt, gemini" };
+        return { error: "provider must be one of: claude, gemini, codex" };
       }
 
       const thread = stateManager.createThread({

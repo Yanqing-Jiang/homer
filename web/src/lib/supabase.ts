@@ -19,12 +19,17 @@ supabase.auth.getSession().then(({ data: { session: currentSession } }) => {
 	loading.set(false);
 });
 
-// Listen for auth changes
-supabase.auth.onAuthStateChange((_event, currentSession) => {
+// Listen for auth changes (store subscription for potential cleanup)
+const { data: { subscription: authSubscription } } = supabase.auth.onAuthStateChange((_event, currentSession) => {
 	session.set(currentSession);
 	user.set(currentSession?.user ?? null);
 	loading.set(false);
 });
+
+// Export cleanup function for potential use
+export function cleanupAuthListener(): void {
+	authSubscription.unsubscribe();
+}
 
 // Auth functions
 export async function signInWithGoogle() {

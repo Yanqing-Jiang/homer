@@ -2,10 +2,16 @@ import { Bot, type Context } from "grammy";
 import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
 import { authMiddleware } from "./middleware/auth.js";
-import { parseRoute, getSubagentPrefix } from "../router/prefix-router.js";
+import {
+  parseCommand,
+  isPureExecutorSwitch,
+  isExecutorSwitchWithQuery,
+  getExecutorModel,
+  type ParsedCommand,
+} from "../commands/index.js";
 import { registerApprovalHandlers, registerPlanApprovalHandlers, registerPlanApprovalCallbacks } from "./handlers/approval.js";
 import { registerQuickCommands, registerProposalCallbacks } from "./handlers/proposal-approval.js";
-import { executeClaudeCommand } from "../executors/claude.js";
+import { registerOvernightCommands, handleOvernightMessage } from "./handlers/overnight.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { StateManager } from "../state/manager.js";
 import { sendThinkingIndicator, editWithResponse } from "./streaming.js";
@@ -16,7 +22,6 @@ import type { SearchConfig } from "../search/types.js";
 import { transcribeAudio, synthesizeSpeech, truncateForTTS } from "../voice/index.js";
 import type { VoiceConfig, SynthesisOptions } from "../voice/types.js";
 import { InputFile } from "grammy";
-import { processMemoryUpdates } from "../memory/writer.js";
 import type { Scheduler } from "../scheduler/index.js";
 import {
   ReminderManager,
@@ -25,14 +30,61 @@ import {
   formatDateTime,
 } from "../reminders/index.js";
 import { MeetingManager, formatDuration } from "../meetings/index.js";
+import { CLIRunManager } from "../executors/cli-runner.js";
+import { telegramLane } from "../utils/lanes.js";
+import { mkdirSync, writeFileSync, existsSync } from "fs";
+import { join, extname } from "path";
 
 const ENABLE_STREAMING = true;
-const SESSION_KEY = "default"; // Single session key
+// Telegram now uses per-chat lanes (tg:<chatId>)
 
 let schedulerRef: Scheduler | null = null;
 let reminderManagerRef: ReminderManager | null = null;
 let meetingManagerRef: MeetingManager | null = null;
 let voiceOutputEnabled = false; // Toggle for voice output responses
+const pendingAttachments: Map<string, string[]> = new Map();
+
+function ensureDir(path: string): void {
+  if (!existsSync(path)) {
+    mkdirSync(path, { recursive: true });
+  }
+}
+
+async function saveTelegramFile(
+  ctx: Context,
+  fileId: string,
+  filename: string,
+  chatId: number
+): Promise<string> {
+  const file = await ctx.api.getFile(fileId);
+  const fileUrl = `https://api.telegram.org/file/bot${config.telegram.botToken}/${file.file_path}`;
+  const response = await fetch(fileUrl);
+  const buffer = Buffer.from(await response.arrayBuffer());
+
+  const baseDir = join(config.paths.uploadLanding, "tg", String(chatId));
+  ensureDir(baseDir);
+
+  const ext = extname(filename) || "";
+  const safeName = filename.replace(/[^\w.\-]/g, "_");
+  const targetPath = join(baseDir, safeName || `${fileId}${ext}`);
+  writeFileSync(targetPath, buffer);
+
+  return targetPath;
+}
+
+function addPendingAttachment(lane: string, path: string): void {
+  const existing = pendingAttachments.get(lane) ?? [];
+  existing.push(path);
+  pendingAttachments.set(lane, existing);
+}
+
+function consumePendingAttachments(lane: string): string[] {
+  const pending = pendingAttachments.get(lane) ?? [];
+  if (pending.length > 0) {
+    pendingAttachments.delete(lane);
+  }
+  return pending;
+}
 
 export function setScheduler(scheduler: Scheduler): void {
   schedulerRef = scheduler;
@@ -46,7 +98,7 @@ export function setMeetingManager(meetingManager: MeetingManager): void {
   meetingManagerRef = meetingManager;
 }
 
-export function createBot(stateManager: StateManager): Bot {
+export function createBot(stateManager: StateManager, runManager: CLIRunManager): Bot {
   const bot = new Bot(config.telegram.botToken);
 
   const reminderManager = new ReminderManager(stateManager);
@@ -55,7 +107,7 @@ export function createBot(stateManager: StateManager): Bot {
   bot.use(authMiddleware);
 
   // Register approval callback handlers for idea review buttons
-  registerApprovalHandlers(bot);
+  registerApprovalHandlers(bot, stateManager);
 
   // Register plan approval handlers (/approve, /reject, /plans)
   registerPlanApprovalHandlers(bot, stateManager);
@@ -65,17 +117,28 @@ export function createBot(stateManager: StateManager): Bot {
   registerQuickCommands(bot, stateManager);
   registerProposalCallbacks(bot, stateManager);
 
+  // Register overnight work commands (/overnight) and inline button callbacks
+  registerOvernightCommands(bot, stateManager);
+
   // /start - help
   bot.command("start", async (ctx) => {
+    // Get current executor state
+    const lane = telegramLane(ctx.chat.id);
+    const executorState = stateManager.getCurrentExecutor(lane);
+    const currentExecutor = executorState?.executor || "claude";
+
     await ctx.reply(
       "H.O.M.E.R ready.\n\n" +
-        "*Commands:*\n" +
-        "/new - Start fresh session\n" +
-        "/g <query> - Gemini subagent\n" +
-        "/x <query> - Codex subagent\n" +
-        "/voice - Toggle voice output\n\n" +
+        `*Current executor:* ${currentExecutor}\n\n` +
+        "*Executor Commands:* (persistent)\n" +
+        "/claude - Switch to Claude (default)\n" +
+        "/gemini - Switch to Gemini CLI\n" +
+        "/codex - Switch to Codex (deep reasoning)\n\n" +
         "*Session:*\n" +
+        "/new - Start fresh session (resets executor)\n" +
         "/status - Active session\n" +
+        "/voice - Toggle voice output\n\n" +
+        "*Jobs:*\n" +
         "/jobs - Scheduled jobs\n" +
         "/trigger <id> - Run job\n\n" +
         "*Meetings:*\n" +
@@ -87,6 +150,10 @@ export function createBot(stateManager: StateManager): Bot {
         "/cancel <id>\n\n" +
         "*Search:*\n" +
         "/search <query>\n\n" +
+        "*Overnight Work:*\n" +
+        "/overnight - View queued tasks\n" +
+        '"work on xyz tonight" - Queue prototype\n' +
+        '"research xyz for me tonight" - Queue research\n\n' +
         "Just type - I'll handle context.",
       { parse_mode: "Markdown" }
     );
@@ -107,20 +174,37 @@ export function createBot(stateManager: StateManager): Bot {
   bot.command("status", async (ctx) => {
     const sessions = stateManager.getActiveSessions();
     const jobStats = stateManager.getJobStats();
-    const claudeSessionId = stateManager.getClaudeSessionId(SESSION_KEY);
+    const lane = telegramLane(ctx.chat.id);
+    const executorState = stateManager.getCurrentExecutor(lane);
 
-    let statusText = "";
+    let statusText = "*Status*\n\n";
+
+    // Executor state
+    if (executorState) {
+      const age = Math.round((Date.now() - executorState.switchedAt) / 1000 / 60);
+      statusText += `Executor: *${executorState.executor}*`;
+      if (executorState.model) statusText += ` (${executorState.model})`;
+      statusText += `\nSwitched: ${age}m ago (${executorState.messageCount} msgs)\n\n`;
+    } else {
+      statusText += "Executor: *claude* (default)\n\n";
+    }
+
+    // Session state
     if (sessions.length === 0) {
       statusText += "No active sessions.\n";
     } else {
       for (const s of sessions) {
         const age = Math.round((Date.now() - s.lastActivityAt) / 1000 / 60);
-        const sessionInfo = claudeSessionId ? ` [${claudeSessionId.slice(0, 8)}...]` : "";
-        statusText += `Session: ${age}m ago (${s.messageCount} msgs)${sessionInfo}\n`;
+        statusText += `Session: ${age}m ago (${s.messageCount} msgs)\n`;
       }
     }
     statusText += `\nJobs: ${jobStats.pending} pending, ${jobStats.running} running`;
-    await ctx.reply(statusText);
+
+    try {
+      await ctx.reply(statusText, { parse_mode: "Markdown" });
+    } catch {
+      await ctx.reply(statusText.replace(/[*_`]/g, ""));
+    }
   });
 
   // /jobs
@@ -289,25 +373,6 @@ ${checksStr}`;
     setTimeout(() => process.exit(0), 1000);
   });
 
-  // /chatgpt - Send message to ChatGPT via browser agent
-  bot.command("chatgpt", async (ctx) => {
-    const message = ctx.match?.trim();
-    if (!message) {
-      await ctx.reply("Usage: /chatgpt <message>\n\nSends your message to ChatGPT via browser automation.");
-      return;
-    }
-
-    // Create a route that uses the chatgpt skill
-    const route: ParsedRoute = {
-      prefix: "",
-      cwd: process.env.HOME ?? "/Users/yj",
-      query: `/chatgpt ${message}`,
-      newSession: true, // Always fresh for browser automation
-    };
-
-    await handleExecution(ctx, route, stateManager, false);
-  });
-
   // /meeting - process audio document
   bot.command("meeting", async (ctx) => {
     if (!meetingManagerRef) {
@@ -437,7 +502,61 @@ ${checksStr}`;
 
     // Check if it's an audio file
     if (!mimeType.startsWith("audio/") && !mimeType.includes("ogg") && !mimeType.includes("mpeg")) {
-      return; // Not an audio file, ignore
+      // Treat as general attachment
+      try {
+        const lane = telegramLane(ctx.chat.id);
+        const filePath = await saveTelegramFile(ctx, doc.file_id, doc.file_name || doc.file_unique_id, ctx.chat.id);
+        const pending = pendingAttachments.get(lane) ?? [];
+
+        if (caption.trim()) {
+          const parsed = parseCommand(caption.trim());
+          if (!parsed) {
+            addPendingAttachment(lane, filePath);
+            await ctx.reply("Attachment saved. Send a message to process it.");
+            return;
+          }
+
+          // Handle executor switch in caption
+          if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
+            const model = getExecutorModel(parsed.newExecutor);
+            runManager.cancelRun(lane, "executor switch");
+            stateManager.setCurrentExecutor(lane, parsed.newExecutor, model, null);
+            addPendingAttachment(lane, filePath);
+            await ctx.reply(`Switched to ${parsed.newExecutor}. Attachment saved.`);
+            return;
+          }
+
+          // Handle /new in caption
+          if (parsed.isNewSession) {
+            runManager.cancelRun(lane, "new session");
+            stateManager.clearExecutor(lane);
+            if (!parsed.query) {
+              addPendingAttachment(lane, filePath);
+              await ctx.reply("Fresh session started. Attachment saved.");
+              return;
+            }
+          }
+
+          // Handle executor switch with query
+          if (isExecutorSwitchWithQuery(parsed) && parsed.newExecutor) {
+            const model = getExecutorModel(parsed.newExecutor);
+            runManager.cancelRun(lane, "executor switch with query");
+            stateManager.setCurrentExecutor(lane, parsed.newExecutor, model, null);
+          }
+
+          const attachments = [...pending, filePath];
+          pendingAttachments.delete(lane);
+          await handleNewExecution(ctx, parsed, stateManager, runManager, false, attachments);
+          return;
+        }
+
+        addPendingAttachment(lane, filePath);
+        await ctx.reply("Attachment saved. Send a message to process it.");
+      } catch (error) {
+        logger.error({ error }, "Failed to save attachment");
+        await ctx.reply(`Attachment error: ${error instanceof Error ? error.message : "Unknown error"}`);
+      }
+      return;
     }
 
     // Check if caption has /meeting command
@@ -510,6 +629,68 @@ ${checksStr}`;
     }
   });
 
+  // Handle photo attachments
+  bot.on("message:photo", async (ctx) => {
+    try {
+      if (!ctx.chat) return;
+      const lane = telegramLane(ctx.chat.id);
+      const caption = ctx.message.caption || "";
+      const photos = ctx.message.photo;
+      if (!photos || photos.length === 0) return;
+
+      // Use the highest resolution photo
+      const photo = photos[photos.length - 1];
+      if (!photo) return;
+      const filePath = await saveTelegramFile(ctx, photo.file_id, `${photo.file_id}.jpg`, ctx.chat.id);
+      const pending = pendingAttachments.get(lane) ?? [];
+
+      if (caption.trim()) {
+        const parsed = parseCommand(caption.trim());
+        if (!parsed) {
+          addPendingAttachment(lane, filePath);
+          await ctx.reply("Photo saved. Send a message to process it.");
+          return;
+        }
+
+        if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
+          const model = getExecutorModel(parsed.newExecutor);
+          runManager.cancelRun(lane, "executor switch");
+          stateManager.setCurrentExecutor(lane, parsed.newExecutor, model, null);
+          addPendingAttachment(lane, filePath);
+          await ctx.reply(`Switched to ${parsed.newExecutor}. Photo saved.`);
+          return;
+        }
+
+        if (parsed.isNewSession) {
+          runManager.cancelRun(lane, "new session");
+          stateManager.clearExecutor(lane);
+          if (!parsed.query) {
+            addPendingAttachment(lane, filePath);
+            await ctx.reply("Fresh session started. Photo saved.");
+            return;
+          }
+        }
+
+        if (isExecutorSwitchWithQuery(parsed) && parsed.newExecutor) {
+          const model = getExecutorModel(parsed.newExecutor);
+          runManager.cancelRun(lane, "executor switch with query");
+          stateManager.setCurrentExecutor(lane, parsed.newExecutor, model, null);
+        }
+
+        const attachments = [...pending, filePath];
+        pendingAttachments.delete(lane);
+        await handleNewExecution(ctx, parsed, stateManager, runManager, false, attachments);
+        return;
+      }
+
+      addPendingAttachment(lane, filePath);
+      await ctx.reply("Photo saved. Send a message to process it.");
+    } catch (error) {
+      logger.error({ error }, "Failed to save photo attachment");
+      await ctx.reply(`Photo error: ${error instanceof Error ? error.message : "Unknown error"}`);
+    }
+  });
+
   // /search
   bot.command("search", async (ctx) => {
     const query = ctx.match?.trim();
@@ -579,13 +760,28 @@ ${checksStr}`;
 
       logger.info({ text: transcription.text.slice(0, 50) }, "Voice transcribed");
 
-      const route = parseRoute(transcription.text);
-      if (!route || !route.query) {
+      const parsed = parseCommand(transcription.text);
+      if (!parsed) {
         await ctx.reply("Could not parse voice message.");
         return;
       }
 
-      const responseText = await handleExecution(ctx, route, stateManager, true);
+      // Handle executor switches via voice
+      if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
+        const model = getExecutorModel(parsed.newExecutor);
+        const lane = telegramLane(ctx.chat.id);
+        runManager.cancelRun(lane, "voice executor switch");
+        stateManager.setCurrentExecutor(lane, parsed.newExecutor, model, null);
+        await ctx.reply(`Switched to ${parsed.newExecutor}`);
+        return;
+      }
+
+      if (!parsed.query) {
+        await ctx.reply("Could not parse voice message.");
+        return;
+      }
+
+      const responseText = await handleNewExecution(ctx, parsed, stateManager, runManager, true);
 
       // Only output voice if toggle is enabled
       if (voiceOutputEnabled && voiceConfig.elevenLabsApiKey && responseText) {
@@ -608,51 +804,123 @@ ${checksStr}`;
     }
   });
 
-  // Text messages
+  // Text messages - unified command handling
   bot.on("message:text", async (ctx) => {
-    const route = parseRoute(ctx.message.text);
-    if (!route) {
+    const text = ctx.message.text;
+    const lane = telegramLane(ctx.chat.id);
+
+    // Check for overnight work requests first (e.g., "work on xyz tonight")
+    // This handles special patterns before regular command parsing
+    try {
+      const wasOvernightRequest = await handleOvernightMessage(ctx, text);
+      if (wasOvernightRequest) {
+        return; // Overnight handler took care of it
+      }
+    } catch (error) {
+      logger.warn({ error }, "Overnight message handling failed, falling back to normal flow");
+    }
+
+    const parsed = parseCommand(text);
+
+    if (!parsed) {
       await ctx.reply("Could not parse message.");
       return;
     }
-    if (!route.query) {
+
+    // Handle deprecation warnings
+    if (parsed.deprecationWarning) {
+      await ctx.reply(`⚠️ ${parsed.deprecationWarning}`);
+    }
+
+    // Handle pure executor switch (no query)
+    if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
+      const model = getExecutorModel(parsed.newExecutor);
+      runManager.cancelRun(lane, "executor switch");
+      stateManager.setCurrentExecutor(lane, parsed.newExecutor, model, null);
+
+      await ctx.reply(
+        `Switched to *${parsed.newExecutor}*${model ? ` (${model})` : ""}\n\n` +
+          `All messages will now use ${parsed.newExecutor} until you switch or use /new.`,
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    // Handle /new command
+    if (parsed.isNewSession) {
+      // Clear executor state
+      runManager.cancelRun(lane, "new session");
+      stateManager.clearExecutor(lane);
+
+      // If there's a query with /new, execute it fresh
+      if (parsed.query) {
+        const attachments = consumePendingAttachments(lane);
+        await handleNewExecution(ctx, parsed, stateManager, runManager, false, attachments);
+      } else {
+        await ctx.reply("Fresh session started. Executor reset to Claude.");
+      }
+      return;
+    }
+
+    // Handle executor switch with query (e.g., "/gemini what's the weather")
+    if (isExecutorSwitchWithQuery(parsed) && parsed.newExecutor) {
+      const model = getExecutorModel(parsed.newExecutor);
+      runManager.cancelRun(lane, "executor switch with query");
+      stateManager.setCurrentExecutor(lane, parsed.newExecutor, model, null);
+
+      // Execute the query with the new executor
+      const attachments = consumePendingAttachments(lane);
+      await handleNewExecution(ctx, parsed, stateManager, runManager, false, attachments);
+      return;
+    }
+
+    // Regular message - use current executor state
+    if (!parsed.query && !parsed.command) {
       await ctx.reply("Send a message to continue.");
       return;
     }
-    await handleExecution(ctx, route, stateManager, false);
+
+    const attachments = consumePendingAttachments(lane);
+    await handleNewExecution(ctx, parsed, stateManager, runManager, false, attachments);
   });
 
   return bot;
 }
 
-interface ParsedRoute {
-  query: string;
-  cwd: string;
-  subagent?: "gemini" | "codex" | "kimi";
-  newSession: boolean;
-  prefix: string;
-}
-
-async function handleExecution(
+/**
+ * Get subagent prefix for prompt injection (legacy support)
+ */
+/**
+ * Handle execution with the new command system
+ */
+async function handleNewExecution(
   ctx: Context,
-  route: ParsedRoute,
+  parsed: ParsedCommand,
   stateManager: StateManager,
-  returnResponse: boolean
+  runManager: CLIRunManager,
+  returnResponse: boolean,
+  attachments: string[] = []
 ): Promise<string | void> {
-  const session = stateManager.getOrCreateSession(SESSION_KEY);
-
-  let claudeSessionId: string | undefined;
-  if (!route.newSession) {
-    claudeSessionId = stateManager.getClaudeSessionId(SESSION_KEY) ?? undefined;
+  if (!ctx.chat) {
+    if (returnResponse) return "Error: chat context unavailable.";
+    return;
   }
+  const lane = telegramLane(ctx.chat.id);
+  const session = stateManager.getOrCreateSession(lane);
+
+  // Get current executor state
+  const executorState = stateManager.getCurrentExecutor(lane);
+  const currentExecutor = executorState?.executor || "claude";
+
+  // Determine if this is a new session
+  const isNewSession = parsed.isNewSession;
 
   logger.info(
     {
-      cwd: route.cwd,
-      claudeSessionId: claudeSessionId?.slice(0, 8),
-      newSession: route.newSession,
-      subagent: route.subagent,
-      queryPreview: route.query.slice(0, 50),
+      cwd: parsed.cwd,
+      executor: currentExecutor,
+      newSession: isNewSession,
+      queryPreview: parsed.query.slice(0, 50),
     },
     "Executing command"
   );
@@ -667,9 +935,9 @@ async function handleExecution(
   }
 
   try {
-    // Load memory context for new sessions
+    // Load memory context for new sessions or first message
     let memoryContext = "";
-    if (route.newSession || !claudeSessionId) {
+    if (isNewSession || !executorState?.sessionId) {
       const bootstrap = await loadBootstrapFiles();
       if (bootstrap) {
         memoryContext = `<context>\n${bootstrap}\n</context>\n\n`;
@@ -677,33 +945,33 @@ async function handleExecution(
       }
     }
 
-    const subagentPrefix = getSubagentPrefix(route.subagent);
-    const finalQuery = memoryContext + subagentPrefix + route.query;
-
-    const result = await executeClaudeCommand(finalQuery, {
-      cwd: route.cwd,
-      claudeSessionId,
-      subagent: route.subagent,
-    });
-
-    if (result.claudeSessionId) {
-      stateManager.setClaudeSessionId(SESSION_KEY, result.claudeSessionId);
-    } else if (claudeSessionId) {
-      stateManager.updateClaudeSessionActivity(SESSION_KEY);
+    if (runManager.getActiveRun(lane)) {
+      await ctx.reply("A run is already in progress for this chat. Please wait.");
+      return;
     }
 
+    const finalQuery = memoryContext + parsed.query;
+
+    const { result } = await runManager.startRun({
+      lane,
+      query: finalQuery,
+      cwd: parsed.cwd,
+      attachments,
+    });
+
+    const runResult = await result;
+
+    // Update session activity
     stateManager.updateSessionActivity(session.id);
 
-    const { cleanedResponse } = await processMemoryUpdates(result.output, SESSION_KEY);
-
     if (returnResponse) {
-      return cleanedResponse;
+      return runResult.output;
     }
 
     if (ENABLE_STREAMING && streamingMsg) {
-      await editWithResponse(ctx, streamingMsg, cleanedResponse);
+      await editWithResponse(ctx, streamingMsg, runResult.output);
     } else {
-      const chunks = chunkMessage(cleanedResponse);
+      const chunks = chunkMessage(runResult.output);
       for (const chunk of chunks) {
         try {
           await ctx.reply(chunk, { parse_mode: "Markdown" });
@@ -713,7 +981,7 @@ async function handleExecution(
       }
     }
   } catch (error) {
-    logger.error({ error, query: route.query }, "Execution failed");
+    logger.error({ error, query: parsed.query }, "Execution failed");
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
     if (returnResponse) {

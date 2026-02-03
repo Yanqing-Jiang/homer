@@ -2,7 +2,7 @@
 	import { user, signOut } from '$lib/supabase';
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
-	import { ALLOWED_EMAIL, isAuthorizedUser } from '$lib/auth';
+	import { isAuthorizedUser } from '$lib/auth';
 
 	onMount(() => {
 		const unsubscribe = user.subscribe((u) => {

@@ -3,20 +3,17 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { logger } from "../utils/logger.js";
 
-/**
- * Memory file locations
- */
-const GLOBAL_MEMORY_FILES = [
-  "/Users/yj/memory/user.md",
-  "/Users/yj/memory/facts.md",
-  "/Users/yj/memory/preferences.md",
-];
+const HOME = process.env.HOME || "/Users/yj";
 
-const CONTEXT_MEMORY_FILES: Record<string, string[]> = {
-  work: ["/Users/yj/work/memory.md"],
-  life: ["/Users/yj/life/memory.md"],
-  default: [],
-};
+/**
+ * Core memory files to load at session start
+ * Claude reads these to understand who it is and the user's context
+ */
+const MEMORY_FILES = [
+  join(HOME, "memory/me.md"),
+  join(HOME, "memory/work.md"),
+  join(HOME, "memory/preferences.md"),
+];
 
 /**
  * Load a single memory file if it exists
@@ -56,19 +53,13 @@ export async function loadProjectContext(cwd: string): Promise<string | null> {
 }
 
 /**
- * Load all bootstrap files for a given context
- * @param context - The context (work/life/default)
- * @param cwd - Optional working directory for project-specific context
- * Returns formatted context string or null if no files found
+ * Load all bootstrap memory files
+ * Called at session start to give Claude context
  */
-export async function loadBootstrapFiles(
-  context: string,
-  cwd?: string
-): Promise<string | null> {
+export async function loadBootstrapFiles(): Promise<string | null> {
   const sections: string[] = [];
 
-  // Load global memory files first
-  for (const path of GLOBAL_MEMORY_FILES) {
+  for (const path of MEMORY_FILES) {
     const content = await loadMemoryFile(path);
     if (content) {
       const filename = path.split("/").pop() || path;
@@ -76,37 +67,17 @@ export async function loadBootstrapFiles(
     }
   }
 
-  // Load context-specific memory files
-  const contextFiles = CONTEXT_MEMORY_FILES[context] || [];
-  for (const path of contextFiles) {
-    const content = await loadMemoryFile(path);
-    if (content) {
-      const filename = path.split("/").pop() || path;
-      sections.push(`## ${context}/${filename}\n${content}`);
-    }
-  }
-
-  // Load project-specific CLAUDE.md if cwd is provided
-  if (cwd) {
-    const projectContext = await loadProjectContext(cwd);
-    if (projectContext) {
-      sections.push(projectContext);
-    }
-  }
-
   if (sections.length === 0) {
     return null;
   }
 
-  // Format as bootstrap context
   const combined = sections.join("\n\n---\n\n");
   return `# Memory Context\n\n${combined}`;
 }
 
 /**
- * Get a list of all memory files that would be loaded for a context
+ * Get list of memory file paths
  */
-export function getMemoryFilePaths(context: string): string[] {
-  const contextFiles = CONTEXT_MEMORY_FILES[context] || [];
-  return [...GLOBAL_MEMORY_FILES, ...contextFiles];
+export function getMemoryFilePaths(): string[] {
+  return MEMORY_FILES;
 }

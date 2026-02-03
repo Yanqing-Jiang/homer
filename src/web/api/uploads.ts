@@ -3,8 +3,9 @@ import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, writeFileSync, unlinkSync, readdirSync, statSync, readFileSync } from "fs";
 import { join, extname, basename } from "path";
 import { logger } from "../../utils/logger.js";
+import { config } from "../../config/index.js";
 
-const UPLOADS_DIR = `${process.env.HOME ?? "/Users/yj"}/homer/uploads`;
+const UPLOADS_DIR = `${config.paths.uploadLanding}/web`;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const ALLOWED_TYPES = [
   // Text
@@ -92,7 +93,7 @@ export function registerUploadsRoutes(server: FastifyInstance): void {
       const mimeType = mimetype || EXT_TO_MIME[ext] || "application/octet-stream";
 
       const isAllowed = ALLOWED_TYPES.some(t =>
-        mimeType.startsWith(t.split("/")[0]) || mimeType === t
+        mimeType.startsWith(t.split("/")[0] ?? "") || mimeType === t
       ) || Object.keys(EXT_TO_MIME).includes(ext);
 
       if (!isAllowed) {

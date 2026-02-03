@@ -5,6 +5,7 @@
 	import interactionPlugin from '@fullcalendar/interaction';
 	import type { CalendarEvent, ScheduledJob } from '$lib/api/client';
 	import { updateScheduledJob } from '$lib/api/client';
+	import { toast } from '$lib/stores/toasts.svelte';
 
 	interface Props {
 		events: CalendarEvent[];
@@ -88,7 +89,7 @@
 			}
 		} catch (e) {
 			console.error('Failed to reschedule job:', e);
-			alert(`Failed to reschedule: ${e instanceof Error ? e.message : 'Unknown error'}`);
+			toast.error(`Failed to reschedule: ${e instanceof Error ? e.message : 'Unknown error'}`);
 			info.revert();
 		} finally {
 			rescheduling = false;

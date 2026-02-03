@@ -1,8 +1,8 @@
 <script lang="ts">
-	type Status = 'draft' | 'review' | 'planning' | 'execution' | 'completed' | 'archived' | 'active' | 'expired' | 'enabled' | 'disabled' | 'pending' | 'in_progress' | 'success' | 'failed';
+	type Status = 'draft' | 'researching' | 'review' | 'planning' | 'execution' | 'completed' | 'archived' | 'active' | 'expired' | 'enabled' | 'disabled' | 'pending' | 'in_progress' | 'success' | 'failed';
 
 	interface Props {
-		status: Status;
+		status: Status | string; // Allow string for flexibility with dynamic statuses
 		size?: 'sm' | 'md';
 	}
 
@@ -10,6 +10,7 @@
 
 	const statusConfig: Record<Status, { label: string; class: string }> = {
 		draft: { label: 'Draft', class: 'badge-gray' },
+		researching: { label: 'Researching', class: 'badge-blue' },
 		review: { label: 'Review', class: 'badge-yellow' },
 		planning: { label: 'Planning', class: 'badge-blue' },
 		execution: { label: 'Execution', class: 'badge-purple' },
@@ -25,7 +26,7 @@
 		failed: { label: 'Failed', class: 'badge-red' }
 	};
 
-	const config = $derived(statusConfig[status] || { label: status, class: 'badge-gray' });
+	const config = $derived(statusConfig[status as Status] || { label: status, class: 'badge-gray' });
 </script>
 
 <span class="badge {config.class} {size === 'md' ? 'badge-md' : ''}">

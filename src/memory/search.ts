@@ -7,11 +7,11 @@ import { logger } from "../utils/logger.js";
  * Paths to search for memory content
  */
 const SEARCH_PATHS = [
-  "/Users/yj/memory/user.md",
-  "/Users/yj/memory/facts.md",
+  "/Users/yj/memory/me.md",
+  "/Users/yj/memory/work.md",
+  "/Users/yj/memory/life.md",
   "/Users/yj/memory/preferences.md",
-  "/Users/yj/work/memory.md",
-  "/Users/yj/life/memory.md",
+  "/Users/yj/memory/tools.md",
 ];
 
 export interface SearchResult {

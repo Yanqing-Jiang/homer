@@ -18,10 +18,21 @@ const configSchema = z.object({
     database: z.string().default("/Users/yj/homer/data/homer.db"),
     logs: z.string().default("/Users/yj/homer/logs"),
     browserProfiles: z.string().default("/Users/yj/homer/profiles"),
+    uploadLanding: z.string().default("/Users/yj/homer-upload-landing"),
   }),
   web: z.object({
     enabled: z.boolean().default(true),
     port: z.number().int().positive().default(3000),
+    // When true, bind to 0.0.0.0 and require auth for /api routes
+    // When false, bind to 127.0.0.1 (localhost only, no auth)
+    exposeExternally: z.boolean().default(false),
+    allowedEmail: z.string().email().optional(),
+    baseUrl: z.string().default("http://localhost:3000"),
+    secret: z.string().default("homer-default-secret"),
+  }),
+  auth: z.object({
+    supabaseUrl: z.string().default(""),
+    supabaseJwtSecret: z.string().default(""),
   }),
   tui: z.object({
     refreshMs: z.number().int().positive().default(1000),
@@ -62,10 +73,19 @@ function loadConfig(): Config {
       database: process.env.DATABASE_PATH ?? "/Users/yj/homer/data/homer.db",
       logs: process.env.LOGS_PATH ?? "/Users/yj/homer/logs",
       browserProfiles: process.env.BROWSER_PROFILES_PATH ?? "/Users/yj/homer/profiles",
+      uploadLanding: process.env.UPLOAD_LANDING_PATH ?? "/Users/yj/homer-upload-landing",
     },
     web: {
       enabled: process.env.WEB_ENABLED !== "false",
       port: parseInt(process.env.WEB_PORT ?? "3000", 10),
+      exposeExternally: process.env.WEB_EXPOSE_EXTERNALLY === "true",
+      allowedEmail: process.env.WEB_ALLOWED_EMAIL,
+      baseUrl: process.env.WEB_BASE_URL ?? "http://localhost:3000",
+      secret: process.env.WEB_SECRET ?? "homer-default-secret",
+    },
+    auth: {
+      supabaseUrl: process.env.SUPABASE_URL ?? "",
+      supabaseJwtSecret: process.env.SUPABASE_JWT_SECRET ?? "",
     },
     tui: {
       refreshMs: parseInt(process.env.TUI_REFRESH_MS ?? "1000", 10),

@@ -5,6 +5,8 @@
 
 ---
 
+**Daemon Auth:** See `docs/DAEMON_AUTH.md` for LaunchAgent + Claude Code keychain guidance.
+
 ## Phase 4 Completed Features
 
 | Feature | Status | Description |
@@ -30,6 +32,7 @@
 | No .env.example | Missing documentation for env vars | Medium | Create `.env.example` |
 | punycode Warning | Node.js deprecation warning | Low | Update dependencies |
 | Legacy Lane References | Unused lanes in types | Low | Clean up `LaneId` type |
+| Auth Health Check | Add `/health/auth` endpoint | ✅ Done | See `docs/DAEMON_AUTH.md` |
 
 ---
 

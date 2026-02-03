@@ -6,6 +6,14 @@ import { executeScheduledJob } from "./executor.js";
 import { notifyJobResult } from "./notifier.js";
 import type { StateManager } from "../state/manager.js";
 import type { RegisteredJob, ProgressEvent } from "./types.js";
+import { isPlanRequiringApproval, createPlanApprovalKeyboard } from "../bot/handlers/approval.js";
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 
 // Throttle progress messages to avoid Telegram rate limits
 const PROGRESS_THROTTLE_MS = 2000; // Min 2s between progress updates
@@ -185,8 +193,13 @@ export class Scheduler {
    */
   private async executeJob(job: RegisteredJob, _manual: boolean): Promise<void> {
     try {
-      // Record job start
-      this.stateManager.recordScheduledJobStart(job.config.id, job.config.name, job.sourceFile);
+      // Record job start (with locking)
+      const runId = this.stateManager.recordScheduledJobStart(job.config.id, job.config.name, job.sourceFile);
+
+      // If runId is null, job is already running - skip
+      if (runId === null) {
+        return;
+      }
 
       // Only stream progress if explicitly enabled (most jobs don't need it)
       const onProgress = job.config.streamProgress
@@ -201,12 +214,46 @@ export class Scheduler {
 
       // Record result in database
       this.stateManager.recordScheduledJobComplete(
+        runId,
         job.config.id,
         result.success,
         result.output,
         result.error,
         result.exitCode
       );
+
+      // Check if output contains an implementation plan requiring approval
+      if (result.success && isPlanRequiringApproval(result.output)) {
+        logger.info({ jobId: job.config.id }, "Plan detected, requesting approval");
+
+        // Save plan for later execution
+        this.stateManager.savePendingPlan(job.config.id, result.output);
+
+        // Send plan for approval with inline buttons
+        const preview = escapeHtml(result.output.slice(0, 1500));
+        const truncated = result.output.length > 1500 ? "\n...(truncated)" : "";
+        const jobName = escapeHtml(job.config.name);
+        const jobId = escapeHtml(job.config.id);
+        try {
+          await this.bot.api.sendMessage(
+            this.chatId,
+            `📋 <b>Plan Generated</b>\n` +
+            `<b>Job:</b> ${jobName}\n` +
+            `<b>ID:</b> <code>${jobId}</code>\n\n` +
+            `<pre>${preview}${truncated}</pre>\n\n` +
+            `Choose an action below. Use “Add Instructions” to provide executor context.`,
+            {
+              parse_mode: "HTML",
+              reply_markup: createPlanApprovalKeyboard(job.config.id),
+            }
+          );
+        } catch (err) {
+          logger.warn({ error: err, jobId: job.config.id }, "Failed to send plan approval message");
+        }
+
+        // Don't send normal notification - plan approval takes over
+        return;
+      }
 
       // Notify via Telegram (final result)
       await notifyJobResult(this.bot, this.chatId, result, job);
@@ -227,15 +274,24 @@ export class Scheduler {
       // Update failure state
       this.cronManager.updateJobState(job.config.id, false);
 
-      // Record failure
+      // Record failure (need to get runId from most recent incomplete run)
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
-      this.stateManager.recordScheduledJobComplete(
-        job.config.id,
-        false,
-        "",
-        errorMessage,
-        1
-      );
+
+      // Get the most recent incomplete run for this job
+      const incompleteRun = this.stateManager.getDb()
+        .prepare(`SELECT id FROM scheduled_job_runs WHERE job_id = ? AND completed_at IS NULL ORDER BY id DESC LIMIT 1`)
+        .get(job.config.id) as { id: number } | undefined;
+
+      if (incompleteRun) {
+        this.stateManager.recordScheduledJobComplete(
+          incompleteRun.id,
+          job.config.id,
+          false,
+          "",
+          errorMessage,
+          1
+        );
+      }
 
       // Notify failure
       if (job.config.notifyOnFailure !== false) {

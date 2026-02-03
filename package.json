@@ -5,34 +5,52 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "npx tsc && cp src/state/migrations/*.sql dist/state/migrations/",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "tui": "tsx src/tui/index.ts",
-    "typecheck": "tsc --noEmit"
+    "mcp": "tsx src/mcp/index.ts",
+    "typecheck": "npx tsc --noEmit",
+    "migrate": "tsx scripts/run-migrations.ts",
+    "migrate:ideas": "tsx scripts/migrate-ideas.ts",
+    "test:router": "tsx scripts/test-router.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.72.1",
+    "@fastify/cors": "^9.0.1",
+    "@fastify/multipart": "^7.7.3",
+    "@fastify/websocket": "^10.0.1",
+    "@google/generative-ai": "^0.24.1",
+    "@modelcontextprotocol/sdk": "^1.25.3",
     "@supabase/supabase-js": "^2.39.0",
+    "@types/fs-ext": "^2.0.3",
     "better-sqlite3": "^11.3.0",
     "blessed": "^0.1.81",
+    "chokidar": "^5.0.0",
     "chrono-node": "^2.9.0",
     "dotenv": "^16.4.5",
     "fastify": "^4.28.0",
+    "fs-ext": "^2.1.1",
     "grammy": "^1.21.1",
+    "jsonwebtoken": "^9.0.3",
     "node-cron": "^3.0.3",
     "openai": "^4.24.0",
     "pg": "^8.17.2",
+    "pidlock": "^0.1.0",
     "pino": "^9.4.0",
     "pino-pretty": "^11.2.2",
     "playwright": "^1.40.0",
+    "yaml": "^2.8.2",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@azure/storage-blob": "^12.30.0",
     "@types/better-sqlite3": "^7.6.11",
     "@types/blessed": "^0.1.25",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.5.0",
     "@types/node-cron": "^3.0.11",
     "tsx": "^4.19.0",
-    "typescript": "^5.5.4"
+    "typescript": "^5.9.3"
   }
 }

@@ -2,16 +2,16 @@
 
 **Hybrid Orchestration for Multi-model Execution and Routing**
 
-A personal AI assistant daemon that routes queries through Claude Code with context-aware sessions, scheduled jobs, and multi-model subagent support.
+A personal AI assistant daemon that routes queries through Claude Code with context-aware sessions, scheduled jobs, persistent memory, and multi-model subagent support.
 
 ## Features
 
 - **Context-Aware Sessions**: Separate sessions for work/life contexts with project isolation
 - **Multi-Model Routing**: Route to Gemini (research/UI) or Codex (architecture/debugging)
-- **Memory System**: Persistent memory with auto-write-back from responses
+- **Persistent Memory**: Centralized memory with auto-append, FTS5 search, and MCP integration
 - **Scheduled Jobs**: Cron-based jobs with hot reload and dashboard
 - **Reminders**: Natural language reminders with chrono-node parsing
-- **Web Dashboard**: Real-time monitoring with HTMX
+- **MCP Server**: Memory tools for Claude Code integration
 
 ## Quick Start
 
@@ -46,67 +46,155 @@ npm start
 | `/reminders` | List pending reminders |
 | `/cancel <id>` | Cancel reminder |
 | `/status` | Show active sessions |
+| `/search <query>` | FTS5 memory search |
 
 ## Architecture
 
+HOMER is a 24/7 daemon that serves as the central hub for all AI interactions.
+
 ```
-Telegram Bot
-     │
-     ▼
-┌─────────────────┐
-│  Prefix Router  │ ── Parses /work, /life, /g, /x, etc.
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Memory Loader   │ ── Loads context + project CLAUDE.md
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Claude Executor │ ── Spawns Claude CLI with session resume
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Memory Writer   │ ── Parses <memory-update> tags
-└────────┬────────┘
-         │
-         ▼
-   Response to User
+┌─────────────────────────────────────────────────────────────────┐
+│                    HOMER DAEMON (Node.js)                        │
+│                      localhost:3000                              │
+│                                                                  │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐                 │
+│  │ Scheduler  │  │ Queue Mgr  │  │ State Mgr  │                 │
+│  │ (cron)     │  │ (jobs)     │  │ (sessions) │                 │
+│  └────────────┘  └────────────┘  └────────────┘                 │
+│                                                                  │
+│  ┌──────────────────────────────────────────────┐               │
+│  │         CLAUDE EXECUTOR (core)                │               │
+│  │  --print --stream-json --resume <id>         │               │
+│  └──────────────────────────────────────────────┘               │
+│                        │                                         │
+│        ┌───────────────┼───────────────┐                        │
+│        ▼               ▼               ▼                        │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐                    │
+│  │ Telegram │   │ Web API  │   │ Voice WS │                    │
+│  │   Bot    │   │ (REST)   │   │ (Speech) │                    │
+│  └──────────┘   └──────────┘   └──────────┘                    │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+### Entry Points
+
+| Interface | Access | Auth |
+|-----------|--------|------|
+| Local Claude Code | Direct CLI / MCP tools | None |
+| Telegram | Grammy long-poll | Chat ID whitelist |
+| Local Web UI | `http://127.0.0.1:3000` | None |
+| Public Web UI | Cloudflare Tunnel | Cloudflare Access JWT |
+
+## How It Works
+
+1) **Daemon runs 24/7** on Mac mini as a LaunchAgent.
+2) **All interfaces use the same Claude Executor**:
+   - Telegram bot messages
+   - Web UI chat (local and public)
+   - Scheduled cron jobs
+   - Voice WebSocket (STT → Claude → TTS)
+3) **Claude CLI is spawned on demand** with `--resume <session_id>` when available; Homer stores only the session ID in SQLite.
+   - Daemon uses `--dangerously-skip-permissions` to avoid interactive prompts.
+4) **Auth via token file**: OAuth token is read from `~/.homer-claude-token` and passed to Claude CLI.
+5) **Session persistence**: Each interface can maintain conversation context via Claude's `--resume` flag.
+6) **Memory updates** are appended to daily logs and indexed for search; nightly jobs classify and organize.
+7) **Single instance enforcement**: Flock-based OS lock prevents duplicate daemons, crash-safe with automatic cleanup.
+8) **Reliable job queue**: Atomic job claiming, 10s heartbeat, 30s stale recovery, graceful shutdown handling.
+7) **Public access** goes through Cloudflare Tunnel with Cloudflare Access JWT validation.
+8) **Health checks**: `GET /health` (uptime) and `GET /health/auth` (Claude CLI + auth status).
 
 ## Subagents
 
 ### Gemini (`/g`)
-- **Timeout**: 10 minutes
-- **Use for**: Research, UI/UX, real-time info, web search
+- **Timeout**: 15 minutes
+- **Use for**: Research, UI/UX, front-end design, exploration
+- **NOT for**: Backend design, system architecture
 - **Docs**: [docs/GEMINI_AGENT.md](docs/GEMINI_AGENT.md)
 
 ### Codex (`/x`)
-- **Timeout**: 15 minutes
+- **Timeout**: 20 minutes
 - **Model**: gpt-5.2-codex @ xHigh reasoning
-- **Use for**: Architecture, debugging, complex algorithms
+- **Use for**: Deep reasoning, backend design, debugging, architecture
+- **NOT for**: Front-end design, UI/UX work
 - **Docs**: [docs/CODEX_AGENT.md](docs/CODEX_AGENT.md)
 
 ## Memory System
 
-### Write-Back
-Claude can update memory files using tags:
+### Structure
 ```
-<memory-update>
-- User prefers TypeScript over JavaScript
-</memory-update>
+~/memory/
+├── me.md           # Identity, goals, HOMER config
+├── work.md         # Career, projects, contacts, positioning
+├── life.md         # Life context (goals, routines)
+├── preferences.md  # Communication style, writing preferences
+├── tools.md        # Tool configs (bird CLI, antigravity, etc.)
+└── daily/          # Daily logs (indexed nightly)
+    └── YYYY-MM-DD.md
 ```
 
-### Memory Locations
-- `~/memory/facts.md` - Global facts
-- `~/memory/preferences.md` - Global preferences
-- `~/work/memory.md` - Work-specific notes
-- `~/life/memory.md` - Life-specific notes
-- `{project}/.claude/CLAUDE.md` - Project instructions
+### Flow
+```
+Session → auto-append to daily → nightly index (3 AM) → morning brief suggests promotions
+```
+
+### MCP Server (homer-memory)
+
+Available tools for Claude Code:
+
+**Memory Tools:**
+| Tool | Description |
+|------|-------------|
+| `memory_search` | FTS5 full-text search across all memory |
+| `memory_append` | Append entry to today's daily log |
+| `memory_promote` | Promote fact to permanent file |
+| `memory_read` | Read any memory file |
+| `memory_reindex` | Rebuild search index |
+| `memory_suggestions` | Get promotion candidates from daily |
+
+**Ideas & Plans:**
+| Tool | Description |
+|------|-------------|
+| `idea_add` | Add new idea with source and context |
+| `idea_update` | Update idea status or add notes |
+| `idea_list` | List ideas filtered by status |
+| `plan_create` | Create plan from approved idea |
+| `plan_update` | Update plan status/phase |
+| `plan_list` | List all plans with status |
+| `feedback_log` | Log decisions/feedback |
+
+**Blob Storage (Azure):**
+| Tool | Description |
+|------|-------------|
+| `blob_upload` | Upload file to Azure Blob |
+| `blob_download` | Download blob to local |
+| `blob_list` | List blobs in container |
+
+### Auto-Append Triggers
+
+During sessions, auto-append to daily log when:
+- Significant decisions made
+- Context that might matter tomorrow
+- Blockers/issues encountered
+- Task completions with outcomes
+- Tool configs learned
+- New preferences discovered
 
 ## Scheduled Jobs
+
+### Built-in Jobs
+
+| Schedule | Job ID | Description |
+|----------|--------|-------------|
+| `0 0 * * *` | learning-engine | Analyze viral content patterns |
+| `0 1 * * *` | nightly-memory | Classify + organize daily log |
+| `0 3 * * *` | moltbot-scan | Check Moltbot for feature ideas |
+| `0 4 * * *` | homer-improvements | Self-analyze and suggest improvements |
+| `0 6 * * *` | morning-brief | Weather, news, bookmarks, suggestions |
+| `0 7 * * *` | daily-ideas-review | Send draft ideas for Telegram review |
+| `0 9 * * *` | planning-reminder | Planning status and pending decisions |
+| `0 */2 * * *` | ideas-explore | Gather ideas from bookmarks & GitHub |
+
+### Custom Jobs
 
 Create `schedule.json` in `~/work/`, `~/life/`, or `~/memory/`:
 
@@ -134,17 +222,9 @@ Create `schedule.json` in `~/work/`, `~/life/`, or `~/memory/`:
 | `ALLOWED_CHAT_ID` | Yes | - | Your Telegram chat ID |
 | `SESSION_TTL_HOURS` | No | 4 | Session timeout |
 | `LOG_LEVEL` | No | info | Logging level |
-| `WEATHER_LOCATION` | No | Bellevue,WA | Default weather location |
 | `WEB_ENABLED` | No | true | Enable web dashboard |
 | `WEB_PORT` | No | 3000 | Dashboard port |
-
-## Web Dashboard
-
-Access at `http://localhost:3000` when running. Features:
-- Active sessions overview
-- Job queue status
-- Scheduled jobs with manual trigger
-- Live log streaming
+| `CLAUDE_PATH` | No | `~/.local/bin/claude` | Claude CLI binary path |
 
 ## Development
 
@@ -155,46 +235,54 @@ npm run typecheck
 # Run TUI dashboard
 npm run tui
 
+# Run MCP server directly
+npm run mcp
+
 # Development with hot reload
 npm run dev
 ```
 
+## Storage
+
+| Path | Purpose |
+|------|---------|
+| `~/homer/data/homer.db` | SQLite state + FTS5 index |
+| `~/homer/logs/` | Application logs |
+| `~/memory/` | All memory files |
+
+## Health Endpoints
+
+- `GET /health` → daemon uptime/status
+- `GET /health/auth` → Claude CLI presence + Keychain item check
+
+## Daemon Auth
+
+See `docs/DAEMON_AUTH.md` for LaunchAgent setup and Claude Code keychain guidance.
+
+## Claude CLI Flags
+
+Homer runs Claude CLI with:
+- `--print`
+- `--verbose`
+- `--output-format stream-json`
+- `--dangerously-skip-permissions` (non-interactive daemon mode)
+
+If you want to remove `--dangerously-skip-permissions`, update:
+- `src/executors/claude.ts`
+- `src/scheduler/executor.ts`
+
 ## Status
 
-**Current:** Phase 4 Complete (Daemon operational)
+**Current:** Phase 6.3 (Daemon Layer + Ideas/Plans + Web UI)
+
+Key capabilities:
+- 24/7 daemon with multiple entry points (Telegram, Web, Claude Code MCP)
+- 8 scheduled heartbeat jobs (ideas exploration, learning engine, planning, etc.)
+- Ideas/plans pipeline with approval workflow
+- Public web access via Cloudflare Tunnel + Access
 
 See [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md) for current implementation status.
-
----
-
-## Phase 5 Roadmap
-
-### Architecture Decision
-
-Messages go directly to Claude Executor (Opus). Claude can spawn Haiku sub-agents for memory search to avoid context blowup. No separate triage layer.
-
-```
-Message → Claude Executor (Opus) → Response
-               ↓
-         CLAUDE.md instructs:
-         • Spawn Haiku for memory grep (selective)
-         • Avoid loading full context
-         • Use session continuity (--resume)
-```
-
-### Planned Features
-
-| Phase | Feature | Status |
-|-------|---------|--------|
-| 5.1 | CLAUDE.md instruction system | Planned |
-| 5.2 | Voice interface (Whisper STT + ElevenLabs TTS) | Planned |
-| 5.3 | Local search (grep on memory files) | Planned |
-| 5.4 | Google Calendar API integration | Planned |
-| 5.5 | Gmail API with Pub/Sub | Planned |
-| 5.6 | Browser automation (Playwright + CDP) | Planned |
-| 5.7 | Advanced search (pgvector + embeddings) | Planned |
-
-See [docs/PHASE5_PLAN.md](docs/PHASE5_PLAN.md) for detailed implementation plan.
+See [architecture.md](architecture.md) for detailed system design.
 
 ## License
 

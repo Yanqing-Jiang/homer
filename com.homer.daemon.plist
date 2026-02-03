@@ -2,47 +2,67 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key>
-    <string>com.homer.daemon</string>
+  <key>Label</key>
+  <string>com.homer.daemon</string>
 
-    <key>ProgramArguments</key>
-    <array>
-        <string>/opt/homebrew/bin/node</string>
-        <string>/Users/yj/homer/dist/index.js</string>
-    </array>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/yj/homer/dist/index.js</string>
+  </array>
 
-    <key>WorkingDirectory</key>
-    <string>/Users/yj/homer</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/yj/homer</string>
 
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>NODE_ENV</key>
-        <string>production</string>
-        <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    </dict>
+  <key>UserName</key>
+  <string>yj</string>
+  <key>GroupName</key>
+  <string>staff</string>
 
-    <key>RunAtLoad</key>
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NODE_ENV</key>
+    <string>production</string>
+    <key>HOME</key>
+    <string>/Users/yj</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/yj/.local/bin</string>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+    <key>LC_ALL</key>
+    <string>en_US.UTF-8</string>
+    <!-- Telegram credentials for crash notifications -->
+    <key>TELEGRAM_BOT_TOKEN</key>
+    <string>8581470957:AAG0TYbh9qW_ZNJ3upRQgS0y_k_oMnZJtHQ</string>
+    <key>TELEGRAM_CHAT_ID</key>
+    <string>7758999972</string>
+    <!-- Log directory for fatal errors -->
+    <key>HOMER_LOG_DIR</key>
+    <string>/Users/yj/Library/Logs/homer</string>
+  </dict>
+
+  <!-- Improved KeepAlive: only restart on non-zero exit, wait for network -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+    <key>NetworkState</key>
     <true/>
+  </dict>
 
-    <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-        <key>Crashed</key>
-        <true/>
-    </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
 
-    <key>ThrottleInterval</key>
-    <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
 
-    <key>StandardOutPath</key>
-    <string>/Users/yj/homer/logs/stdout.log</string>
-
-    <key>StandardErrorPath</key>
-    <string>/Users/yj/homer/logs/stderr.log</string>
-
-    <key>ProcessType</key>
-    <string>Background</string>
+  <!-- Keep stdout/stderr in homer/logs for backward compatibility -->
+  <key>StandardOutPath</key>
+  <string>/Users/yj/homer/logs/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/yj/homer/logs/stderr.log</string>
 </dict>
 </plist>
