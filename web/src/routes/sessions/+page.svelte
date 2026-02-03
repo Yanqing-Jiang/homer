@@ -89,7 +89,7 @@
 		}
 	}
 
-	async function createThread(provider: 'claude' | 'chatgpt' | 'gemini' = 'claude') {
+	async function createThread(provider: 'claude' | 'gemini' | 'codex' = 'claude') {
 		if (!selectedSession) return;
 		try {
 			const thread = await api.createThread(selectedSession.id, {
@@ -110,6 +110,8 @@
 		if (!selectedThread || !messageInput.trim() || sendingMessage) return;
 
 		const content = messageInput.trim();
+		const threadId = selectedThread.id;
+		const provider = selectedThread.provider;
 		messageInput = '';
 		sendingMessage = true;
 		streamingContent = '';
@@ -117,7 +119,7 @@
 		// Optimistically add user message
 		const tempUserMessage: api.ThreadMessage = {
 			id: 'temp-' + Date.now(),
-			threadId: selectedThread.id,
+			threadId: threadId,
 			role: 'user',
 			content,
 			metadata: null,
@@ -129,49 +131,91 @@
 			messages: [...selectedThread.messages, tempUserMessage]
 		};
 
-		const stream = api.streamMessage(selectedThread.id, content, {
-			onStart: (data) => {
-				// Update temp message with real ID
-				if (selectedThread) {
-					selectedThread = {
-						...selectedThread,
-						messages: selectedThread.messages.map((m) =>
-							m.id === tempUserMessage.id ? { ...m, id: data.userMessageId } : m
-						)
-					};
+		if (provider === 'claude') {
+			api.streamMessage(threadId, content, {
+				onStart: (data) => {
+					// Update temp message with real ID
+					if (selectedThread && selectedThread.id === threadId) {
+						selectedThread = {
+							...selectedThread,
+							messages: selectedThread.messages.map((m) =>
+								m.id === tempUserMessage.id ? { ...m, id: data.userMessageId } : m
+							)
+						};
+					}
+				},
+				onDelta: (data) => {
+					streamingContent += data.content;
+				},
+				onComplete: async (data) => {
+					sendingMessage = false;
+					// Add assistant message
+					if (selectedThread && selectedThread.id === threadId && streamingContent) {
+						const assistantMessage: api.ThreadMessage = {
+							id: data.messageId,
+							threadId,
+							role: 'assistant',
+							content: streamingContent,
+							metadata: null,
+							createdAt: new Date().toISOString()
+						};
+						selectedThread = {
+							...selectedThread,
+							messages: [...selectedThread.messages, assistantMessage]
+						};
+					}
+					streamingContent = '';
+				},
+				onError: (data) => {
+					sendingMessage = false;
+					error = data.message;
+					if (data.code === 'SESSION_EXPIRED' && selectedThread && selectedThread.id === threadId) {
+						selectedThread = { ...selectedThread, status: 'expired' };
+					}
+					streamingContent = '';
 				}
-			},
-			onDelta: (data) => {
-				streamingContent += data.content;
-			},
-			onComplete: async (data) => {
-				sendingMessage = false;
-				// Add assistant message
-				if (selectedThread && streamingContent) {
-					const assistantMessage: api.ThreadMessage = {
-						id: data.messageId,
-						threadId: selectedThread.id,
-						role: 'assistant',
-						content: streamingContent,
-						metadata: null,
-						createdAt: new Date().toISOString()
-					};
-					selectedThread = {
-						...selectedThread,
-						messages: [...selectedThread.messages, assistantMessage]
-					};
-				}
-				streamingContent = '';
-			},
-			onError: (data) => {
-				sendingMessage = false;
-				error = data.message;
-				if (data.code === 'SESSION_EXPIRED' && selectedThread) {
-					selectedThread = { ...selectedThread, status: 'expired' };
-				}
-				streamingContent = '';
+			});
+			return;
+		}
+
+		// Non-Claude executors: run + status events
+		try {
+			streamingContent = 'Running...';
+			const result = await api.executeMessage(threadId, content);
+			if (result.userMessageId && selectedThread && selectedThread.id === threadId) {
+				selectedThread = {
+					...selectedThread,
+					messages: selectedThread.messages.map((m) =>
+						m.id === tempUserMessage.id ? { ...m, id: result.userMessageId! } : m
+					)
+				};
 			}
-		});
+
+			api.streamRunEvents(result.runId, {
+				onStatus: async (data) => {
+					if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
+						sendingMessage = false;
+						streamingContent = '';
+						if (!selectedThread || selectedThread.id !== threadId) return;
+						try {
+							const updated = await api.getThread(threadId);
+							selectedThread = updated;
+						} catch (err) {
+							error = err instanceof Error ? err.message : 'Failed to refresh thread';
+						}
+					}
+				},
+				onError: (err) => {
+					sendingMessage = false;
+					streamingContent = '';
+					error = err.message;
+				}
+			});
+		} catch (err) {
+			sendingMessage = false;
+			streamingContent = '';
+			error = err instanceof Error ? err.message : 'Execution failed';
+		}
 	}
 
 	function closeSession() {
@@ -221,10 +265,10 @@
 		switch (provider.toLowerCase()) {
 			case 'claude':
 				return '🟠';
-			case 'chatgpt':
-				return '🟢';
 			case 'gemini':
 				return '🔵';
+			case 'codex':
+				return '🟣';
 			default:
 				return '🤖';
 		}
@@ -609,7 +653,7 @@
 						{:else if selectedThread.status === 'expired'}
 							<div class="expired-notice">
 								<p>This thread's session has expired.</p>
-								<button class="primary-btn" onclick={() => createThread(selectedThread?.provider)}>
+								<button class="primary-btn" onclick={() => createThread(selectedThread?.provider ?? 'claude')}>
 									Start New Thread
 								</button>
 							</div>

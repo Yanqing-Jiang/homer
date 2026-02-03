@@ -72,18 +72,34 @@ export async function createWebServer(
   return server;
 }
 
+/**
+ * Start the web server.
+ * If port is in use, another Homer instance is already running - exit immediately.
+ * This enforces single-instance operation.
+ */
 export async function startWebServer(server: FastifyInstance): Promise<void> {
+  const host = config.web.exposeExternally ? "0.0.0.0" : "127.0.0.1";
+  const port = config.web.port;
+
   try {
-    // Bind to 0.0.0.0 if externally exposed (with auth), otherwise localhost only
-    const host = config.web.exposeExternally ? "0.0.0.0" : "127.0.0.1";
-    await server.listen({ port: config.web.port, host });
+    await server.listen({ port, host });
     logger.info(
-      { port: config.web.port, host, authEnabled: config.web.exposeExternally },
+      { port, host, authEnabled: config.web.exposeExternally },
       "Web server started"
     );
-  } catch (error) {
+  } catch (error: unknown) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code === "EADDRINUSE") {
+      logger.error(
+        { port, host },
+        `Another Homer instance is already running on port ${port}. Exiting to prevent duplicate daemons.`
+      );
+      // Exit cleanly (code 0) so launchd/systemd won't restart immediately
+      process.exit(0);
+    }
+    // For other errors, log and exit
     logger.error({ error }, "Failed to start web server");
-    throw error;
+    process.exit(1);
   }
 }
 
