@@ -1627,9 +1627,9 @@ Just confirm when done. Keep your response brief.`;
 		font-size: 12px;
 	}
 
-	/* Copilot Header (Azure Blue) */
+	/* Copilot Header (Purple - Azure Copilot style) */
 	.copilot-header {
-		background: #0078d4;
+		background: linear-gradient(135deg, #7B4FBE 0%, #5B3FA0 100%);
 		padding: 10px 16px;
 		display: flex;
 		align-items: center;
