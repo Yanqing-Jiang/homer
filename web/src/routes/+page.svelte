@@ -13,7 +13,7 @@
 
 	let searchQuery = $state('');
 	let chatInput = $state('');
-	let messages = $state<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+	let messages = $state<Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }>>([]);
 	let sidebarOpen = $state(false);
 	let userMenuOpen = $state(false);
 
@@ -242,6 +242,10 @@
 		return DOMPurify.sanitize(html, DOMPURIFY_CONFIG) as string;
 	}
 
+	function formatTime(date: Date): string {
+		return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+	}
+
 	// Track if we've checked for context
 	let contextChecked = $state(false);
 
@@ -433,7 +437,8 @@
 			const thread = await api.getThread(tId);
 			messages = thread.messages.map((m) => ({
 				role: m.role as 'user' | 'assistant',
-				content: m.content
+				content: m.content,
+				timestamp: m.createdAt ? new Date(m.createdAt) : new Date()
 			}));
 		} catch (e) {
 			console.error('Failed to load thread messages:', e);
@@ -539,7 +544,7 @@ Just confirm when done. Keep your response brief.`;
 		// Optimistic update
 		chatInput = '';
 		chatError = null;
-		messages = [...messages, { role: 'user', content: userMessage }];
+		messages = [...messages, { role: 'user', content: userMessage, timestamp: new Date() }];
 
 		// Clear attachments after sending
 		attachedFiles = [];
@@ -575,7 +580,7 @@ Just confirm when done. Keep your response brief.`;
 								const run = await api.getRun(runId);
 								const output = run.run.output || (run.run.error ?? '');
 								if (output) {
-									messages = [...messages, { role: 'assistant', content: output }];
+									messages = [...messages, { role: 'assistant', content: output, timestamp: new Date() }];
 								} else if (run.run.status === 'cancelled') {
 									chatError = 'Run cancelled.';
 								}
@@ -925,6 +930,7 @@ Just confirm when done. Keep your response brief.`;
 										{:else}
 											<div class="message-bubble">{message.content}</div>
 										{/if}
+									<span class="message-timestamp">{formatTime(message.timestamp)}</span>
 									</div>
 								</div>
 							{/each}
@@ -1732,6 +1738,21 @@ Just confirm when done. Keep your response brief.`;
 		background: #e1dfdd;
 		border-radius: 8px 2px 8px 8px;
 		color: #1b1b1b;
+	}
+
+	.message-timestamp {
+		display: block;
+		font-size: 11px;
+		color: #888;
+		margin-top: 4px;
+	}
+
+	.message.user .message-timestamp {
+		text-align: right;
+	}
+
+	.message.assistant .message-timestamp {
+		text-align: left;
 	}
 
 	/* Chat Input */
