@@ -29,6 +29,8 @@
 	let sessions = $state<api.ChatSession[]>([]);
 	let showSessionDropdown = $state(false);
 	let currentSessionName = $state('New Session');
+	let editingSessionId = $state<string | null>(null);
+	let editingName = $state('');
 
 	// File upload state
 	let attachedFiles = $state<api.Upload[]>([]);
@@ -43,14 +45,25 @@
 	// Fallback commands (used until dynamic ones load)
 	const fallbackCommands = [
 		{ name: '/gemini', category: 'executor', description: 'Switch to Gemini CLI', executor: 'gemini' as api.ExecutorType },
-		{ name: '/codex', category: 'executor', description: 'Switch to Codex (deep reasoning)', executor: 'codex' as api.ExecutorType },
+		{ name: '/codex', category: 'executor', description: 'Switch to Codex CLI', executor: 'codex' as api.ExecutorType },
 		{ name: '/claude', category: 'executor', description: 'Switch to Claude (default)', executor: 'claude' as api.ExecutorType },
+		{ name: '/sonnet', category: 'executor', description: 'Switch Claude to Sonnet', executor: 'claude' as api.ExecutorType, model: 'sonnet' },
+		{ name: '/opus', category: 'executor', description: 'Switch Claude to Opus', executor: 'claude' as api.ExecutorType, model: 'opus' },
+		{ name: '/chatgpt', category: 'executor', description: 'Use ChatGPT via browser skill', executor: 'chatgpt' as api.ExecutorType },
 		{ name: '/new', category: 'session', description: 'Start fresh session (reset executor)' },
 		{ name: '/search', category: 'search', description: 'Search memory files' },
 	];
 
-	// Use dynamic commands if loaded, otherwise fallback
-	let slashCommands = $derived(dynamicCommands.length > 0 ? dynamicCommands : fallbackCommands);
+	// Local-only commands (always available, not from API)
+	const localCommands = [
+		{ name: '/log-memory', category: 'memory', description: 'Log session summary to daily memory' },
+	];
+
+	// Use dynamic commands if loaded, otherwise fallback, and always include local commands
+	let slashCommands = $derived([
+		...(dynamicCommands.length > 0 ? dynamicCommands : fallbackCommands),
+		...localCommands
+	]);
 
 	// Executor state
 	let currentExecutor = $state<api.ExecutorType>('claude');
@@ -94,7 +107,7 @@
 	}
 
 	// Switch executor
-	async function switchExecutor(executor: api.ExecutorType) {
+	async function switchExecutor(executor: api.ExecutorType, model?: string) {
 		if (!sessionId) return;
 		try {
 			if (currentAbort) {
@@ -103,7 +116,7 @@
 			}
 			isStreaming = false;
 			streamingContent = '';
-			const result = await api.setExecutor(sessionId, executor);
+			const result = await api.setExecutor(sessionId, executor, model);
 			currentExecutor = result.executor;
 			currentModel = result.model;
 			executorMessageCount = 0;
@@ -132,16 +145,23 @@
 	}
 
 	function handleInputChange(e: Event) {
-		const value = (e.target as HTMLInputElement).value;
+		const value = (e.target as HTMLTextAreaElement).value;
 		chatInput = value;
 		showSlashCommands = value.startsWith('/') && !value.includes(' ');
 		selectedCommandIndex = 0;
 	}
 
+	function autoResizeTextarea(textarea: HTMLTextAreaElement) {
+		textarea.style.height = 'auto';
+		const maxHeight = 200; // Max height before scrolling
+		textarea.style.height = Math.min(textarea.scrollHeight, maxHeight) + 'px';
+		textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : 'hidden';
+	}
+
 	function selectCommand(cmd: api.CommandDefinition) {
 		// For executor commands, switch immediately if no additional input needed
 		if (cmd.category === 'executor' && cmd.executor) {
-			switchExecutor(cmd.executor);
+			switchExecutor(cmd.executor, cmd.model);
 			chatInput = '';
 			showSlashCommands = false;
 			return;
@@ -154,6 +174,14 @@
 			showSlashCommands = false;
 			// Also start a new session
 			selectSession(null);
+			return;
+		}
+
+		// For /log-memory, log session to daily memory
+		if (cmd.name === '/log-memory') {
+			showSlashCommands = false;
+			chatInput = buildLogMemoryMessage('work');
+			handleSendMessage();
 			return;
 		}
 
@@ -184,7 +212,8 @@
 		{ name: 'Sessions', icon: 'chat', href: '/sessions' },
 		{ name: 'Ideas', icon: 'lightbulb', href: '/ideas' },
 		{ name: 'Plans', icon: 'clipboard', href: '/plans' },
-		{ name: 'Jobs', icon: 'clock', href: '/jobs' }
+		{ name: 'Jobs', icon: 'clock', href: '/jobs' },
+		{ name: 'Trading', icon: 'chart', href: '/trading' }
 	];
 
 	// Configure marked for safe rendering
@@ -229,19 +258,11 @@
 	});
 
 	// Stored context from sessionStorage (read once, use when auth completes)
-	let pendingContext = $state<{ type: 'idea' | 'session'; data: string } | null>(null);
+	let pendingContext = $state<{ type: 'session'; data: string } | null>(null);
 
 	// Check for context passed from Ideas or Sessions pages
 	// Read values immediately but defer removal until auth confirms
 	onMount(() => {
-		// Check for idea context
-		const ideaContext = sessionStorage.getItem('copilot_context');
-		if (ideaContext) {
-			pendingContext = { type: 'idea', data: ideaContext };
-			contextChecked = true;
-			return;
-		}
-
 		// Check for session resume
 		const resumeSession = sessionStorage.getItem('resume_session');
 		if (resumeSession) {
@@ -259,22 +280,24 @@
 			const ctx = pendingContext;
 			pendingContext = null; // Clear to prevent re-processing
 
-			if (ctx.type === 'idea') {
-				sessionStorage.removeItem('copilot_context');
-				chatInput = ctx.data;
-			} else if (ctx.type === 'session') {
-				sessionStorage.removeItem('resume_session');
-				try {
-					const sessionData = JSON.parse(ctx.data);
-					sessionId = sessionData.sessionId || null;
-					threadId = sessionData.threadId || null;
-					// Load thread messages if we have a threadId
-					if (threadId) {
-						loadThreadMessages(threadId);
-					}
-				} catch (e) {
-					console.error('Failed to restore session:', e);
+			sessionStorage.removeItem('resume_session');
+			try {
+				const sessionData = JSON.parse(ctx.data);
+				sessionId = sessionData.sessionId || null;
+				threadId = sessionData.threadId || null;
+				currentSessionName = sessionData.name || 'Resumed Session';
+				// Load thread messages if we have a threadId
+				if (threadId) {
+					loadThreadMessages(threadId);
 				}
+				// Load executor state for resumed session
+				if (sessionId) {
+					loadExecutorState();
+					// Refresh sessions list to include the new one
+					loadSessions();
+				}
+			} catch (e) {
+				console.error('Failed to restore session:', e);
 			}
 		}
 	});
@@ -372,6 +395,39 @@
 		}
 	}
 
+	function startRenaming(sess: api.ChatSession, event: MouseEvent) {
+		event.stopPropagation();
+		editingSessionId = sess.id;
+		editingName = sess.name;
+	}
+
+	async function saveRename(event?: KeyboardEvent) {
+		if (event && event.key !== 'Enter') return;
+		if (!editingSessionId || !editingName.trim()) {
+			cancelRename();
+			return;
+		}
+		try {
+			await api.updateSession(editingSessionId, { name: editingName.trim() });
+			// Update local state
+			sessions = sessions.map(s =>
+				s.id === editingSessionId ? { ...s, name: editingName.trim() } : s
+			);
+			if (sessionId === editingSessionId) {
+				currentSessionName = editingName.trim();
+			}
+		} catch (e) {
+			console.error('Failed to rename session:', e);
+		}
+		editingSessionId = null;
+		editingName = '';
+	}
+
+	function cancelRename() {
+		editingSessionId = null;
+		editingName = '';
+	}
+
 	async function loadThreadMessages(tId: string) {
 		try {
 			const thread = await api.getThread(tId);
@@ -384,6 +440,40 @@
 		}
 	}
 
+	function compileSessionSummary(): string {
+		if (messages.length === 0) {
+			return 'No messages in this session.';
+		}
+		// Compile a concise summary of the session
+		const summary: string[] = [];
+		summary.push(`Session: ${currentSessionName}`);
+		summary.push(`Messages: ${messages.length}`);
+		summary.push('');
+		// Include key user messages (truncated)
+		const userMsgs = messages.filter(m => m.role === 'user');
+		if (userMsgs.length > 0) {
+			summary.push('Topics discussed:');
+			userMsgs.slice(0, 5).forEach((m, i) => {
+				const content = m.content.slice(0, 100) + (m.content.length > 100 ? '...' : '');
+				summary.push(`- ${content}`);
+			});
+			if (userMsgs.length > 5) {
+				summary.push(`- ... and ${userMsgs.length - 5} more messages`);
+			}
+		}
+		return summary.join('\n');
+	}
+
+	function buildLogMemoryMessage(context: string = 'work'): string {
+		const summary = compileSessionSummary();
+		return `Please use the memory_append MCP tool to log the following session summary to daily memory with context "${context}":
+
+---
+${summary}
+---
+
+Just confirm when done. Keep your response brief.`;
+	}
 
 	async function handleSignOut() {
 		userMenuOpen = false;
@@ -411,7 +501,7 @@
 			if (matchedCmd) {
 				// Handle executor switch commands
 				if (matchedCmd.category === 'executor' && matchedCmd.executor) {
-					await switchExecutor(matchedCmd.executor);
+					await switchExecutor(matchedCmd.executor, matchedCmd.model);
 
 					// If there's a query after the command, send it
 					if (queryPart) {
@@ -428,6 +518,14 @@
 					await resetExecutor();
 					selectSession(null);
 					chatInput = queryPart || '';
+					return;
+				}
+
+				// Handle /log-memory command - transform and resend
+				if (matchedCmd.name === '/log-memory') {
+					const context = queryPart || 'work';
+					chatInput = buildLogMemoryMessage(context);
+					await handleSendMessage();
 					return;
 				}
 			}
@@ -643,69 +741,6 @@
 			</div>
 		</header>
 
-		<!-- Blue Ribbon (Session Selector + Executor Indicator) -->
-		<div class="directory-ribbon">
-			<div class="session-selector">
-				<button class="session-dropdown-btn" onclick={() => showSessionDropdown = !showSessionDropdown}>
-					<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-						<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-					</svg>
-					<span class="session-name">{currentSessionName}</span>
-					<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12" class="chevron" class:open={showSessionDropdown}>
-						<path d="M7 10l5 5 5-5z"/>
-					</svg>
-				</button>
-			</div>
-
-			{#if showSessionDropdown}
-				<div class="session-dropdown">
-					<button class="session-dropdown-item new-session" onclick={() => selectSession(null)}>
-						<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-							<path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
-						</svg>
-						New Session
-					</button>
-					<div class="session-dropdown-divider"></div>
-					{#if sessions.length === 0}
-						<div class="session-dropdown-empty">No recent sessions</div>
-					{:else}
-						{#each sessions as sess}
-							<button
-								class="session-dropdown-item"
-								class:active={sess.id === sessionId}
-								onclick={() => selectSession(sess)}
-							>
-								<span class="session-item-name">{sess.name}</span>
-								<span class="session-item-date">{new Date(sess.updatedAt).toLocaleDateString()}</span>
-							</button>
-						{/each}
-					{/if}
-					<div class="session-dropdown-divider"></div>
-					<a href="/sessions" class="session-dropdown-item view-all">
-						View All Sessions
-						<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
-							<path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/>
-						</svg>
-					</a>
-				</div>
-			{/if}
-
-			<!-- Executor Indicator -->
-			<div class="executor-indicator">
-				<span class="executor-label">Executor:</span>
-				<span class="executor-badge" class:executor-claude={currentExecutor === 'claude'}
-					class:executor-gemini={currentExecutor === 'gemini'}
-					class:executor-codex={currentExecutor === 'codex'}>
-					{currentExecutor}
-					{#if currentModel}
-						<span class="executor-model">({currentModel})</span>
-					{/if}
-				</span>
-				{#if executorMessageCount > 0}
-					<span class="executor-count">{executorMessageCount} msgs</span>
-				{/if}
-			</div>
-		</div>
 		{#if showSessionDropdown}
 			<div class="session-dropdown-overlay" onclick={() => showSessionDropdown = false}></div>
 		{/if}
@@ -741,6 +776,10 @@
 								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
 									<path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
 								</svg>
+							{:else if item.icon === 'chart'}
+								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+									<path d="M3 3v18h18M7 16l4-4 4 4 6-6"/>
+								</svg>
 							{/if}
 							<span>{item.name}</span>
 						</a>
@@ -754,23 +793,97 @@
 			<!-- Copilot Chat Interface (Full Width) -->
 			<section class="copilot-section">
 				<div class="copilot-chat">
-					<!-- Copilot Header -->
+					<!-- Copilot Header (Unified) -->
 					<div class="copilot-header">
 						<div class="copilot-title">
 							<svg class="copilot-icon" viewBox="0 0 24 24" fill="currentColor" width="24" height="24">
 								<path d="M12 2L9.5 9.5L2 12L9.5 14.5L12 22L14.5 14.5L22 12L14.5 9.5L12 2Z"/>
 							</svg>
-							<div class="copilot-title-text">
-								<span class="copilot-name">Microsoft Copilot in Azure</span>
-								<span class="copilot-preview">Preview</span>
-							</div>
+							<span class="copilot-name">Microsoft Copilot in Azure</span>
 						</div>
-						<button class="copilot-close" aria-label="Close">
-							<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-								<path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
-							</svg>
-						</button>
+						<div class="copilot-center">
+							<!-- Empty or future nav tabs -->
+						</div>
+						<div class="copilot-right">
+							<div class="session-selector">
+								<button class="session-dropdown-btn" onclick={() => showSessionDropdown = !showSessionDropdown}>
+									<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+										<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+									</svg>
+									<span class="session-name">{currentSessionName}</span>
+									<svg viewBox="0 0 24 24" fill="currentColor" width="10" height="10" class="chevron" class:open={showSessionDropdown}>
+										<path d="M7 10l5 5 5-5z"/>
+									</svg>
+								</button>
+								{#if showSessionDropdown}
+									<div class="session-dropdown">
+										<button class="session-dropdown-item new-session" onclick={() => selectSession(null)}>
+											<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+												<path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+											</svg>
+											New Session
+										</button>
+										<div class="session-dropdown-divider"></div>
+										{#if sessions.length === 0}
+											<div class="session-dropdown-empty">No recent sessions</div>
+										{:else}
+											{#each sessions as sess}
+												{#if editingSessionId === sess.id}
+													<div class="session-dropdown-item editing">
+														<input
+															type="text"
+															class="session-rename-input"
+															bind:value={editingName}
+															onkeydown={(e) => e.key === 'Enter' ? saveRename() : e.key === 'Escape' ? cancelRename() : null}
+															onblur={() => saveRename()}
+															autofocus
+														/>
+														<button class="session-rename-save" onclick={() => saveRename()}>
+															<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+																<path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+															</svg>
+														</button>
+													</div>
+												{:else}
+													<div
+														class="session-dropdown-item"
+														class:active={sess.id === sessionId}
+													>
+														<button class="session-item-main" onclick={() => selectSession(sess)}>
+															<span class="session-item-name">{sess.name}</span>
+															<span class="session-item-date">{new Date(sess.updatedAt).toLocaleDateString()}</span>
+														</button>
+														<button class="session-rename-btn" onclick={(e) => startRenaming(sess, e)} title="Rename">
+															<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12">
+																<path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
+															</svg>
+														</button>
+													</div>
+												{/if}
+											{/each}
+										{/if}
+										<div class="session-dropdown-divider"></div>
+										<a href="/sessions" class="session-dropdown-item view-all">
+											View All Sessions
+											<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+												<path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/>
+											</svg>
+										</a>
+									</div>
+								{/if}
+							</div>
+						<div class="executor-indicator">
+							<span class="executor-badge" class:executor-claude={currentExecutor === 'claude'}
+								class:executor-gemini={currentExecutor === 'gemini'}
+								class:executor-codex={currentExecutor === 'codex'}>
+								{currentExecutor}
+								{#if currentModel}
+									<span class="executor-model">({currentModel})</span>
+								{/if}
+							</span>
+						</div>
 					</div>
+				</div>
 
 					<!-- Error Banner -->
 					{#if chatError}
@@ -869,18 +982,24 @@
 										{/each}
 									</div>
 								{/if}
-								<input
-									type="text"
+								<textarea
 									placeholder="Ask me anything... (type / for commands)"
 									class="chat-input"
 									bind:value={chatInput}
 									disabled={isStreaming}
-									oninput={handleInputChange}
+									oninput={(e) => {
+										handleInputChange(e);
+										autoResizeTextarea(e.target as HTMLTextAreaElement);
+									}}
 									onkeydown={(e) => {
 										handleCommandKeydown(e);
-										if (e.key === 'Enter' && !showSlashCommands) handleSendMessage();
+										if (e.key === 'Enter' && !e.shiftKey && !showSlashCommands) {
+											e.preventDefault();
+											handleSendMessage();
+										}
 									}}
-								/>
+									rows="1"
+								></textarea>
 								<button class="send-btn" onclick={handleSendMessage} disabled={!chatInput.trim() || isStreaming} aria-label="Send">
 									{#if isStreaming}
 										<span class="spinner-small"></span>
@@ -944,13 +1063,13 @@
 		font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
 	}
 
-	/* Top Bar (Dark) */
+	/* Top Bar (Azure Blue) */
 	.top-bar {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		height: 40px;
-		background: #1b1b1b;
+		background: #0078d4;
 		color: white;
 		padding: 0 8px;
 		position: relative;
@@ -1008,25 +1127,25 @@
 		transform: translateY(-50%);
 		width: 16px;
 		height: 16px;
-		color: #666;
+		color: #0078d4;
 	}
 
 	.search-input {
 		width: 100%;
 		padding: 6px 12px 6px 36px;
 		border: none;
-		border-radius: 2px;
+		border-radius: 4px;
 		font-size: 13px;
-		background: #3b3b3b;
-		color: white;
+		background: white;
+		color: #1b1b1b;
 	}
 
 	.search-input::placeholder {
-		color: #999;
+		color: #666;
 	}
 
 	.search-input:focus {
-		outline: 2px solid #0078d4;
+		outline: 2px solid rgba(255, 255, 255, 0.5);
 		background: #fff;
 		color: #1b1b1b;
 	}
@@ -1158,17 +1277,7 @@
 		background: #f5f5f5;
 	}
 
-	/* Blue Ribbon with Main Tabs and Session Selector */
-	.directory-ribbon {
-		background: #0078d4;
-		padding: 6px 16px;
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		position: relative;
-		z-index: 50;
-	}
-
+	/* Session Selector (in Copilot Header) */
 	.session-selector {
 		position: relative;
 	}
@@ -1176,24 +1285,24 @@
 	.session-dropdown-btn {
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 6px;
 		color: white;
-		font-size: 13px;
+		font-size: 12px;
 		cursor: pointer;
-		background: none;
+		background: rgba(255, 255, 255, 0.15);
 		border: none;
-		padding: 4px 8px;
+		padding: 4px 10px;
 		border-radius: 4px;
 		transition: background 0.15s;
 	}
 
 	.session-dropdown-btn:hover {
-		background: rgba(255, 255, 255, 0.15);
+		background: rgba(255, 255, 255, 0.25);
 	}
 
 	.session-name {
 		font-weight: 500;
-		max-width: 200px;
+		max-width: 150px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -1211,12 +1320,13 @@
 	.session-dropdown {
 		position: absolute;
 		top: 100%;
-		left: 0;
-		margin-top: 4px;
+		right: 0;
+		margin-top: 8px;
 		background: white;
 		border: 1px solid #e0e0e0;
 		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
 		min-width: 280px;
+		max-width: calc(100vw - 40px);
 		z-index: 1000;
 		border-radius: 4px;
 		max-height: 400px;
@@ -1226,7 +1336,6 @@
 	.session-dropdown-item {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
 		gap: 10px;
 		width: 100%;
 		padding: 10px 16px;
@@ -1234,7 +1343,6 @@
 		border: none;
 		font-size: 13px;
 		color: #1b1b1b;
-		cursor: pointer;
 		text-align: left;
 		text-decoration: none;
 	}
@@ -1270,6 +1378,69 @@
 		flex-shrink: 0;
 	}
 
+	.session-item-main {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px;
+		background: none;
+		border: none;
+		padding: 0;
+		font-size: 13px;
+		color: #1b1b1b;
+		cursor: pointer;
+		text-align: left;
+		min-width: 0;
+	}
+
+	.session-rename-btn {
+		opacity: 0;
+		background: none;
+		border: none;
+		padding: 4px;
+		cursor: pointer;
+		color: #666;
+		border-radius: 4px;
+		transition: all 0.15s;
+		flex-shrink: 0;
+	}
+
+	.session-dropdown-item:hover .session-rename-btn {
+		opacity: 1;
+	}
+
+	.session-rename-btn:hover {
+		background: #e0e0e0;
+		color: #333;
+	}
+
+	.session-dropdown-item.editing {
+		padding: 6px 10px;
+	}
+
+	.session-rename-input {
+		flex: 1;
+		padding: 4px 8px;
+		border: 1px solid #0078d4;
+		border-radius: 4px;
+		font-size: 13px;
+		outline: none;
+	}
+
+	.session-rename-save {
+		background: none;
+		border: none;
+		padding: 4px;
+		cursor: pointer;
+		color: #0078d4;
+		border-radius: 4px;
+	}
+
+	.session-rename-save:hover {
+		background: #e8f4fc;
+	}
+
 	.session-dropdown-divider {
 		height: 1px;
 		background: #e0e0e0;
@@ -1292,18 +1463,11 @@
 		z-index: 49;
 	}
 
-	/* Executor Indicator */
+	/* Executor Indicator (in Copilot Header) */
 	.executor-indicator {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		margin-left: auto;
-		padding-right: 8px;
-	}
-
-	.executor-label {
-		color: rgba(255, 255, 255, 0.7);
-		font-size: 12px;
+		gap: 6px;
 	}
 
 	.executor-badge {
@@ -1312,14 +1476,15 @@
 		gap: 4px;
 		padding: 3px 10px;
 		border-radius: 12px;
-		font-size: 12px;
+		font-size: 11px;
 		font-weight: 600;
 		text-transform: capitalize;
+		white-space: nowrap;
 	}
 
 	.executor-badge.executor-claude {
 		background: rgba(255, 255, 255, 0.9);
-		color: #8b5cf6;
+		color: #0078d4;
 	}
 
 	.executor-badge.executor-gemini {
@@ -1335,11 +1500,6 @@
 	.executor-model {
 		font-weight: 400;
 		opacity: 0.8;
-	}
-
-	.executor-count {
-		color: rgba(255, 255, 255, 0.7);
-		font-size: 11px;
 	}
 
 	/* Sidebar */
@@ -1359,7 +1519,7 @@
 		left: 0;
 		width: 280px;
 		height: 100vh;
-		background: #1b1b1b;
+		background: #0078d4;
 		z-index: 300;
 		display: flex;
 		flex-direction: column;
@@ -1370,7 +1530,7 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 12px 16px;
-		border-bottom: 1px solid #333;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.2);
 		color: white;
 		font-weight: 600;
 	}
@@ -1392,7 +1552,7 @@
 
 	.sidebar-nav {
 		flex: 1;
-		padding: 8px 0;
+		padding: 0;
 	}
 
 	.sidebar-item {
@@ -1416,7 +1576,7 @@
 		max-width: 100%;
 		margin: 0;
 		padding: 0;
-		height: calc(100vh - 78px); /* viewport minus header and ribbon */
+		height: calc(100vh - 40px); /* viewport minus top header only */
 		display: flex;
 		flex-direction: column;
 	}
@@ -1461,28 +1621,27 @@
 		font-size: 12px;
 	}
 
-	/* Copilot Header - Purple Gradient */
+	/* Copilot Header (Azure Blue) */
 	.copilot-header {
-		background: linear-gradient(135deg, #6264a7 0%, #464775 100%);
-		padding: 12px 16px;
+		background: #0078d4;
+		padding: 10px 16px;
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
+		gap: 16px;
 	}
 
 	.copilot-title {
 		display: flex;
 		align-items: center;
-		gap: 12px;
+		gap: 10px;
+		flex-shrink: 0;
 	}
 
 	.copilot-icon {
 		color: white;
-	}
-
-	.copilot-title-text {
-		display: flex;
-		flex-direction: column;
+		width: 20px;
+		height: 20px;
 	}
 
 	.copilot-name {
@@ -1491,22 +1650,17 @@
 		font-size: 14px;
 	}
 
-	.copilot-preview {
-		color: rgba(255, 255, 255, 0.7);
-		font-size: 11px;
+	.copilot-center {
+		flex: 1;
+		display: flex;
+		justify-content: center;
 	}
 
-	.copilot-close {
-		background: none;
-		border: none;
-		color: white;
-		padding: 4px;
-		cursor: pointer;
-		opacity: 0.8;
-	}
-
-	.copilot-close:hover {
-		opacity: 1;
+	.copilot-right {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		flex-shrink: 0;
 	}
 
 	/* Chat Messages */
@@ -1547,7 +1701,7 @@
 		width: 28px;
 		height: 28px;
 		border-radius: 50%;
-		background: linear-gradient(135deg, #6264a7 0%, #464775 100%);
+		background: linear-gradient(135deg, #0078d4 0%, #004578 100%);
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -1597,19 +1751,19 @@
 
 	.input-container {
 		display: flex;
-		align-items: center;
+		align-items: flex-end;
 		gap: 8px;
 		background: #f5f5f5;
 		border: 1px solid #e0e0e0;
-		border-radius: 4px;
-		padding: 4px 8px 4px 12px;
+		border-radius: 8px;
+		padding: 8px 8px 8px 12px;
 		flex: 1;
 		position: relative;
 	}
 
 	.input-container:focus-within {
-		border-color: #6264a7;
-		box-shadow: 0 0 0 1px #6264a7;
+		border-color: #0078d4;
+		box-shadow: 0 0 0 1px #0078d4;
 	}
 
 	/* Slash Command Dropdown */
@@ -1650,7 +1804,7 @@
 	.slash-command-item .cmd-name {
 		font-weight: 600;
 		font-size: 14px;
-		color: #6264a7;
+		color: #0078d4;
 	}
 
 	.slash-command-item .cmd-desc {
@@ -1685,6 +1839,12 @@
 		font-size: 14px;
 		padding: 8px 0;
 		outline: none;
+		resize: none;
+		min-height: 24px;
+		max-height: 200px;
+		line-height: 1.5;
+		font-family: inherit;
+		overflow-y: hidden;
 	}
 
 	.chat-input::placeholder {
@@ -1695,7 +1855,7 @@
 		width: 36px;
 		height: 36px;
 		border-radius: 4px;
-		background: #6264a7;
+		background: #0078d4;
 		border: none;
 		color: white;
 		cursor: pointer;
@@ -1706,7 +1866,7 @@
 	}
 
 	.send-btn:hover:not(:disabled) {
-		background: #464775;
+		background: #106ebe;
 	}
 
 	.send-btn:disabled {
@@ -1723,12 +1883,12 @@
 
 	/* Streaming and typing indicators */
 	.streaming .message-bubble {
-		border-color: #6264a7;
+		border-color: #0078d4;
 	}
 
 	.cursor {
 		animation: blink 1s infinite;
-		color: #6264a7;
+		color: #0078d4;
 	}
 
 	@keyframes blink {
@@ -1745,7 +1905,7 @@
 	.typing-indicator span {
 		width: 8px;
 		height: 8px;
-		background: #6264a7;
+		background: #0078d4;
 		border-radius: 50%;
 		animation: bounce 1.4s infinite ease-in-out both;
 	}
@@ -1827,7 +1987,7 @@
 	.markdown-content :global(h3) { font-size: 1.1em; }
 
 	.markdown-content :global(blockquote) {
-		border-left: 3px solid #6264a7;
+		border-left: 3px solid #0078d4;
 		padding-left: 12px;
 		margin: 8px 0;
 		color: #666;
