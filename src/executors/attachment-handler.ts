@@ -46,7 +46,7 @@ export function formatSingleAttachment(
 ${content}
 </attachment>`;
 
-    case "gemini-cli":
+    case "opencode":
     case "gemini-api":
       // Code blocks with filename for Gemini
       const lang = getLanguageFromFilename(filename);
@@ -179,7 +179,7 @@ export function shouldEmbedContent(
   const maxSizeBytes: Record<string, number> = {
     claude: 100_000,      // 100KB
     codex: 100_000,       // 100KB
-    "gemini-cli": 50_000, // 50KB
+    opencode: 50_000,     // 50KB
     "gemini-api": 50_000, // 50KB
     kimi: 500_000,        // 500KB (long context)
   };

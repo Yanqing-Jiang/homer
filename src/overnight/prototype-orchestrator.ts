@@ -11,7 +11,7 @@
 
 import { logger } from "../utils/logger.js";
 import { executeWithRouting, type RoutingRequest } from "../executors/router.js";
-import { executeGeminiWithFallback } from "../executors/gemini-cli.js";
+import { executeGeminiWithFallback } from "../executors/opencode-cli.js";
 import { OvernightTaskStore } from "./task-store.js";
 import { WorkspaceManager } from "./workspace.js";
 import type {
@@ -46,7 +46,7 @@ const APPROACH_DEFINITIONS: Record<ApproachLabel, { name: ApproachName; descript
 
 const APPROACH_EXECUTOR_MAP: Record<ApproachName, ExecutorType> = {
   Conservative: "codex",
-  Innovative: "gemini-cli" as ExecutorType,
+  Innovative: "opencode" as ExecutorType,
   Pragmatic: "claude",
 };
 

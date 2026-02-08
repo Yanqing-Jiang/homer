@@ -2,10 +2,30 @@ import type { Bot } from "grammy";
 import { QueueManager } from "./manager.js";
 import { StateManager, type Job } from "../state/manager.js";
 import { executeClaudeCommand } from "../executors/claude.js";
+import { executeGeminiCLI } from "../executors/opencode-cli.js";
+import { executeCodexCLI } from "../executors/codex-cli.js";
+import { executeKimiCLI } from "../executors/kimi-cli.js";
+import { runCompletionCheckup } from "../executors/completion-checkup.js";
+import {
+  runWithFallbackChain,
+  DEFAULT_CHAIN,
+  MEMORY_CHAIN,
+  type ExecutorKind,
+} from "../executors/fallback-orchestrator.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { logger } from "../utils/logger.js";
 
 const HOME = process.env.HOME || "/Users/yj";
+
+function isMemoryJob(job: Job): boolean {
+  const query = job.query.toLowerCase();
+  return (
+    query.includes("/nightly-memory") ||
+    query.includes("memory/daily") ||
+    query.includes("daily log") ||
+    query.includes("memory")
+  );
+}
 
 export class QueueWorker {
   private queueManager: QueueManager;
@@ -68,7 +88,11 @@ export class QueueWorker {
     const heartbeatInterval = this.queueManager.startJobHeartbeat(job.id);
 
     try {
-      // Determine subagent
+      const memoryJob = isMemoryJob(job);
+      const chain: ExecutorKind[] = memoryJob ? [...MEMORY_CHAIN] : [...DEFAULT_CHAIN];
+      const primary: ExecutorKind = chain[0] ?? "claude";
+
+      // Determine subagent (used only when executor is Claude)
       let subagent: "gemini" | "codex" | undefined;
       if (job.executor === "gemini") {
         subagent = "gemini";
@@ -76,43 +100,125 @@ export class QueueWorker {
         subagent = "codex";
       }
 
-      // Get Claude session ID for resume
-      const claudeSessionId = this.stateManager.getClaudeSessionId(job.lane);
+      // Claude session handling
+      const initialClaudeSessionId = this.stateManager.getClaudeSessionId(job.lane);
+      let lastClaudeSessionId = initialClaudeSessionId ?? undefined;
 
-      // Execute
-      const result = await executeClaudeCommand(job.query, {
-        cwd: HOME,
-        claudeSessionId: claudeSessionId ?? undefined,
-        subagent,
+      const runExecutor = async (
+        executor: ExecutorKind,
+        queryOverride?: string
+      ): Promise<{ exitCode: number; output: string; error?: string; duration: number; startedAt: Date; completedAt: Date }> => {
+        const query = queryOverride ?? job.query;
+        const startedAt = new Date();
+
+        if (executor === "claude") {
+          const result = await executeClaudeCommand(query, {
+            cwd: HOME,
+            claudeSessionId: lastClaudeSessionId,
+            subagent,
+          });
+          if (result.claudeSessionId) {
+            lastClaudeSessionId = result.claudeSessionId;
+          } else if (lastClaudeSessionId) {
+            this.stateManager.updateClaudeSessionActivity(job.lane);
+          }
+          return {
+            exitCode: result.exitCode,
+            output: result.output,
+            error: result.exitCode === 0 ? undefined : result.output,
+            duration: result.duration,
+            startedAt,
+            completedAt: new Date(),
+          };
+        }
+
+        if (executor === "gemini") {
+          const result = await executeGeminiCLI(query, "", {
+            timeout: 1200000,
+            sandbox: true,
+            model: "gemini-3-flash-preview",
+          });
+          return {
+            exitCode: result.exitCode,
+            output: result.output,
+            error: result.exitCode === 0 ? undefined : result.output,
+            duration: result.duration,
+            startedAt,
+            completedAt: new Date(),
+          };
+        }
+
+        if (executor === "codex") {
+          const result = await executeCodexCLI(query, {
+            cwd: HOME,
+            timeout: 1800000,
+          });
+          return {
+            exitCode: result.exitCode,
+            output: result.output,
+            error: result.exitCode === 0 ? undefined : result.output,
+            duration: result.duration,
+            startedAt,
+            completedAt: new Date(),
+          };
+        }
+
+        const result = await executeKimiCLI(query, "", {
+          timeout: 1200000,
+          yolo: true,
+          workDir: HOME,
+        });
+        return {
+          exitCode: result.exitCode,
+          output: result.output,
+          error: result.exitCode === 0 ? undefined : result.output,
+          duration: result.duration,
+          startedAt,
+          completedAt: new Date(),
+        };
+      };
+
+      const fallbackResult = await runWithFallbackChain({
+        primary,
+        chain,
+        job: {
+          id: job.id,
+          name: job.query.slice(0, 80),
+          query: job.query,
+          lane: job.lane,
+          source: "queue",
+        },
+        runExecutor,
+        notify: async (message) => {
+          await this.bot.api.sendMessage(job.chatId, message);
+        },
       });
 
-      // Store new Claude session ID if captured
-      if (result.claudeSessionId) {
-        this.stateManager.setClaudeSessionId(job.lane, result.claudeSessionId);
-      } else if (claudeSessionId) {
-        this.stateManager.updateClaudeSessionActivity(job.lane);
-      }
+      const result = fallbackResult.result;
+      const success = result.exitCode === 0;
 
       // Update session activity
       const session = this.stateManager.getOrCreateSession(job.lane);
       this.stateManager.updateSessionActivity(session.id);
 
+      // Persist Claude session if used
+      if (lastClaudeSessionId) {
+        this.stateManager.setClaudeSessionId(job.lane, lastClaudeSessionId);
+      }
+
       // Send response to Telegram
       if (job.messageId) {
-        // Edit existing message
         try {
           await this.bot.api.editMessageText(job.chatId, job.messageId, result.output, {
             parse_mode: "Markdown",
           });
         } catch {
-          // Fallback: send as new message
           const chunks = chunkMessage(result.output);
           for (const chunk of chunks) {
             await this.bot.api.sendMessage(job.chatId, chunk, { parse_mode: "Markdown" });
           }
         }
       } else {
-        // Send new messages
         const chunks = chunkMessage(result.output);
         for (const chunk of chunks) {
           try {
@@ -123,13 +229,38 @@ export class QueueWorker {
         }
       }
 
-      // Mark complete
-      this.queueManager.completeJob(job.id, result.output);
+      if (success) {
+        // Completion checkup
+        const check = await runCompletionCheckup({
+          name: job.query.slice(0, 80),
+          id: job.id,
+          query: job.query,
+          output: result.output,
+          isMemoryJob: memoryJob,
+        });
+        if (check) {
+          const lines: string[] = [check.complete ? "✅ Checkup: Complete" : "⚠️ Checkup: Incomplete"];
+          if (check.summary) lines.push(`Summary: ${check.summary}`);
+          if (check.missing && check.missing.length > 0) {
+            lines.push(`Missing: ${check.missing.join("; ")}`);
+          }
+          if (check.next_steps && check.next_steps.length > 0) {
+            lines.push(`Next: ${check.next_steps.join("; ")}`);
+          }
+          if (typeof check.confidence === "number") {
+            lines.push(`Confidence: ${Math.round(check.confidence * 100)}%`);
+          }
+          await this.bot.api.sendMessage(job.chatId, lines.join("\n"));
+        }
+
+        this.queueManager.completeJob(job.id, result.output);
+      } else {
+        this.queueManager.failJob(job.id, result.error ?? "Execution failed");
+      }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
       logger.error({ jobId: job.id, error: errorMessage }, "Job execution failed");
 
-      // Notify user of error
       try {
         if (job.messageId) {
           await this.bot.api.editMessageText(job.chatId, job.messageId, `❌ Error: ${errorMessage}`);
@@ -140,11 +271,10 @@ export class QueueWorker {
         // Ignore notification errors
       }
 
-      // Mark failed
       this.queueManager.failJob(job.id, errorMessage);
     } finally {
-      // Always stop heartbeat when job completes
       this.queueManager.stopJobHeartbeat(heartbeatInterval);
     }
   }
+
 }

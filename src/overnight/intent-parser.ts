@@ -82,11 +82,11 @@ const CONSTRAINT_PATTERNS = [
 /**
  * Parse a message to detect overnight work intent
  */
-export function parseOvernightIntent(message: string): ParsedOvernightIntent {
+export function parseOvernightIntent(message: string, forceOvernight: boolean = false): ParsedOvernightIntent {
   const trimmed = message.trim();
 
   // Check for overnight triggers
-  const isOvernight = OVERNIGHT_PATTERNS.some((p) => p.test(trimmed));
+  const isOvernight = forceOvernight || OVERNIGHT_PATTERNS.some((p) => p.test(trimmed));
 
   if (!isOvernight) {
     return {
@@ -331,6 +331,8 @@ export function getTaskTypeDisplay(type: OvernightTaskType): string {
       return "Prototype generation";
     case "research_dive":
       return "Research deep-dive";
+    case "youtube_summary":
+      return "YouTube summary";
   }
 }
 

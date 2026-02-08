@@ -14,11 +14,12 @@ export interface ScheduledJobConfig {
   name: string;
   cron: string;
   query: string;
-  lane: "work" | "life" | "default";
+  lane: "work" | "life" | "default" | "trading";
   enabled: boolean;
   timeout?: number; // ms, defaults to 600000 (10 min)
   model?: string; // e.g. "sonnet", "haiku", "opus" - defaults to sonnet
-  executor?: "claude" | "kimi" | "gemini"; // defaults to claude; kimi for cheap API; gemini for free CLI
+  executor?: "claude" | "kimi" | "gemini" | "internal"; // defaults to claude; internal for daemon handlers
+  handler?: "ideas_review" | "night_supervisor" | "overnight_review" | "idea_ingest" | "idea_dedup" | "session_summaries" | "weekly_consolidation" | "memory_cleanup" | "ideas_explore" | "nightly_memory" | "homer_improvements";
   contextFiles?: string[]; // files to load and inject as system prompt context
   streamProgress?: boolean; // stream tool usage to Telegram (default: false)
   notifyOnSuccess?: boolean; // defaults to true
@@ -51,6 +52,8 @@ export interface JobExecutionResult {
   error?: string;
   exitCode: number;
   duration: number; // ms
+  executorUsed?: string;
+  fallbackUsed?: boolean;
 }
 
 /**
@@ -95,6 +98,12 @@ export const SCHEDULE_LOCATIONS = [
   { path: "/Users/yj/work/schedule.json", lane: "work" as const },
   { path: "/Users/yj/life/schedule.json", lane: "life" as const },
   { path: "/Users/yj/memory/schedule.json", lane: "default" as const },
+  ...(process.env.TRADING_SCHEDULE_ENABLED === "1"
+    ? [{
+        path: process.env.TRADING_SCHEDULE_FILE ?? "/Users/yj/trading/config/schedule.json",
+        lane: "trading" as const,
+      }]
+    : []),
 ];
 
 /**
@@ -104,6 +113,7 @@ export const LANE_CWD: Record<string, string> = {
   work: "/Users/yj/work",
   life: "/Users/yj/life",
   default: "/Users/yj",
+  trading: process.env.TRADING_CWD ?? "/Users/yj/trading",
 };
 
 /**

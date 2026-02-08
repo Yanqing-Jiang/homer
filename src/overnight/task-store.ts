@@ -38,6 +38,7 @@ interface TaskRow {
   scheduled_for: string | null;
   confidence_score: number | null;
   error: string | null;
+  metadata: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -113,6 +114,7 @@ export class OvernightTaskStore {
     messageId?: number;
     scheduledFor?: Date;
     confidenceScore?: number;
+    metadata?: string;
   }): OvernightTask {
     const id = `overnight_${randomUUID().slice(0, 8)}`;
     const now = new Date().toISOString();
@@ -121,18 +123,19 @@ export class OvernightTaskStore {
       INSERT INTO overnight_tasks (
         id, type, subject, constraints, iterations,
         chat_id, message_id, status, scheduled_for,
-        confidence_score, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+        confidence_score, metadata, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
     `).run(
       id,
       params.type,
       params.subject,
       params.constraints ? JSON.stringify(params.constraints) : null,
-      params.iterations ?? 3,
+      params.iterations ?? 2,
       params.chatId,
       params.messageId ?? null,
       params.scheduledFor?.toISOString() ?? null,
       params.confidenceScore ?? null,
+      params.metadata ?? null,
       now
     );
 
@@ -151,10 +154,25 @@ export class OvernightTaskStore {
     const rows = this.db.prepare(`
       SELECT * FROM overnight_tasks
       WHERE status = 'queued'
+        AND (scheduled_for IS NULL OR scheduled_for <= datetime('now'))
       ORDER BY created_at ASC
     `).all() as TaskRow[];
 
     return rows.map((r) => this.mapTaskRow(r));
+  }
+
+  getNextQueuedTime(): Date | null {
+    const row = this.db.prepare(`
+      SELECT scheduled_for as scheduledFor
+      FROM overnight_tasks
+      WHERE status = 'queued' AND scheduled_for IS NOT NULL
+      ORDER BY scheduled_for ASC
+      LIMIT 1
+    `).get() as { scheduledFor?: string } | undefined;
+
+    if (!row?.scheduledFor) return null;
+    const next = new Date(row.scheduledFor);
+    return isNaN(next.getTime()) ? null : next;
   }
 
   getTasksByStatus(status: OvernightTaskStatus): OvernightTask[] {
@@ -181,24 +199,40 @@ export class OvernightTaskStore {
   updateTaskStatus(
     id: string,
     status: OvernightTaskStatus,
-    extra?: { error?: string; startedAt?: Date; completedAt?: Date }
+    extra?: {
+      error?: string;
+      startedAt?: Date | null;
+      completedAt?: Date | null;
+      scheduledFor?: Date | null;
+      iterations?: number;
+    }
   ): void {
     let query = "UPDATE overnight_tasks SET status = ?";
-    const params: (string | null)[] = [status];
+    const params: (string | number | null)[] = [status];
 
     if (extra?.error) {
       query += ", error = ?";
       params.push(extra.error);
     }
 
-    if (extra?.startedAt) {
+    if (extra?.startedAt !== undefined) {
       query += ", started_at = ?";
-      params.push(extra.startedAt.toISOString());
+      params.push(extra.startedAt ? extra.startedAt.toISOString() : null);
     }
 
-    if (extra?.completedAt) {
+    if (extra?.completedAt !== undefined) {
       query += ", completed_at = ?";
-      params.push(extra.completedAt.toISOString());
+      params.push(extra.completedAt ? extra.completedAt.toISOString() : null);
+    }
+
+    if (extra?.scheduledFor !== undefined) {
+      query += ", scheduled_for = ?";
+      params.push(extra.scheduledFor ? extra.scheduledFor.toISOString() : null);
+    }
+
+    if (typeof extra?.iterations === "number") {
+      query += ", iterations = ?";
+      params.push(extra.iterations);
     }
 
     query += " WHERE id = ?";
@@ -225,10 +259,45 @@ export class OvernightTaskStore {
       scheduledFor: row.scheduled_for ? new Date(row.scheduled_for) : undefined,
       confidenceScore: row.confidence_score ?? undefined,
       error: row.error ?? undefined,
+      metadata: row.metadata ?? undefined,
       createdAt: new Date(row.created_at),
       startedAt: row.started_at ? new Date(row.started_at) : undefined,
       completedAt: row.completed_at ? new Date(row.completed_at) : undefined,
     };
+  }
+
+  // ============================================
+  // METADATA OPERATIONS
+  // ============================================
+
+  updateTaskMetadata(id: string, metadata: string): void {
+    this.db.prepare(
+      "UPDATE overnight_tasks SET metadata = ? WHERE id = ?"
+    ).run(metadata, id);
+  }
+
+  getTaskMetadata(id: string): string | null {
+    const row = this.db.prepare(
+      "SELECT metadata FROM overnight_tasks WHERE id = ?"
+    ).get(id) as { metadata: string | null } | undefined;
+    return row?.metadata ?? null;
+  }
+
+  /**
+   * Find an existing task for a given YouTube video ID.
+   * Used for dedup — returns task if one exists in a non-terminal status.
+   */
+  findTaskByVideoId(videoId: string): OvernightTask | null {
+    const pattern = `%"videoId":"${videoId}"%`;
+    const row = this.db.prepare(`
+      SELECT * FROM overnight_tasks
+      WHERE metadata LIKE ?
+        AND status NOT IN ('failed', 'expired')
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(pattern) as TaskRow | undefined;
+
+    return row ? this.mapTaskRow(row) : null;
   }
 
   // ============================================
@@ -275,7 +344,7 @@ export class OvernightTaskStore {
     const rows = this.db.prepare(`
       SELECT * FROM overnight_iterations
       WHERE task_id = ?
-      ORDER BY approach_label ASC
+      ORDER BY created_at ASC
     `).all(taskId) as IterationRow[];
 
     return rows.map((r) => this.mapIterationRow(r));

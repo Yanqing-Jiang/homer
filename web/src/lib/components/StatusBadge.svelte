@@ -1,5 +1,5 @@
 <script lang="ts">
-	type Status = 'draft' | 'researching' | 'review' | 'planning' | 'execution' | 'completed' | 'archived' | 'active' | 'expired' | 'enabled' | 'disabled' | 'pending' | 'in_progress' | 'success' | 'failed';
+	type Status = 'draft' | 'research' | 'researching' | 'exploring' | 'review' | 'planning' | 'execution' | 'completed' | 'archived' | 'active' | 'expired' | 'enabled' | 'disabled' | 'pending' | 'in_progress' | 'success' | 'failed';
 
 	interface Props {
 		status: Status | string; // Allow string for flexibility with dynamic statuses
@@ -9,13 +9,18 @@
 	let { status, size = 'sm' }: Props = $props();
 
 	const statusConfig: Record<Status, { label: string; class: string }> = {
-		draft: { label: 'Draft', class: 'badge-gray' },
-		researching: { label: 'Researching', class: 'badge-blue' },
-		review: { label: 'Review', class: 'badge-yellow' },
+		draft: { label: 'Draft', class: 'badge-draft' },
+		research: { label: 'Research', class: 'badge-research' },
+		// Legacy statuses - map to research
+		researching: { label: 'Research', class: 'badge-research' },
+		exploring: { label: 'Research', class: 'badge-research' },
+		review: { label: 'Research', class: 'badge-research' },
+		// Plan-specific statuses
 		planning: { label: 'Planning', class: 'badge-blue' },
 		execution: { label: 'Execution', class: 'badge-purple' },
 		completed: { label: 'Completed', class: 'badge-green' },
-		archived: { label: 'Archived', class: 'badge-gray' },
+		archived: { label: 'Archived', class: 'badge-archived' },
+		// Other statuses
 		active: { label: 'Active', class: 'badge-green' },
 		expired: { label: 'Expired', class: 'badge-gray' },
 		enabled: { label: 'Enabled', class: 'badge-green' },
@@ -49,6 +54,23 @@
 		font-size: 12px;
 	}
 
+	/* Idea-specific statuses */
+	.badge-draft {
+		background: #e5e5e5;
+		color: #666;
+	}
+
+	.badge-research {
+		background: #dcfce7;
+		color: #166534;
+	}
+
+	.badge-archived {
+		background: #d4d4d4;
+		color: #525252;
+	}
+
+	/* General statuses */
 	.badge-gray {
 		background: #e5e5e5;
 		color: #666;

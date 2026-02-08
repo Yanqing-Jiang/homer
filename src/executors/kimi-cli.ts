@@ -24,36 +24,46 @@ export interface KimiCLIResult extends ExecutorResult {
 const KIMI_PATH = process.env.KIMI_PATH ?? "/opt/homebrew/bin/kimi";
 const DEFAULT_TIMEOUT = 1200000; // 20 minutes
 
+// Env vars that conflict with Kimi CLI
+const ENV_BLOCKLIST = ["OPENAI_API_KEY", "CI"];
+
 export async function executeKimiCLI(
   prompt: string,
   context: string = "",
   options: KimiCLIOptions = {}
 ): Promise<KimiCLIResult> {
   const {
-    model = "k2", // Default to k2 model
+    model,
     timeout = DEFAULT_TIMEOUT,
     yolo = true,
     workDir,
   } = options;
 
+  const resolvedModel = model ?? "moonshot-ai/kimi-k2.5";
   const startTime = Date.now();
 
   logger.debug(
-    { model, promptLength: prompt.length, contextLength: context.length },
+    { model: resolvedModel, promptLength: prompt.length, contextLength: context.length },
     "Executing Kimi CLI"
   );
 
   return new Promise((resolve) => {
-    // Build arguments
     const args: string[] = [];
 
-    // Model
-    args.push("-m", model);
+    // Model (omit to use config default: moonshot-ai/kimi-k2.5)
+    if (model) {
+      args.push("-m", model);
+    }
+
+    // Thinking mode on by default via config (default_thinking = true)
 
     // Auto-approve actions
     if (yolo) {
       args.push("--yolo");
     }
+
+    // Quiet mode: --print --output-format text --final-message-only
+    args.push("--quiet");
 
     // Working directory
     if (workDir) {
@@ -65,37 +75,32 @@ export async function executeKimiCLI(
       ? `Context:\n${context}\n\n---\n\nTask:\n${prompt}`
       : prompt;
 
-    // Pass prompt via -p flag
     args.push("-p", fullPrompt);
 
-    // Spawn process
+    // Clean env to prevent conflicts
+    const cleanEnv = { ...process.env };
+    for (const key of ENV_BLOCKLIST) {
+      delete cleanEnv[key];
+    }
+
     const child: ChildProcess = spawn(KIMI_PATH, args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        CI: "1",
-        TERM: "dumb",
-        NO_COLOR: "1",
-      },
+      env: cleanEnv,
     });
 
-    // State
     let stdout = "";
     let stderr = "";
     let timedOut = false;
 
-    // Timeout handling
+    // Timeout: SIGTERM then SIGKILL after grace period
     const timeoutId = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
-      // Hard kill after grace period
       setTimeout(() => child.kill("SIGKILL"), 5000);
     }, timeout);
 
-    // Close stdin
     child.stdin?.end();
 
-    // Capture stdout
     if (child.stdout) {
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
@@ -103,18 +108,15 @@ export async function executeKimiCLI(
       });
     }
 
-    // Capture stderr
     if (child.stderr) {
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => {
-        // Filter out deprecation warnings
         if (!chunk.includes("DeprecationWarning")) {
           stderr += chunk;
         }
       });
     }
 
-    // Handle completion
     child.on("close", (code: number | null) => {
       clearTimeout(timeoutId);
       const duration = Date.now() - startTime;
@@ -126,7 +128,7 @@ export async function executeKimiCLI(
           exitCode: 4,
           duration,
           executor: "kimi-cli",
-          model,
+          model: resolvedModel,
         });
         return;
       }
@@ -141,12 +143,11 @@ export async function executeKimiCLI(
           exitCode: code,
           duration,
           executor: "kimi-cli",
-          model,
+          model: resolvedModel,
         });
         return;
       }
 
-      // Success
       logger.debug(
         { duration, outputLength: output.length },
         "Kimi CLI completed successfully"
@@ -157,19 +158,18 @@ export async function executeKimiCLI(
         exitCode: 0,
         duration,
         executor: "kimi-cli",
-        model,
+        model: resolvedModel,
       });
     });
 
     child.on("error", (err: Error) => {
       clearTimeout(timeoutId);
-
       resolve({
         output: `Spawn error: ${err.message}`,
         exitCode: 1,
         duration: Date.now() - startTime,
         executor: "kimi-cli",
-        model,
+        model: resolvedModel,
       });
     });
   });

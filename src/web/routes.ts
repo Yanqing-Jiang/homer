@@ -17,6 +17,7 @@ import { registerClaudeHistoryRoutes } from "./api/claude-history.js";
 import { registerProposalRoutes } from "./routes/proposals.js";
 import { registerCommandRoutes } from "./api/commands.js";
 import { registerRunRoutes } from "./api/runs.js";
+import { registerTradingRoutes } from "./api/trading.js";
 import type { CLIRunManager } from "../executors/cli-runner.js";
 import type { Bot } from "grammy";
 
@@ -85,6 +86,9 @@ export function createRoutes(
   if (cliRunManagerRef) {
     registerRunRoutes(server, stateManager, cliRunManagerRef);
   }
+
+  // Register trading API proxy routes
+  registerTradingRoutes(server);
 
   // Health check counter for periodic integrity checks
   let healthCheckCounter = 0;

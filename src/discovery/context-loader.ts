@@ -67,7 +67,6 @@ function extractInterests(meContent: string): string[] {
     /analytics|data science|data engineering/gi,
     /automation|workflow|productivity/gi,
     /agent|agentic|orchestration/gi,
-    /trading|quant|investing|polymarket/gi,
     /side income|monetization|revenue/gi,
     /CLI|command line|terminal/gi,
     /TypeScript|Python/gi,

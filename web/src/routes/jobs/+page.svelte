@@ -201,16 +201,17 @@
 	<header class="page-header">
 		<div class="header-content">
 			<div class="header-left">
-				<a href="/" class="back-link">
-					<svg
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="2"
-						width="20"
-						height="20"
-					>
-						<path d="M19 12H5M12 19l-7-7 7-7" />
+				<a href="/" class="back-btn" aria-label="Back to chat">
+					<svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+						<path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
+					</svg>
+				</a>
+				<a href="/" class="azure-logo-link">
+					<svg class="azure-icon" viewBox="0 0 23 23" fill="none">
+						<rect width="11" height="11" fill="#f25022" />
+						<rect x="12" width="11" height="11" fill="#7fba00" />
+						<rect y="12" width="11" height="11" fill="#00a4ef" />
+						<rect x="12" y="12" width="11" height="11" fill="#ffb900" />
 					</svg>
 				</a>
 				<h1>Jobs</h1>
@@ -581,8 +582,6 @@
 
 	.header-content {
 		width: 100%;
-		max-width: 1200px;
-		margin: 0 auto;
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
@@ -591,7 +590,7 @@
 	.header-left {
 		display: flex;
 		align-items: center;
-		gap: 12px;
+		gap: 0;
 	}
 
 	.header-right {
@@ -600,34 +599,60 @@
 		gap: 12px;
 	}
 
-	.back-link {
-		color: #ccc;
+	.back-btn {
 		display: flex;
 		align-items: center;
-		padding: 8px;
-		margin: -8px;
-		border-radius: 4px;
-		transition: all 0.15s;
+		justify-content: center;
+		width: 32px;
+		height: 32px;
+		background: rgba(255, 255, 255, 0.1);
+		border-radius: 6px;
+		color: white;
+		transition: all 0.2s ease;
+		cursor: pointer;
+		border: 1px solid rgba(255, 255, 255, 0.15);
+		margin-right: 8px;
 	}
 
-	.back-link:hover {
-		color: white;
-		background: rgba(255, 255, 255, 0.1);
+	.back-btn:hover {
+		background: rgba(255, 255, 255, 0.25);
+		border-color: rgba(255, 255, 255, 0.4);
+		transform: translateX(-2px);
+	}
+
+	.azure-logo-link {
+		display: flex;
+		align-items: center;
+		padding: 4px;
+		border-radius: 4px;
+		transition: all 0.2s ease;
+		margin-right: 12px;
+	}
+
+	.azure-logo-link:hover {
+		background: rgba(255, 255, 255, 0.15);
+	}
+
+	.azure-icon {
+		width: 20px;
+		height: 20px;
+		flex-shrink: 0;
 	}
 
 	h1 {
 		color: white;
-		font-size: 18px;
+		font-size: 16px;
 		font-weight: 600;
 		margin: 0;
 	}
 
 	.count {
-		background: rgba(255, 255, 255, 0.2);
+		background: rgba(255, 255, 255, 0.25);
 		color: white;
 		font-size: 12px;
 		padding: 2px 8px;
 		border-radius: 10px;
+		margin-left: 8px;
 	}
 
 	.view-toggle {

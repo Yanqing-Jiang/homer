@@ -70,9 +70,25 @@
 		}
 	}
 
+	// Map legacy statuses to new simplified statuses
+	function mapLegacyStatus(status: string): string {
+		if (['researching', 'exploring', 'review'].includes(status)) {
+			return 'research';
+		}
+		// Ideas in planning/execution should be viewed in Plans, not Ideas
+		if (['planning', 'execution'].includes(status)) {
+			return 'research'; // Show them in research if no linkedPlanId
+		}
+		return status;
+	}
+
 	const filteredIdeas = $derived(() => {
 		return ideas.filter(idea => {
-			const matchesStatus = filterStatus === 'all' || idea.status === filterStatus;
+			// Hide ideas that are linked to plans - they should be viewed in Plans tab
+			if (idea.linkedPlanId) return false;
+
+			const normalizedStatus = mapLegacyStatus(idea.status);
+			const matchesStatus = filterStatus === 'all' || normalizedStatus === filterStatus;
 			const matchesSearch = !searchQuery ||
 				idea.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
 				idea.content.toLowerCase().includes(searchQuery.toLowerCase());
@@ -81,9 +97,12 @@
 	});
 
 	const statusCounts = $derived(() => {
-		const counts: Record<string, number> = { all: ideas.length };
-		ideas.forEach(idea => {
-			counts[idea.status] = (counts[idea.status] || 0) + 1;
+		// Filter out ideas with linkedPlanId first
+		const visibleIdeas = ideas.filter(idea => !idea.linkedPlanId);
+		const counts: Record<string, number> = { all: visibleIdeas.length };
+		visibleIdeas.forEach(idea => {
+			const normalizedStatus = mapLegacyStatus(idea.status);
+			counts[normalizedStatus] = (counts[normalizedStatus] || 0) + 1;
 		});
 		return counts;
 	});
@@ -222,12 +241,39 @@
 		}
 	}
 
-	function chatAboutIdea(idea: api.Idea) {
-		// Navigate to home with idea context
-		const context = `I'd like to discuss this idea:\n\n**${idea.title}**\n\n${idea.content}\n\nContext: ${idea.context || 'None provided'}`;
-		// Store in session storage and redirect
-		sessionStorage.setItem('copilot_context', context);
-		window.location.href = '/';
+	let chattingAboutIdea = $state(false);
+
+	async function chatAboutIdea(idea: api.Idea) {
+		if (chattingAboutIdea) return;
+		chattingAboutIdea = true;
+
+		try {
+			// Create a new session for this idea
+			const session = await api.createSession(`Idea: ${idea.title}`);
+
+			// Create a thread
+			const thread = await api.createThread(session.id, { provider: 'claude' });
+
+			// Build the message content
+			const messageContent = `I'd like to discuss this idea:\n\n**${idea.title}**\n\n${idea.content}${idea.context ? `\n\nContext: ${idea.context}` : ''}`;
+
+			// Execute the message (this sends it and gets a response)
+			await api.executeMessage(thread.id, messageContent);
+
+			// Store session info for navigation
+			sessionStorage.setItem('resume_session', JSON.stringify({
+				sessionId: session.id,
+				threadId: thread.id
+			}));
+
+			// Navigate to home
+			window.location.href = '/';
+		} catch (e) {
+			console.error('Failed to create chat about idea:', e);
+			toast.error(`Failed to start chat: ${e instanceof Error ? e.message : 'Unknown error'}`);
+		} finally {
+			chattingAboutIdea = false;
+		}
 	}
 
 	async function createIdea() {
@@ -290,9 +336,17 @@
 	<header class="page-header">
 		<div class="header-content">
 			<div class="header-left">
-				<a href="/" class="back-link">
-					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
-						<path d="M19 12H5M12 19l-7-7 7-7"/>
+				<a href="/" class="back-btn" aria-label="Back to chat">
+					<svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+						<path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
+					</svg>
+				</a>
+				<a href="/" class="azure-logo-link">
+					<svg class="azure-icon" viewBox="0 0 23 23" fill="none">
+						<rect width="11" height="11" fill="#f25022" />
+						<rect x="12" width="11" height="11" fill="#7fba00" />
+						<rect y="12" width="11" height="11" fill="#00a4ef" />
+						<rect x="12" y="12" width="11" height="11" fill="#ffb900" />
 					</svg>
 				</a>
 				<h1>Ideas</h1>
@@ -333,24 +387,17 @@
 			</button>
 			<button
 				class="tab"
-				class:active={filterStatus === 'review'}
-				onclick={() => filterStatus = 'review'}
+				class:active={filterStatus === 'research'}
+				onclick={() => filterStatus = 'research'}
 			>
-				Review <span class="tab-count">{statusCounts().review || 0}</span>
+				Research <span class="tab-count">{statusCounts().research || 0}</span>
 			</button>
 			<button
 				class="tab"
-				class:active={filterStatus === 'exploring'}
-				onclick={() => filterStatus = 'exploring'}
+				class:active={filterStatus === 'archived'}
+				onclick={() => filterStatus = 'archived'}
 			>
-				Exploring <span class="tab-count">{statusCounts().exploring || 0}</span>
-			</button>
-			<button
-				class="tab"
-				class:active={filterStatus === 'planning'}
-				onclick={() => filterStatus = 'planning'}
-			>
-				Planning <span class="tab-count">{statusCounts().planning || 0}</span>
+				Archived <span class="tab-count">{statusCounts().archived || 0}</span>
 			</button>
 		</div>
 	</div>
@@ -565,7 +612,7 @@
 					<div class="modal-section">
 						<h4>Update Status</h4>
 						<div class="status-buttons">
-							{#each ['draft', 'review', 'exploring', 'planning', 'execution', 'archived'] as status}
+							{#each ['draft', 'research', 'archived'] as status}
 								<button
 									class="status-btn {status}"
 									class:active={selectedIdea.status === status}
@@ -603,11 +650,11 @@
 							{/if}
 						</button>
 					{/if}
-					<button class="primary-btn" onclick={() => selectedIdea && chatAboutIdea(selectedIdea)}>
+					<button class="primary-btn" onclick={() => selectedIdea && chatAboutIdea(selectedIdea)} disabled={chattingAboutIdea}>
 						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
 							<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
 						</svg>
-						Chat About This
+						{chattingAboutIdea ? 'Creating chat...' : 'Chat About This'}
 					</button>
 				</div>
 			{/if}
@@ -732,8 +779,6 @@
 
 	.header-content {
 		width: 100%;
-		max-width: 1200px;
-		margin: 0 auto;
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
@@ -742,37 +787,63 @@
 	.header-left {
 		display: flex;
 		align-items: center;
-		gap: 12px;
+		gap: 0;
 	}
 
-	.back-link {
-		color: #ccc;
+	.back-btn {
 		display: flex;
 		align-items: center;
-		padding: 8px;
-		margin: -8px;
-		border-radius: 4px;
-		transition: all 0.15s;
+		justify-content: center;
+		width: 32px;
+		height: 32px;
+		background: rgba(255, 255, 255, 0.1);
+		border-radius: 6px;
+		color: white;
+		transition: all 0.2s ease;
+		cursor: pointer;
+		border: 1px solid rgba(255, 255, 255, 0.15);
+		margin-right: 8px;
 	}
 
-	.back-link:hover {
-		color: white;
-		background: rgba(255, 255, 255, 0.1);
+	.back-btn:hover {
+		background: rgba(255, 255, 255, 0.25);
+		border-color: rgba(255, 255, 255, 0.4);
+		transform: translateX(-2px);
+	}
+
+	.azure-logo-link {
+		display: flex;
+		align-items: center;
+		padding: 4px;
+		border-radius: 4px;
+		transition: all 0.2s ease;
+		margin-right: 12px;
+	}
+
+	.azure-logo-link:hover {
+		background: rgba(255, 255, 255, 0.15);
+	}
+
+	.azure-icon {
+		width: 20px;
+		height: 20px;
+		flex-shrink: 0;
 	}
 
 	h1 {
 		color: white;
-		font-size: 18px;
+		font-size: 16px;
 		font-weight: 600;
 		margin: 0;
 	}
 
 	.count {
-		background: rgba(255, 255, 255, 0.2);
+		background: rgba(255, 255, 255, 0.25);
 		color: white;
 		font-size: 12px;
 		padding: 2px 8px;
 		border-radius: 10px;
+		margin-left: 8px;
 	}
 
 	.create-btn {
