@@ -18,8 +18,11 @@ import {
 } from "../../overnight/intent-parser.js";
 import { OvernightTaskStore } from "../../overnight/task-store.js";
 import { MorningPresenter } from "../../overnight/morning-presenter.js";
-import { decodeCallbackData, type OvernightTaskType } from "../../overnight/types.js";
+import { decodeCallbackData, type OvernightTaskType, type YouTubeSummaryMetadata } from "../../overnight/types.js";
 import type { ApproachLabel } from "../../overnight/types.js";
+import { markSummaryReviewed, summaryFileExists } from "../../youtube/summarizer.js";
+import { saveIdeaFile, type ParsedIdea } from "../../ideas/parser.js";
+import { readFileSync } from "fs";
 
 // ============================================
 // STATE
@@ -30,6 +33,7 @@ let morningPresenter: MorningPresenter | null = null;
 
 // Pending clarifications (chatId -> partial task data)
 interface PendingClarification {
+  chatId: number;
   subject: string;
   constraints: string[];
   rawMessage: string;
@@ -37,18 +41,51 @@ interface PendingClarification {
   createdAt: number;
 }
 
+// pending clarification messageId -> data
 const pendingClarifications = new Map<number, PendingClarification>();
 
 // Cleanup stale clarifications every 5 minutes
 setInterval(() => {
   const staleThreshold = Date.now() - 3600000; // 1 hour
-  for (const [chatId, pending] of pendingClarifications.entries()) {
+  for (const [msgId, pending] of pendingClarifications.entries()) {
     if (pending.createdAt < staleThreshold) {
-      pendingClarifications.delete(chatId);
-      logger.debug({ chatId }, "Cleaned up stale overnight clarification");
+      pendingClarifications.delete(msgId);
+      logger.debug({ chatId: pending.chatId }, "Cleaned up stale overnight clarification");
     }
   }
 }, 300000);
+
+// ============================================
+// TASK SPLITTING
+// ============================================
+
+function splitOvernightTasks(message: string): string[] {
+  const trimmed = message.trim();
+  if (!trimmed) return [];
+
+  const lines = trimmed.split("\n");
+  const bulletLines = lines
+    .map((l) => l.trim())
+    .filter((l) => l.match(/^[-*•]\s+/) || l.match(/^\d+\.\s+/))
+    .map((l) => l.replace(/^[-*•]\s+/, "").replace(/^\d+\.\s+/, "").trim())
+    .filter(Boolean);
+
+  if (bulletLines.length >= 2) {
+    return bulletLines;
+  }
+
+  if (trimmed.includes(";")) {
+    return trimmed.split(";").map((s) => s.trim()).filter(Boolean);
+  }
+
+  // Split on " and " when it looks like two actions
+  if (/\b(and)\b/i.test(trimmed) && /(work on|research|investigate|build|implement)/i.test(trimmed)) {
+    const parts = trimmed.split(/\band\b/i).map((s) => s.trim()).filter(Boolean);
+    if (parts.length >= 2) return parts;
+  }
+
+  return [trimmed];
+}
 
 // ============================================
 // INITIALIZATION
@@ -77,30 +114,38 @@ export async function handleOvernightMessage(
     return false;
   }
 
-  // Full parsing
-  const intent = parseOvernightIntent(message);
-
-  if (!intent.isOvernight) {
-    return false;
-  }
-
   const chatId = ctx.chat?.id;
   if (!chatId) return false;
 
-  logger.info(
-    { chatId, subject: intent.subject, type: intent.taskType, confidence: intent.confidence },
-    "Detected overnight work request"
-  );
+  const tasks = splitOvernightTasks(message);
+  if (tasks.length === 0) return false;
 
-  // Check if clarification needed
-  if (intent.clarificationNeeded) {
-    await handleClarificationRequest(ctx, intent);
-    return true;
+  let handled = false;
+
+  for (const taskMessage of tasks) {
+    const intent = parseOvernightIntent(taskMessage, true);
+    if (!intent.isOvernight) {
+      continue;
+    }
+
+    logger.info(
+      { chatId, subject: intent.subject, type: intent.taskType, confidence: intent.confidence },
+      "Detected overnight work request"
+    );
+
+    if (intent.clarificationNeeded) {
+      await handleClarificationRequest(ctx, intent);
+      handled = true;
+      continue;
+    }
+
+    if (intent.taskType && intent.subject) {
+      await queueOvernightTask(ctx, intent.taskType, intent.subject, intent.constraints);
+      handled = true;
+    }
   }
 
-  // Queue the task
-  await queueOvernightTask(ctx, intent.taskType!, intent.subject!, intent.constraints);
-  return true;
+  return handled;
 }
 
 // ============================================
@@ -120,18 +165,19 @@ async function handleClarificationRequest(
     keyboard.text(option.label, `overnight_clarify:${option.value}`).row();
   }
 
-  // Store pending clarification
-  pendingClarifications.set(chatId, {
+  const sent = await ctx.reply(clarification.question, {
+    reply_markup: keyboard,
+    reply_to_message_id: ctx.message?.message_id,
+  });
+
+  // Store pending clarification by clarification message ID
+  pendingClarifications.set(sent.message_id, {
+    chatId,
     subject: intent.subject || intent.rawMessage,
     constraints: intent.constraints,
     rawMessage: intent.rawMessage,
-    messageId: ctx.message?.message_id || 0,
+    messageId: sent.message_id,
     createdAt: Date.now(),
-  });
-
-  await ctx.reply(clarification.question, {
-    reply_markup: keyboard,
-    reply_to_message_id: ctx.message?.message_id,
   });
 }
 
@@ -194,20 +240,19 @@ export function registerOvernightCallbacks(bot: Bot): void {
   // Clarification responses
   bot.callbackQuery(/^overnight_clarify:/, async (ctx) => {
     const value = ctx.callbackQuery.data.replace("overnight_clarify:", "");
-    const chatId = ctx.chat?.id;
-
-    if (!chatId) {
-      await ctx.answerCallbackQuery({ text: "Error: No chat context" });
+    const msgId = ctx.callbackQuery.message?.message_id;
+    if (!msgId) {
+      await ctx.answerCallbackQuery({ text: "Clarification expired" });
       return;
     }
 
-    const pending = pendingClarifications.get(chatId);
+    const pending = pendingClarifications.get(msgId);
     if (!pending) {
       await ctx.answerCallbackQuery({ text: "Clarification expired" });
       return;
     }
 
-    pendingClarifications.delete(chatId);
+    pendingClarifications.delete(msgId);
     await ctx.answerCallbackQuery();
 
     // Handle different clarification values
@@ -231,7 +276,7 @@ export function registerOvernightCallbacks(bot: Bot): void {
     if (value === "confirm") {
       // User confirmed current interpretation
       // Need to detect type again
-      const intent = parseOvernightIntent(pending.rawMessage);
+      const intent = parseOvernightIntent(pending.rawMessage, true);
       if (intent.taskType) {
         await ctx.editMessageText("✓ Confirmed!");
         await queueOvernightTask(ctx, intent.taskType, pending.subject, pending.constraints);
@@ -278,6 +323,48 @@ export function registerOvernightCallbacks(bot: Bot): void {
     }
 
     await handleSkip(ctx, data.taskId);
+  });
+
+  // Approve summary
+  bot.callbackQuery(/^overnight:approve:/, async (ctx) => {
+    const data = decodeCallbackData(ctx.callbackQuery.data);
+    if (!data) {
+      await ctx.answerCallbackQuery({ text: "Invalid request" });
+      return;
+    }
+    await handleApprove(ctx, data.taskId);
+  });
+
+  // Archive summary
+  bot.callbackQuery(/^overnight:archive:/, async (ctx) => {
+    const data = decodeCallbackData(ctx.callbackQuery.data);
+    if (!data) {
+      await ctx.answerCallbackQuery({ text: "Invalid request" });
+      return;
+    }
+    await handleArchive(ctx, data.taskId);
+  });
+
+  // Talk summary
+  bot.callbackQuery(/^overnight:talk:/, async (ctx) => {
+    const data = decodeCallbackData(ctx.callbackQuery.data);
+    if (!data) {
+      await ctx.answerCallbackQuery({ text: "Invalid request" });
+      return;
+    }
+    await handleTalk(ctx, data.taskId);
+  });
+
+  // YouTube: Save to Ideas
+  bot.callbackQuery(/^yt:save:/, async (ctx) => {
+    const taskId = ctx.callbackQuery.data.replace("yt:save:", "");
+    await handleYouTubeSave(ctx, taskId);
+  });
+
+  // YouTube: Dismiss
+  bot.callbackQuery(/^yt:dismiss:/, async (ctx) => {
+    const taskId = ctx.callbackQuery.data.replace("yt:dismiss:", "");
+    await handleYouTubeDismiss(ctx, taskId);
   });
 
   logger.debug("Overnight callback handlers registered");
@@ -371,6 +458,65 @@ async function handleSkip(ctx: Context, taskId: string): Promise<void> {
   await ctx.editMessageText("⏭ Skipped. Workspaces will be cleaned up.");
 }
 
+async function handleApprove(ctx: Context, taskId: string): Promise<void> {
+  if (!taskStore) {
+    await ctx.answerCallbackQuery({ text: "System not initialized" });
+    return;
+  }
+
+  await ctx.answerCallbackQuery({ text: "Approved" });
+  const task = taskStore.getTask(taskId);
+  if (!task) {
+    await ctx.editMessageText("❌ Task not found.");
+    return;
+  }
+
+  taskStore.updateTaskStatus(taskId, "selected");
+  await ctx.editMessageText("✅ Approved. Moving to planning.");
+}
+
+async function handleArchive(ctx: Context, taskId: string): Promise<void> {
+  if (!taskStore) {
+    await ctx.answerCallbackQuery({ text: "System not initialized" });
+    return;
+  }
+
+  await ctx.answerCallbackQuery({ text: "Archived" });
+  const task = taskStore.getTask(taskId);
+  if (!task) {
+    await ctx.editMessageText("❌ Task not found.");
+    return;
+  }
+
+  taskStore.updateTaskStatus(taskId, "skipped");
+  await ctx.editMessageText("🗂 Archived.");
+}
+
+async function handleTalk(ctx: Context, taskId: string): Promise<void> {
+  if (!taskStore) {
+    await ctx.answerCallbackQuery({ text: "System not initialized" });
+    return;
+  }
+
+  await ctx.answerCallbackQuery({ text: "Let's talk" });
+  const task = taskStore.getTask(taskId);
+  if (!task) {
+    await ctx.editMessageText("❌ Task not found.");
+    return;
+  }
+
+  taskStore.updateTaskStatus(taskId, "selected");
+  await ctx.editMessageText("💬 Talk requested.");
+  await ctx.reply(
+    `💬 *Overnight Task Discussion*\n\n` +
+    `Subject: ${task.subject}\n\n` +
+    `1) What outcome do you want?\n` +
+    `2) How urgent is this?\n` +
+    `3) Any constraints or dependencies?`,
+    { parse_mode: "Markdown" }
+  );
+}
+
 // ============================================
 // MILESTONE NOTIFICATIONS
 // ============================================
@@ -401,7 +547,7 @@ export async function presentMorningChoices(
   chatId: number,
   taskId: string
 ): Promise<void> {
-  if (!taskStore || !morningPresenter) {
+  if (!taskStore) {
     logger.error("Overnight system not initialized for morning presentation");
     return;
   }
@@ -412,44 +558,244 @@ export async function presentMorningChoices(
     return;
   }
 
-  // Prepare choices
-  const choice = await morningPresenter.prepareMorningChoices(task);
-  if (!choice) {
-    logger.warn({ taskId }, "No choices to present");
+  // YouTube tasks get a simplified presentation
+  if (task.type === "youtube_summary") {
+    await presentYouTubeSummary(bot, chatId, task);
     return;
   }
 
-  // Format message
-  const message = morningPresenter.formatTelegramMessage(task, choice);
+  const iteration = getLatestIteration(taskId);
+  const message = formatTaskSummary(task.subject, task.type, iteration?.output, task.id);
 
-  // Build keyboard
   const keyboard = new InlineKeyboard();
+  keyboard.text("✅ Approve", `overnight:approve:${task.id}`);
+  keyboard.text("🗂 Archive", `overnight:archive:${task.id}`);
+  keyboard.text("💬 Talk", `overnight:talk:${task.id}`);
 
-  // Option buttons
-  for (const opt of choice.options) {
-    keyboard.text(`${opt.label}: ${opt.name}`, `overnight:select:${task.id}:${opt.label}`);
-  }
-  keyboard.row();
-
-  // Action buttons
-  keyboard.text("📊 Compare All", `overnight:compare:${task.id}:`);
-  keyboard.text("⏭ Skip", `overnight:skip:${task.id}:`);
-
-  // Send message
   try {
     const result = await bot.api.sendMessage(chatId, message, {
-      parse_mode: "Markdown",
+      parse_mode: "HTML",
       reply_markup: keyboard,
     });
 
-    // Update choice with message ID
-    taskStore.setMorningChoiceMessageId(choice.id, result.message_id);
     taskStore.updateTaskStatus(task.id, "presented");
-
-    logger.info({ taskId, chatId, messageId: result.message_id }, "Morning choices presented");
+    logger.info({ taskId, chatId, messageId: result.message_id }, "Overnight summary presented");
   } catch (error) {
-    logger.error({ taskId, chatId, error }, "Failed to present morning choices");
+    logger.error({ taskId, chatId, error }, "Failed to present overnight summary");
   }
+}
+
+export async function presentOvernightSummaries(
+  bot: Bot,
+  stateManager: StateManager,
+  chatId: number
+): Promise<number> {
+  if (!taskStore) {
+    initializeOvernightHandlers(stateManager);
+  }
+  if (!taskStore) return 0;
+
+  const readyTasks = taskStore.getTasksByStatus("ready");
+  let sent = 0;
+  for (const task of readyTasks) {
+    await presentMorningChoices(bot, chatId, task.id);
+    sent++;
+  }
+  return sent;
+}
+
+// ============================================
+// YOUTUBE SUMMARY PRESENTATION
+// ============================================
+
+async function presentYouTubeSummary(
+  bot: Bot,
+  chatId: number,
+  task: ReturnType<OvernightTaskStore["getTask"]> & {}
+): Promise<void> {
+  if (!taskStore) return;
+
+  let metadata: YouTubeSummaryMetadata | null = null;
+  try {
+    metadata = task.metadata ? JSON.parse(task.metadata) as YouTubeSummaryMetadata : null;
+  } catch {
+    // metadata parse failed
+  }
+
+  const videoId = metadata?.videoId ?? "";
+  const summaryPath = summaryFileExists(videoId);
+
+  let summary = "";
+  let careerRelevance = "";
+  let suggestions: string[] = [];
+  let relevanceScore = 0;
+  let videoTitle = metadata?.videoTitle ?? "Unknown";
+
+  if (summaryPath) {
+    try {
+      const content = readFileSync(summaryPath, "utf-8");
+
+      // Extract sections from markdown
+      const titleMatch = content.match(/videoTitle:\s*"([^"]+)"/);
+      if (titleMatch) videoTitle = titleMatch[1]!;
+
+      const scoreMatch = content.match(/relevanceScore:\s*(\d+)/);
+      if (scoreMatch) relevanceScore = parseInt(scoreMatch[1]!, 10);
+
+      const summaryMatch = content.match(/## Summary\n([\s\S]*?)(?=\n## )/);
+      if (summaryMatch) summary = summaryMatch[1]!.trim();
+
+      const careerMatch = content.match(/## Career (?:& Life )?Relevance\n([\s\S]*?)(?=\n## )/);
+      if (careerMatch) careerRelevance = careerMatch[1]!.trim();
+
+      const suggestionsMatch = content.match(/## Actionable Suggestions\n([\s\S]*?)(?=\n## )/);
+      if (suggestionsMatch) {
+        suggestions = suggestionsMatch[1]!
+          .trim()
+          .split("\n")
+          .filter((l) => l.startsWith("- "))
+          .slice(0, 2)
+          .map((l) => l.slice(2));
+      }
+    } catch (error) {
+      logger.warn({ videoId, error }, "Failed to read summary file for presentation");
+    }
+  }
+
+  // Build message (keep under Telegram's 4096 char limit)
+  const scoreEmoji = relevanceScore >= 7 ? "🔥" : relevanceScore >= 4 ? "📊" : "📎";
+  let message = `${scoreEmoji} <b>YouTube Summary</b>\n\n`;
+  message += `<b>${escapeHtml(videoTitle)}</b>\n`;
+  message += `Relevance: ${relevanceScore}/10\n\n`;
+
+  if (summary) {
+    message += `<b>Summary:</b>\n${escapeHtml(summary.slice(0, 600))}\n\n`;
+  }
+
+  if (careerRelevance) {
+    message += `<b>Career Relevance:</b>\n${escapeHtml(careerRelevance.slice(0, 400))}\n\n`;
+  }
+
+  if (suggestions.length > 0) {
+    message += `<b>Actions:</b>\n`;
+    for (const s of suggestions) {
+      message += `• ${escapeHtml(s.slice(0, 200))}\n`;
+    }
+  }
+
+  // Truncate if too long
+  if (message.length > 3800) {
+    message = message.slice(0, 3800) + "...";
+  }
+
+  const keyboard = new InlineKeyboard();
+  keyboard.text("💡 Save to Ideas", `yt:save:${task.id}`);
+  keyboard.text("🗑 Dismiss", `yt:dismiss:${task.id}`);
+
+  try {
+    const result = await bot.api.sendMessage(chatId, message, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+
+    taskStore.updateTaskStatus(task.id, "presented");
+    logger.info({ taskId: task.id, chatId, videoId, messageId: result.message_id }, "YouTube summary presented");
+  } catch (error) {
+    logger.error({ taskId: task.id, chatId, error }, "Failed to present YouTube summary");
+  }
+}
+
+async function handleYouTubeSave(ctx: Context, taskId: string): Promise<void> {
+  if (!taskStore) {
+    await ctx.answerCallbackQuery({ text: "System not initialized" });
+    return;
+  }
+
+  await ctx.answerCallbackQuery({ text: "Saving to ideas..." });
+
+  const task = taskStore.getTask(taskId);
+  if (!task) {
+    await ctx.editMessageText("❌ Task not found.");
+    return;
+  }
+
+  let metadata: YouTubeSummaryMetadata | null = null;
+  try {
+    metadata = task.metadata ? JSON.parse(task.metadata) as YouTubeSummaryMetadata : null;
+  } catch {
+    // ignore
+  }
+
+  const videoId = metadata?.videoId ?? "";
+  const videoUrl = metadata?.videoUrl ?? "";
+  const videoTitle = metadata?.videoTitle ?? "YouTube Video";
+
+  // Read summary file content for the idea
+  const summaryPath = summaryFileExists(videoId);
+  let summaryContent = "";
+  if (summaryPath) {
+    try {
+      const raw = readFileSync(summaryPath, "utf-8");
+      // Strip YAML frontmatter
+      const bodyMatch = raw.match(/---[\s\S]*?---\n([\s\S]*)/);
+      summaryContent = bodyMatch ? bodyMatch[1]!.trim() : raw;
+    } catch {
+      // ignore
+    }
+  }
+
+  // Create idea file
+  const now = new Date();
+  const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
+
+  const idea: ParsedIdea = {
+    id: `yt_${videoId.slice(0, 11)}`,
+    title: `YouTube: ${videoTitle}`,
+    status: "draft",
+    source: "youtube-telegram",
+    content: summaryContent || `Video: ${videoUrl}`,
+    link: videoUrl,
+    tags: ["youtube", "overnight-summary"],
+    timestamp,
+  };
+
+  try {
+    saveIdeaFile(idea);
+    markSummaryReviewed(videoId);
+    taskStore.updateTaskStatus(taskId, "selected");
+    await ctx.editMessageText(`💡 Saved to ideas: ${videoTitle}`);
+    logger.info({ taskId, videoId, ideaId: idea.id }, "YouTube summary saved to ideas");
+  } catch (error) {
+    logger.error({ taskId, error }, "Failed to save YouTube summary to ideas");
+    await ctx.editMessageText("❌ Failed to save to ideas.");
+  }
+}
+
+async function handleYouTubeDismiss(ctx: Context, taskId: string): Promise<void> {
+  if (!taskStore) {
+    await ctx.answerCallbackQuery({ text: "System not initialized" });
+    return;
+  }
+
+  await ctx.answerCallbackQuery({ text: "Dismissed" });
+
+  const task = taskStore.getTask(taskId);
+  if (!task) {
+    await ctx.editMessageText("❌ Task not found.");
+    return;
+  }
+
+  let metadata: YouTubeSummaryMetadata | null = null;
+  try {
+    metadata = task.metadata ? JSON.parse(task.metadata) as YouTubeSummaryMetadata : null;
+  } catch {
+    // ignore
+  }
+
+  const videoId = metadata?.videoId ?? "";
+  markSummaryReviewed(videoId);
+  taskStore.updateTaskStatus(taskId, "skipped");
+  await ctx.editMessageText("🗑 Dismissed.");
 }
 
 // ============================================
@@ -529,6 +875,31 @@ function formatStatus(status: string): string {
     default:
       return "•";
   }
+}
+
+function getLatestIteration(taskId: string): { output?: string } | undefined {
+  if (!taskStore) return undefined;
+  const iterations = taskStore.getIterationsByTask(taskId);
+  if (iterations.length === 0) return undefined;
+  return iterations[iterations.length - 1];
+}
+
+function formatTaskSummary(subject: string, type: string, output: string | undefined, taskId: string): string {
+  const typeLabel = type === "prototype_work" ? "Coding" : type === "research_dive" ? "Research" : type;
+  const header =
+    `🌙 <b>Overnight Task Complete</b>\n\n` +
+    `<b>Subject:</b> ${escapeHtml(subject)}\n` +
+    `<b>Type:</b> ${escapeHtml(typeLabel)}\n` +
+    `<b>Task ID:</b> <code>${escapeHtml(taskId)}</code>\n\n`;
+  const body = output ? escapeHtml(output.slice(0, 1500)) : "No output recorded.";
+  return header + body;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 function formatAge(date: Date): string {

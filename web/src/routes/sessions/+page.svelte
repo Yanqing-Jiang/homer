@@ -32,6 +32,12 @@
 	let messageInput = $state('');
 	let sendingMessage = $state(false);
 	let streamingContent = $state('');
+	let textareaRef = $state<HTMLTextAreaElement | null>(null);
+
+	// File attachment state (client-only)
+	let attachedFiles = $state<File[]>([]);
+	let uploadingFiles = $state(false);
+	let uploadError = $state<string | null>(null);
 
 	// Load sessions on mount
 	onMount(async () => {
@@ -89,7 +95,7 @@
 		}
 	}
 
-	async function createThread(provider: 'claude' | 'gemini' | 'codex' = 'claude') {
+	async function createThread(provider: 'claude' | 'gemini' | 'codex' | 'chatgpt' = 'claude') {
 		if (!selectedSession) return;
 		try {
 			const thread = await api.createThread(selectedSession.id, {
@@ -106,15 +112,107 @@
 		}
 	}
 
+	// File attachment functions
+	const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+	function openFilePicker() {
+		const input = document.createElement('input');
+		input.type = 'file';
+		input.multiple = true;
+		input.accept = '.txt,.md,.csv,.html,.json,.js,.ts,.py,.sql,.xml,.yaml,.yml,.css,.tsx,.jsx,.pdf';
+		input.onchange = (e) => {
+			const files = Array.from((e.target as HTMLInputElement).files ?? []);
+			const oversized = files.filter((f) => f.size > MAX_FILE_SIZE);
+			if (oversized.length > 0) {
+				uploadError = `Files too large (>10MB): ${oversized.map((f) => f.name).join(', ')}`;
+				return;
+			}
+			uploadError = null;
+			attachedFiles = [...attachedFiles, ...files];
+		};
+		input.click();
+	}
+
+	function removeFile(file: File) {
+		attachedFiles = attachedFiles.filter((f) => f !== file);
+	}
+
+	function clearAllFiles() {
+		attachedFiles = [];
+		uploadError = null;
+	}
+
+	// Textarea auto-resize
+	async function handleTextareaInput() {
+		if (!textareaRef) return;
+		textareaRef.style.height = 'auto';
+		textareaRef.style.height = `${textareaRef.scrollHeight}px`;
+	}
+
+	function handleKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter' && !e.shiftKey) {
+			e.preventDefault();
+			if (canSend) {
+				sendMessage();
+			}
+		}
+		if (e.key === 'Escape') {
+			textareaRef?.blur();
+		}
+	}
+
+	// Computed: can send message
+	const canSend = $derived(
+		!sendingMessage && !uploadingFiles && (messageInput.trim() || attachedFiles.length > 0)
+	);
+
 	async function sendMessage() {
-		if (!selectedThread || !messageInput.trim() || sendingMessage) return;
+		if (!selectedThread || (!messageInput.trim() && attachedFiles.length === 0) || sendingMessage) return;
 
 		const content = messageInput.trim();
 		const threadId = selectedThread.id;
 		const provider = selectedThread.provider;
+		const isExecutorCommand = /^\/(gemini|codex|claude|sonnet|opus|chatgpt|g|x|new)\b/i.test(content);
+		let sessionExecutor: api.ExecutorType = 'claude';
+		if (selectedSession) {
+			try {
+				const state = await api.getExecutorState(selectedSession.id);
+				sessionExecutor = state.executor;
+			} catch (err) {
+				console.warn('Failed to load executor state, defaulting to Claude:', err);
+			}
+		}
+
+		// Upload files first if any
+		let uploadIds: string[] = [];
+		const filesToUpload = [...attachedFiles];
+		if (filesToUpload.length > 0 && selectedSession) {
+			uploadingFiles = true;
+			uploadError = null;
+			try {
+				for (const file of filesToUpload) {
+					const upload = await api.uploadFile(file, selectedSession.id);
+					uploadIds.push(upload.id);
+				}
+			} catch (err) {
+				uploadingFiles = false;
+				uploadError = err instanceof Error ? err.message : 'Failed to upload files';
+				return;
+			}
+			uploadingFiles = false;
+		}
+
+		// Clear input and files
+		const savedContent = messageInput;
 		messageInput = '';
+		attachedFiles = [];
 		sendingMessage = true;
 		streamingContent = '';
+
+		// Reset textarea height
+		if (textareaRef) {
+			textareaRef.style.height = 'auto';
+		}
 
 		// Optimistically add user message
 		const tempUserMessage: api.ThreadMessage = {
@@ -131,8 +229,11 @@
 			messages: [...selectedThread.messages, tempUserMessage]
 		};
 
-		if (provider === 'claude') {
-			api.streamMessage(threadId, content, {
+		if (provider === 'claude' && !isExecutorCommand && sessionExecutor === 'claude') {
+			api.streamMessage(
+				threadId,
+				content,
+				{
 				onStart: (data) => {
 					// Update temp message with real ID
 					if (selectedThread && selectedThread.id === threadId) {
@@ -168,13 +269,32 @@
 				},
 				onError: (data) => {
 					sendingMessage = false;
-					error = data.message;
+
+					// Handle 409 Conflict (thread busy)
+					if (data.code === 'THREAD_BUSY') {
+						error = 'Thread is busy. Please wait for the current response to complete.';
+					} else {
+						error = data.message;
+					}
+
+					// Rollback optimistic update
+					if (selectedThread && selectedThread.id === threadId) {
+						selectedThread = {
+							...selectedThread,
+							messages: selectedThread.messages.filter((m) => m.id !== tempUserMessage.id)
+						};
+					}
+
+					// Restore message input so user can retry
+					messageInput = savedContent;
 					if (data.code === 'SESSION_EXPIRED' && selectedThread && selectedThread.id === threadId) {
 						selectedThread = { ...selectedThread, status: 'expired' };
 					}
 					streamingContent = '';
 				}
-			});
+			},
+			{ attachments: uploadIds, sessionId: selectedSession?.id }
+			);
 			return;
 		}
 
@@ -261,6 +381,19 @@
 		return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 	}
 
+	function formatMessageTime(timestamp: string): string {
+		const date = new Date(timestamp);
+		const now = new Date();
+		const isToday = date.toDateString() === now.toDateString();
+		const timeStr = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+
+		if (isToday) {
+			return timeStr;
+		}
+		// Show date + time for older messages
+		return `${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} ${timeStr}`;
+	}
+
 	function getProviderIcon(provider: string) {
 		switch (provider.toLowerCase()) {
 			case 'claude':
@@ -269,6 +402,8 @@
 				return '🔵';
 			case 'codex':
 				return '🟣';
+			case 'chatgpt':
+				return '🟢';
 			default:
 				return '🤖';
 		}
@@ -327,16 +462,17 @@
 	<header class="page-header">
 		<div class="header-content">
 			<div class="header-left">
-				<a href="/" class="back-link">
-					<svg
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="2"
-						width="20"
-						height="20"
-					>
-						<path d="M19 12H5M12 19l-7-7 7-7" />
+				<a href="/" class="back-btn" aria-label="Back to chat">
+					<svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+						<path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
+					</svg>
+				</a>
+				<a href="/" class="azure-logo-link">
+					<svg class="azure-icon" viewBox="0 0 23 23" fill="none">
+						<rect width="11" height="11" fill="#f25022" />
+						<rect x="12" width="11" height="11" fill="#7fba00" />
+						<rect y="12" width="11" height="11" fill="#00a4ef" />
+						<rect x="12" y="12" width="11" height="11" fill="#ffb900" />
 					</svg>
 				</a>
 				<h1>Sessions</h1>
@@ -611,6 +747,7 @@
 											<span class="message-role"
 												>{message.role === 'user' ? 'You' : selectedThread.provider}</span
 											>
+											<span class="message-time">{formatMessageTime(message.createdAt)}</span>
 										</div>
 										<p class="message-text">{message.content}</p>
 									</div>
@@ -632,23 +769,74 @@
 						</div>
 
 						{#if selectedThread.status === 'active'}
-							<div class="chat-input">
-								<input
-									type="text"
-									bind:value={messageInput}
-									placeholder="Type a message..."
-									disabled={sendingMessage}
-									onkeydown={(e) => e.key === 'Enter' && sendMessage()}
-								/>
-								<button class="send-btn" onclick={sendMessage} disabled={sendingMessage || !messageInput.trim()}>
-									{#if sendingMessage}
-										<span class="spinner"></span>
-									{:else}
-										<svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
-											<path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
-										</svg>
+							<div class="chat-composer-container">
+								<div class="chat-composer">
+									<!-- Attachment chips -->
+									{#if attachedFiles.length > 0}
+										<div class="attachment-area" role="list" aria-label="Attached files">
+											{#each attachedFiles as file}
+												<div class="attachment-chip" role="listitem">
+													<span class="chip-name">{file.name}</span>
+													<button
+														class="chip-remove"
+														onclick={() => removeFile(file)}
+														aria-label="Remove {file.name}"
+													>&times;</button>
+												</div>
+											{/each}
+											<button class="chip-clear-all" onclick={clearAllFiles} aria-label="Clear all files">
+												Clear all
+											</button>
+										</div>
 									{/if}
-								</button>
+
+									<!-- Upload error -->
+									{#if uploadError}
+										<div class="upload-error">{uploadError}</div>
+									{/if}
+
+									<div class="textarea-wrapper">
+										<!-- Attach button -->
+										<button
+											class="attach-btn"
+											onclick={openFilePicker}
+											disabled={sendingMessage || uploadingFiles}
+											aria-label="Attach file"
+										>
+											<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+												<path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+											</svg>
+										</button>
+
+										<!-- Textarea -->
+										<textarea
+											bind:this={textareaRef}
+											bind:value={messageInput}
+											oninput={handleTextareaInput}
+											onkeydown={handleKeydown}
+											placeholder="Message Homer..."
+											rows="1"
+											disabled={sendingMessage || uploadingFiles}
+											aria-label="Message Homer"
+										></textarea>
+
+										<!-- Send button -->
+										<button
+											class="send-btn"
+											onclick={sendMessage}
+											disabled={!canSend}
+											aria-label="Send message"
+										>
+											{#if sendingMessage || uploadingFiles}
+												<span class="spinner"></span>
+											{:else}
+												<svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+													<path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+												</svg>
+											{/if}
+										</button>
+									</div>
+								</div>
 							</div>
 						{:else if selectedThread.status === 'expired'}
 							<div class="expired-notice">
@@ -745,8 +933,6 @@
 
 	.header-content {
 		width: 100%;
-		max-width: 1200px;
-		margin: 0 auto;
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
@@ -755,37 +941,63 @@
 	.header-left {
 		display: flex;
 		align-items: center;
-		gap: 12px;
+		gap: 0;
 	}
 
-	.back-link {
-		color: #ccc;
+	.back-btn {
 		display: flex;
 		align-items: center;
-		padding: 8px;
-		margin: -8px;
-		border-radius: 4px;
-		transition: all 0.15s;
+		justify-content: center;
+		width: 32px;
+		height: 32px;
+		background: rgba(255, 255, 255, 0.1);
+		border-radius: 6px;
+		color: white;
+		transition: all 0.2s ease;
+		cursor: pointer;
+		border: 1px solid rgba(255, 255, 255, 0.15);
+		margin-right: 8px;
 	}
 
-	.back-link:hover {
-		color: white;
-		background: rgba(255, 255, 255, 0.1);
+	.back-btn:hover {
+		background: rgba(255, 255, 255, 0.25);
+		border-color: rgba(255, 255, 255, 0.4);
+		transform: translateX(-2px);
+	}
+
+	.azure-logo-link {
+		display: flex;
+		align-items: center;
+		padding: 4px;
+		border-radius: 4px;
+		transition: all 0.2s ease;
+		margin-right: 12px;
+	}
+
+	.azure-logo-link:hover {
+		background: rgba(255, 255, 255, 0.15);
+	}
+
+	.azure-icon {
+		width: 20px;
+		height: 20px;
+		flex-shrink: 0;
 	}
 
 	h1 {
 		color: white;
-		font-size: 18px;
+		font-size: 16px;
 		font-weight: 600;
 		margin: 0;
 	}
 
 	.count {
-		background: rgba(255, 255, 255, 0.2);
+		background: rgba(255, 255, 255, 0.25);
 		color: white;
 		font-size: 12px;
 		padding: 2px 8px;
 		border-radius: 10px;
+		margin-left: 8px;
 	}
 
 	.create-btn {
@@ -1300,12 +1512,21 @@
 
 	.message-header {
 		margin-bottom: 4px;
+		display: flex;
+		align-items: center;
+		gap: 8px;
 	}
 
 	.message-role {
 		font-size: 13px;
 		font-weight: 600;
 		color: #1b1b1b;
+	}
+
+	.message-time {
+		font-size: 11px;
+		color: #888;
+		font-weight: 400;
 	}
 
 	.message-text {
@@ -1335,52 +1556,169 @@
 		}
 	}
 
-	.chat-input {
-		display: flex;
-		gap: 8px;
-		padding-top: 12px;
+	/* Microsoft Azure-style chat composer */
+	.chat-composer-container {
+		padding: 12px 16px;
+		padding-bottom: calc(12px + env(safe-area-inset-bottom));
+		background: #f2f2f2;
 		border-top: 1px solid #e0e0e0;
 		margin-top: auto;
 	}
 
-	.chat-input input {
-		flex: 1;
-		padding: 10px 12px;
-		border: 1px solid #e0e0e0;
+	.chat-composer {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 8px 12px;
+		background: white;
 		border-radius: 4px;
-		font-size: 14px;
+		border: 1px solid #e0e0e0;
+		transition: border-color 0.2s, box-shadow 0.2s;
 	}
 
-	.chat-input input:disabled {
+	.chat-composer:focus-within {
+		border-color: #0078d4;
+		box-shadow: 0 0 0 1px #0078d4;
+	}
+
+	.attachment-area {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		padding-bottom: 4px;
+	}
+
+	.attachment-chip {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 4px 8px;
+		background: #f0f0f0;
+		border: 1px solid #e0e0e0;
+		border-radius: 4px;
+		font-size: 13px;
+		color: #323130;
+	}
+
+	.chip-name {
+		max-width: 150px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.chip-remove {
+		background: none;
+		border: none;
+		color: #605e5c;
+		cursor: pointer;
+		padding: 2px 4px;
+		font-size: 14px;
+		line-height: 1;
+	}
+
+	.chip-remove:hover {
+		color: #323130;
+	}
+
+	.chip-clear-all {
+		background: none;
+		border: none;
+		color: #605e5c;
+		cursor: pointer;
+		font-size: 12px;
+		padding: 4px 8px;
+	}
+
+	.chip-clear-all:hover {
+		color: #323130;
+		text-decoration: underline;
+	}
+
+	.upload-error {
+		color: #a4262c;
+		font-size: 12px;
+		padding: 4px 0;
+	}
+
+	.textarea-wrapper {
+		display: flex;
+		align-items: flex-end;
+		gap: 8px;
+	}
+
+	.chat-composer textarea {
+		flex: 1;
+		border: none;
+		background: transparent;
+		resize: none;
+		font-size: 14px;
+		line-height: 1.5;
+		max-height: 200px;
+		overflow-y: auto;
+		color: #323130;
+		padding: 6px 0;
+		font-family: inherit;
+	}
+
+	.chat-composer textarea::placeholder {
+		color: #a19f9d;
+	}
+
+	.chat-composer textarea:focus {
+		outline: none;
+	}
+
+	.chat-composer textarea:disabled {
+		opacity: 0.6;
 		background: #f5f5f5;
 	}
 
+	.attach-btn,
 	.send-btn {
-		width: 40px;
-		height: 40px;
-		border: none;
+		width: 32px;
+		height: 32px;
+		min-width: 32px;
 		border-radius: 4px;
-		background: #0078d4;
-		color: white;
+		border: none;
+		background: transparent;
 		cursor: pointer;
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		color: #605e5c;
+		transition: all 0.15s;
 	}
 
-	.send-btn:hover {
-		background: #006cbe;
+	.attach-btn:hover:not(:disabled) {
+		background: #f0f0f0;
+		color: #323130;
+	}
+
+	.attach-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
 	}
 
 	.send-btn:disabled {
-		background: #ccc;
+		background: #f0f0f0;
+		color: #a19f9d;
 		cursor: not-allowed;
+	}
+
+	.send-btn:not(:disabled) {
+		background: #0078d4;
+		color: white;
+	}
+
+	.send-btn:not(:disabled):hover {
+		background: #006cbe;
 	}
 
 	.spinner {
 		width: 16px;
 		height: 16px;
-		border: 2px solid white;
+		border: 2px solid currentColor;
 		border-top-color: transparent;
 		border-radius: 50%;
 		animation: spin 0.8s linear infinite;
@@ -1389,6 +1727,18 @@
 	@keyframes spin {
 		to {
 			transform: rotate(360deg);
+		}
+	}
+
+	/* Mobile adjustments */
+	@media (max-width: 640px) {
+		.chat-composer-container {
+			padding: 8px 12px;
+			padding-bottom: calc(8px + env(safe-area-inset-bottom));
+		}
+
+		.chat-composer {
+			border-radius: 12px;
 		}
 	}
 

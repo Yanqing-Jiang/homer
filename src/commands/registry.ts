@@ -5,7 +5,7 @@
  * Supports persistent executor switching across conversation sessions.
  */
 
-export type ExecutorType = "claude" | "gemini" | "codex";
+export type ExecutorType = "claude" | "gemini" | "codex" | "kimi" | "chatgpt" | "opencode";
 
 export type CommandCategory =
   | "session"    // Session management (new, etc.)
@@ -30,9 +30,12 @@ export interface CommandDefinition {
  * Model configurations for each executor
  */
 export const EXECUTOR_MODELS: Record<ExecutorType, string | undefined> = {
-  claude: "sonnet",              // Cost-effective default
-  codex: "opus",                 // Deep reasoning
+  claude: "opus",                   // Default: highest-quality
+  codex: undefined,                 // Codex CLI (model handled by CLI)
   gemini: "gemini-3-flash-preview", // Fast, cheap
+  kimi: "kimi-k2-5",                // Kimi K2.5 via NVIDIA NIM
+  chatgpt: undefined,               // Uses Claude + browser skill to access ChatGPT
+  opencode: "google/gemini-3-flash-preview", // OpenCode CLI (default: Gemini Flash)
 };
 
 /**
@@ -52,7 +55,7 @@ export const COMMANDS: CommandDefinition[] = [
     category: "executor",
     description: "Switch to Claude (default, tool use)",
     executor: "claude",
-    model: "sonnet",
+    model: "opus",
   },
   {
     name: "/gemini",
@@ -60,33 +63,57 @@ export const COMMANDS: CommandDefinition[] = [
     description: "Switch to Gemini CLI (research, front-end)",
     executor: "gemini",
     model: "gemini-3-flash-preview",
+    deprecated: true,
+    deprecatedMessage: "Use /open_flash instead. /gemini still works but will be removed.",
   },
   {
     name: "/codex",
     category: "executor",
     description: "Switch to Codex (deep reasoning, backend)",
     executor: "codex",
+  },
+  {
+    name: "/sonnet",
+    category: "executor",
+    description: "Switch Claude to Sonnet",
+    executor: "claude",
+    model: "sonnet",
+  },
+  {
+    name: "/opus",
+    category: "executor",
+    description: "Switch Claude to Opus",
+    executor: "claude",
     model: "opus",
   },
-
-  // Deprecated commands (with migration)
   {
-    name: "/g",
-    category: "deprecated",
-    deprecated: true,
-    deprecatedMessage: "Use /gemini instead. /g will be removed soon.",
-    description: "Deprecated: Use /gemini",
-    executor: "gemini",
-    aliases: [],
+    name: "/chatgpt",
+    category: "executor",
+    description: "Use ChatGPT via browser skill",
+    executor: "chatgpt",
   },
   {
-    name: "/x",
-    category: "deprecated",
+    name: "/kimi",
+    category: "executor",
+    description: "Switch to Kimi CLI (long-context, multilingual)",
+    executor: "kimi",
+    model: "kimi-k2-5",
     deprecated: true,
-    deprecatedMessage: "Use /codex instead. /x will be removed soon.",
-    description: "Deprecated: Use /codex",
-    executor: "codex",
-    aliases: [],
+    deprecatedMessage: "Use /open_kimi instead. /kimi still works but will be removed.",
+  },
+  {
+    name: "/open_flash",
+    category: "executor",
+    description: "OpenCode with Gemini Flash",
+    executor: "opencode",
+    model: "google/gemini-3-flash-preview",
+  },
+  {
+    name: "/open_kimi",
+    category: "executor",
+    description: "OpenCode with Kimi K2.5",
+    executor: "opencode",
+    model: "opencode/kimi-k2.5-free",
   },
 
   // Search commands

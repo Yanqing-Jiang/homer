@@ -104,7 +104,7 @@ export interface Thread {
 	id: string;
 	chatSessionId: string;
 	title: string | null;
-	provider: 'claude' | 'gemini' | 'codex';
+	provider: 'claude' | 'gemini' | 'codex' | 'chatgpt';
 	model: string | null;
 	status: 'active' | 'expired' | 'archived';
 	externalSessionId: string | null;
@@ -192,7 +192,7 @@ export async function createThread(
 	sessionId: string,
 	options: {
 		title?: string;
-		provider: 'claude' | 'gemini' | 'codex';
+		provider: 'claude' | 'gemini' | 'codex' | 'chatgpt';
 		model?: string;
 		parentThreadId?: string;
 		branchPointMessageId?: string;
@@ -363,7 +363,7 @@ export async function getJobCalendar(options?: {
 export interface Idea {
 	id: string;
 	title: string;
-	status: 'draft' | 'researching' | 'exploring' | 'review' | 'planning' | 'execution' | 'archived';
+	status: 'draft' | 'research' | 'archived' | 'researching' | 'exploring' | 'review' | 'planning' | 'execution'; // Include legacy for backwards compatibility
 	source: string;
 	content: string;
 	context?: string | null;
@@ -758,6 +758,17 @@ export function streamMessage(
 				return;
 			}
 
+			// Handle 409 - thread busy
+			if (response.status === 409) {
+				const error = await response.json().catch(() => ({ code: 'THREAD_BUSY' }));
+				callbacks.onError?.({
+					message: error.message || 'Thread is busy. Please wait for the current response to complete.',
+					recoverable: true,
+					code: error.code || 'THREAD_BUSY'
+				});
+				return;
+			}
+
 			if (!response.ok) {
 				const error = await response.json().catch(() => ({ error: 'Stream failed' }));
 				callbacks.onError?.({ message: error.error || 'Stream failed', recoverable: false });
@@ -842,7 +853,7 @@ export function streamMessage(
 // Commands & Executor API
 // ============================================
 
-export type ExecutorType = 'claude' | 'gemini' | 'codex';
+export type ExecutorType = 'claude' | 'gemini' | 'codex' | 'chatgpt';
 
 export interface CommandDefinition {
 	name: string;
@@ -1016,4 +1027,89 @@ export function streamRunEvents(
 			reader?.cancel().catch(() => {});
 		}
 	};
+}
+
+// ============================================
+// Trading API
+// ============================================
+
+/**
+ * Get trading dashboard data
+ */
+export async function getTradingDashboard(): Promise<unknown> {
+	return apiFetch('/api/trading/dashboard');
+}
+
+/**
+ * Get trading service health
+ */
+export async function getTradingHealth(): Promise<unknown> {
+	return apiFetch('/api/trading/health');
+}
+
+/**
+ * Get trading strategies
+ */
+export async function getTradingStrategies(): Promise<{ strategies: unknown[] }> {
+	const result = await apiFetch<{ strategies: unknown[] } | undefined>('/api/trading/strategies');
+	return result ?? { strategies: [] };
+}
+
+/**
+ * Start a trading strategy
+ */
+export async function startTradingStrategy(name: string): Promise<unknown> {
+	return apiFetch(`/api/trading/strategies/${name}/start`, { method: 'POST' });
+}
+
+/**
+ * Stop a trading strategy
+ */
+export async function stopTradingStrategy(name: string): Promise<unknown> {
+	return apiFetch(`/api/trading/strategies/${name}/stop`, { method: 'POST' });
+}
+
+/**
+ * Get current positions
+ */
+export async function getTradingPositions(): Promise<{ positions: unknown[] }> {
+	const result = await apiFetch<{ positions: unknown[] } | undefined>('/api/trading/positions');
+	return result ?? { positions: [] };
+}
+
+/**
+ * Get recent trades
+ */
+export async function getTradingTrades(limit?: number): Promise<{ trades: unknown[] }> {
+	const params = limit ? `?limit=${limit}` : '';
+	const result = await apiFetch<{ trades: unknown[] } | undefined>(`/api/trading/trades${params}`);
+	return result ?? { trades: [] };
+}
+
+/**
+ * Get P&L summary
+ */
+export async function getTradingPnL(): Promise<unknown> {
+	return apiFetch('/api/trading/pnl');
+}
+
+/**
+ * Start paper trading service
+ */
+export async function startTradingService(options?: {
+	symbols?: string[];
+	capital?: number;
+	daily_loss_limit?: number;
+}): Promise<{ success: boolean; message: string }> {
+	return apiFetch('/api/trading/start', {
+		method: 'POST',
+		body: JSON.stringify(options ?? {})
+	});
+}
+
+/**
+ * Stop paper trading service
+ */
+export async function stopTradingService(): Promise<{ success: boolean; message: string }> {
+	return apiFetch('/api/trading/stop', { method: 'POST' });
 }

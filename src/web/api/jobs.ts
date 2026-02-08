@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { readFileSync, writeFileSync, existsSync } from "fs";
+import { CronUtils } from "../../utils/cron.js";
 import type { StateManager } from "../../state/manager.js";
 import type { Scheduler } from "../../scheduler/index.js";
 import { logger } from "../../utils/logger.js";
@@ -331,118 +332,21 @@ function saveScheduleConfig(config: ScheduleConfig): void {
  * Convert cron expression to human-readable string
  */
 function cronToHuman(cron: string): string {
-  const parts = cron.split(" ");
-  if (parts.length !== 5) return cron;
-
-  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
-
-  // Common patterns
-  if (minute === "0" && hour === "*") {
-    return "Every hour";
-  }
-  if (minute === "*/15" || minute === "*/30") {
-    return `Every ${minute.slice(2)} minutes`;
-  }
-  if (minute === "0" && hour?.startsWith("*/")) {
-    return `Every ${hour.slice(2)} hours`;
-  }
-  if (dayOfMonth === "*" && month === "*" && dayOfWeek === "*") {
-    const h = parseInt(hour ?? "0", 10);
-    const m = parseInt(minute ?? "0", 10);
-    const time = `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`;
-    return `Daily at ${time}`;
-  }
-
-  return cron;
+  return CronUtils.toHuman(cron);
 }
 
 /**
  * Get next N run times for a cron expression
  */
 function getNextRuns(cron: string, count: number): string[] {
-  // Simple implementation - for accurate results, use a cron library
-  const runs: string[] = [];
-  const now = new Date();
-  let current = new Date(now);
-
-  // Parse cron
-  const parts = cron.split(" ");
-  if (parts.length !== 5) return runs;
-
-  const [minutePart, hourPart] = parts;
-
-  // Simple: handle fixed hour/minute patterns
-  const minute = minutePart?.startsWith("*/")
-    ? -1  // Every N minutes
-    : parseInt(minutePart ?? "0", 10);
-
-  const hourInterval = hourPart?.startsWith("*/")
-    ? parseInt(hourPart.slice(2), 10)
-    : null;
-  const hour = hourInterval === null
-    ? parseInt(hourPart ?? "0", 10)
-    : -1;
-
-  for (let i = 0; i < count && runs.length < count; i++) {
-    current = new Date(current.getTime() + 60 * 60 * 1000); // Add 1 hour
-
-    if (hourInterval !== null) {
-      // Every N hours
-      if (current.getHours() % hourInterval === 0 && current.getMinutes() === (minute >= 0 ? minute : 0)) {
-        runs.push(current.toISOString());
-      }
-    } else if (hour >= 0 && minute >= 0) {
-      // Daily at specific time
-      if (current.getHours() === hour && current.getMinutes() === minute) {
-        runs.push(current.toISOString());
-      }
-    }
-  }
-
-  return runs;
+  return CronUtils.getNextRuns(cron, count).map(d => d.toISOString());
 }
 
 /**
  * Get all runs between two dates for a cron expression
  */
 function getRunsBetween(cron: string, start: Date, end: Date): Date[] {
-  const runs: Date[] = [];
-  const parts = cron.split(" ");
-  if (parts.length !== 5) return runs;
-
-  const [minutePart, hourPart] = parts;
-  const minute = minutePart?.startsWith("*/") ? 0 : parseInt(minutePart ?? "0", 10);
-  const hourInterval = hourPart?.startsWith("*/")
-    ? parseInt(hourPart.slice(2), 10)
-    : null;
-  const hour = hourInterval === null ? parseInt(hourPart ?? "0", 10) : -1;
-
-  // Iterate through each day
-  const current = new Date(start);
-  current.setHours(0, 0, 0, 0);
-
-  while (current <= end) {
-    if (hourInterval !== null) {
-      // Every N hours
-      for (let h = 0; h < 24; h += hourInterval) {
-        const run = new Date(current);
-        run.setHours(h, minute, 0, 0);
-        if (run >= start && run <= end) {
-          runs.push(run);
-        }
-      }
-    } else if (hour >= 0) {
-      // Specific hour
-      const run = new Date(current);
-      run.setHours(hour, minute, 0, 0);
-      if (run >= start && run <= end) {
-        runs.push(run);
-      }
-    }
-    current.setDate(current.getDate() + 1);
-  }
-
-  return runs;
+  return CronUtils.getRunsBetween(cron, start, end);
 }
 
 /**

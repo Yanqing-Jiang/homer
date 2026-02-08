@@ -7,12 +7,26 @@ import { notifyJobResult } from "./notifier.js";
 import type { StateManager } from "../state/manager.js";
 import type { RegisteredJob, ProgressEvent } from "./types.js";
 import { isPlanRequiringApproval, createPlanApprovalKeyboard } from "../bot/handlers/approval.js";
+import { executeInternalJob } from "./internal-handlers.js";
+import { runCompletionCheckup } from "../executors/completion-checkup.js";
 
 function escapeHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+function isMemoryJob(job: RegisteredJob): boolean {
+  const id = job.config.id.toLowerCase();
+  const query = job.config.query.toLowerCase();
+  return (
+    id.includes("memory") ||
+    id.includes("daily-log") ||
+    id.includes("session-summaries") ||
+    query.includes("/nightly-memory") ||
+    query.includes("memory/daily")
+  );
 }
 
 // Throttle progress messages to avoid Telegram rate limits
@@ -41,6 +55,11 @@ export class Scheduler {
     // Listen for job triggers
     this.cronManager.on("job:trigger", ({ job, manual }) => {
       this.executeJob(job, manual);
+    });
+
+    // Sync nextRun to state manager
+    this.cronManager.on("job:updated", (job: RegisteredJob) => {
+      this.stateManager.updateScheduledJobNextRun(job.config.id, job.nextRun);
     });
   }
 
@@ -191,7 +210,7 @@ export class Scheduler {
   /**
    * Execute a job and handle results
    */
-  private async executeJob(job: RegisteredJob, _manual: boolean): Promise<void> {
+  private async executeJob(job: RegisteredJob, manual: boolean): Promise<void> {
     try {
       // Record job start (with locking)
       const runId = this.stateManager.recordScheduledJobStart(job.config.id, job.config.name, job.sourceFile);
@@ -206,11 +225,34 @@ export class Scheduler {
         ? (event: ProgressEvent) => void this.sendProgress(job.config.id, event)
         : undefined;
 
-      // Execute the job
-      const result = await executeScheduledJob(job, onProgress);
+      // Execute the job (internal handler or CLI executor)
+      const result = job.config.executor === "internal" || job.config.handler
+        ? await executeInternalJob(job, {
+            stateManager: this.stateManager,
+            bot: this.bot,
+            chatId: this.chatId,
+          })
+        : await executeScheduledJob(job, onProgress);
 
       // Update job state
       this.cronManager.updateJobState(job.config.id, result.success);
+
+      // Dependency triggers — fire downstream jobs on success
+      if (result.success) {
+        const triggers: Record<string, string[]> = {
+          "idea-ingest": ["ideas-explore"],
+          "ideas-explore": ["idea-dedup"],
+          "github-trending-ideas": ["idea-dedup"],
+          "internal-idea-mining": ["idea-dedup"],
+        };
+        const downstream = triggers[job.config.id];
+        if (downstream) {
+          for (const targetId of downstream) {
+            logger.info({ jobId: targetId, triggeredBy: job.config.id }, "Triggering downstream job");
+            this.cronManager.triggerJob(targetId, false);
+          }
+        }
+      }
 
       // Record result in database
       this.stateManager.recordScheduledJobComplete(
@@ -257,6 +299,49 @@ export class Scheduler {
 
       // Notify via Telegram (final result)
       await notifyJobResult(this.bot, this.chatId, result, job);
+
+      if (result.fallbackUsed && result.executorUsed) {
+        try {
+          await this.bot.api.sendMessage(
+            this.chatId,
+            `⚠️ Fallback used for *${job.config.name}*\\nExecutor: ${result.executorUsed}`,
+            { parse_mode: "Markdown" }
+          );
+        } catch (err) {
+          logger.warn({ error: err, jobId: job.config.id }, "Failed to notify fallback usage");
+        }
+      }
+
+      // Run completion checkup for manual triggers
+      if (manual && result.success) {
+        const check = await runCompletionCheckup({
+          name: job.config.name,
+          id: job.config.id,
+          query: job.config.query,
+          output: result.output ?? "",
+          isMemoryJob: isMemoryJob(job),
+        });
+        if (check) {
+          const status = check.complete ? "✅ Checkup: Complete" : "⚠️ Checkup: Incomplete";
+          const lines: string[] = [status];
+          if (check.summary) lines.push(`Summary: ${check.summary}`);
+          if (check.missing && check.missing.length > 0) {
+            lines.push(`Missing: ${check.missing.join("; ")}`);
+          }
+          if (check.next_steps && check.next_steps.length > 0) {
+            lines.push(`Next: ${check.next_steps.join("; ")}`);
+          }
+          if (typeof check.confidence === "number") {
+            lines.push(`Confidence: ${Math.round(check.confidence * 100)}%`);
+          }
+          lines.push(`Job: ${job.config.id}`);
+          try {
+            await this.bot.api.sendMessage(this.chatId, lines.join("\n"));
+          } catch (err) {
+            logger.warn({ error: err, jobId: job.config.id }, "Failed to send completion checkup");
+          }
+        }
+      }
     } catch (error) {
       logger.error({ jobId: job.config.id, error }, "Failed to execute scheduled job");
 

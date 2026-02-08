@@ -1,38 +1,22 @@
-import OpenAI from "openai";
+/**
+ * Kimi Executor — CLI-based
+ *
+ * All Kimi execution routes through the Kimi CLI (v1.8.0+) which has
+ * built-in tools (Grep, Glob, Shell, FetchURL, SearchWeb, etc).
+ *
+ * NVIDIA NIM API is disabled — it's a raw chat completion endpoint
+ * with no tooling. Use the CLI for everything.
+ */
+
+import { executeKimiCLI, type KimiCLIOptions } from "./kimi-cli.js";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
 
-// Provider configurations
-const PROVIDERS = {
-  moonshot: {
-    baseURL: "https://api.moonshot.cn/v1",
-    envKey: "MOONSHOT_API_KEY",
-    models: {
-      small: "moonshot-v1-8k",
-      medium: "moonshot-v1-32k",
-      large: "moonshot-v1-128k",
-    },
-    default: "moonshot-v1-128k",
-  },
-  nvidia: {
-    baseURL: "https://integrate.api.nvidia.com/v1",
-    envKey: "NVIDIA_NIM_API_KEY",
-    models: {
-      small: "moonshotai/kimi-k2.5",
-      medium: "moonshotai/kimi-k2.5",
-      large: "moonshotai/kimi-k2.5",
-    },
-    default: "moonshotai/kimi-k2.5",
-  },
-} as const;
-
-type Provider = keyof typeof PROVIDERS;
-type ModelSize = "small" | "medium" | "large";
-
+// Re-export types for backwards compatibility
 export interface KimiExecutorOptions {
-  provider?: Provider;
+  provider?: string; // Ignored — always uses CLI
   model?: string;
-  modelSize?: ModelSize;
+  modelSize?: string; // Ignored — CLI uses config default
   systemPrompt?: string;
   temperature?: number;
   maxTokens?: number;
@@ -45,120 +29,59 @@ export interface KimiExecutorResult extends ExecutorResult {
   outputTokens?: number;
 }
 
-const clients: Record<string, OpenAI> = {};
-
-function getClient(provider: Provider): OpenAI {
-  if (!clients[provider]) {
-    const config = PROVIDERS[provider];
-    const apiKey = process.env[config.envKey];
-    if (!apiKey) {
-      throw new Error(`${config.envKey} not set in environment`);
-    }
-    clients[provider] = new OpenAI({
-      apiKey,
-      baseURL: config.baseURL,
-    });
-  }
-  return clients[provider];
-}
-
-// Auto-select provider based on available keys (prefer NVIDIA for longer expiry)
-function selectProvider(): Provider {
-  if (process.env.NVIDIA_NIM_API_KEY) return "nvidia";
-  if (process.env.MOONSHOT_API_KEY) return "moonshot";
-  throw new Error("No Kimi API key configured (NVIDIA_NIM_API_KEY or MOONSHOT_API_KEY)");
-}
-
+/**
+ * Execute a Kimi command via CLI.
+ *
+ * Previously used NVIDIA NIM / Moonshot API directly.
+ * Now delegates to Kimi CLI which has full tool access
+ * (web search, file ops, shell, etc).
+ */
 export async function executeKimiCommand(
   query: string,
   options: KimiExecutorOptions = {}
 ): Promise<KimiExecutorResult> {
-  const startTime = Date.now();
-  const provider = options.provider ?? selectProvider();
-  const config = PROVIDERS[provider];
+  const { systemPrompt, model } = options;
 
-  // Resolve model: explicit model > modelSize > default
-  const model = options.model
-    ?? (options.modelSize ? config.models[options.modelSize] : config.default);
-
-  const {
-    systemPrompt = "You are a helpful assistant. Be concise and direct.",
-    temperature = 0.3,
-    maxTokens = 4096,
-  } = options;
+  // Prepend system prompt as context if provided
+  const fullQuery = systemPrompt
+    ? `Instructions: ${systemPrompt}\n\n---\n\n${query}`
+    : query;
 
   logger.debug(
-    { provider, model, queryLength: query.length, temperature },
-    "Executing Kimi request"
+    { model, queryLength: query.length, hasSystemPrompt: !!systemPrompt },
+    "Executing Kimi via CLI (not API)"
   );
 
-  try {
-    const client = getClient(provider);
+  const cliOptions: KimiCLIOptions = {
+    model,
+    timeout: 1200000, // 20 minutes
+    yolo: true,
+    workDir: process.env.HOME ?? "/Users/yj",
+  };
 
-    const response = await client.chat.completions.create({
-      model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: query },
-      ],
-      temperature,
-      max_tokens: maxTokens,
-    });
+  const result = await executeKimiCLI(fullQuery, "", cliOptions);
 
-    const duration = Date.now() - startTime;
-    const output = response.choices[0]?.message?.content || "(No response)";
-
-    logger.debug(
-      {
-        provider,
-        model,
-        duration,
-        inputTokens: response.usage?.prompt_tokens,
-        outputTokens: response.usage?.completion_tokens,
-      },
-      "Kimi request completed"
-    );
-
-    return {
-      output,
-      exitCode: 0,
-      duration,
-      executor: "kimi",
-      provider,
-      model,
-      inputTokens: response.usage?.prompt_tokens,
-      outputTokens: response.usage?.completion_tokens,
-    };
-  } catch (error) {
-    const duration = Date.now() - startTime;
-    const message = error instanceof Error ? error.message : String(error);
-    logger.error({ error: message, provider, model, duration }, "Kimi request failed");
-
-    return {
-      output: `Error: ${message}`,
-      exitCode: 1,
-      duration,
-      executor: "kimi",
-      provider,
-      model,
-    };
-  }
+  return {
+    ...result,
+    provider: "cli",
+    model: model ?? "moonshot-ai/kimi-k2.5",
+    inputTokens: undefined, // CLI doesn't report token counts
+    outputTokens: undefined,
+  };
 }
 
-// Convenience function for long-context summarization
+/**
+ * Long-context summarization via Kimi CLI.
+ */
 export async function summarizeWithKimi(
   content: string,
-  instruction: string,
-  provider?: Provider
+  instruction: string
 ): Promise<string> {
   const result = await executeKimiCommand(
     `${instruction}\n\n---\n\n${content}`,
     {
-      provider,
-      modelSize: "large",
       systemPrompt:
         "You are an expert at analyzing and summarizing content. Extract key insights, decisions, and actionable items. Be thorough but concise.",
-      maxTokens: 8192,
     }
   );
 
@@ -169,10 +92,11 @@ export async function summarizeWithKimi(
   return result.output;
 }
 
-// Convenience function for memory extraction from daily logs
+/**
+ * Memory extraction from daily logs via Kimi CLI.
+ */
 export async function extractMemoryFacts(
-  dailyLogContent: string,
-  provider?: Provider
+  dailyLogContent: string
 ): Promise<{
   promotions: Array<{
     content: string;
@@ -210,12 +134,8 @@ Return as JSON:
 
 ${dailyLogContent}`,
     {
-      provider,
-      modelSize: "large",
       systemPrompt:
-        "You are a memory curator. Extract lasting facts from daily logs. Only include information worth remembering long-term. Be selective - not everything needs to be saved.",
-      temperature: 0.2,
-      maxTokens: 4096,
+        "You are a memory curator. Extract lasting facts from daily logs. Only include information worth remembering long-term. Be selective - not everything needs to be saved. Return valid JSON only.",
     }
   );
 
@@ -224,7 +144,6 @@ ${dailyLogContent}`,
   }
 
   try {
-    // Extract JSON from response (might be wrapped in markdown code block)
     const jsonMatch = result.output.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       throw new Error("No JSON found in response");

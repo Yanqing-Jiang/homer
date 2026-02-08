@@ -378,7 +378,24 @@ export class UnifiedRuntime {
         intentId: intent.id,
       };
 
-      const result = await executeWithRouting(request);
+      const result = await executeWithRouting(request, {
+        notify: async (message) => {
+          if (!this.bot || !this.config.chatId) return;
+          await this.bot.api.sendMessage(this.config.chatId, message, { parse_mode: "Markdown" });
+        },
+      });
+
+      if (result.fallbackUsed && this.bot && this.config.chatId) {
+        try {
+          await this.bot.api.sendMessage(
+            this.config.chatId,
+            `⚠️ Fallback used for intent *${intent.title}*\\nExecutor: ${result.executorUsed}`,
+            { parse_mode: "Markdown" }
+          );
+        } catch (err) {
+          logger.warn({ err, intentId }, "Failed to notify fallback usage");
+        }
+      }
 
       // Check for exhaustion (fail-loud)
       if (result.failed) {

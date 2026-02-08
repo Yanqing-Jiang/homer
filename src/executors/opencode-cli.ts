@@ -1,0 +1,456 @@
+import { spawn, ChildProcess } from "child_process";
+import * as readline from "readline";
+import type { ExecutorResult } from "./types.js";
+import { logger } from "../utils/logger.js";
+
+// ============================================
+// TYPES
+// ============================================
+
+interface OpenCodeStreamEvent {
+  type: "step_start" | "text" | "tool_use" | "tool_result" | "step_finish" | "error";
+  timestamp?: number;
+  sessionID?: string;
+  part?: {
+    id?: string;
+    sessionID?: string;
+    messageID?: string;
+    type?: string;
+    text?: string;
+    name?: string;
+    input?: Record<string, unknown>;
+    output?: string;
+    reason?: string;
+    cost?: number;
+    tokens?: {
+      input: number;
+      output: number;
+      reasoning?: number;
+      cache?: { read: number; write: number };
+    };
+    error?: string;
+    time?: { start: number; end: number };
+  };
+}
+
+export interface OpenCodeCLIOptions {
+  model?: string;
+  timeout?: number;
+  signal?: AbortSignal;
+  researchOnly?: boolean;
+  cwd?: string;
+  // Legacy options accepted for backward compatibility (ignored by OpenCode)
+  resume?: string;
+  yolo?: boolean;
+  sandbox?: boolean;
+  includeDirectories?: string[];
+  accountId?: number;
+}
+
+export interface OpenCodeCLIResult extends ExecutorResult {
+  sessionId: string;
+  model: string;
+  accountId: number;
+  stats?: {
+    total_tokens: number;
+    input_tokens: number;
+    output_tokens: number;
+    cached: number;
+    duration_ms: number;
+    tool_calls: number;
+  };
+}
+
+// Backward-compatible aliases
+export type GeminiCLIOptions = OpenCodeCLIOptions;
+export type GeminiCLIResult = OpenCodeCLIResult;
+
+// ============================================
+// QUOTA DETECTION
+// ============================================
+
+function isQuotaError(text: string): boolean {
+  return /exhausted.*quota|quota.*reset|429|rate.limit|capacity.*exhausted/i.test(text);
+}
+
+function isAuthError(text: string): boolean {
+  return /401|403|unauthorized|invalid.*credential|auth.*fail/i.test(text);
+}
+
+// ============================================
+// RESEARCH-ONLY PROMPT INJECTION
+// ============================================
+
+const RESEARCH_ONLY_PREFIX = `CRITICAL CONSTRAINTS - You MUST follow these rules:
+
+ALLOWED:
+- READ any files for context and analysis
+- CREATE or UPDATE .md (markdown) files for reports, ideas, summaries, digests
+- CREATE or UPDATE .json files in ~/memory/ for data storage
+- Use MCP tools for memory operations (memory_append, memory_promote, idea_add)
+- Web searches and API calls for research
+
+PROHIBITED:
+- DO NOT modify source code files: .ts, .js, .py, .tsx, .jsx, .go, .rs, .java, .c, .cpp, .h, .swift, .kt, .rb, .php, .vue, .svelte
+- DO NOT use Edit or Write tools on code files
+- DO NOT create new code files
+- If code changes are needed, DESCRIBE them in a markdown file instead of implementing them
+
+Focus on research, analysis, information extraction, and documentation.
+
+Now proceed with the task:
+
+`;
+
+// ============================================
+// MAIN EXECUTOR
+// ============================================
+
+export async function executeOpenCodeCLI(
+  prompt: string,
+  context: string = "",
+  options: OpenCodeCLIOptions = {}
+): Promise<OpenCodeCLIResult> {
+  const {
+    model = "google/gemini-3-flash-preview",
+    timeout = 1200000, // 20 minutes default
+    signal,
+    researchOnly = true,
+    cwd,
+  } = options;
+
+  const effectivePrompt = researchOnly ? RESEARCH_ONLY_PREFIX + prompt : prompt;
+  const startTime = Date.now();
+
+  logger.debug({ model, promptLength: effectivePrompt.length, contextLength: context.length, researchOnly }, "Executing OpenCode CLI");
+
+  return new Promise((resolve) => {
+    // Build the full message: context + prompt combined via stdin if context exists
+    const fullMessage = context
+      ? `${context}\n\n---\n\n${effectivePrompt}`
+      : effectivePrompt;
+
+    const args: string[] = [
+      "run",
+      fullMessage,
+      "-m", model,
+      "--format", "json",
+    ];
+
+    const child: ChildProcess = spawn("opencode", args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      cwd: cwd || process.env.HOME || "/Users/yj",
+      env: {
+        ...process.env,
+      },
+    });
+
+    // State
+    let sessionId = "";
+    const responseChunks: string[] = [];
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalCached = 0;
+    let toolCallCount = 0;
+    let stderrOutput = "";
+    let timedOut = false;
+    let aborted = false;
+
+    // Timeout handling
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 5000);
+    }, timeout);
+
+    const abortHandler = () => {
+      if (aborted) return;
+      aborted = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 5000);
+    };
+
+    if (signal) {
+      if (signal.aborted) {
+        abortHandler();
+      } else {
+        signal.addEventListener("abort", abortHandler, { once: true });
+      }
+    }
+
+    child.stdin?.end();
+
+    // Parse streaming NDJSON output
+    const rl = readline.createInterface({
+      input: child.stdout!,
+      terminal: false,
+    });
+
+    rl.on("line", (line: string) => {
+      if (!line.trim()) return;
+
+      try {
+        const event: OpenCodeStreamEvent = JSON.parse(line);
+
+        switch (event.type) {
+          case "step_start":
+            if (event.sessionID && !sessionId) {
+              sessionId = event.sessionID;
+              logger.debug({ sessionId }, "OpenCode session initialized");
+            }
+            break;
+
+          case "text":
+            if (event.part?.text) {
+              responseChunks.push(event.part.text);
+            }
+            break;
+
+          case "tool_use":
+            toolCallCount++;
+            break;
+
+          case "step_finish":
+            if (event.part?.tokens) {
+              totalInputTokens += event.part.tokens.input;
+              totalOutputTokens += event.part.tokens.output;
+              totalCached += event.part.tokens.cache?.read ?? 0;
+            }
+            break;
+
+          case "error":
+            stderrOutput += (event.part?.error || "") + "\n";
+            break;
+        }
+      } catch {
+        // Skip non-JSON lines
+      }
+    });
+
+    // Capture stderr
+    child.stderr?.on("data", (data: Buffer) => {
+      const text = data.toString();
+      if (!text.includes("DeprecationWarning") && !text.includes("ExperimentalWarning")) {
+        stderrOutput += text;
+      }
+    });
+
+    // Handle completion
+    child.on("close", (code: number | null) => {
+      clearTimeout(timeoutId);
+      const duration = Date.now() - startTime;
+      const output = responseChunks.join("");
+
+      const allOutput = output + stderrOutput;
+
+      if (aborted) {
+        resolve({
+          output: "Cancelled",
+          exitCode: 130,
+          duration,
+          executor: "opencode",
+          sessionId,
+          model,
+          accountId: 1,
+          stats: {
+            total_tokens: totalInputTokens + totalOutputTokens,
+            input_tokens: totalInputTokens,
+            output_tokens: totalOutputTokens,
+            cached: totalCached,
+            duration_ms: duration,
+            tool_calls: toolCallCount,
+          },
+        });
+        return;
+      }
+
+      if (isQuotaError(allOutput)) {
+        resolve({
+          output: `Quota exhausted: ${stderrOutput}`,
+          exitCode: 2,
+          duration,
+          executor: "opencode",
+          sessionId,
+          model,
+          accountId: 1,
+        });
+        return;
+      }
+
+      if (isAuthError(allOutput)) {
+        resolve({
+          output: `Auth error: ${stderrOutput}`,
+          exitCode: 3,
+          duration,
+          executor: "opencode",
+          sessionId,
+          model,
+          accountId: 1,
+        });
+        return;
+      }
+
+      if (timedOut) {
+        resolve({
+          output: `Timeout after ${timeout}ms`,
+          exitCode: 4,
+          duration,
+          executor: "opencode",
+          sessionId,
+          model,
+          accountId: 1,
+        });
+        return;
+      }
+
+      if (code !== 0 && code !== null) {
+        resolve({
+          output: stderrOutput || `OpenCode CLI exited with code ${code}`,
+          exitCode: code,
+          duration,
+          executor: "opencode",
+          sessionId,
+          model,
+          accountId: 1,
+        });
+        return;
+      }
+
+      // Success
+      logger.debug(
+        { sessionId, duration, inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+        "OpenCode CLI completed successfully"
+      );
+
+      resolve({
+        output,
+        exitCode: 0,
+        duration,
+        executor: "opencode",
+        sessionId,
+        model,
+        accountId: 1,
+        stats: {
+          total_tokens: totalInputTokens + totalOutputTokens,
+          input_tokens: totalInputTokens,
+          output_tokens: totalOutputTokens,
+          cached: totalCached,
+          duration_ms: duration,
+          tool_calls: toolCallCount,
+        },
+      });
+    });
+
+    child.on("error", (err: Error) => {
+      clearTimeout(timeoutId);
+      resolve({
+        output: `Spawn error: ${err.message}`,
+        exitCode: 1,
+        duration: Date.now() - startTime,
+        executor: "opencode",
+        sessionId: "",
+        model,
+        accountId: 1,
+      });
+    });
+  });
+}
+
+// ============================================
+// WITH RETRY (replaces executeGeminiWithFallback)
+// ============================================
+
+export async function executeOpenCodeWithFallback(
+  prompt: string,
+  context: string = "",
+  options: OpenCodeCLIOptions = {}
+): Promise<OpenCodeCLIResult> {
+  // OpenCode handles account rotation internally via the auth plugin.
+  // We just retry once on quota/auth errors.
+  const result = await executeOpenCodeCLI(prompt, context, options);
+
+  if (result.exitCode === 0 || (result.exitCode !== 2 && result.exitCode !== 3)) {
+    return result;
+  }
+
+  // Retry once on quota/auth error (OpenCode may rotate internally)
+  logger.info({ exitCode: result.exitCode }, "Retrying OpenCode after quota/auth error");
+  return executeOpenCodeCLI(prompt, context, options);
+}
+
+// ============================================
+// STREAMING VERSION
+// ============================================
+
+export async function* streamOpenCodeCLI(
+  prompt: string,
+  context: string = "",
+  options: OpenCodeCLIOptions = {}
+): AsyncGenerator<OpenCodeStreamEvent> {
+  const {
+    model = "google/gemini-3-flash-preview",
+    cwd,
+  } = options;
+
+  const fullMessage = context
+    ? `${context}\n\n---\n\n${prompt}`
+    : prompt;
+
+  const args: string[] = [
+    "run",
+    fullMessage,
+    "-m", model,
+    "--format", "json",
+  ];
+
+  const child = spawn("opencode", args, {
+    stdio: ["pipe", "pipe", "pipe"],
+    cwd: cwd || process.env.HOME || "/Users/yj",
+    env: { ...process.env },
+  });
+
+  child.stdin?.end();
+
+  const rl = readline.createInterface({
+    input: child.stdout!,
+    terminal: false,
+  });
+
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    try {
+      yield JSON.parse(line) as OpenCodeStreamEvent;
+    } catch {
+      // Skip non-JSON lines
+    }
+  }
+}
+
+// ============================================
+// ACCOUNT STATUS (simplified - OpenCode manages internally)
+// ============================================
+
+export function getAccountStatus(): Array<{
+  id: number;
+  available: boolean;
+  cooldownRemaining: number;
+  consecutiveFailures: number;
+}> {
+  // OpenCode manages auth rotation internally via the plugin.
+  // Return a single "always available" account for compatibility.
+  return [
+    { id: 1, available: true, cooldownRemaining: 0, consecutiveFailures: 0 },
+  ];
+}
+
+export function resetAccountCooldowns(): void {
+  logger.info("OpenCode CLI manages account rotation internally - no cooldowns to reset");
+}
+
+// ============================================
+// BACKWARD-COMPATIBLE ALIASES
+// ============================================
+
+export const executeGeminiCLI = executeOpenCodeCLI;
+export const executeGeminiWithFallback = executeOpenCodeWithFallback;
+export const streamGeminiCLI = streamOpenCodeCLI;

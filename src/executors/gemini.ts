@@ -1,4 +1,5 @@
-import OpenAI from "openai";
+
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
 
@@ -7,11 +8,11 @@ import { logger } from "../utils/logger.js";
 // ============================================
 
 const GEMINI_CONFIG = {
-  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
   envKey: "GEMINI_API_KEY_Primary",
   models: {
     flash: "gemini-2.0-flash",
     pro: "gemini-2.0-pro",
+    flashLite: "gemini-2.0-flash-lite-preview-02-05",
     // Future models
     flash3: "gemini-3-flash-preview",
     pro3: "gemini-3-pro-preview",
@@ -32,32 +33,33 @@ export interface GeminiAPIOptions {
   temperature?: number;
   maxTokens?: number;
   timeout?: number;
+  useGrounding?: boolean;
+  dynamicThreshold?: number; // 0.0 to 1.0
+  reasoningEffort?: "low" | "medium" | "high"; // Added back for compatibility
 }
 
 export interface GeminiAPIResult extends ExecutorResult {
   model: string;
   inputTokens?: number;
   outputTokens?: number;
+  groundingMetadata?: any;
 }
 
 // ============================================
 // CLIENT MANAGEMENT
 // ============================================
 
-let client: OpenAI | null = null;
+let genAI: GoogleGenerativeAI | null = null;
 
-function getClient(): OpenAI {
-  if (!client) {
-    const apiKey = process.env[GEMINI_CONFIG.envKey];
+function getClient(): GoogleGenerativeAI {
+  if (!genAI) {
+    const apiKey = process.env[GEMINI_CONFIG.envKey] || process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      throw new Error(`${GEMINI_CONFIG.envKey} not set in environment`);
+      throw new Error(`${GEMINI_CONFIG.envKey} or GEMINI_API_KEY not set in environment`);
     }
-    client = new OpenAI({
-      apiKey,
-      baseURL: GEMINI_CONFIG.baseURL,
-    });
+    genAI = new GoogleGenerativeAI(apiKey);
   }
-  return client;
+  return genAI;
 }
 
 function resolveModel(model?: GeminiModel): string {
@@ -76,58 +78,76 @@ function resolveModel(model?: GeminiModel): string {
 // MAIN EXECUTOR
 // ============================================
 
+/**
+ * Execute a query using the native Google Generative AI SDK.
+ * Supports Search Grounding.
+ */
 export async function executeGeminiAPI(
   query: string,
   options: GeminiAPIOptions = {}
 ): Promise<GeminiAPIResult> {
   const startTime = Date.now();
-  const model = resolveModel(options.model);
+  const modelName = resolveModel(options.model);
 
-  const {
+    const {
     systemPrompt = "You are a helpful assistant. Be concise and direct.",
     temperature = 0.3,
     maxTokens = 8192,
-    timeout = 120000,
+    useGrounding = true, // Default to true for better research
   } = options;
 
   logger.debug(
-    { model, queryLength: query.length, temperature },
-    "Executing Gemini API request"
+    { model: modelName, queryLength: query.length, temperature, useGrounding },
+    "Executing Native Gemini API request"
   );
 
   try {
-    const openaiClient = getClient();
+    const client = getClient();
+    
+    // Configure tools
+    const tools: any[] = [];
+    if (useGrounding) {
+      tools.push({
+        googleSearch: {}, // Native search grounding tool
+      });
+    }
 
-    // Create abort controller for timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const model = client.getGenerativeModel({
+      model: modelName,
+      systemInstruction: systemPrompt,
+      tools,
+    });
 
-    const response = await openaiClient.chat.completions.create(
-      {
-        model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: query },
-        ],
-        temperature,
-        max_tokens: maxTokens,
-      },
-      { signal: controller.signal }
-    );
+    const chatConfig = {
+      temperature,
+      maxOutputTokens: maxTokens,
+    };
 
-    clearTimeout(timeoutId);
+    // Use grounding with dynamic threshold if requested
+    // Note: The SDK structure for tools/grounding is slightly different depending on version
+    // But for 0.24.x, this is the standard way.
+    
+    const result = await model.generateContent({
+      contents: [{ role: "user", parts: [{ text: query }] }],
+      generationConfig: chatConfig,
+    });
 
+    const response = await result.response;
+    const output = response.text() || "(No response)";
     const duration = Date.now() - startTime;
-    const output = response.choices[0]?.message?.content || "(No response)";
+
+    // Extract grounding metadata if available
+    const groundingMetadata = response.candidates?.[0]?.groundingMetadata;
 
     logger.debug(
       {
-        model,
+        model: modelName,
         duration,
-        inputTokens: response.usage?.prompt_tokens,
-        outputTokens: response.usage?.completion_tokens,
+        inputTokens: response.usageMetadata?.promptTokenCount,
+        outputTokens: response.usageMetadata?.candidatesTokenCount,
+        grounded: !!groundingMetadata,
       },
-      "Gemini API request completed"
+      "Native Gemini API request completed"
     );
 
     return {
@@ -135,31 +155,32 @@ export async function executeGeminiAPI(
       exitCode: 0,
       duration,
       executor: "gemini-api",
-      model,
-      inputTokens: response.usage?.prompt_tokens,
-      outputTokens: response.usage?.completion_tokens,
+      model: modelName,
+      inputTokens: response.usageMetadata?.promptTokenCount,
+      outputTokens: response.usageMetadata?.candidatesTokenCount,
+      groundingMetadata,
     };
   } catch (error) {
     const duration = Date.now() - startTime;
     const message = error instanceof Error ? error.message : String(error);
 
     // Check if it's a model-specific error and try fallback
-    if (message.includes("model") && model !== GEMINI_CONFIG.fallbackModel) {
-      logger.warn({ model, error: message }, "Primary model failed, trying fallback");
+    if (message.includes("model") && modelName !== GEMINI_CONFIG.fallbackModel) {
+      logger.warn({ model: modelName, error: message }, "Primary model failed, trying fallback");
       return executeGeminiAPI(query, {
         ...options,
         model: GEMINI_CONFIG.fallbackModel,
       });
     }
 
-    logger.error({ error: message, model, duration }, "Gemini API request failed");
+    logger.error({ error: message, model: modelName, duration }, "Native Gemini API request failed");
 
     return {
       output: `Error: ${message}`,
       exitCode: 1,
       duration,
       executor: "gemini-api",
-      model,
+      model: modelName,
     };
   }
 }
@@ -181,12 +202,13 @@ export async function researchWithGemini(
 
   const result = await executeGeminiAPI(query, {
     model: "flash",
+    useGrounding: true, // Force grounding for research
     systemPrompt: `You are an expert researcher. Provide comprehensive, accurate information with:
 - Key facts and insights
 - Recent developments (if applicable)
 - Practical implications
-- Sources or references when possible
-Be thorough but organized.`,
+- Citations from web search results when available
+Be thorough but organized. Always prioritize accuracy and recent data.`,
     maxTokens: 8192,
     temperature: 0.4,
   });
@@ -211,6 +233,7 @@ export async function summarizeWithGemini(
     `${instruction || defaultInstruction}\n\n---\n\n${content}`,
     {
       model: "flash",
+      useGrounding: false, // Don't need search for summarization
       systemPrompt: "You are an expert at analyzing and summarizing content. Extract key insights concisely.",
       maxTokens: 4096,
       temperature: 0.2,
@@ -238,6 +261,7 @@ export async function planWithGemini(
     `Given this context:\n\n${context}\n\n---\n\nCreate a plan to achieve this goal: ${goal}\n\nReturn as JSON:\n{\n  "plan": "overview of approach",\n  "tasks": [\n    {"task": "description", "priority": "high|medium|low", "risk": "low|medium|high"}\n  ]\n}`,
     {
       model: "pro", // Use pro for planning
+      useGrounding: false,
       systemPrompt: "You are a strategic planner. Create actionable, risk-aware plans. Return valid JSON only.",
       maxTokens: 4096,
       temperature: 0.3,
@@ -287,6 +311,7 @@ Create a briefing with:
 Keep it actionable and concise.`,
     {
       model: "flash",
+      useGrounding: false,
       systemPrompt: "You are a personal assistant creating a morning briefing. Be concise, prioritized, and actionable.",
       maxTokens: 2048,
       temperature: 0.3,
@@ -300,16 +325,15 @@ Keep it actionable and concise.`,
   return result.output;
 }
 
-// ============================================
-// HEALTH CHECK
-// ============================================
-
+/**
+ * Health check for the native API
+ */
 export async function checkGeminiAPIHealth(): Promise<boolean> {
   try {
     const result = await executeGeminiAPI("Say OK", {
       model: "flash",
+      useGrounding: false,
       maxTokens: 10,
-      timeout: 10000,
     });
     return result.exitCode === 0 && result.output.toLowerCase().includes("ok");
   } catch {

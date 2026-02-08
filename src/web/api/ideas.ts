@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomUUID } from "crypto";
-import { unlinkSync } from "fs";
+import { unlinkSync, readdirSync } from "fs";
 import type { StateManager } from "../../state/manager.js";
 import { IdeasIndexer } from "../../ideas/indexer.js";
 import {
@@ -12,6 +12,7 @@ import {
   type ParsedIdea,
 } from "../../ideas/parser.js";
 import { join } from "path";
+import { logger } from "../../utils/logger.js";
 
 let ideasIndexer: IdeasIndexer | null = null;
 
@@ -32,6 +33,49 @@ interface CreateIdeaBody {
   context?: string;
   tags?: string[];
   link?: string;
+}
+
+/**
+ * Find and update idea file directly (similar to MCP idea_update logic)
+ * This searches by ID or partial ID match across all idea files
+ */
+function findAndUpdateIdeaFile(
+  ideaId: string,
+  updates: { status?: string; notes?: string }
+): { success: boolean; filePath?: string; error?: string } {
+  const { directory } = getIdeasPaths();
+
+  try {
+    const files = readdirSync(directory).filter((f) => f.endsWith(".md"));
+
+    for (const file of files) {
+      const filePath = join(directory, file);
+      const parsed = parseIdeaFile(filePath);
+
+      if (!parsed) continue;
+
+      // Match by exact ID or partial ID match
+      if (parsed.id === ideaId || parsed.id.includes(ideaId) || file.includes(ideaId)) {
+        // Apply updates
+        if (updates.status) parsed.status = updates.status;
+        if (updates.notes) {
+          parsed.notes = (parsed.notes ? parsed.notes + "; " : "") + updates.notes;
+        }
+
+        // Save the updated file
+        saveIdeaFile(parsed);
+
+        logger.info({ ideaId, filePath, status: parsed.status }, "Updated idea file directly");
+        return { success: true, filePath };
+      }
+    }
+
+    return { success: false, error: `Idea file not found for ID: ${ideaId}` };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    logger.error({ ideaId, error: errMsg }, "Failed to find/update idea file");
+    return { success: false, error: errMsg };
+  }
 }
 
 /**
@@ -132,8 +176,52 @@ export function registerIdeasRoutes(
       return { error: "Idea not found" };
     }
 
-    // Update file
-    const parsed = idea.filePath ? parseIdeaFile(idea.filePath) : null;
+    // For status-only updates, use Gemini CLI with MCP tool
+    const isStatusOnlyUpdate = body.status !== undefined &&
+      body.title === undefined &&
+      body.notes === undefined &&
+      body.content === undefined &&
+      body.context === undefined &&
+      body.tags === undefined &&
+      body.link === undefined;
+
+    if (isStatusOnlyUpdate) {
+      // Use direct file update (searches all idea files by ID)
+      const result = findAndUpdateIdeaFile(id, { status: body.status });
+
+      if (!result.success) {
+        // Fallback: update just the index if file update fails
+        logger.warn({ id, error: result.error }, "File update failed, falling back to index-only update");
+        ideasIndexer.updateStatus(id, body.status!);
+      } else if (result.filePath) {
+        // Trigger reindex to pick up file changes
+        ideasIndexer.updateIdea(result.filePath);
+      }
+
+      return ideasIndexer.get(id);
+    }
+
+    // For other updates, use direct file manipulation
+    // First try direct path, then search by ID
+    let parsed = idea.filePath ? parseIdeaFile(idea.filePath) : null;
+
+    if (!parsed) {
+      // Try finding the file by ID search (handles path mismatches)
+      const { directory } = getIdeasPaths();
+      const files = readdirSync(directory).filter((f) => f.endsWith(".md"));
+
+      for (const file of files) {
+        const filePath = join(directory, file);
+        const candidate = parseIdeaFile(filePath);
+        if (candidate && (candidate.id === id || candidate.id.includes(id) || file.includes(id))) {
+          parsed = candidate;
+          // Update the index with correct path
+          idea.filePath = filePath;
+          break;
+        }
+      }
+    }
+
     if (!parsed) {
       reply.status(500);
       return { error: "Could not read idea file" };
@@ -162,9 +250,9 @@ export function registerIdeasRoutes(
       parsed.link = body.link;
     }
 
-    // Save and reindex
-    saveIdeaFile(parsed);
-    ideasIndexer.updateIdea(idea.filePath!);
+    // Save and reindex (use corrected filePath if we found it)
+    const savedPath = saveIdeaFile(parsed);
+    ideasIndexer.updateIdea(savedPath);
 
     return ideasIndexer.get(id);
   });

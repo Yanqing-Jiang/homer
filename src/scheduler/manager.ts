@@ -1,6 +1,7 @@
 import cron, { type ScheduledTask } from "node-cron";
 import { EventEmitter } from "events";
 import { logger } from "../utils/logger.js";
+import { CronUtils } from "../utils/cron.js";
 import type { ScheduledJobConfig, RegisteredJob } from "./types.js";
 
 interface JobTriggerEvent {
@@ -38,6 +39,7 @@ export class CronManager extends EventEmitter {
     };
 
     this.jobs.set(config.id, registeredJob);
+    this.emit("job:updated", registeredJob);
 
     if (config.enabled) {
       const task = cron.schedule(config.cron, () => {
@@ -120,6 +122,8 @@ export class CronManager extends EventEmitter {
     } else {
       job.consecutiveFailures++;
     }
+
+    this.emit("job:updated", job);
   }
 
   /**
@@ -146,16 +150,8 @@ export class CronManager extends EventEmitter {
   /**
    * Calculate next run time for a cron expression
    */
-  private getNextRun(_cronExpr: string): Date | null {
-    try {
-      // node-cron doesn't have a built-in way to get next run
-      // We use cron-parser for this
-      // For now, return null and we'll implement properly
-      // Actually node-cron validates, let's use a simpler approach
-      return null; // Will be calculated when needed
-    } catch {
-      return null;
-    }
+  private getNextRun(cronExpr: string): Date | null {
+    return CronUtils.getNextRun(cronExpr);
   }
 
   /**
