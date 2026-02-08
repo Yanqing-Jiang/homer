@@ -35,6 +35,7 @@
 	// File upload state
 	let attachedFiles = $state<api.Upload[]>([]);
 	let fileUploadComponent: FileUpload;
+	let chatInputElement: HTMLTextAreaElement;
 
 	// Slash command state
 	let showSlashCommands = $state(false);
@@ -156,6 +157,11 @@
 		const maxHeight = 200; // Max height before scrolling
 		textarea.style.height = Math.min(textarea.scrollHeight, maxHeight) + 'px';
 		textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : 'hidden';
+	}
+
+	function resetTextareaHeight(textarea: HTMLTextAreaElement) {
+		textarea.style.height = 'auto';
+		textarea.style.overflowY = 'hidden';
 	}
 
 	function selectCommand(cmd: api.CommandDefinition) {
@@ -545,6 +551,11 @@ Just confirm when done. Keep your response brief.`;
 		chatInput = '';
 		chatError = null;
 		messages = [...messages, { role: 'user', content: userMessage, timestamp: new Date() }];
+
+		// Reset textarea height to original size
+		if (chatInputElement) {
+			resetTextareaHeight(chatInputElement);
+		}
 
 		// Clear attachments after sending
 		attachedFiles = [];
@@ -992,6 +1003,7 @@ Just confirm when done. Keep your response brief.`;
 									placeholder="Ask me anything... (type / for commands)"
 									class="chat-input"
 									bind:value={chatInput}
+									bind:this={chatInputElement}
 									disabled={isStreaming}
 									oninput={(e) => {
 										handleInputChange(e);
@@ -1508,14 +1520,14 @@ Just confirm when done. Keep your response brief.`;
 		opacity: 0.8;
 	}
 
-	/* Sidebar */
+	/* Sidebar - Azure Portal Style (Dark Theme) */
 	.sidebar-overlay {
 		position: fixed;
 		top: 0;
 		left: 0;
 		right: 0;
 		bottom: 0;
-		background: rgba(0, 0, 0, 0.4);
+		background: rgba(0, 0, 0, 0.5);
 		z-index: 200;
 	}
 
@@ -1525,10 +1537,11 @@ Just confirm when done. Keep your response brief.`;
 		left: 0;
 		width: 280px;
 		height: 100vh;
-		background: #0078d4;
+		background: #252423;
 		z-index: 300;
 		display: flex;
 		flex-direction: column;
+		box-shadow: 4px 0 8px rgba(0, 0, 0, 0.2);
 	}
 
 	.sidebar-header {
@@ -1536,45 +1549,58 @@ Just confirm when done. Keep your response brief.`;
 		align-items: center;
 		justify-content: space-between;
 		padding: 12px 16px;
-		border-bottom: 1px solid rgba(255, 255, 255, 0.2);
-		color: white;
+		border-bottom: 1px solid #3b3a39;
+		color: #f3f2f1;
 		font-weight: 600;
+		font-size: 14px;
 	}
 
 	.sidebar-close {
 		background: none;
 		border: none;
-		color: white;
+		color: #f3f2f1;
 		padding: 4px;
 		cursor: pointer;
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		border-radius: 2px;
 	}
 
 	.sidebar-close:hover {
-		background: rgba(255, 255, 255, 0.1);
+		background: #3b3a39;
 	}
 
 	.sidebar-nav {
 		flex: 1;
-		padding: 0;
+		padding: 8px 0;
+		overflow-y: auto;
 	}
 
 	.sidebar-item {
 		display: flex;
 		align-items: center;
 		gap: 12px;
-		padding: 12px 16px;
-		color: #ccc;
+		padding: 10px 16px;
+		color: #d2d0ce;
 		text-decoration: none;
-		font-size: 14px;
-		transition: all 0.15s;
+		font-size: 13px;
+		transition: background 0.1s, color 0.1s;
+		border-left: 3px solid transparent;
 	}
 
 	.sidebar-item:hover {
-		background: rgba(255, 255, 255, 0.1);
-		color: white;
+		background: #3b3a39;
+		color: #f3f2f1;
+		border-left-color: #0078d4;
+	}
+
+	.sidebar-item svg {
+		opacity: 0.85;
+	}
+
+	.sidebar-item:hover svg {
+		opacity: 1;
 	}
 
 	/* Main Content */

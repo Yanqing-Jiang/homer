@@ -7,6 +7,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { getMemoryIndexer } from "../memory/indexer.js";
 import { appendDailyLog, createDailyEntry, readDailyLog } from "../memory/daily.js";
+import { StateManager } from "../state/manager.js";
 import { appendFile, readFile, writeFile, mkdir, readdir } from "fs/promises";
 import { existsSync } from "fs";
 import {
@@ -39,7 +40,7 @@ const PLANS_DIR = `${MEMORY_BASE}/plans`;
 const FEEDBACK_FILE = `${MEMORY_BASE}/feedback.md`;
 
 // Idea status values
-type IdeaStatus = "draft" | "review" | "planning" | "execution" | "archived";
+type IdeaStatus = "draft" | "review" | "discussion" | "planning" | "execution" | "archived";
 
 interface Idea {
   id: string;
@@ -179,7 +180,7 @@ function formatIdea(idea: Idea): string {
  */
 function rebuildIdeasFile(ideas: Idea[]): string {
   const draft = ideas.filter(i => i.status === "draft");
-  const review = ideas.filter(i => i.status === "review");
+  const review = ideas.filter(i => i.status === "review" || i.status === "discussion");
   const archived = ideas.filter(i => i.status === "archived" || i.status === "planning" || i.status === "execution");
 
   let output = "# Ideas\n\nRaw ideas collected by HOMER. Reviewed daily at 7 AM.\n\n";
@@ -327,7 +328,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "memory_read",
-        description: "Read a memory file or today's daily log.",
+        description: "Read a memory file or today's daily log. Use source='archive' to read the full raw daily log from SQLite (before it was stripped to summary-only).",
         inputSchema: {
           type: "object",
           properties: {
@@ -339,6 +340,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             date: {
               type: "string",
               description: "For daily: specific date YYYY-MM-DD (default: today)",
+            },
+            source: {
+              type: "string",
+              enum: ["file", "archive"],
+              description: "For daily: 'file' reads .md (default), 'archive' reads full raw content from SQLite",
             },
           },
           required: ["file"],
@@ -812,10 +818,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "memory_read": {
-        const { file, date } = args as {
+        const { file, date, source } = args as {
           file: "me" | "work" | "life" | "preferences" | "tools" | "daily";
           date?: string;
+          source?: "file" | "archive";
         };
+
+        if (file === "daily" && source === "archive") {
+          const dateStr = date ?? new Date().toISOString().slice(0, 10);
+          const sm = new StateManager("/Users/yj/homer/data/homer.db");
+          try {
+            const archive = sm.getDailyLogArchive(dateStr);
+            if (!archive) {
+              return {
+                content: [{ type: "text", text: `No archive found for ${dateStr}` }],
+              };
+            }
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: archive.rawContent,
+                },
+              ],
+            };
+          } finally {
+            sm.close();
+          }
+        }
 
         if (file === "daily") {
           const d = date ? new Date(date) : new Date();

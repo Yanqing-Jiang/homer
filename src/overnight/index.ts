@@ -21,4 +21,5 @@ export { OvernightTaskStore } from "./task-store.js";
 export { WorkspaceManager, getWorkspaceManager } from "./workspace.js";
 export { PrototypeOrchestrator } from "./prototype-orchestrator.js";
 export { ResearchOrchestrator } from "./research-orchestrator.js";
+export { PipelineOrchestrator } from "./pipeline-orchestrator.js";
 export { MorningPresenter, encodeCallbackData, type SelectionResult, type InlineKeyboardButton } from "./morning-presenter.js";

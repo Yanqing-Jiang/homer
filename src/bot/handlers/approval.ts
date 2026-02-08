@@ -1,11 +1,13 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { logger } from "../../utils/logger.js";
-import { readFile, writeFile, appendFile } from "fs/promises";
+import { readFile, writeFile, appendFile, readdir } from "fs/promises";
 import { existsSync } from "fs";
+import { join } from "path";
 import type { StateManager } from "../../state/manager.js";
 
 const MEMORY_BASE = "/Users/yj/memory";
 const IDEAS_FILE = `${MEMORY_BASE}/ideas.md`;
+const IDEAS_DIR = `${MEMORY_BASE}/ideas`;
 const FEEDBACK_FILE = `${MEMORY_BASE}/feedback.md`;
 const DENY_HISTORY_FILE = `${MEMORY_BASE}/deny-history.md`;
 
@@ -28,6 +30,8 @@ interface PendingInstruction {
 }
 const pendingInstructionRequests = new Map<number, PendingInstruction>();
 
+let stateManagerRef: StateManager | null = null;
+
 // Cleanup stale entries every 5 minutes (entries older than 1 hour)
 setInterval(() => {
   const staleThreshold = Date.now() - 3600000; // 1 hour
@@ -45,7 +49,7 @@ setInterval(() => {
   }
 }, 300000); // Every 5 minutes
 
-type IdeaStatus = "draft" | "review" | "planning" | "execution" | "archived";
+type IdeaStatus = "draft" | "review" | "discussion" | "planning" | "execution" | "archived";
 
 interface Idea {
   id: string;
@@ -60,7 +64,135 @@ interface Idea {
 }
 
 /**
- * Parse ideas.md file into structured data
+ * Parse a single idea file with YAML frontmatter (~/memory/ideas/*.md)
+ */
+function parseIdeaFile(content: string, filename: string): Idea | null {
+  const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!fmMatch) return null;
+
+  const frontmatter = fmMatch[1] ?? "";
+  const body = fmMatch[2] ?? "";
+
+  const get = (key: string): string => {
+    const m = frontmatter.match(new RegExp(`^${key}:\\s*(.+)$`, "m"));
+    return m?.[1]?.trim() ?? "";
+  };
+
+  const id = get("id") || filename.replace(/\.md$/, "");
+  const status = get("status") as IdeaStatus || "draft";
+  const title = get("title");
+  if (!title) return null;
+
+  // Extract context section if present
+  const contextMatch = body.match(/## Context\n([\s\S]*?)(?=\n##|$)/);
+  const contextText = contextMatch?.[1]?.trim() ?? "";
+
+  // Body before first ## section is the main content
+  const mainContent = body.split(/\n## /)[0]?.trim() ?? "";
+
+  return {
+    id,
+    timestamp: get("created") || "",
+    source: get("source") || "unknown",
+    status,
+    title,
+    content: mainContent,
+    context: contextText || undefined,
+    link: get("link") || undefined,
+    notes: get("notes") || undefined,
+  };
+}
+
+/**
+ * Load all ideas from ~/memory/ideas/ directory (new file-based system)
+ */
+async function loadIdeasFromDir(): Promise<Idea[]> {
+  if (!existsSync(IDEAS_DIR)) return [];
+
+  const files = await readdir(IDEAS_DIR);
+  const mdFiles = files.filter(f => f.endsWith(".md")).sort();
+  const ideas: Idea[] = [];
+
+  for (const file of mdFiles) {
+    try {
+      const content = await readFile(join(IDEAS_DIR, file), "utf-8");
+      const idea = parseIdeaFile(content, file);
+      if (idea) ideas.push(idea);
+    } catch (error) {
+      logger.warn({ file, error }, "Failed to parse idea file");
+    }
+  }
+
+  return ideas;
+}
+
+/**
+ * Update an idea file's YAML frontmatter field
+ */
+async function updateIdeaFileField(ideaId: string, field: string, value: string): Promise<boolean> {
+  if (!existsSync(IDEAS_DIR)) return false;
+
+  const files = await readdir(IDEAS_DIR);
+  for (const file of files) {
+    if (!file.endsWith(".md")) continue;
+    const filepath = join(IDEAS_DIR, file);
+    const content = await readFile(filepath, "utf-8");
+    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    if (!fmMatch) continue;
+
+    const fm = fmMatch[1] ?? "";
+    const idMatch = fm.match(/^id:\s*(.+)$/m);
+    const fileId = idMatch?.[1]?.trim() ?? file.replace(/\.md$/, "");
+
+    if (fileId === ideaId || fileId.startsWith(ideaId) || file.replace(/\.md$/, "") === ideaId) {
+      const fieldRegex = new RegExp(`^${field}:.*$`, "m");
+      let newContent: string;
+      if (fieldRegex.test(fm)) {
+        newContent = content.replace(
+          new RegExp(`(^---\\n[\\s\\S]*?)^${field}:.*$`, "m"),
+          `$1${field}: ${value}`
+        );
+      } else {
+        // Add field before closing ---
+        newContent = content.replace(/^(---\n[\s\S]*?)\n---/, `$1\n${field}: ${value}\n---`);
+      }
+      await writeFile(filepath, newContent, "utf-8");
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Append a note to an idea file's body
+ */
+async function appendIdeaNote(ideaId: string, note: string): Promise<boolean> {
+  if (!existsSync(IDEAS_DIR)) return false;
+
+  const files = await readdir(IDEAS_DIR);
+  for (const file of files) {
+    if (!file.endsWith(".md")) continue;
+    const filepath = join(IDEAS_DIR, file);
+    const content = await readFile(filepath, "utf-8");
+    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    if (!fmMatch) continue;
+
+    const fm = fmMatch[1] ?? "";
+    const idMatch = fm.match(/^id:\s*(.+)$/m);
+    const fileId = idMatch?.[1]?.trim() ?? file.replace(/\.md$/, "");
+
+    if (fileId === ideaId || fileId.startsWith(ideaId) || file.replace(/\.md$/, "") === ideaId) {
+      const timestamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+      const appendText = `\n\n## Notes\n- [${timestamp}] ${note}\n`;
+      await writeFile(filepath, content.trimEnd() + appendText, "utf-8");
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Parse ideas.md file into structured data (LEGACY - kept for backward compat)
  */
 function parseIdeasFile(content: string): Idea[] {
   const ideas: Idea[] = [];
@@ -172,7 +304,7 @@ function formatIdea(idea: Idea): string {
  */
 function rebuildIdeasFile(ideas: Idea[]): string {
   const draft = ideas.filter(i => i.status === "draft");
-  const review = ideas.filter(i => i.status === "review");
+  const review = ideas.filter(i => i.status === "review" || i.status === "discussion");
   const archived = ideas.filter(i => i.status === "archived" || i.status === "planning" || i.status === "execution");
 
   let output = "# Ideas\n\nRaw ideas collected by HOMER. Reviewed daily at 7 AM.\n\n";
@@ -220,8 +352,22 @@ function findIdea(ideas: Idea[], id: string): Idea | undefined {
  * Approve an idea - create a plan
  */
 async function approveIdea(ideaId: string): Promise<{ success: boolean; message: string }> {
+  // Try file-based system first
+  const dirIdeas = await loadIdeasFromDir();
+  const dirIdea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
+
+  if (dirIdea) {
+    const updated = await updateIdeaFileField(ideaId, "status", "planning");
+    if (updated) {
+      await appendIdeaNote(ideaId, "Approved, creating plan");
+      await logFeedback("approve", dirIdea.title);
+      return { success: true, message: `Approved: ${dirIdea.title}` };
+    }
+  }
+
+  // Fallback to legacy ideas.md
   if (!existsSync(IDEAS_FILE)) {
-    return { success: false, message: "Ideas file not found" };
+    return { success: false, message: `Idea not found: ${ideaId}` };
   }
 
   const content = await readFile(IDEAS_FILE, "utf-8");
@@ -232,7 +378,6 @@ async function approveIdea(ideaId: string): Promise<{ success: boolean; message:
     return { success: false, message: `Idea not found: ${ideaId}` };
   }
 
-  // Update idea status
   idea.status = "planning";
   idea.notes = (idea.notes ? idea.notes + "; " : "") + "Approved, creating plan";
 
@@ -242,16 +387,30 @@ async function approveIdea(ideaId: string): Promise<{ success: boolean; message:
   return { success: true, message: `Approved: ${idea.title}` };
 }
 
-
 /**
- * Deny an idea with a reason - logs to deny-history.md for preference learning
+ * Archive an idea (no reason required)
  */
-async function denyIdea(
+async function archiveIdea(
   ideaId: string,
-  reason: string
-): Promise<{ success: boolean; message: string }> {
+  reason: string = "Archived"
+): Promise<{ success: boolean; message: string; idea?: Idea }> {
+  // Try file-based system first
+  const dirIdeas = await loadIdeasFromDir();
+  const dirIdea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
+
+  if (dirIdea) {
+    const updated = await updateIdeaFileField(ideaId, "status", "archived");
+    if (updated) {
+      await appendIdeaNote(ideaId, reason);
+      await logDenyHistory(dirIdea.title, dirIdea.source, reason, dirIdea.link);
+      await logFeedback("archive", dirIdea.title, reason);
+      return { success: true, message: `Archived: ${dirIdea.title}`, idea: dirIdea };
+    }
+  }
+
+  // Fallback to legacy ideas.md
   if (!existsSync(IDEAS_FILE)) {
-    return { success: false, message: "Ideas file not found" };
+    return { success: false, message: `Idea not found: ${ideaId}` };
   }
 
   const content = await readFile(IDEAS_FILE, "utf-8");
@@ -262,18 +421,54 @@ async function denyIdea(
     return { success: false, message: `Idea not found: ${ideaId}` };
   }
 
-  // Archive the idea
   idea.status = "archived";
-  idea.notes = (idea.notes ? idea.notes + "; " : "") + `Denied: ${reason}`;
-
+  idea.notes = (idea.notes ? idea.notes + "; " : "") + reason;
   await writeFile(IDEAS_FILE, rebuildIdeasFile(ideas), "utf-8");
 
-  // Log to deny history for preference learning
   await logDenyHistory(idea.title, idea.source, reason, idea.link);
-  await logFeedback("deny", idea.title, reason);
+  await logFeedback("archive", idea.title, reason);
 
-  return { success: true, message: `Denied: ${idea.title}` };
+  return { success: true, message: `Archived: ${idea.title}`, idea };
 }
+
+/**
+ * Mark an idea for discussion
+ */
+async function talkIdea(ideaId: string): Promise<{ success: boolean; message: string; idea?: Idea }> {
+  // Try file-based system first
+  const dirIdeas = await loadIdeasFromDir();
+  const dirIdea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
+
+  if (dirIdea) {
+    const updated = await updateIdeaFileField(ideaId, "status", "discussion");
+    if (updated) {
+      await appendIdeaNote(ideaId, "Discussion requested");
+      await logFeedback("talk", dirIdea.title);
+      return { success: true, message: `Discussion queued: ${dirIdea.title}`, idea: dirIdea };
+    }
+  }
+
+  // Fallback to legacy ideas.md
+  if (!existsSync(IDEAS_FILE)) {
+    return { success: false, message: `Idea not found: ${ideaId}` };
+  }
+
+  const content = await readFile(IDEAS_FILE, "utf-8");
+  const ideas = parseIdeasFile(content);
+  const idea = findIdea(ideas, ideaId);
+
+  if (!idea) {
+    return { success: false, message: `Idea not found: ${ideaId}` };
+  }
+
+  idea.status = "discussion";
+  idea.notes = (idea.notes ? idea.notes + "; " : "") + "Discussion requested";
+  await writeFile(IDEAS_FILE, rebuildIdeasFile(ideas), "utf-8");
+  await logFeedback("talk", idea.title);
+
+  return { success: true, message: `Discussion queued: ${idea.title}`, idea };
+}
+
 
 /**
  * Add user instructions to an idea
@@ -282,8 +477,21 @@ async function addIdeaInstructions(
   ideaId: string,
   instructions: string
 ): Promise<{ success: boolean; message: string; title?: string }> {
+  // Try file-based system first
+  const dirIdeas = await loadIdeasFromDir();
+  const dirIdea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
+
+  if (dirIdea) {
+    const updated = await appendIdeaNote(ideaId, `User instructions: ${instructions}`);
+    if (updated) {
+      await logFeedback("instruction", dirIdea.title, instructions);
+      return { success: true, message: `Instructions saved for ${dirIdea.title}`, title: dirIdea.title };
+    }
+  }
+
+  // Fallback to legacy ideas.md
   if (!existsSync(IDEAS_FILE)) {
-    return { success: false, message: "Ideas file not found" };
+    return { success: false, message: `Idea not found: ${ideaId}` };
   }
 
   const content = await readFile(IDEAS_FILE, "utf-8");
@@ -357,9 +565,8 @@ export async function getDenyPatterns(): Promise<string[]> {
 export function createIdeaKeyboard(ideaId: string): InlineKeyboard {
   return new InlineKeyboard()
     .text("✅ Approve", `a:i:${ideaId}:approve`)
-    .text("❌ Reject", `a:i:${ideaId}:reject`)
-    .row()
-    .text("✍️ Add Instructions", `a:i:${ideaId}:note`);
+    .text("🗂 Archive", `a:i:${ideaId}:archive`)
+    .text("💬 Talk", `a:i:${ideaId}:talk`);
 }
 
 /**
@@ -398,6 +605,7 @@ function escapeHtml(text: string): string {
  * Register approval callback handlers on the bot
  */
 export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): void {
+  stateManagerRef = stateManager;
   // Handle approve button
   bot.callbackQuery(/^a:i:([^:]+):approve$/, async (ctx) => {
     const ideaId = ctx.match?.[1];
@@ -415,6 +623,7 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
           `✅ <b>${escapeHtml(result.message)}</b>\n\n<em>Creating plan...</em>`,
           { parse_mode: "HTML" }
         );
+        await sendNextIdeaForReview(bot, ctx.chat!.id);
       } else {
         await ctx.editMessageText(`❌ ${escapeHtml(result.message)}`, { parse_mode: "HTML" });
       }
@@ -429,48 +638,57 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
     await ctx.answerCallbackQuery();
   });
 
-  // Handle reject button (with reason)
-  bot.callbackQuery(/^a:i:([^:]+):reject$/, async (ctx) => {
+  // Handle archive button
+  bot.callbackQuery(/^a:i:([^:]+):archive$/, async (ctx) => {
     const ideaId = ctx.match?.[1];
     if (!ideaId) {
       await ctx.answerCallbackQuery("Invalid request");
       return;
     }
-    logger.info({ ideaId }, "Reject button clicked");
+    logger.info({ ideaId }, "Archive button clicked");
 
     try {
-      const content = await readFile(IDEAS_FILE, "utf-8");
-      const ideas = parseIdeasFile(content);
-      const idea = findIdea(ideas, ideaId);
+      const result = await archiveIdea(ideaId);
 
-      if (!idea) {
-        await ctx.editMessageText(`❌ Idea not found: ${ideaId}`);
-        await ctx.answerCallbackQuery();
-        return;
+      if (result.success) {
+        await ctx.editMessageText(`🗂 <b>${escapeHtml(result.message)}</b>`, { parse_mode: "HTML" });
+        await sendNextIdeaForReview(bot, ctx.chat!.id);
+      } else {
+        await ctx.editMessageText(`❌ ${escapeHtml(result.message)}`, { parse_mode: "HTML" });
       }
-
-      const reasonMsg = await ctx.reply(
-        `❌ <b>Rejecting:</b> ${escapeHtml(idea.title)}\n\n` +
-        `Why are you declining this? (Helps me learn preferences)\n\n` +
-        `<em>Reply to this message with your reason, or type "skip" to reject without reason.</em>`,
-        {
-          parse_mode: "HTML",
-          reply_markup: { force_reply: true, selective: true },
-        }
-      );
-
-      pendingDenyReasons.set(reasonMsg.message_id, {
-        ideaId,
-        title: idea.title,
-        source: idea.source,
-        link: idea.link,
-        createdAt: Date.now(),
-      });
-
-      await ctx.answerCallbackQuery("Please provide a reason");
     } catch (error) {
-      logger.error({ error, ideaId }, "Failed to initiate reject");
-      await ctx.answerCallbackQuery("Error processing reject");
+      logger.error({ error, ideaId }, "Failed to archive idea");
+      await ctx.answerCallbackQuery("Error processing archive");
+    }
+  });
+
+  // Handle talk button
+  bot.callbackQuery(/^a:i:([^:]+):talk$/, async (ctx) => {
+    const ideaId = ctx.match?.[1];
+    if (!ideaId) {
+      await ctx.answerCallbackQuery("Invalid request");
+      return;
+    }
+    logger.info({ ideaId }, "Talk button clicked");
+
+    try {
+      const result = await talkIdea(ideaId);
+      if (result.success) {
+        await ctx.editMessageText(`💬 <b>${escapeHtml(result.message)}</b>`, { parse_mode: "HTML" });
+        await ctx.reply(
+          `💬 *Let's discuss this idea*\n\n` +
+          `1) What outcome do you want?\n` +
+          `2) How urgent is this?\n` +
+          `3) Any constraints or dependencies?`,
+          { parse_mode: "Markdown" }
+        );
+        await sendNextIdeaForReview(bot, ctx.chat!.id);
+      } else {
+        await ctx.editMessageText(`❌ ${escapeHtml(result.message)}`, { parse_mode: "HTML" });
+      }
+    } catch (error) {
+      logger.error({ error, ideaId }, "Failed to initiate talk");
+      await ctx.answerCallbackQuery("Error processing talk");
     }
   });
 
@@ -484,9 +702,15 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
     logger.info({ ideaId }, "Add instructions clicked");
 
     try {
-      const content = await readFile(IDEAS_FILE, "utf-8");
-      const ideas = parseIdeasFile(content);
-      const idea = findIdea(ideas, ideaId);
+      // Look up idea from both systems
+      const dirIdeas = await loadIdeasFromDir();
+      let idea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
+
+      if (!idea && existsSync(IDEAS_FILE)) {
+        const content = await readFile(IDEAS_FILE, "utf-8");
+        const legacyIdeas = parseIdeasFile(content);
+        idea = findIdea(legacyIdeas, ideaId);
+      }
 
       if (!idea) {
         await ctx.editMessageText(`❌ Idea not found: ${ideaId}`);
@@ -580,36 +804,9 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       return next();
     }
 
-    const pending = pendingDenyReasons.get(replyTo);
-    if (!pending) return next();
-
-    const reason = ctx.message.text.trim();
-    const finalReason = reason.toLowerCase() === "skip" ? "No reason provided" : reason;
-
-    logger.info({ ideaId: pending.ideaId, reason: finalReason }, "Reject reason received");
-
-    try {
-      const result = await denyIdea(pending.ideaId, finalReason);
-
-      if (result.success) {
-        await ctx.reply(
-          `❌ <b>Rejected:</b> ${escapeHtml(pending.title)}\n\n` +
-          `<b>Reason:</b> ${escapeHtml(finalReason)}\n\n` +
-          `<em>Logged to preferences for future filtering.</em>`,
-          { parse_mode: "HTML" }
-        );
-      } else {
-        await ctx.reply(`❌ ${escapeHtml(result.message)}`, { parse_mode: "HTML" });
-      }
-    } catch (error) {
-      logger.error({ error, ideaId: pending.ideaId }, "Failed to reject idea");
-      await ctx.reply(
-        `❌ Error: ${escapeHtml(error instanceof Error ? error.message : "Unknown")}`,
-        { parse_mode: "HTML" }
-      );
-    }
-
+    // Legacy reject reason flow (unused)
     pendingDenyReasons.delete(replyTo);
+    return next();
   });
 
   logger.info("Approval handlers registered");
@@ -653,18 +850,102 @@ export async function sendIdeasForReview(
 }
 
 /**
- * Get ideas awaiting review
+ * Get ideas awaiting review (from both file-based and legacy systems)
  */
 export async function getIdeasForReview(): Promise<Idea[]> {
-  if (!existsSync(IDEAS_FILE)) {
-    return [];
+  const allDrafts: Idea[] = [];
+
+  // Load from file-based system (primary)
+  const dirIdeas = await loadIdeasFromDir();
+  allDrafts.push(...dirIdeas.filter(i => i.status === "draft"));
+
+  // Load from legacy ideas.md (fallback)
+  if (existsSync(IDEAS_FILE)) {
+    const content = await readFile(IDEAS_FILE, "utf-8");
+    const legacyIdeas = parseIdeasFile(content);
+    const legacyDrafts = legacyIdeas.filter(i => i.status === "draft");
+    // Avoid duplicates by ID
+    const existingIds = new Set(allDrafts.map(i => i.id));
+    for (const idea of legacyDrafts) {
+      if (!existingIds.has(idea.id)) {
+        allDrafts.push(idea);
+      }
+    }
   }
 
-  const content = await readFile(IDEAS_FILE, "utf-8");
-  const ideas = parseIdeasFile(content);
+  return allDrafts;
+}
 
-  // Return draft ideas (not yet sent for review)
-  return ideas.filter(i => i.status === "draft");
+/**
+ * Send the next draft idea for review (one-by-one queue)
+ * Reads from both ~/memory/ideas/*.md (primary) and ideas.md (legacy).
+ * Returns true if an idea was sent, false otherwise.
+ */
+export async function sendNextIdeaForReview(bot: Bot, chatId: number, dailyLimit: number = 3): Promise<boolean> {
+  // Check daily limit
+  if (stateManagerRef) {
+    const sentCount = stateManagerRef.getIdeaReviewCount();
+    if (sentCount >= dailyLimit) {
+      logger.info({ sentCount, dailyLimit }, "Daily idea review limit reached");
+      return false;
+    }
+  }
+
+  // Load ideas from BOTH systems
+  const dirIdeas = await loadIdeasFromDir();
+  let legacyIdeas: Idea[] = [];
+  if (existsSync(IDEAS_FILE)) {
+    const content = await readFile(IDEAS_FILE, "utf-8");
+    legacyIdeas = parseIdeasFile(content);
+  }
+
+  // Check if any idea is already under review/discussion in EITHER system
+  const dirPending = dirIdeas.find(i => i.status === "review" || i.status === "discussion");
+  const legacyPending = legacyIdeas.find(i => i.status === "review" || i.status === "discussion");
+  if (dirPending || legacyPending) {
+    logger.info(
+      { dirPending: dirPending?.id, legacyPending: legacyPending?.id },
+      "Idea already under review, waiting"
+    );
+    return false;
+  }
+
+  // Find next draft — file-based system first (newest ideas), then legacy
+  const dirDrafts = dirIdeas.filter(i => i.status === "draft");
+  const legacyDrafts = legacyIdeas.filter(i => i.status === "draft");
+
+  const next = dirDrafts[0] || legacyDrafts[0];
+  if (!next) {
+    await bot.api.sendMessage(chatId, "📋 No new ideas to review today.");
+    return false;
+  }
+
+  // Determine which system this idea belongs to
+  const isFileBasedIdea = dirDrafts.some(i => i.id === next.id);
+
+  // Send to Telegram with buttons
+  const message = formatIdeaForTelegram(next, 0);
+  const keyboard = createIdeaKeyboard(next.id);
+
+  await bot.api.sendMessage(chatId, message, {
+    parse_mode: "HTML",
+    reply_markup: keyboard,
+  });
+
+  // Mark as "review" in the correct system
+  if (isFileBasedIdea) {
+    await updateIdeaFileField(next.id, "status", "review");
+  } else {
+    next.status = "review";
+    await writeFile(IDEAS_FILE, rebuildIdeasFile(legacyIdeas), "utf-8");
+  }
+
+  if (stateManagerRef) {
+    stateManagerRef.incrementIdeaReviewCount(1);
+  }
+
+  logger.info({ ideaId: next.id, title: next.title, source: isFileBasedIdea ? "dir" : "legacy" }, "Sent idea for review");
+  return true;
 }
 
 // ============================================

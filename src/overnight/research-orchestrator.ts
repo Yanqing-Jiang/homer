@@ -12,8 +12,8 @@
 
 import { logger } from "../utils/logger.js";
 import { executeWithRouting } from "../executors/router.js";
-import { executeGeminiWithFallback } from "../executors/gemini-cli.js";
 import { executeKimiCommand } from "../executors/kimi.js";
+import { executeGeminiAPI } from "../executors/gemini.js";
 import { OvernightTaskStore } from "./task-store.js";
 import type {
   OvernightTask,
@@ -185,9 +185,10 @@ Respond in JSON:
 }
 \`\`\``;
 
-    const result = await executeGeminiWithFallback(prompt, "", {
-      sandbox: true,
-      yolo: false,
+    const result = await executeGeminiAPI(prompt, {
+      model: "flash",
+      useGrounding: true,
+      systemPrompt: "You are a research planner. Expand topics into specific, high-value queries.",
     });
 
     if (result.exitCode !== 0) {
@@ -281,11 +282,10 @@ Provide a structured response with:
 - Sources (URLs if available)
 - Confidence level (0-1)`;
 
-    const result = await executeWithRouting({
-      query: prompt,
-      taskType: "discovery",
-      urgency: "batch",
-      forceExecutor: "gemini-cli",
+    const result = await executeGeminiAPI(prompt, {
+      model: "flash",
+      useGrounding: true,
+      systemPrompt: "You are an expert researcher. Provide comprehensive, accurate information with citations when available.",
     });
 
     return {

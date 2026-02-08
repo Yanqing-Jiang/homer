@@ -2,7 +2,7 @@
  * Night Supervisor
  *
  * Main orchestrator for the autonomous night mode.
- * Runs Gemini CLI to plan and execute overnight tasks.
+ * Uses Gemini CLI for nightly planning and the PipelineOrchestrator for queued overnight tasks.
  */
 
 import { writeFile, mkdir } from "fs/promises";
@@ -18,12 +18,19 @@ import type {
 import { DEFAULT_CONFIG } from "./types.js";
 import { buildContextPack } from "./context.js";
 import { JobQueue, shouldAutoExecute, formatJobsForBriefing } from "./jobs.js";
-import { executeGeminiWithFallback } from "../executors/gemini-cli.js";
+import { executeGeminiWithFallback } from "../executors/opencode-cli.js";
 import { generateMorningBriefing } from "../executors/gemini.js";
 import { logger } from "../utils/logger.js";
-import { OvernightTaskStore, PrototypeOrchestrator, ResearchOrchestrator } from "../overnight/index.js";
-import type { OvernightTask } from "../overnight/types.js";
+import { OvernightTaskStore, PipelineOrchestrator } from "../overnight/index.js";
+import type { OvernightTask, YouTubeSummaryMetadata } from "../overnight/types.js";
 import type Database from "better-sqlite3";
+import { dedupeIdeasFile } from "../ideas/dedup.js";
+import {
+  summarizeYouTubeVideo,
+  geminiSemaphore,
+  summaryFileExists,
+  ensureSummariesDir,
+} from "../youtube/summarizer.js";
 
 // ============================================
 // NIGHT SUPERVISOR CLASS
@@ -81,6 +88,9 @@ export class NightSupervisor {
     try {
       // Ensure output directories exist
       await this.ensureDirectories();
+
+      // Phase 0.5: Automatic idea dedup (LLM + deterministic)
+      await this.runIdeaDedup();
 
       // Phase 0: Process queued overnight tasks (ad-hoc user requests)
       await this.processOvernightTasks();
@@ -174,23 +184,45 @@ export class NightSupervisor {
       return;
     }
 
-    const queuedTasks = this.overnightStore.getQueuedTasks();
-    if (queuedTasks.length === 0) {
-      logger.debug("No queued overnight tasks");
-      return;
-    }
+    const endTime = Date.now() + this.config.totalTimeout;
 
-    logger.info({ taskCount: queuedTasks.length }, "Processing queued overnight tasks");
+    while (Date.now() < endTime) {
+      const queuedTasks = this.overnightStore.getQueuedTasks();
+      if (queuedTasks.length === 0) {
+        const nextScheduled = this.overnightStore.getNextQueuedTime();
+        if (!nextScheduled) {
+          logger.debug("No queued overnight tasks");
+          return;
+        }
+        const sleepMs = Math.min(nextScheduled.getTime() - Date.now(), 15 * 60 * 1000);
+        if (sleepMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, sleepMs));
+          continue;
+        }
+      }
 
-    for (const task of queuedTasks) {
-      try {
-        await this.processOvernightTask(task);
-      } catch (error) {
-        logger.error(
-          { taskId: task.id, error: error instanceof Error ? error.message : String(error) },
-          "Failed to process overnight task"
-        );
-        // Continue with other tasks
+      logger.info({ taskCount: queuedTasks.length }, "Processing queued overnight tasks");
+
+      // Separate YouTube tasks from others for batch processing
+      const ytTasks = queuedTasks.filter((t) => t.type === "youtube_summary");
+      const otherTasks = queuedTasks.filter((t) => t.type !== "youtube_summary");
+
+      // Process YouTube tasks in parallel (max 3 concurrent via semaphore)
+      if (ytTasks.length > 0) {
+        await this.processYouTubeBatch(ytTasks);
+      }
+
+      // Process remaining tasks sequentially
+      for (const task of otherTasks) {
+        try {
+          await this.processOvernightTask(task);
+        } catch (error) {
+          logger.error(
+            { taskId: task.id, error: error instanceof Error ? error.message : String(error) },
+            "Failed to process overnight task"
+          );
+          // Continue with other tasks
+        }
       }
     }
   }
@@ -205,28 +237,145 @@ export class NightSupervisor {
       }
     };
 
-    if (task.type === "prototype_work") {
-      const orchestrator = new PrototypeOrchestrator(task, this.overnightStore!, {
-        onMilestone,
+    if (!this.overnightStore) return;
+
+    if (task.iterations <= 0) {
+      this.overnightStore.updateTaskStatus(task.id, "ready", { completedAt: new Date(), iterations: 0 });
+      this.session?.findings.push(`Overnight task skipped (no iterations left): ${task.subject}`);
+      return;
+    }
+
+    const orchestrator = new PipelineOrchestrator(task, this.overnightStore!, { onMilestone });
+    const result = await orchestrator.execute();
+
+    if (result.success) {
+      const remaining = Math.max(0, task.iterations - 1);
+      if (result.nextIterationNeeded && remaining > 0) {
+        const nextRun = new Date(Date.now() + 60 * 60 * 1000);
+        this.overnightStore.updateTaskStatus(task.id, "queued", {
+          scheduledFor: nextRun,
+          iterations: remaining,
+          startedAt: null,
+          completedAt: null,
+        });
+        this.session?.findings.push(
+          `Overnight task scheduled for next iteration: ${task.subject} (${result.summary})`
+        );
+      } else {
+        this.overnightStore.updateTaskStatus(task.id, "ready", {
+          completedAt: new Date(),
+          iterations: remaining,
+        });
+        this.session?.findings.push(`Overnight task ready: ${task.subject} (${result.summary})`);
+      }
+    } else {
+      this.session?.findings.push(`Overnight task failed: ${task.subject} - ${result.error}`);
+    }
+  }
+
+  // ----------------------------------------
+  // YouTube Batch Processing
+  // ----------------------------------------
+
+  private async processYouTubeBatch(tasks: OvernightTask[]): Promise<void> {
+    logger.info({ count: tasks.length }, "Processing YouTube tasks in parallel batch");
+    ensureSummariesDir();
+
+    const results = await Promise.allSettled(
+      tasks.map((task) => this.processYouTubeTask(task))
+    );
+
+    let succeeded = 0;
+    let failed = 0;
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        succeeded++;
+      } else {
+        failed++;
+      }
+    }
+
+    logger.info({ succeeded, failed, total: tasks.length }, "YouTube batch processing complete");
+  }
+
+  private async processYouTubeTask(task: OvernightTask): Promise<void> {
+    if (!this.overnightStore) return;
+
+    let metadata: YouTubeSummaryMetadata;
+    try {
+      metadata = JSON.parse(task.metadata ?? "{}") as YouTubeSummaryMetadata;
+    } catch {
+      this.overnightStore.updateTaskStatus(task.id, "failed", {
+        error: "Invalid metadata JSON",
       });
-      const result = await orchestrator.execute();
+      return;
+    }
+
+    const { videoId } = metadata;
+    if (!videoId) {
+      this.overnightStore.updateTaskStatus(task.id, "failed", {
+        error: "No videoId in metadata",
+      });
+      return;
+    }
+
+    // Process-time dedup: skip if summary file already exists
+    const existing = summaryFileExists(videoId);
+    if (existing) {
+      logger.info({ videoId, taskId: task.id }, "Summary file already exists, marking ready");
+      this.overnightStore.updateTaskStatus(task.id, "ready", {
+        completedAt: new Date(),
+      });
+      this.session?.findings.push(`YouTube summary already exists: ${videoId}`);
+      return;
+    }
+
+    // Mark as executing
+    this.overnightStore.updateTaskStatus(task.id, "executing", {
+      startedAt: new Date(),
+    });
+
+    // Acquire semaphore slot (max 3 concurrent Gemini processes)
+    await geminiSemaphore.acquire();
+    try {
+      logger.info({ videoId, taskId: task.id }, "Processing YouTube video");
+
+      const result = await summarizeYouTubeVideo(metadata);
 
       if (result.success) {
-        this.session?.findings.push(`Overnight prototype: ${task.subject} - ${result.iterations.length} approaches completed`);
+        // Update metadata in DB with enriched data
+        this.overnightStore.updateTaskMetadata(
+          task.id,
+          JSON.stringify(metadata)
+        );
+        this.overnightStore.updateTaskStatus(task.id, "ready", {
+          completedAt: new Date(),
+        });
+        this.session?.findings.push(
+          `YouTube summary ready: ${metadata.videoTitle ?? videoId} (relevance: ${metadata.relevanceScore ?? "?"})`
+        );
       } else {
-        this.session?.findings.push(`Overnight prototype failed: ${task.subject} - ${result.error}`);
+        this.overnightStore.updateTaskStatus(task.id, "failed", {
+          error: result.error,
+          completedAt: new Date(),
+        });
+        this.session?.findings.push(
+          `YouTube summary failed: ${videoId} — ${result.error}`
+        );
       }
-    } else if (task.type === "research_dive") {
-      const orchestrator = new ResearchOrchestrator(task, this.overnightStore!, {
-        onMilestone,
-      });
-      const result = await orchestrator.execute();
+    } finally {
+      geminiSemaphore.release();
+    }
+  }
 
-      if (result.success) {
-        this.session?.findings.push(`Overnight research: ${task.subject} - ${result.iterations.length} interpretations ready`);
-      } else {
-        this.session?.findings.push(`Overnight research failed: ${task.subject} - ${result.error}`);
+  private async runIdeaDedup(): Promise<void> {
+    try {
+      const result = await dedupeIdeasFile();
+      if (result.merged > 0 || result.archived > 0) {
+        logger.info({ ...result }, "Idea dedup completed");
       }
+    } catch (error) {
+      logger.warn({ error }, "Idea dedup failed");
     }
   }
 
@@ -240,23 +389,24 @@ export class NightSupervisor {
     const prompt = `You are the Night Supervisor. Analyze the context and create a plan for tonight's autonomous work.
 
 Focus on:
-1. **Idea Consolidation** (ALWAYS include): Deduplicate ~/memory/ideas.md, merge similar entries, archive stale drafts
-2. Research tasks that would provide value (web searches, documentation lookups)
-3. Ideas worth exploring further (pick 1-2 high-value ones)
-4. Code improvements or proposals (be conservative - these require verification)
-5. Priority actions for tomorrow
+1. Research tasks that would provide value (web searches, documentation lookups)
+2. Ideas worth exploring further (pick 1-2 high-value ones)
+3. Code improvements or proposals (be conservative - these require verification)
+4. Priority actions for tomorrow
+
+Note: Idea deduplication is handled separately and should NOT be included.
 
 Return a JSON plan with this structure:
 {
   "summary": "Brief description of tonight's focus",
-  "maintenance_tasks": [{"id": "m1", "task": "idea_consolidation", "priority": "high"}],
+  "maintenance_tasks": [],
   "research_tasks": [...],
   "ideas_to_explore": [...],
   "code_proposals": [...],
   "priority_actions": [...]
 }
 
-Be selective - quality over quantity. Always include idea_consolidation as a maintenance task.`;
+Be selective - quality over quantity.`;
 
     try {
       const result = await executeGeminiWithFallback(prompt, context, {
@@ -439,32 +589,11 @@ Be selective - quality over quantity. Always include idea_consolidation as a mai
         }
 
         case "idea_consolidation": {
-          // Deduplicate and consolidate ideas in ideas.md
-          const prompt = `You are consolidating the ideas file. Read ~/memory/ideas.md and:
-
-1. **Find Duplicates**: Identify ideas about the same topic (e.g., multiple entries for "Trellis", "Moltworker", "Anthony Fu skills")
-2. **Merge Duplicates**: Keep the most comprehensive entry, archive others
-3. **Remove Stale Ideas**: Archive ideas older than 14 days that are still in "draft" status
-4. **Update Blocklist**: Add any frequently duplicated repos to ~/memory/deny-history.md "Already Tracking" section
-
-Output a summary:
-- Duplicates merged: X
-- Stale ideas archived: Y
-- Repos added to blocklist: Z
-
-IMPORTANT: Actually edit the files, don't just analyze.`;
-
-          const result = await executeGeminiWithFallback(prompt, "", {
-            model: "gemini-3-flash-preview",
-            sandbox: false, // Need to edit files
-            yolo: true,
-            timeout: this.config.jobTimeout,
-          });
-
+          const result = await dedupeIdeasFile();
+          const output = `Duplicates merged: ${result.merged}\nArchived: ${result.archived}\nBlocklist added: ${result.blocklistAdded.length}`;
           return {
-            success: result.exitCode === 0,
-            output: result.output,
-            error: result.exitCode !== 0 ? result.output : undefined,
+            success: true,
+            output,
             duration: Date.now() - startTime,
           };
         }
@@ -702,4 +831,3 @@ async function main() {
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch(console.error);
 }
-

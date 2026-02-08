@@ -18,6 +18,7 @@ import {
 } from "../../commands/index.js";
 import type { CLIRunManager } from "../../executors/cli-runner.js";
 import { webLane } from "../../utils/lanes.js";
+import { buildConversationContext } from "../../executors/context-builder.js";
 
 interface SetExecutorBody {
   executor: ExecutorType;
@@ -110,6 +111,9 @@ export function registerCommandRoutes(
         "claude",
         "gemini",
         "codex",
+        "kimi",
+        "chatgpt",
+        "opencode",
       ];
 
       if (!validExecutors.includes(body.executor)) {
@@ -120,21 +124,52 @@ export function registerCommandRoutes(
       }
 
       const model = body.model || getExecutorModel(body.executor);
+      const lane = webLane(sessionId);
+
+      // Get current executor state before switching
+      const currentState = stateManager.getCurrentExecutor(lane);
+      const previousExecutor = currentState?.executor ?? "claude";
+
       // Cancel any active run for this web session
       if (runManager) {
-        runManager.cancelRun(webLane(sessionId), "executor switch");
+        runManager.cancelRun(lane, "executor switch");
       }
 
-      const lane = webLane(sessionId);
-      stateManager.setCurrentExecutor(lane, body.executor as ExecutorStateType, model, null);
+      // Build and store conversation context for handoff (if switching to different executor)
+      let contextBuilt = false;
+      if (previousExecutor !== body.executor) {
+        try {
+          // Extract threadId from sessionId (web:threadId format -> threadId)
+          const threadId = sessionId;
+          const context = await buildConversationContext(
+            stateManager,
+            { type: "thread", id: threadId },
+            { maxMessages: 10, maxTokens: 2000 }
+          );
 
-      logger.info({ sessionId, executor: body.executor, model }, "Executor set via API");
+          if (context.messageCount > 0) {
+            stateManager.setPendingContext(lane, context.formatted, previousExecutor);
+            contextBuilt = true;
+            logger.debug(
+              { lane, messageCount: context.messageCount, anchorCount: context.anchorCount },
+              "Built pending context for executor switch"
+            );
+          }
+        } catch (err) {
+          logger.warn({ err, sessionId }, "Failed to build context for executor switch");
+        }
+      }
+
+      stateManager.setCurrentExecutor(lane, body.executor as ExecutorStateType, model);
+
+      logger.info({ sessionId, executor: body.executor, model, contextBuilt }, "Executor set via API");
 
       return {
         sessionId,
         executor: body.executor,
         model,
         success: true,
+        contextCarriedOver: contextBuilt,
       };
     }
   );

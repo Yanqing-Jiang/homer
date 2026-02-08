@@ -10,7 +10,7 @@
 // TASK TYPES
 // ============================================
 
-export type OvernightTaskType = "prototype_work" | "research_dive";
+export type OvernightTaskType = "prototype_work" | "research_dive" | "youtube_summary";
 
 export type OvernightTaskStatus =
   | "queued"        // Waiting for overnight execution
@@ -57,9 +57,22 @@ export interface OvernightTask {
   scheduledFor?: Date;
   confidenceScore?: number;
   error?: string;
+  metadata?: string;
   createdAt: Date;
   startedAt?: Date;
   completedAt?: Date;
+}
+
+export interface YouTubeSummaryMetadata {
+  videoUrl: string;
+  videoId: string;
+  videoTitle?: string;
+  channelName?: string;
+  transcript?: string;
+  transcriptMethod?: "youtube-transcript-api" | "yt-dlp" | "elevenlabs" | "none";
+  summary?: string;
+  personalizedInsights?: string;
+  relevanceScore?: number;
 }
 
 export interface OvernightIteration {
@@ -239,7 +252,7 @@ export interface Workspace {
  */
 export const APPROACH_EXECUTORS: Record<ApproachName, ExecutorType> = {
   Conservative: "codex",
-  Innovative: "gemini-cli",
+  Innovative: "opencode",
   Pragmatic: "claude",
 };
 
@@ -250,8 +263,8 @@ export const APPROACH_EXECUTORS: Record<ApproachName, ExecutorType> = {
  * - Validation: Codex (verification)
  */
 export const RESEARCH_EXECUTORS = {
-  queryExpansion: "gemini-cli" as ExecutorType,
-  harvest: "gemini-cli" as ExecutorType,
+  queryExpansion: "opencode" as ExecutorType,
+  harvest: "opencode" as ExecutorType,
   synthesis: "kimi" as ExecutorType,
   validation: "codex" as ExecutorType,
 };
@@ -285,7 +298,7 @@ export interface OvernightConfig {
 export const DEFAULT_OVERNIGHT_CONFIG: OvernightConfig = {
   workspacesDir: `${process.env.HOME}/homer/workspaces`,
   workspaceRetentionDays: 7,
-  defaultIterations: 3,
+  defaultIterations: 2,
   maxIterations: 5,
   jobTimeout: 600000,     // 10 min per iteration
   totalTimeout: 7200000,  // 2 hours total per task
@@ -300,7 +313,7 @@ export const DEFAULT_OVERNIGHT_CONFIG: OvernightConfig = {
 // ============================================
 
 export interface OvernightCallbackData {
-  action: "select" | "compare" | "clarify" | "skip";
+  action: "select" | "compare" | "clarify" | "skip" | "approve" | "archive" | "talk";
   taskId: string;
   option?: ApproachLabel | string;
 }

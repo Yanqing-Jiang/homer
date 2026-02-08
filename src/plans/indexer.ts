@@ -43,8 +43,8 @@ export class PlansIndexer {
     const insert = this.db.prepare(`
       INSERT INTO plan_index (
         id, title, status, current_phase, progress, total_tasks, completed_tasks,
-        file_path, content_hash, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        file_path, content_hash, source_idea_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     `);
 
     for (const plan of plans) {
@@ -59,6 +59,7 @@ export class PlansIndexer {
           plan.completedTasks,
           plan.filePath,
           plan.contentHash,
+          plan.sourceIdeaId ?? null,
           plan.createdAt
         );
         indexed++;
@@ -97,8 +98,8 @@ export class PlansIndexer {
       .prepare(`
         INSERT INTO plan_index (
           id, title, status, current_phase, progress, total_tasks, completed_tasks,
-          file_path, content_hash, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          file_path, content_hash, source_idea_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(id) DO UPDATE SET
           title = excluded.title,
           status = excluded.status,
@@ -108,6 +109,7 @@ export class PlansIndexer {
           completed_tasks = excluded.completed_tasks,
           file_path = excluded.file_path,
           content_hash = excluded.content_hash,
+          source_idea_id = excluded.source_idea_id,
           updated_at = CURRENT_TIMESTAMP
       `)
       .run(
@@ -120,6 +122,7 @@ export class PlansIndexer {
         plan.completedTasks,
         plan.filePath,
         plan.contentHash,
+        plan.sourceIdeaId ?? null,
         plan.createdAt
       );
 
