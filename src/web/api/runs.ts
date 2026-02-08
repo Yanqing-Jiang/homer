@@ -6,6 +6,7 @@ import { CLIRunManager } from "../../executors/cli-runner.js";
 import { logger } from "../../utils/logger.js";
 import { webLane } from "../../utils/lanes.js";
 import { config } from "../../config/index.js";
+import { parseCommand, getExecutorModel } from "../../commands/index.js";
 
 interface ExecuteBody {
   content: string;
@@ -33,7 +34,7 @@ export function registerRunRoutes(
       const { threadId } = request.params as { threadId: string };
       const body = request.body as ExecuteBody;
 
-      if (!body.content) {
+      if (!body.content || !body.content.trim()) {
         reply.status(400);
         return { error: "content is required" };
       }
@@ -45,30 +46,110 @@ export function registerRunRoutes(
       }
 
       const lane = webLane(thread.chatSessionId);
+      const parsed = parseCommand(body.content) ?? null;
+
+      if (parsed?.isNewSession) {
+        runManager.cancelRun(lane, "new session");
+        stateManager.clearExecutor(lane);
+        stateManager.clearStoredExecutorSessions(lane);
+      }
+
+      if (parsed?.isExecutorSwitch && parsed.newExecutor) {
+        runManager.cancelRun(lane, "executor switch");
+        const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
+        stateManager.setCurrentExecutor(lane, parsed.newExecutor, model ?? undefined);
+      }
+
+      const hasQuery = parsed ? !!parsed.query : false;
+      const isCommandOnly = parsed ? (parsed.isNewSession || parsed.isExecutorSwitch) && !hasQuery : false;
+
+      if (isCommandOnly) {
+        const userMessageId = randomUUID();
+        stateManager.createThreadMessage({
+          id: userMessageId,
+          threadId,
+          role: "user",
+          content: body.content,
+        });
+
+        let responseText = "";
+        if (parsed?.deprecationWarning) {
+          responseText += `${parsed.deprecationWarning}\n\n`;
+        }
+
+        if (parsed?.isExecutorSwitch && parsed.newExecutor) {
+          responseText += `Executor switched to ${parsed.newExecutor}.`;
+        } else if (parsed?.isNewSession) {
+          const model = getExecutorModel("claude");
+          stateManager.setCurrentExecutor(lane, "claude", model ?? undefined);
+          responseText += "Fresh session started. Executor reset to Claude.";
+        } else {
+          responseText += "Command processed.";
+        }
+
+        const assistantMessageId = randomUUID();
+        stateManager.createThreadMessage({
+          id: assistantMessageId,
+          threadId,
+          role: "assistant",
+          content: responseText,
+          metadata: {
+            exitCode: 0,
+          },
+        });
+
+        const runId = randomUUID();
+        const startedAt = Date.now();
+        stateManager.createCliRun({
+          id: runId,
+          lane,
+          executor: parsed?.newExecutor ?? "claude",
+          threadId,
+          status: "running",
+          startedAt,
+        });
+        stateManager.completeCliRun(runId, {
+          status: "completed",
+          completedAt: startedAt,
+          exitCode: 0,
+          output: responseText,
+          executor: parsed?.newExecutor ?? "claude",
+        });
+
+        return { runId, userMessageId };
+      }
+
       if (runManager.getActiveRun(lane)) {
         reply.status(409);
         return { error: "A run is already in progress for this session" };
       }
 
       // Create user message
+      const attachments = filterAttachmentPaths(body.attachments);
       const userMessageId = randomUUID();
       stateManager.createThreadMessage({
         id: userMessageId,
         threadId,
         role: "user",
         content: body.content,
+        metadata: attachments.length > 0 ? { attachments } : undefined,
       });
 
-      const attachments = filterAttachmentPaths(body.attachments);
+      const query =
+        parsed && (parsed.isExecutorSwitch || parsed.isNewSession)
+          ? parsed.query
+          : body.content;
 
       // Start run
       try {
         const { runId } = await runManager.startRun({
           lane,
-          query: body.content,
+          query,
           cwd: process.env.HOME ?? "/Users/yj",
           attachments,
           threadId,
+          contextBeforeMessageId: userMessageId,
+          suppressContext: parsed?.isNewSession ?? false,
         });
 
         return { runId, userMessageId };

@@ -10,9 +10,11 @@ export type { ExecutorResult, ExecutorOptions } from "./types.js";
 // Individual executors
 export { executeClaudeCommand, type ClaudeExecutorOptions, type ClaudeExecutorResult } from "./claude.js";
 export { executeCodexCLI, type CodexCLIOptions, type CodexCLIResult } from "./codex-cli.js";
-export { executeGeminiCLI, executeGeminiWithFallback, streamGeminiCLI, getAccountStatus, resetAccountCooldowns, type GeminiCLIOptions, type GeminiCLIResult } from "./gemini-cli.js";
+export { executeGeminiCLI, executeGeminiWithFallback, streamGeminiCLI, getAccountStatus, resetAccountCooldowns, executeOpenCodeCLI, executeOpenCodeWithFallback, streamOpenCodeCLI, type GeminiCLIOptions, type GeminiCLIResult, type OpenCodeCLIOptions, type OpenCodeCLIResult } from "./opencode-cli.js";
 export { executeGeminiAPI, researchWithGemini, summarizeWithGemini, planWithGemini, checkGeminiAPIHealth, type GeminiAPIOptions, type GeminiAPIResult } from "./gemini.js";
 export { executeKimiCommand, summarizeWithKimi, extractMemoryFacts, type KimiExecutorOptions, type KimiExecutorResult } from "./kimi.js";
+export { executeKimiCLI, type KimiCLIOptions, type KimiCLIResult } from "./kimi-cli.js";
+export { executeKimiAgent, kimiResearch, kimiDesign, kimiSummarize, type KimiAgentOptions, type KimiAgentResult } from "./kimi-agent.js";
 
 // Router system
 export {

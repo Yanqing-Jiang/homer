@@ -10,8 +10,10 @@ import {
   type ParsedCommand,
 } from "../commands/index.js";
 import { registerApprovalHandlers, registerPlanApprovalHandlers, registerPlanApprovalCallbacks } from "./handlers/approval.js";
+import { registerIdeaCommands, registerIdeaCallbacks } from "./handlers/idea.js";
 import { registerQuickCommands, registerProposalCallbacks } from "./handlers/proposal-approval.js";
 import { registerOvernightCommands, handleOvernightMessage } from "./handlers/overnight.js";
+import { handleYouTubeUrl, initializeYouTubeHandler } from "./handlers/youtube.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { StateManager } from "../state/manager.js";
 import { sendThinkingIndicator, editWithResponse } from "./streaming.js";
@@ -32,8 +34,10 @@ import {
 import { MeetingManager, formatDuration } from "../meetings/index.js";
 import { CLIRunManager } from "../executors/cli-runner.js";
 import { telegramLane } from "../utils/lanes.js";
+import { buildConversationContext } from "../executors/context-builder.js";
 import { mkdirSync, writeFileSync, existsSync } from "fs";
 import { join, extname } from "path";
+import { randomUUID } from "crypto";
 
 const ENABLE_STREAMING = true;
 // Telegram now uses per-chat lanes (tg:<chatId>)
@@ -41,7 +45,7 @@ const ENABLE_STREAMING = true;
 let schedulerRef: Scheduler | null = null;
 let reminderManagerRef: ReminderManager | null = null;
 let meetingManagerRef: MeetingManager | null = null;
-let voiceOutputEnabled = false; // Toggle for voice output responses
+
 const pendingAttachments: Map<string, string[]> = new Map();
 
 function ensureDir(path: string): void {
@@ -117,8 +121,15 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
   registerQuickCommands(bot, stateManager);
   registerProposalCallbacks(bot, stateManager);
 
+  // Register /idea command and inline button callbacks
+  registerIdeaCommands(bot, stateManager);
+  registerIdeaCallbacks(bot);
+
   // Register overnight work commands (/overnight) and inline button callbacks
   registerOvernightCommands(bot, stateManager);
+
+  // Initialize YouTube URL handler
+  initializeYouTubeHandler(stateManager);
 
   // /start - help
   bot.command("start", async (ctx) => {
@@ -131,13 +142,13 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
       "H.O.M.E.R ready.\n\n" +
         `*Current executor:* ${currentExecutor}\n\n` +
         "*Executor Commands:* (persistent)\n" +
-        "/claude - Switch to Claude (default)\n" +
-        "/gemini - Switch to Gemini CLI\n" +
-        "/codex - Switch to Codex (deep reasoning)\n\n" +
+        "/claude - Claude (default)\n" +
+        "/gemini - Gemini CLI\n" +
+        "/codex - Codex (deep reasoning)\n" +
+        "/kimi - Kimi K2.5 (long-context)\n\n" +
         "*Session:*\n" +
-        "/new - Start fresh session (resets executor)\n" +
-        "/status - Active session\n" +
-        "/voice - Toggle voice output\n\n" +
+        "/new - Fresh session (resets executor)\n" +
+        "/status - Active session\n\n" +
         "*Jobs:*\n" +
         "/jobs - Scheduled jobs\n" +
         "/trigger <id> - Run job\n\n" +
@@ -148,6 +159,8 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
         "/remind <time> <msg>\n" +
         "/reminders - List\n" +
         "/cancel <id>\n\n" +
+        "*Ideas:*\n" +
+        "/idea - List/add/update/archive ideas\n\n" +
         "*Search:*\n" +
         "/search <query>\n\n" +
         "*Overnight Work:*\n" +
@@ -157,17 +170,6 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
         "Just type - I'll handle context.",
       { parse_mode: "Markdown" }
     );
-  });
-
-  // /voice - toggle voice output
-  bot.command("voice", async (ctx) => {
-    voiceOutputEnabled = !voiceOutputEnabled;
-    const status = voiceOutputEnabled ? "ON" : "OFF";
-    const icon = voiceOutputEnabled ? "🔊" : "🔇";
-    await ctx.reply(`${icon} Voice output: *${status}*\n\nVoice input always works - just send a voice message.`, {
-      parse_mode: "Markdown",
-    });
-    logger.info({ voiceOutputEnabled }, "Voice output toggled");
   });
 
   // /status
@@ -518,9 +520,9 @@ ${checksStr}`;
 
           // Handle executor switch in caption
           if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
-            const model = getExecutorModel(parsed.newExecutor);
+            const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
             runManager.cancelRun(lane, "executor switch");
-            stateManager.setCurrentExecutor(lane, parsed.newExecutor, model, null);
+            stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
             addPendingAttachment(lane, filePath);
             await ctx.reply(`Switched to ${parsed.newExecutor}. Attachment saved.`);
             return;
@@ -530,6 +532,7 @@ ${checksStr}`;
           if (parsed.isNewSession) {
             runManager.cancelRun(lane, "new session");
             stateManager.clearExecutor(lane);
+            stateManager.clearStoredExecutorSessions(lane);
             if (!parsed.query) {
               addPendingAttachment(lane, filePath);
               await ctx.reply("Fresh session started. Attachment saved.");
@@ -539,9 +542,9 @@ ${checksStr}`;
 
           // Handle executor switch with query
           if (isExecutorSwitchWithQuery(parsed) && parsed.newExecutor) {
-            const model = getExecutorModel(parsed.newExecutor);
+            const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
             runManager.cancelRun(lane, "executor switch with query");
-            stateManager.setCurrentExecutor(lane, parsed.newExecutor, model, null);
+            stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
           }
 
           const attachments = [...pending, filePath];
@@ -653,9 +656,9 @@ ${checksStr}`;
         }
 
         if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
-          const model = getExecutorModel(parsed.newExecutor);
+          const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
           runManager.cancelRun(lane, "executor switch");
-          stateManager.setCurrentExecutor(lane, parsed.newExecutor, model, null);
+          stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
           addPendingAttachment(lane, filePath);
           await ctx.reply(`Switched to ${parsed.newExecutor}. Photo saved.`);
           return;
@@ -664,6 +667,7 @@ ${checksStr}`;
         if (parsed.isNewSession) {
           runManager.cancelRun(lane, "new session");
           stateManager.clearExecutor(lane);
+          stateManager.clearStoredExecutorSessions(lane);
           if (!parsed.query) {
             addPendingAttachment(lane, filePath);
             await ctx.reply("Fresh session started. Photo saved.");
@@ -672,9 +676,9 @@ ${checksStr}`;
         }
 
         if (isExecutorSwitchWithQuery(parsed) && parsed.newExecutor) {
-          const model = getExecutorModel(parsed.newExecutor);
+          const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
           runManager.cancelRun(lane, "executor switch with query");
-          stateManager.setCurrentExecutor(lane, parsed.newExecutor, model, null);
+          stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
         }
 
         const attachments = [...pending, filePath];
@@ -768,10 +772,10 @@ ${checksStr}`;
 
       // Handle executor switches via voice
       if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
-        const model = getExecutorModel(parsed.newExecutor);
+        const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
         const lane = telegramLane(ctx.chat.id);
         runManager.cancelRun(lane, "voice executor switch");
-        stateManager.setCurrentExecutor(lane, parsed.newExecutor, model, null);
+        stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
         await ctx.reply(`Switched to ${parsed.newExecutor}`);
         return;
       }
@@ -781,22 +785,67 @@ ${checksStr}`;
         return;
       }
 
+      // Inject voice-mode instruction: produce spoken response + bullet-point summary
+      parsed.query = `<voice-mode>
+You MUST structure your response in exactly two sections using these XML tags:
+
+<spoken>
+Your full spoken response here. Natural spoken language suitable for text-to-speech. No markdown, no bullet lists, no code blocks. Use conversational transitions. Cover all key points thoroughly but concisely.
+</spoken>
+
+<summary>
+A bullet-point summary (using • or -) of the key takeaways. This is a separate written summary for reading, NOT a transcript of the spoken part. Keep it concise — max 5-8 bullets. Use markdown formatting.
+</summary>
+
+IMPORTANT: You MUST include both <spoken> and <summary> tags. The spoken section is for audio playback. The summary is a complementary text reference with the main points.
+</voice-mode>\n\n${parsed.query}`;
+
       const responseText = await handleNewExecution(ctx, parsed, stateManager, runManager, true);
 
-      // Only output voice if toggle is enabled
-      if (voiceOutputEnabled && voiceConfig.elevenLabsApiKey && responseText) {
+      // Voice in = voice out: always reply with voice
+      if (voiceConfig.elevenLabsApiKey && responseText) {
+        // Parse spoken and summary sections from response
+        const spokenMatch = responseText.match(/<spoken>([\s\S]*?)<\/spoken>/);
+        const summaryMatch = responseText.match(/<summary>([\s\S]*?)<\/summary>/);
+        const spokenText = spokenMatch?.[1]?.trim() || responseText.replace(/<\/?(?:spoken|summary)>/g, "").trim();
+        const summaryText = summaryMatch?.[1]?.trim() || null;
+
+        // Log transcription + response locally for future DB indexing
+        logger.info(
+          { transcription: transcription.text, response: spokenText.slice(0, 500) },
+          "Voice exchange logged"
+        );
+
         try {
-          const ttsText = truncateForTTS(responseText);
-          // Use OGG/Opus format for proper Telegram voice notes with turbo model for low latency
-          const ttsOptions: SynthesisOptions = { format: "ogg_opus", turbo: true };
-          const synthesis = await synthesizeSpeech(ttsText, voiceConfig, ttsOptions);
+          const ttsText = truncateForTTS(spokenText);
+          // Use Eleven v3 with Jonathan Livingston voice for quality spoken output
+          const ttsVoiceConfig: VoiceConfig = {
+            ...voiceConfig,
+            elevenLabsVoiceId: "PIGsltMj3gFMR34aFDI3",
+            elevenLabsModel: "eleven_v3",
+          };
+          const ttsOptions: SynthesisOptions = { format: "ogg_opus" };
+          const synthesis = await synthesizeSpeech(ttsText, ttsVoiceConfig, ttsOptions);
           await ctx.replyWithVoice(new InputFile(synthesis.audio, "response.ogg"));
+
+          // Send the bullet-point summary after the voice reply
+          if (summaryText) {
+            try {
+              await ctx.reply(summaryText, { parse_mode: "Markdown" });
+            } catch {
+              try { await ctx.reply(summaryText); } catch { /* non-critical */ }
+            }
+          }
         } catch (ttsError) {
-          logger.warn({ error: ttsError }, "TTS failed");
-          await ctx.reply(responseText);
+          logger.warn({ error: ttsError }, "TTS failed, falling back to text");
+          for (const chunk of chunkMessage(responseText)) {
+            await ctx.reply(chunk);
+          }
         }
       } else if (responseText) {
-        await ctx.reply(responseText);
+        for (const chunk of chunkMessage(responseText)) {
+          await ctx.reply(chunk);
+        }
       }
     } catch (error) {
       logger.error({ error }, "Voice processing failed");
@@ -809,7 +858,15 @@ ${checksStr}`;
     const text = ctx.message.text;
     const lane = telegramLane(ctx.chat.id);
 
-    // Check for overnight work requests first (e.g., "work on xyz tonight")
+    // Check for bare YouTube URLs first — queue for overnight summary
+    try {
+      const wasYouTubeUrl = await handleYouTubeUrl(ctx, text);
+      if (wasYouTubeUrl) return;
+    } catch (error) {
+      logger.warn({ error }, "YouTube URL handling failed, falling back to normal flow");
+    }
+
+    // Check for overnight work requests (e.g., "work on xyz tonight")
     // This handles special patterns before regular command parsing
     try {
       const wasOvernightRequest = await handleOvernightMessage(ctx, text);
@@ -834,12 +891,36 @@ ${checksStr}`;
 
     // Handle pure executor switch (no query)
     if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
-      const model = getExecutorModel(parsed.newExecutor);
-      runManager.cancelRun(lane, "executor switch");
-      stateManager.setCurrentExecutor(lane, parsed.newExecutor, model, null);
+      const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
+      const currentState = stateManager.getCurrentExecutor(lane);
+      const previousExecutor = currentState?.executor ?? "claude";
 
+      runManager.cancelRun(lane, "executor switch");
+
+      // Build and store conversation context for handoff (if switching to different executor)
+      let contextCarried = false;
+      if (previousExecutor !== parsed.newExecutor) {
+        try {
+          const context = await buildConversationContext(
+            stateManager,
+            { type: "lane", id: lane },
+            { maxMessages: 8, maxTokens: 1500 }
+          );
+          if (context.messageCount > 0) {
+            stateManager.setPendingContext(lane, context.formatted, previousExecutor);
+            contextCarried = true;
+            logger.debug({ lane, messageCount: context.messageCount }, "Built pending context for Telegram executor switch");
+          }
+        } catch (err) {
+          logger.warn({ err, lane }, "Failed to build context for Telegram executor switch");
+        }
+      }
+
+      stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
+
+      const contextNote = contextCarried ? "\n_(Conversation context carried over)_" : "";
       await ctx.reply(
-        `Switched to *${parsed.newExecutor}*${model ? ` (${model})` : ""}\n\n` +
+        `Switched to *${parsed.newExecutor}*${model ? ` (${model})` : ""}${contextNote}\n\n` +
           `All messages will now use ${parsed.newExecutor} until you switch or use /new.`,
         { parse_mode: "Markdown" }
       );
@@ -851,6 +932,7 @@ ${checksStr}`;
       // Clear executor state
       runManager.cancelRun(lane, "new session");
       stateManager.clearExecutor(lane);
+      stateManager.clearStoredExecutorSessions(lane);
 
       // If there's a query with /new, execute it fresh
       if (parsed.query) {
@@ -864,9 +946,30 @@ ${checksStr}`;
 
     // Handle executor switch with query (e.g., "/gemini what's the weather")
     if (isExecutorSwitchWithQuery(parsed) && parsed.newExecutor) {
-      const model = getExecutorModel(parsed.newExecutor);
+      const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
+      const currentState = stateManager.getCurrentExecutor(lane);
+      const previousExecutor = currentState?.executor ?? "claude";
+
       runManager.cancelRun(lane, "executor switch with query");
-      stateManager.setCurrentExecutor(lane, parsed.newExecutor, model, null);
+
+      // Build and store conversation context for handoff (if switching to different executor)
+      if (previousExecutor !== parsed.newExecutor) {
+        try {
+          const context = await buildConversationContext(
+            stateManager,
+            { type: "lane", id: lane },
+            { maxMessages: 8, maxTokens: 1500 }
+          );
+          if (context.messageCount > 0) {
+            stateManager.setPendingContext(lane, context.formatted, previousExecutor);
+            logger.debug({ lane, messageCount: context.messageCount }, "Built pending context for Telegram executor switch with query");
+          }
+        } catch (err) {
+          logger.warn({ err, lane }, "Failed to build context for Telegram executor switch");
+        }
+      }
+
+      stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
 
       // Execute the query with the new executor
       const attachments = consumePendingAttachments(lane);
@@ -945,6 +1048,24 @@ async function handleNewExecution(
       }
     }
 
+    const thread = stateManager.ensureThreadForLane(lane, {
+      title: `Telegram ${ctx.chat.id}`,
+      provider: currentExecutor,
+      model: executorState?.model ?? null,
+    });
+
+    let userMessageId: string | null = null;
+    if (parsed.query && parsed.query.trim()) {
+      userMessageId = randomUUID();
+      stateManager.createThreadMessage({
+        id: userMessageId,
+        threadId: thread.id,
+        role: "user",
+        content: parsed.query,
+        metadata: attachments.length > 0 ? { attachments } : undefined,
+      });
+    }
+
     if (runManager.getActiveRun(lane)) {
       await ctx.reply("A run is already in progress for this chat. Please wait.");
       return;
@@ -957,6 +1078,9 @@ async function handleNewExecution(
       query: finalQuery,
       cwd: parsed.cwd,
       attachments,
+      threadId: thread.id,
+      contextBeforeMessageId: userMessageId ?? undefined,
+      suppressContext: parsed.isNewSession,
     });
 
     const runResult = await result;

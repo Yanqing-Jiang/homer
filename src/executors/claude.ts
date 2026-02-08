@@ -17,7 +17,7 @@ const CLAUDE_PATH = process.env.CLAUDE_PATH ?? "/Users/yj/.local/bin/claude";
 // Subagent-specific timeouts (longer for complex tasks)
 const SUBAGENT_TIMEOUTS: Record<string, number> = {
   gemini: 15 * 60 * 1000, // 15 minutes
-  codex: 20 * 60 * 1000,  // 20 minutes
+  codex: 30 * 60 * 1000,  // 30 minutes
   kimi: 10 * 60 * 1000,   // 10 minutes (faster parallel execution)
 };
 

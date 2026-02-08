@@ -91,6 +91,12 @@ async function main(): Promise<void> {
     logger.warn({ count: recoveredCount }, "Recovered stale jobs");
   }
 
+  // Clear stale scheduled_job_state is_running flags from crashed runs
+  const clearedFlags = stateManager.resetScheduledJobRunFlags();
+  if (clearedFlags > 0) {
+    logger.warn({ count: clearedFlags }, "Cleared stale scheduled job run flags");
+  }
+
   // Initialize queue manager
   const queueManager = new QueueManager(stateManager);
 

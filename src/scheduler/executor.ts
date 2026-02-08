@@ -5,6 +5,14 @@ import type { RegisteredJob, JobExecutionResult, ProgressCallback, ProgressEvent
 import { LANE_CWD, DEFAULT_JOB_TIMEOUT } from "./types.js";
 import { processMemoryUpdates } from "../memory/writer.js";
 import { executeKimiCLI } from "../executors/kimi-cli.js";
+import { executeCodexCLI } from "../executors/codex-cli.js";
+import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
+import {
+  runWithFallbackChain,
+  DEFAULT_CHAIN,
+  MEMORY_CHAIN,
+  type ExecutorKind,
+} from "../executors/fallback-orchestrator.js";
 
 /**
  * Load context files and combine into a single string
@@ -28,7 +36,6 @@ function loadContextFiles(files: string[]): string {
 }
 
 const CLAUDE_PATH = process.env.CLAUDE_PATH ?? "/Users/yj/.local/bin/claude";
-const GEMINI_PATH = process.env.GEMINI_PATH ?? "/opt/homebrew/bin/gemini";
 const KILL_GRACE_MS = 5_000;
 const MAX_OUTPUT_BYTES = 1 * 1024 * 1024; // 1MB capture cap
 
@@ -46,17 +53,32 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   TodoWrite: "📋 Todo",
 };
 
+function isMemoryJob(job: RegisteredJob): boolean {
+  const id = job.config.id.toLowerCase();
+  const query = job.config.query.toLowerCase();
+  return (
+    id.includes("memory") ||
+    id.includes("daily-log") ||
+    id.includes("session-summaries") ||
+    query.includes("/nightly-memory") ||
+    query.includes("memory/daily")
+  );
+}
+
 /**
  * Execute a Kimi job via Kimi CLI (long-context, free tier)
  */
 async function executeKimiJob(
   job: RegisteredJob,
   startedAt: Date,
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
+  options?: { queryOverride?: string; emitCompletedEvent?: boolean; timeoutOverride?: number }
 ): Promise<JobExecutionResult> {
   const { config, sourceFile } = job;
-  const timeout = config.timeout ?? 1200000; // 20 minutes default for kimi
-  const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default;
+  const timeout = options?.timeoutOverride ?? config.timeout ?? 1200000; // 20 minutes default for kimi
+  const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
+  const emitCompleted = options?.emitCompletedEvent !== false;
+  const query = options?.queryOverride ?? config.query;
 
   // Load context files if specified
   const contextPrompt = config.contextFiles?.length
@@ -64,12 +86,12 @@ async function executeKimiJob(
     : "";
 
   logger.info(
-    { jobId: config.id, executor: "kimi-cli", queryLength: config.query.length },
+    { jobId: config.id, executor: "kimi-cli", queryLength: query.length },
     "Executing Kimi CLI job"
   );
 
   try {
-    const result = await executeKimiCLI(config.query, contextPrompt, {
+    const result = await executeKimiCLI(query, contextPrompt, {
       timeout,
       yolo: true,
       workDir: cwd,
@@ -80,16 +102,18 @@ async function executeKimiJob(
     const success = result.exitCode === 0;
 
     // Emit completed event
-    onProgress?.({
-      type: "completed",
-      jobId: config.id,
-      jobName: config.name,
-      timestamp: completedAt,
-      message: success
-        ? `✅ Completed: ${config.name} (${Math.round(duration / 1000)}s, Kimi CLI)`
-        : `❌ Failed: ${config.name}`,
-      details: { duration, success },
-    });
+    if (emitCompleted) {
+      onProgress?.({
+        type: "completed",
+        jobId: config.id,
+        jobName: config.name,
+        timestamp: completedAt,
+        message: success
+          ? `✅ Completed: ${config.name} (${Math.round(duration / 1000)}s, Kimi CLI)`
+          : `❌ Failed: ${config.name}`,
+        details: { duration, success },
+      });
+    }
 
     logger.info(
       {
@@ -118,14 +142,16 @@ async function executeKimiJob(
     const duration = completedAt.getTime() - startedAt.getTime();
     const errorMessage = error instanceof Error ? error.message : String(error);
 
-    onProgress?.({
-      type: "completed",
-      jobId: config.id,
-      jobName: config.name,
-      timestamp: completedAt,
-      message: `❌ Failed: ${config.name}`,
-      details: { duration, success: false },
-    });
+    if (emitCompleted) {
+      onProgress?.({
+        type: "completed",
+        jobId: config.id,
+        jobName: config.name,
+        timestamp: completedAt,
+        message: `❌ Failed: ${config.name}`,
+        details: { duration, success: false },
+      });
+    }
 
     logger.error({ jobId: config.id, error: errorMessage }, "Kimi CLI job failed");
 
@@ -145,85 +171,41 @@ async function executeKimiJob(
 }
 
 /**
- * Execute a Gemini job via Gemini CLI (free with subscription)
+ * Execute a Gemini job via OpenCode CLI (replaces direct gemini CLI spawn)
  */
 async function executeGeminiJob(
   job: RegisteredJob,
   startedAt: Date,
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
+  options?: { queryOverride?: string; emitCompletedEvent?: boolean; timeoutOverride?: number }
 ): Promise<JobExecutionResult> {
   const { config, sourceFile } = job;
-  const timeout = config.timeout ?? 1200000; // 20 minutes default for gemini
-  const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default;
+  const timeout = options?.timeoutOverride ?? config.timeout ?? 1200000;
+  const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
+  const emitCompleted = options?.emitCompletedEvent !== false;
+  const query = options?.queryOverride ?? config.query;
 
-  // Load context files if specified
   const contextPrompt = config.contextFiles?.length
     ? loadContextFiles(config.contextFiles)
     : "";
 
-  const fullQuery = contextPrompt
-    ? `Context:\n${contextPrompt}\n\n---\n\nTask:\n${config.query}`
-    : config.query;
-
   logger.info(
-    { jobId: config.id, executor: "gemini", queryLength: fullQuery.length },
-    "Executing Gemini job"
+    { jobId: config.id, executor: "opencode", queryLength: query.length },
+    "Executing Gemini job via OpenCode CLI"
   );
 
-  return new Promise((resolve) => {
-    // Use gemini CLI in non-interactive mode with yolo for auto-approval
-    const args = [
-      "--yolo",
-      "--sandbox",
-      fullQuery,
-    ];
-
-    const proc = spawn(GEMINI_PATH, args, {
+  try {
+    const result = await executeOpenCodeCLI(query, contextPrompt, {
+      timeout,
       cwd,
-      env: {
-        ...process.env,
-        CI: "1",
-        TERM: "dumb",
-        NO_COLOR: "1",
-      },
-      stdio: ["pipe", "pipe", "pipe"],
+      researchOnly: true,
     });
 
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    let settled = false;
+    const completedAt = new Date();
+    const duration = completedAt.getTime() - startedAt.getTime();
+    const success = result.exitCode === 0;
 
-    let timeoutTimer: NodeJS.Timeout | undefined;
-    let killTimer: NodeJS.Timeout | undefined;
-
-    const clearTimers = () => {
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (killTimer) clearTimeout(killTimer);
-    };
-
-    const finalize = (exitCode: number | null, error?: string) => {
-      if (settled) return;
-      settled = true;
-      clearTimers();
-
-      const completedAt = new Date();
-      const duration = completedAt.getTime() - startedAt.getTime();
-      const output = stdout.trim();
-      const success = !timedOut && !error && exitCode === 0;
-
-      let errorMessage = error;
-      if (timedOut) {
-        errorMessage = `Job timed out after ${timeout / 1000}s`;
-      } else if (exitCode !== 0 && !error) {
-        errorMessage = `Exit code ${exitCode}`;
-      }
-      if (stderr.trim()) {
-        errorMessage = errorMessage
-          ? `${errorMessage}\n\nStderr:\n${stderr.trim()}`
-          : stderr.trim();
-      }
-
+    if (emitCompleted) {
       onProgress?.({
         type: "completed",
         jobId: config.id,
@@ -234,76 +216,163 @@ async function executeGeminiJob(
           : `❌ Failed: ${config.name}`,
         details: { duration, success },
       });
+    }
 
-      logger.info(
-        { jobId: config.id, success, duration, exitCode },
-        "Gemini job completed"
-      );
+    logger.info(
+      { jobId: config.id, success, duration, exitCode: result.exitCode },
+      "Gemini job completed"
+    );
 
-      resolve({
+    return {
+      jobId: config.id,
+      jobName: config.name,
+      sourceFile,
+      startedAt,
+      completedAt,
+      success,
+      output: result.output || "(No output)",
+      error: success ? undefined : result.output,
+      exitCode: result.exitCode,
+      duration,
+    };
+  } catch (error) {
+    const completedAt = new Date();
+    const duration = completedAt.getTime() - startedAt.getTime();
+    const errorMessage = error instanceof Error ? error.message : String(error);
+
+    if (emitCompleted) {
+      onProgress?.({
+        type: "completed",
         jobId: config.id,
         jobName: config.name,
-        sourceFile,
-        startedAt,
-        completedAt,
-        success,
-        output: output || "(No output)",
-        error: errorMessage,
-        exitCode: exitCode ?? 1,
-        duration,
+        timestamp: completedAt,
+        message: `❌ Failed: ${config.name}`,
+        details: { duration, success: false },
       });
+    }
+
+    logger.error({ jobId: config.id, error: errorMessage }, "Gemini job failed");
+
+    return {
+      jobId: config.id,
+      jobName: config.name,
+      sourceFile,
+      startedAt,
+      completedAt,
+      success: false,
+      output: "",
+      error: errorMessage,
+      exitCode: 1,
+      duration,
     };
+  }
+}
 
-    if (proc.stdin) {
-      proc.stdin.on("error", () => {});
-      proc.stdin.end();
-    }
+/**
+ * Execute a Codex job via Codex CLI
+ */
+async function executeCodexJob(
+  job: RegisteredJob,
+  startedAt: Date,
+  onProgress?: ProgressCallback,
+  options?: { queryOverride?: string; emitCompletedEvent?: boolean; timeoutOverride?: number }
+): Promise<JobExecutionResult> {
+  const { config, sourceFile } = job;
+  const timeout = options?.timeoutOverride ?? config.timeout ?? 1800000;
+  const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
+  const emitCompleted = options?.emitCompletedEvent !== false;
+  const query = options?.queryOverride ?? config.query;
 
-    if (proc.stdout) {
-      proc.stdout.setEncoding("utf8");
-      proc.stdout.on("data", (chunk: string) => {
-        if (stdout.length < MAX_OUTPUT_BYTES) {
-          stdout += chunk;
-        }
+  const contextPrompt = config.contextFiles?.length
+    ? loadContextFiles(config.contextFiles)
+    : "";
+
+  const fullQuery = contextPrompt
+    ? `Context:\n${contextPrompt}\n\n---\n\nTask:\n${query}`
+    : query;
+
+  logger.info(
+    { jobId: config.id, executor: "codex", queryLength: fullQuery.length },
+    "Executing Codex job"
+  );
+
+  try {
+    const result = await executeCodexCLI(fullQuery, { cwd, timeout });
+    const completedAt = new Date();
+    const duration = completedAt.getTime() - startedAt.getTime();
+    const success = result.exitCode === 0;
+
+    if (emitCompleted) {
+      onProgress?.({
+        type: "completed",
+        jobId: config.id,
+        jobName: config.name,
+        timestamp: completedAt,
+        message: success
+          ? `✅ Completed: ${config.name} (${Math.round(duration / 1000)}s, Codex)`
+          : `❌ Failed: ${config.name}`,
+        details: { duration, success },
       });
     }
 
-    if (proc.stderr) {
-      proc.stderr.setEncoding("utf8");
-      proc.stderr.on("data", (chunk: string) => {
-        if (stderr.length < MAX_OUTPUT_BYTES) {
-          stderr += chunk;
-        }
+    return {
+      jobId: config.id,
+      jobName: config.name,
+      sourceFile,
+      startedAt,
+      completedAt,
+      success,
+      output: result.output,
+      error: success ? undefined : result.output,
+      exitCode: result.exitCode,
+      duration,
+    };
+  } catch (error) {
+    const completedAt = new Date();
+    const duration = completedAt.getTime() - startedAt.getTime();
+    const errorMessage = error instanceof Error ? error.message : String(error);
+
+    if (emitCompleted) {
+      onProgress?.({
+        type: "completed",
+        jobId: config.id,
+        jobName: config.name,
+        timestamp: completedAt,
+        message: `❌ Failed: ${config.name}`,
+        details: { duration, success: false },
       });
     }
 
-    proc.once("error", (err) => finalize(null, err.message));
-    proc.once("close", (code) => finalize(code));
-
-    timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      logger.warn({ jobId: config.id, timeout }, "Gemini job timed out");
-      try { proc.kill("SIGTERM"); } catch {}
-      killTimer = setTimeout(() => {
-        if (!settled) {
-          try { proc.kill("SIGKILL"); } catch {}
-        }
-      }, KILL_GRACE_MS);
-    }, timeout);
-  });
+    return {
+      jobId: config.id,
+      jobName: config.name,
+      sourceFile,
+      startedAt,
+      completedAt,
+      success: false,
+      output: "",
+      error: errorMessage,
+      exitCode: 1,
+      duration,
+    };
+  }
 }
 
 /**
  * Execute a scheduled job via Claude CLI with optional progress streaming
  */
-export async function executeScheduledJob(
+async function executeClaudeJob(
   job: RegisteredJob,
-  onProgress?: ProgressCallback
+  startedAt: Date,
+  onProgress?: ProgressCallback,
+  options?: { modelOverride?: string; queryOverride?: string; emitCompletedEvent?: boolean }
 ): Promise<JobExecutionResult> {
-  const startedAt = new Date();
   const { config, sourceFile } = job;
   const timeout = config.timeout ?? DEFAULT_JOB_TIMEOUT;
   const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default;
+  const model = options?.modelOverride ?? config.model ?? "sonnet";
+  const emitCompleted = options?.emitCompletedEvent !== false;
+  const query = options?.queryOverride ?? config.query;
 
   logger.info(
     {
@@ -312,31 +381,10 @@ export async function executeScheduledJob(
       lane: config.lane,
       cwd,
       timeout,
+      model,
     },
-    "Executing scheduled job"
+    "Executing Claude scheduled job"
   );
-
-  // Emit started event
-  onProgress?.({
-    type: "started",
-    jobId: config.id,
-    jobName: config.name,
-    timestamp: startedAt,
-    message: `🚀 Starting: ${config.name}`,
-  });
-
-  // Route to Kimi executor for kimi jobs (cheap batch processing)
-  if (config.executor === "kimi") {
-    return executeKimiJob(job, startedAt, onProgress);
-  }
-
-  // Route to Gemini executor (free with subscription)
-  if (config.executor === "gemini") {
-    return executeGeminiJob(job, startedAt, onProgress);
-  }
-
-  // Default to sonnet for cost efficiency on scheduled jobs
-  const model = config.model ?? "sonnet";
 
   // Load context files if specified
   const contextPrompt = config.contextFiles?.length
@@ -359,7 +407,7 @@ export async function executeScheduledJob(
     logger.info({ jobId: config.id, contextLength: contextPrompt.length }, "Injected context files");
   }
 
-  args.push(config.query);
+  args.push(query);
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -514,35 +562,41 @@ export async function executeScheduledJob(
 
       if (stderr.trim()) {
         errorMessage = errorMessage
-          ? `${errorMessage}\n\nStderr:\n${stderr.trim()}`
+          ? `${errorMessage}
+
+Stderr:
+${stderr.trim()}`
           : stderr.trim();
       }
 
-      // Process memory updates from scheduled job output
-      try {
-        const { cleanedResponse, updatesWritten, targets } = await processMemoryUpdates(
-          output,
-          config.lane
-        );
-        if (updatesWritten > 0) {
-          logger.info({ jobId: config.id, updatesWritten, targets }, "Memory updated from scheduled job");
+      if (success) {
+        // Process memory updates from scheduled job output
+        try {
+          const { cleanedResponse, updatesWritten, targets } = await processMemoryUpdates(
+            output,
+            config.lane
+          );
+          if (updatesWritten > 0) {
+            logger.info({ jobId: config.id, updatesWritten, targets }, "Memory updated from scheduled job");
+          }
+          output = cleanedResponse;
+        } catch (memErr) {
+          logger.warn({ error: memErr, jobId: config.id }, "Failed to process memory updates");
         }
-        output = cleanedResponse;
-      } catch (memErr) {
-        logger.warn({ error: memErr, jobId: config.id }, "Failed to process memory updates");
       }
 
-      // Emit completed event
-      emitProgress({
-        type: "completed",
-        jobId: config.id,
-        jobName: config.name,
-        timestamp: completedAt,
-        message: success
-          ? `✅ Completed: ${config.name} (${Math.round(duration / 1000)}s)`
-          : `❌ Failed: ${config.name}`,
-        details: { duration, success },
-      });
+      if (emitCompleted) {
+        emitProgress({
+          type: "completed",
+          jobId: config.id,
+          jobName: config.name,
+          timestamp: completedAt,
+          message: success
+            ? `✅ Completed: ${config.name} (${Math.round(duration / 1000)}s)`
+            : `❌ Failed: ${config.name}`,
+          details: { duration, success },
+        });
+      }
 
       logger.info(
         {
@@ -633,4 +687,112 @@ export async function executeScheduledJob(
       }, KILL_GRACE_MS);
     }, timeout);
   });
+}
+
+export async function executeScheduledJob(
+  job: RegisteredJob,
+  onProgress?: ProgressCallback
+): Promise<JobExecutionResult> {
+  const startedAt = new Date();
+  const { config } = job;
+  const memoryJob = isMemoryJob(job);
+  const chain: ExecutorKind[] = memoryJob ? [...MEMORY_CHAIN] : [...DEFAULT_CHAIN];
+  const primary: ExecutorKind = chain[0] ?? "claude";
+
+  // Emit started event
+  onProgress?.({
+    type: "started",
+    jobId: config.id,
+    jobName: config.name,
+    timestamp: startedAt,
+    message: `🚀 Starting: ${config.name}`,
+  });
+
+  const jobContext = {
+    id: config.id,
+    name: config.name,
+    query: config.query,
+    lane: config.lane,
+    source: "scheduler" as const,
+  };
+
+  const notify = async (message: string) => {
+    onProgress?.({
+      type: "thinking",
+      jobId: config.id,
+      jobName: config.name,
+      timestamp: new Date(),
+      message,
+    });
+  };
+
+  const runExecutor = async (
+    executor: ExecutorKind,
+    queryOverride?: string,
+    modelOverride?: string
+  ): Promise<JobExecutionResult> => {
+    if (executor === "kimi") {
+      return executeKimiJob(job, startedAt, onProgress, {
+        queryOverride,
+        emitCompletedEvent: false,
+      });
+    }
+    if (executor === "gemini") {
+      return executeGeminiJob(job, startedAt, onProgress, {
+        queryOverride,
+        emitCompletedEvent: false,
+      });
+    }
+    if (executor === "codex") {
+      return executeCodexJob(job, startedAt, onProgress, {
+        queryOverride,
+        emitCompletedEvent: false,
+      });
+    }
+    return executeClaudeJob(job, startedAt, onProgress, {
+      queryOverride,
+      modelOverride,
+      emitCompletedEvent: false,
+    });
+  };
+
+  const fallbackResult = await runWithFallbackChain({
+    primary,
+    chain,
+    job: jobContext,
+    runExecutor,
+    notify,
+  });
+
+  const result = fallbackResult.result ?? {
+    jobId: config.id,
+    jobName: config.name,
+    sourceFile: job.sourceFile,
+    startedAt,
+    completedAt: new Date(),
+    success: false,
+    output: "",
+    error: "Executor failed with no result",
+    exitCode: 1,
+    duration: Date.now() - startedAt.getTime(),
+  };
+
+  // Emit final completion event
+  const label = fallbackResult.executorUsed;
+  onProgress?.({
+    type: "completed",
+    jobId: config.id,
+    jobName: config.name,
+    timestamp: result.completedAt ?? new Date(),
+    message: result.success
+      ? `✅ Completed: ${config.name} (${Math.round(result.duration / 1000)}s, ${label})`
+      : `❌ Failed: ${config.name} (${label})`,
+    details: { duration: result.duration, success: result.success },
+  });
+
+  return {
+    ...result,
+    executorUsed: fallbackResult.executorUsed,
+    fallbackUsed: fallbackResult.fallbackUsed,
+  } as JobExecutionResult;
 }

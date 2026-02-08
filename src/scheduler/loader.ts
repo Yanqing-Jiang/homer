@@ -1,6 +1,7 @@
 import { readFile, watch } from "fs/promises";
 import { existsSync } from "fs";
 import { logger } from "../utils/logger.js";
+import { CronUtils } from "../utils/cron.js";
 import {
   type ScheduleFile,
   type ScheduledJobConfig,
@@ -15,12 +16,10 @@ interface LoadedSchedule {
 type ScheduleChangeCallback = (schedules: LoadedSchedule[]) => void;
 
 /**
- * Validates a cron expression (basic validation)
+ * Validates a cron expression
  */
 function isValidCron(cron: string): boolean {
-  // Basic validation: should have 5 or 6 space-separated parts
-  const parts = cron.trim().split(/\s+/);
-  return parts.length >= 5 && parts.length <= 6;
+  return CronUtils.isValid(cron);
 }
 
 /**
@@ -44,28 +43,30 @@ function validateJob(job: unknown, sourceFile: string): ScheduledJobConfig | nul
     return null;
   }
 
-  if (typeof j.query !== "string" || !j.query) {
+  const hasHandler = typeof j.handler === "string" && j.handler.length > 0;
+  if (!hasHandler && (typeof j.query !== "string" || !j.query)) {
     logger.warn({ sourceFile, jobId: j.id }, "Invalid job: missing query");
     return null;
   }
 
-  const validLanes = ["work", "life", "default"];
+  const validLanes = ["work", "life", "default", "trading"];
   const lane = typeof j.lane === "string" && validLanes.includes(j.lane)
-    ? j.lane as "work" | "life" | "default"
+    ? j.lane as "work" | "life" | "default" | "trading"
     : "default";
 
   return {
     id: j.id,
     name: typeof j.name === "string" ? j.name : j.id,
     cron: j.cron,
-    query: j.query,
+    query: typeof j.query === "string" ? j.query : "",
     lane,
     enabled: j.enabled !== false, // default to true
     timeout: typeof j.timeout === "number" ? j.timeout : undefined,
     model: typeof j.model === "string" ? j.model : undefined,
-    executor: typeof j.executor === "string" && ["claude", "kimi", "gemini"].includes(j.executor)
-      ? j.executor as "claude" | "kimi" | "gemini"
+    executor: typeof j.executor === "string" && ["claude", "kimi", "gemini", "internal"].includes(j.executor)
+      ? j.executor as "claude" | "kimi" | "gemini" | "internal"
       : undefined,
+    handler: hasHandler ? (j.handler as ScheduledJobConfig["handler"]) : undefined,
     contextFiles: Array.isArray(j.contextFiles) ? j.contextFiles : undefined,
     streamProgress: j.streamProgress === true,
     notifyOnSuccess: j.notifyOnSuccess !== false, // default to true
@@ -78,7 +79,7 @@ function validateJob(job: unknown, sourceFile: string): ScheduledJobConfig | nul
  */
 async function loadScheduleFile(
   path: string,
-  defaultLane: "work" | "life" | "default"
+  defaultLane: "work" | "life" | "default" | "trading"
 ): Promise<LoadedSchedule | null> {
   if (!existsSync(path)) {
     logger.debug({ path }, "Schedule file does not exist");

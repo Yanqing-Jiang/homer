@@ -137,6 +137,20 @@ export class StateManager {
         switched_at INTEGER NOT NULL,
         message_count INTEGER DEFAULT 0
       );
+
+      CREATE TABLE IF NOT EXISTS executor_session_map (
+        lane TEXT NOT NULL,
+        executor TEXT NOT NULL,
+        model TEXT NOT NULL DEFAULT '',
+        session_id TEXT NOT NULL,
+        account_id INTEGER,
+        created_at INTEGER NOT NULL,
+        last_used_at INTEGER NOT NULL,
+        PRIMARY KEY (lane, executor, model)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_executor_session_map_lane ON executor_session_map(lane);
+      CREATE INDEX IF NOT EXISTS idx_executor_session_map_activity ON executor_session_map(last_used_at);
     `);
 
     logger.debug("State manager initialized");
@@ -372,6 +386,19 @@ export class StateManager {
     return result.changes;
   }
 
+  /**
+   * Clear is_running flags on all scheduled jobs — called on daemon startup
+   * to recover from crashes that left flags stuck.
+   */
+  clearStaleScheduledJobFlags(): void {
+    const result = this._db.prepare(
+      `UPDATE scheduled_job_state SET is_running = 0 WHERE is_running = 1`
+    ).run();
+    if (result.changes > 0) {
+      logger.warn({ count: result.changes }, "Cleared stale scheduled job running flags");
+    }
+  }
+
   getJobById(jobId: string): Job | null {
     return this._db.prepare(
         `SELECT id, lane, executor, query, status, chat_id as chatId, message_id as messageId,
@@ -414,6 +441,36 @@ export class StateManager {
     const result = this._db.prepare(`DELETE FROM job_queue WHERE completed_at < ? AND status IN ('completed', 'failed')`)
       .run(cutoff);
     return result.changes;
+  }
+
+  // ============================================
+  // Idea Review State (Daily Limits)
+  // ============================================
+
+  private getLocalDateKey(date?: Date): string {
+    const d = date ?? new Date();
+    // en-CA yields YYYY-MM-DD
+    return new Intl.DateTimeFormat("en-CA").format(d);
+  }
+
+  getIdeaReviewCount(date?: Date): number {
+    const key = this.getLocalDateKey(date);
+    const row = this._db.prepare(
+      "SELECT sent_count as sentCount FROM idea_review_state WHERE date = ?"
+    ).get(key) as { sentCount?: number } | undefined;
+    return row?.sentCount ?? 0;
+  }
+
+  incrementIdeaReviewCount(delta: number = 1, date?: Date): number {
+    const key = this.getLocalDateKey(date);
+    this._db.prepare(
+      `INSERT INTO idea_review_state (date, sent_count, updated_at)
+       VALUES (?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(date) DO UPDATE SET sent_count = sent_count + excluded.sent_count,
+       updated_at = CURRENT_TIMESTAMP`
+    ).run(key, delta);
+
+    return this.getIdeaReviewCount(date);
   }
 
   // Scheduled job methods
@@ -488,10 +545,24 @@ export class StateManager {
     }
   }
 
+  /**
+   * Update the next scheduled run time for a job
+   */
+  updateScheduledJobNextRun(jobId: string, nextRunAt: Date | null): void {
+    const nextRunStr = nextRunAt ? nextRunAt.toISOString() : null;
+    this._db.prepare(
+        `UPDATE scheduled_job_state
+         SET next_run_at = ?, updated_at = ?
+         WHERE job_id = ?`
+      )
+      .run(nextRunStr, new Date().toISOString(), jobId);
+  }
+
   getScheduledJobState(jobId: string): ScheduledJobState | null {
     return this._db.prepare(
         `SELECT job_id as jobId, source_file as sourceFile, enabled,
                 last_run_at as lastRunAt, last_success_at as lastSuccessAt,
+                next_run_at as nextRunAt,
                 consecutive_failures as consecutiveFailures, updated_at as updatedAt
          FROM scheduled_job_state WHERE job_id = ?`
       )
@@ -515,6 +586,7 @@ export class StateManager {
     return this._db.prepare(
         `SELECT job_id as jobId, source_file as sourceFile, enabled,
                 last_run_at as lastRunAt, last_success_at as lastSuccessAt,
+                next_run_at as nextRunAt,
                 consecutive_failures as consecutiveFailures, updated_at as updatedAt
          FROM scheduled_job_state
          ORDER BY updated_at DESC`
@@ -696,6 +768,26 @@ export class StateManager {
     return row ?? null;
   }
 
+  ensureChatSession(id: string, name: string, archived = false): ChatSession {
+    const existing = this.getChatSession(id);
+    if (existing) {
+      if (archived && !existing.archivedAt) {
+        this.updateChatSession(id, { archivedAt: new Date().toISOString() });
+        return this.getChatSession(id) as ChatSession;
+      }
+      return existing;
+    }
+
+    const now = new Date().toISOString();
+    this._db.prepare(
+        `INSERT INTO chat_sessions (id, name, created_at, updated_at, archived_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(id, name, now, now, archived ? now : null);
+
+    return this.getChatSession(id) as ChatSession;
+  }
+
   updateChatSession(id: string, updates: { name?: string; archivedAt?: string | null }): void {
     const fields: string[] = [];
     const params: Array<string | null> = [];
@@ -763,6 +855,28 @@ export class StateManager {
       );
 
     return this.getThread(thread.id) as Thread;
+  }
+
+  ensureThreadForLane(
+    lane: string,
+    options?: { title?: string; provider?: string; model?: string | null }
+  ): Thread {
+    const existing = this.getThread(lane);
+    if (existing) return existing;
+
+    const systemSessionId = "tg:system";
+    const session = this.ensureChatSession(systemSessionId, "Telegram", true);
+    const title = options?.title ?? `Telegram ${lane.replace(/^tg:/, "")}`;
+    const provider = options?.provider ?? "telegram";
+    const model = options?.model ?? null;
+
+    return this.createThread({
+      id: lane,
+      chatSessionId: session.id,
+      title,
+      provider,
+      model,
+    });
   }
 
   getThread(id: string): Thread | null {
@@ -858,6 +972,35 @@ export class StateManager {
     }));
   }
 
+  getThreadMessages(threadId: string, limit = 50, beforeId?: string): ThreadMessage[] {
+    const rows = beforeId
+      ? this._db.prepare(
+          `SELECT id, thread_id as threadId, role, content, metadata, created_at as createdAt
+           FROM thread_messages
+           WHERE thread_id = ?
+             AND created_at < (SELECT created_at FROM thread_messages WHERE id = ?)
+           ORDER BY created_at DESC
+           LIMIT ?`
+        ).all(threadId, beforeId, limit)
+      : this._db.prepare(
+          `SELECT id, thread_id as threadId, role, content, metadata, created_at as createdAt
+           FROM thread_messages
+           WHERE thread_id = ?
+           ORDER BY created_at DESC
+           LIMIT ?`
+        ).all(threadId, limit);
+
+    return (rows as Array<ThreadMessage & { metadata: string | null }>).map((row) => ({
+      ...row,
+      metadata: row.metadata ? JSON.parse(row.metadata) : null,
+    }));
+  }
+
+  getLaneMessages(lane: string, limit = 50, beforeId?: string): ThreadMessage[] {
+    this.ensureThreadForLane(lane);
+    return this.getThreadMessages(lane, limit, beforeId);
+  }
+
   createThreadMessage(message: {
     id: string;
     threadId: string;
@@ -944,6 +1087,17 @@ export class StateManager {
     ).run(now);
   }
 
+  /**
+   * Clear stale is_running flags from scheduled_job_state.
+   * Call on startup to prevent jobs stuck after crashes.
+   */
+  resetScheduledJobRunFlags(): number {
+    const result = this._db.prepare(
+      `UPDATE scheduled_job_state SET is_running = 0 WHERE is_running = 1`
+    ).run();
+    return result.changes;
+  }
+
   // ============================================
   // Pending Plans (Implementation Approval)
   // ============================================
@@ -995,6 +1149,85 @@ export class StateManager {
   // Executor State (Persistent Switching)
   // ============================================
 
+  private normalizeExecutorModel(model?: string | null): string {
+    return model ?? "";
+  }
+
+  /**
+   * Get stored session id for a specific executor/model.
+   */
+  getStoredExecutorSessionId(
+    lane: string,
+    executor: ExecutorStateType,
+    model?: string | null
+  ): string | null {
+    const session = this.getStoredExecutorSession(lane, executor, model);
+    return session.sessionId;
+  }
+
+  /**
+   * Get stored session metadata for a specific executor/model.
+   */
+  getStoredExecutorSession(
+    lane: string,
+    executor: ExecutorStateType,
+    model?: string | null
+  ): { sessionId: string | null; accountId?: number | null } {
+    const cutoff = Date.now() - this.ttlMs;
+    const normalizedModel = this.normalizeExecutorModel(model);
+    const row = this._db.prepare(
+      `SELECT session_id as sessionId, account_id as accountId
+       FROM executor_session_map
+       WHERE lane = ? AND executor = ? AND model = ? AND last_used_at > ?`
+    ).get(lane, executor, normalizedModel, cutoff) as { sessionId?: string; accountId?: number | null } | undefined;
+
+    return { sessionId: row?.sessionId ?? null, accountId: row?.accountId ?? null };
+  }
+
+  /**
+   * Store session id for a specific executor/model.
+   */
+  setStoredExecutorSessionId(
+    lane: string,
+    executor: ExecutorStateType,
+    sessionId: string,
+    model?: string | null,
+    accountId?: number | null
+  ): void {
+    const now = Date.now();
+    const normalizedModel = this.normalizeExecutorModel(model);
+    this._db.prepare(
+      `INSERT INTO executor_session_map (lane, executor, model, session_id, account_id, created_at, last_used_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(lane, executor, model) DO UPDATE SET
+         session_id = excluded.session_id,
+         account_id = excluded.account_id,
+         last_used_at = excluded.last_used_at`
+    ).run(lane, executor, normalizedModel, sessionId, accountId ?? null, now, now);
+  }
+
+  /**
+   * Clear stored executor sessions for a lane (optionally scoped).
+   */
+  clearStoredExecutorSessions(lane: string, executor?: ExecutorStateType, model?: string | null): void {
+    if (!executor) {
+      this._db.prepare("DELETE FROM executor_session_map WHERE lane = ?").run(lane);
+      return;
+    }
+
+    if (model !== undefined) {
+      const normalizedModel = this.normalizeExecutorModel(model);
+      this._db.prepare(
+        "DELETE FROM executor_session_map WHERE lane = ? AND executor = ? AND model = ?"
+      ).run(lane, executor, normalizedModel);
+      return;
+    }
+
+    this._db.prepare(
+      "DELETE FROM executor_session_map WHERE lane = ? AND executor = ?"
+    ).run(lane, executor);
+  }
+
   /**
    * Get the current executor for a lane
    */
@@ -1021,6 +1254,9 @@ export class StateManager {
    */
   setCurrentExecutor(lane: string, executor: ExecutorStateType, model?: string, sessionId?: string | null): void {
     const now = Date.now();
+    const resolvedSessionId = sessionId === undefined
+      ? this.getStoredExecutorSessionId(lane, executor, model)
+      : sessionId;
     this._db.prepare(
       `INSERT INTO executor_state (lane, executor, model, session_id, switched_at, message_count)
        VALUES (?, ?, ?, ?, ?, 0)
@@ -1030,9 +1266,9 @@ export class StateManager {
          session_id = excluded.session_id,
          switched_at = excluded.switched_at,
          message_count = 0`
-    ).run(lane, executor, model ?? null, sessionId ?? null, now);
+    ).run(lane, executor, model ?? null, resolvedSessionId ?? null, now);
 
-    logger.debug({ lane, executor, model, sessionId }, "Set executor state");
+    logger.debug({ lane, executor, model, sessionId: resolvedSessionId ?? null }, "Set executor state");
   }
 
   /**
@@ -1047,10 +1283,23 @@ export class StateManager {
   /**
    * Update executor session id for a lane
    */
-  setExecutorSessionId(lane: string, sessionId: string | null): void {
+  setExecutorSessionId(
+    lane: string,
+    sessionId: string | null,
+    executor?: ExecutorStateType,
+    model?: string | null,
+    accountId?: number | null
+  ): void {
     this._db.prepare(
       `UPDATE executor_state SET session_id = ? WHERE lane = ?`
     ).run(sessionId, lane);
+
+    const effectiveExecutor = executor ?? this.getCurrentExecutor(lane)?.executor;
+    const effectiveModel = model ?? this.getCurrentExecutor(lane)?.model ?? null;
+
+    if (effectiveExecutor && sessionId) {
+      this.setStoredExecutorSessionId(lane, effectiveExecutor, sessionId, effectiveModel, accountId ?? null);
+    }
   }
 
   /**
@@ -1108,19 +1357,35 @@ export class StateManager {
     exitCode?: number | null;
     output?: string | null;
     error?: string | null;
+    executor?: string | null;
   }): void {
-    this._db.prepare(
-      `UPDATE cli_runs
-       SET status = ?, completed_at = ?, exit_code = ?, output = ?, error = ?
-       WHERE id = ?`
-    ).run(
+    const fields = [
+      "status = ?",
+      "completed_at = ?",
+      "exit_code = ?",
+      "output = ?",
+      "error = ?",
+    ];
+    const params: Array<string | number | null> = [
       updates.status,
       updates.completedAt,
       updates.exitCode ?? null,
       updates.output ?? null,
       updates.error ?? null,
-      runId
-    );
+    ];
+
+    if (updates.executor) {
+      fields.push("executor = ?");
+      params.push(updates.executor);
+    }
+
+    params.push(runId);
+
+    this._db.prepare(
+      `UPDATE cli_runs
+       SET ${fields.join(", ")}
+       WHERE id = ?`
+    ).run(...params);
   }
 
   getCliRun(runId: string): CLIRunRecord | null {
@@ -1144,11 +1409,109 @@ export class StateManager {
        LIMIT 1`
     ).get(lane) as CLIRunRecord | undefined;
     return row ?? null;
+
+  }
+
+  // ============================================
+  // Pending Context (Executor Handoff)
+  // ============================================
+
+  /**
+   * Store pending context for next executor execution
+   * Used when switching executors to pass conversation history
+   */
+  setPendingContext(lane: string, context: string, sourceExecutor?: string): void {
+    this._db.prepare(
+      `INSERT INTO pending_context (lane, context, source_executor)
+       VALUES (?, ?, ?)
+       ON CONFLICT(lane) DO UPDATE SET
+         context = excluded.context,
+         source_executor = excluded.source_executor,
+         created_at = CURRENT_TIMESTAMP`
+    ).run(lane, context, sourceExecutor ?? null);
+
+    logger.debug({ lane, sourceExecutor }, "Stored pending context for handoff");
+  }
+
+  /**
+   * Get pending context for a lane
+   */
+  getPendingContext(lane: string): { context: string; sourceExecutor: string | null } | null {
+    const row = this._db.prepare(
+      `SELECT context, source_executor as sourceExecutor
+       FROM pending_context
+       WHERE lane = ?`
+    ).get(lane) as { context: string; sourceExecutor: string | null } | undefined;
+
+    return row ?? null;
+  }
+
+  /**
+   * Clear pending context after it has been used
+   */
+  clearPendingContext(lane: string): void {
+    this._db.prepare("DELETE FROM pending_context WHERE lane = ?").run(lane);
+    logger.debug({ lane }, "Cleared pending context");
+  }
+
+  /**
+   * Get executor message count for double-history guard
+   * Returns the current message count for the active executor on this lane
+   */
+  getExecutorMessageCount(lane: string): number {
+    const state = this.getCurrentExecutor(lane);
+    return state?.messageCount ?? 0;
+  }
+
+  // ============================================
+  // Daily Log Archive (Raw → SQLite)
+  // ============================================
+
+  archiveDailyLog(date: string, rawContent: string): void {
+    this._db.prepare(
+      `INSERT INTO daily_log_archive (date, raw_content, raw_size_bytes)
+       VALUES (?, ?, ?)
+       ON CONFLICT(date) DO UPDATE SET
+         raw_content = excluded.raw_content,
+         raw_size_bytes = excluded.raw_size_bytes,
+         archived_at = CURRENT_TIMESTAMP`
+    ).run(date, rawContent, Buffer.byteLength(rawContent, "utf-8"));
+  }
+
+  markDailyLogStripped(date: string, summaryContent: string): void {
+    this._db.prepare(
+      `UPDATE daily_log_archive
+       SET summary_content = ?, stripped_at = CURRENT_TIMESTAMP
+       WHERE date = ?`
+    ).run(summaryContent, date);
+  }
+
+  getDailyLogArchive(date: string): DailyLogArchive | null {
+    const row = this._db.prepare(
+      `SELECT date, raw_content as rawContent, raw_size_bytes as rawSizeBytes,
+              summary_content as summaryContent, archived_at as archivedAt, stripped_at as strippedAt
+       FROM daily_log_archive WHERE date = ?`
+    ).get(date) as DailyLogArchive | undefined;
+    return row ?? null;
+  }
+
+  isDailyLogArchived(date: string): boolean {
+    const row = this._db.prepare(
+      "SELECT 1 FROM daily_log_archive WHERE date = ?"
+    ).get(date);
+    return row !== undefined;
+  }
+
+  listDailyLogArchiveDates(): string[] {
+    const rows = this._db.prepare(
+      "SELECT date FROM daily_log_archive ORDER BY date DESC"
+    ).all() as { date: string }[];
+    return rows.map(r => r.date);
   }
 }
 
 // Executor state types
-export type ExecutorStateType = "claude" | "gemini" | "codex";
+export type ExecutorStateType = "claude" | "gemini" | "codex" | "kimi" | "chatgpt" | "opencode";
 
 export interface ExecutorState {
   lane: string;
@@ -1174,6 +1537,7 @@ export interface ScheduledJobState {
   enabled: number;
   lastRunAt: string | null;
   lastSuccessAt: string | null;
+  nextRunAt: string | null;
   consecutiveFailures: number;
   updatedAt: string;
 }
@@ -1282,3 +1646,13 @@ export interface ThreadLink {
   linkId: string;
   createdAt: string;
 }
+
+export interface DailyLogArchive {
+  date: string;
+  rawContent: string;
+  rawSizeBytes: number;
+  summaryContent: string | null;
+  archivedAt: string;
+  strippedAt: string | null;
+}
+

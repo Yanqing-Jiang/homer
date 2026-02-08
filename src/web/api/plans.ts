@@ -121,11 +121,13 @@ export function registerPlansRoutes(
     // Apply updates
     savePlanFile({
       filePath: plan.filePath,
+      id: plan.id,
       title: body.title ?? parsed.title,
       description: body.description ?? parsed.description,
       status: body.status ?? parsed.status,
       currentPhase: body.currentPhase ?? parsed.currentPhase,
       phases: body.phases ?? parsed.phases,
+      sourceIdeaId: plan.sourceIdeaId ?? parsed.sourceIdeaId ?? null,
     });
 
     // Reindex

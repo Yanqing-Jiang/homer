@@ -3,20 +3,22 @@
  *
  * Manages intelligent routing between executors based on:
  * - Task type (research, long-context, code changes, verification)
- * - Cost optimization (free tier first, API fallback)
- * - Account rotation with cooldown tracking
+ * - Deterministic CLI fallbacks with LLM diagnose & decide
  * - Fail-loud on exhaustion (no silent deferral)
  *
- * Fallback chain: Gemini CLI (3 accounts) → Gemini API → FAIL
+ * Fallback chain: Claude → Codex → Kimi → OpenCode
  */
 
 import Database from "better-sqlite3";
+import { randomUUID } from "crypto";
 import { logger } from "../utils/logger.js";
-import { executeGeminiCLI, getAccountStatus, type GeminiCLIOptions } from "./gemini-cli.js";
+import { executeGeminiCLI, getAccountStatus, type GeminiCLIOptions } from "./opencode-cli.js";
 import { executeGeminiAPI, type GeminiAPIOptions, type GeminiAPIResult } from "./gemini.js";
-import { executeKimiCommand, type KimiExecutorOptions } from "./kimi.js";
+import { executeCodexCLI } from "./codex-cli.js";
+import { executeKimiCLI, type KimiCLIOptions } from "./kimi-cli.js";
 import { executeClaudeCommand, type ClaudeExecutorOptions } from "./claude.js";
 import type { ExecutorResult } from "./types.js";
+import { runWithFallbackChain, DEFAULT_CHAIN, type ExecutorKind } from "./fallback-orchestrator.js";
 import { AccountManager, CostTracker, DeferralQueue, createRouterState, type RouterState } from "./router-db.js";
 
 // ============================================
@@ -32,7 +34,7 @@ export type TaskType =
   | "general";       // Default catch-all
 
 export type ExecutorType =
-  | "gemini-cli"
+  | "opencode"
   | "gemini-api"
   | "kimi"
   | "claude"
@@ -68,6 +70,7 @@ export interface RoutedExecutionResult extends ExecutorResult {
   fallbacksAttempted: number;
   deferralId?: string;
   failed?: boolean;  // True if all executors exhausted
+  fallbackUsed?: boolean;
 }
 
 // ============================================
@@ -110,9 +113,9 @@ export { AccountManager, CostTracker, DeferralQueue };
 
 // Approximate costs per 1K tokens (USD)
 const COST_PER_1K_TOKENS: Record<ExecutorType, { input: number; output: number }> = {
-  "gemini-cli": { input: 0, output: 0 },           // Free (with subscription)
+  opencode: { input: 0, output: 0 },               // Free (OpenCode CLI)
   "gemini-api": { input: 0.00025, output: 0.001 }, // $0.25/$1.00 per 1M (flash)
-  "kimi": { input: 0, output: 0 },                 // Free via NVIDIA NIM
+  "kimi": { input: 0, output: 0 },                 // Kimi CLI (Moonshot managed, free tier)
   "claude": { input: 0.003, output: 0.015 },       // Sonnet pricing
   "codex": { input: 0.003, output: 0.015 },        // Uses Claude internally
 };
@@ -153,7 +156,7 @@ export interface AccountPoolStatus {
 }
 
 export function getGeminiCLIPoolStatus(): AccountPoolStatus {
-  // Use in-memory account status from gemini-cli.ts for real-time accuracy
+  // Use in-memory account status from opencode-cli.ts for real-time accuracy
   // (DB state is for persistence across restarts)
   const accounts = getAccountStatus();
   const available = accounts.filter(a => a.available);
@@ -257,79 +260,78 @@ export function makeRoutingDecision(request: RoutingRequest): RoutingDecision {
     };
   }
 
-  // Check Gemini CLI availability
   const cliStatus = getGeminiCLIPoolStatus();
-  const cliAvailable = !cliStatus.allExhausted;
+  // OpenCode last - research/analysis only, no code changes
+  const fallbackChain: ExecutorType[] = ["codex", "kimi", "opencode"];
 
-  // Long context tasks (>60k tokens) → Kimi first
-  if (taskType === "long-context" || estimatedTokens > 60000) {
-    return {
-      executor: "kimi",
-      fallbackChain: ["gemini-api"],
-      reason: `Long context task (${estimatedTokens} tokens), using Kimi for free long-context processing`,
-      estimatedCost: estimateCost("kimi", estimatedTokens),
-      canDefer: urgency !== "immediate",
-      deferred: false,
-    };
+  if (cliStatus.allExhausted) {
+    const idx = fallbackChain.indexOf("opencode");
+    if (idx >= 0) {
+      fallbackChain.splice(idx, 1);
+    }
   }
 
-  // Code changes → Claude only (requires tool use)
-  if (taskType === "code-change") {
-    return {
-      executor: "claude",
-      fallbackChain: [],
-      reason: "Code changes require Claude (tool use capability)",
-      estimatedCost: estimateCost("claude", estimatedTokens),
-      canDefer: false,
-      deferred: false,
-    };
-  }
-
-  // Verification → Codex (deep reasoning) with Claude fallback
-  if (taskType === "verification") {
-    return {
-      executor: "codex",
-      fallbackChain: ["claude"],
-      reason: "Verification task, using Codex for deep reasoning",
-      estimatedCost: estimateCost("codex", estimatedTokens),
-      canDefer: urgency !== "immediate",
-      deferred: false,
-    };
-  }
-
-  // Batch processing → Kimi (free, good for overnight tasks)
-  if (taskType === "batch" || urgency === "batch") {
-    return {
-      executor: "kimi",
-      fallbackChain: ["gemini-api"],
-      reason: "Batch processing, using Kimi for free execution",
-      estimatedCost: estimateCost("kimi", estimatedTokens),
-      canDefer: true,
-      deferred: false,
-    };
-  }
-
-  // Discovery/Research and General → Gemini CLI first (free)
-  if (cliAvailable) {
-    return {
-      executor: "gemini-cli",
-      fallbackChain: ["gemini-api"],
-      reason: `${taskType === "discovery" ? "Discovery" : "General"} task, using free Gemini CLI`,
-      estimatedCost: 0,
-      canDefer: urgency !== "immediate",
-      deferred: false,
-    };
-  }
-
-  // CLI exhausted → Gemini API (NO silent deferral - fail loud)
   return {
-    executor: "gemini-api",
-    fallbackChain: [],
-    reason: "Gemini CLI accounts exhausted, using Gemini API (charged)",
-    estimatedCost: estimateCost("gemini-api", estimatedTokens),
-    canDefer: false,
+    executor: "claude",
+    fallbackChain,
+    reason: `${taskType} task, default chain Claude → Codex → Kimi → OpenCode`,
+    estimatedCost: estimateCost("claude", estimatedTokens),
+    canDefer: urgency !== "immediate",
     deferred: false,
   };
+}
+
+function mapExecutorTypeToKind(executor: ExecutorType): ExecutorKind | null {
+  switch (executor) {
+    case "claude":
+      return "claude";
+    case "opencode":
+      return "gemini";
+    case "codex":
+      return "codex";
+    case "kimi":
+      return "kimi";
+    case "gemini-api":
+      return null;
+    default:
+      return null;
+  }
+}
+
+function mapExecutorKindToType(executor: ExecutorKind): ExecutorType {
+  switch (executor) {
+    case "claude":
+      return "claude";
+    case "gemini":
+      return "opencode";
+    case "codex":
+      return "codex";
+    case "kimi":
+      return "kimi";
+    default:
+      return "claude";
+  }
+}
+
+function buildExecutorChain(decision: RoutingDecision): ExecutorKind[] {
+  const chain: ExecutorKind[] = [];
+  const seen = new Set<ExecutorKind>();
+  const push = (executor: ExecutorKind | null) => {
+    if (!executor || seen.has(executor)) return;
+    chain.push(executor);
+    seen.add(executor);
+  };
+
+  push(mapExecutorTypeToKind(decision.executor));
+  for (const fallback of decision.fallbackChain) {
+    push(mapExecutorTypeToKind(fallback));
+  }
+
+  if (chain.length === 0) {
+    return [...DEFAULT_CHAIN];
+  }
+
+  return chain;
 }
 
 // ============================================
@@ -337,7 +339,8 @@ export function makeRoutingDecision(request: RoutingRequest): RoutingDecision {
 // ============================================
 
 export async function executeWithRouting(
-  request: RoutingRequest
+  request: RoutingRequest,
+  options?: { notify?: (message: string) => Promise<void> }
 ): Promise<RoutedExecutionResult> {
   const startTime = Date.now();
   const decision = makeRoutingDecision(request);
@@ -354,72 +357,121 @@ export async function executeWithRouting(
     "Routing decision made"
   );
 
-  // Build execution chain
-  const executorChain = [decision.executor, ...decision.fallbackChain];
-  let lastResult: ExecutorResult | null = null;
-  let fallbacksAttempted = 0;
-  let executorUsed = decision.executor;
-
-  for (const executor of executorChain) {
-    try {
-      lastResult = await executeOnExecutor(executor, request);
-
-      // Track cost for paid executors
-      if (executor !== "gemini-cli" && executor !== "kimi") {
-        const inputTokens = (lastResult as GeminiAPIResult).inputTokens || request.estimatedTokens || 2000;
-        const outputTokens = (lastResult as GeminiAPIResult).outputTokens || Math.floor(inputTokens * 0.5);
-        trackCost(executor, inputTokens, outputTokens, {
-          jobId: request.jobId,
-          query: request.query,
-          intentId: request.intentId,
-        });
-      }
-
-      // Success - return result
-      if (lastResult.exitCode === 0) {
-        executorUsed = executor;
-        break;
-      }
-
-      // Quota error (exit code 2) - try fallback
-      if (lastResult.exitCode === 2) {
-        logger.info({ executor, exitCode: 2 }, "Quota exhausted, trying fallback");
-        fallbacksAttempted++;
-        continue;
-      }
-
-      // Other errors - check if we should fallback
-      if (decision.fallbackChain.includes(executor as ExecutorType)) {
-        logger.warn({ executor, exitCode: lastResult.exitCode }, "Executor failed, trying fallback");
-        fallbacksAttempted++;
-        continue;
-      }
-
-      // No more fallbacks
-      executorUsed = executor;
-      break;
-
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      logger.error({ executor, error: message }, "Executor threw exception");
-
-      lastResult = {
-        output: `Error: ${message}`,
-        exitCode: 1,
-        duration: Date.now() - startTime,
-        executor,
-      };
-
-      fallbacksAttempted++;
+  if (decision.executor === "gemini-api") {
+    const apiResult = await executeOnExecutor(decision.executor, request);
+    if (apiResult.exitCode === 0 && "inputTokens" in apiResult) {
+      const inputTokens = (apiResult as GeminiAPIResult).inputTokens || request.estimatedTokens || 2000;
+      const outputTokens = (apiResult as GeminiAPIResult).outputTokens || Math.floor(inputTokens * 0.5);
+      trackCost(decision.executor, inputTokens, outputTokens, {
+        jobId: request.jobId,
+        query: request.query,
+        intentId: request.intentId,
+      });
     }
+
+    return {
+      ...apiResult,
+      decision,
+      executorUsed: "gemini-api",
+      fallbacksAttempted: 0,
+      fallbackUsed: false,
+      failed: apiResult.exitCode !== 0,
+    };
   }
 
-  // All executors failed - FAIL LOUD (no silent deferral)
-  if (lastResult && lastResult.exitCode !== 0) {
+  const baseQuery = request.context
+    ? `${request.context}\n\n---\n\n${request.query}`
+    : request.query;
+  const jobId = request.jobId ?? request.intentId ?? `router_${randomUUID().slice(0, 8)}`;
+  const jobName = request.query.slice(0, 80);
+
+  const chain = buildExecutorChain(decision);
+  const primary = chain[0] ?? "claude";
+
+  const runExecutor = async (
+    executor: ExecutorKind,
+    queryOverride?: string
+  ): Promise<ExecutorResult & { error?: string; startedAt: Date; completedAt: Date }> => {
+    const query = queryOverride ?? baseQuery;
+    const startedAt = new Date();
+    const cwd = request.cwd ?? process.cwd();
+
+    if (executor === "claude") {
+      const res = await executeClaudeCommand(query, {
+        cwd,
+        model: request.model,
+      } as ClaudeExecutorOptions);
+      return {
+        ...res,
+        error: res.exitCode === 0 ? undefined : res.output,
+        startedAt,
+        completedAt: new Date(),
+      };
+    }
+
+    if (executor === "gemini") {
+      const res = await executeGeminiCLI(query, "", {
+        model: request.model || "gemini-3-flash-preview",
+        sandbox: true,
+        yolo: true,
+      } as GeminiCLIOptions);
+      return {
+        ...res,
+        error: res.exitCode === 0 ? undefined : res.output,
+        startedAt,
+        completedAt: new Date(),
+      };
+    }
+
+    if (executor === "codex") {
+      const res = await executeCodexCLI(query, {
+        cwd,
+        timeout: 1800000,
+      });
+      return {
+        ...res,
+        error: res.exitCode === 0 ? undefined : res.output,
+        startedAt,
+        completedAt: new Date(),
+      };
+    }
+
+    const res = await executeKimiCLI(query, "", {
+      timeout: 1200000,
+      yolo: true,
+      workDir: cwd,
+    } as KimiCLIOptions);
+    return {
+      ...res,
+      error: res.exitCode === 0 ? undefined : res.output,
+      startedAt,
+      completedAt: new Date(),
+    };
+  };
+
+  const fallbackResult = await runWithFallbackChain({
+    primary,
+    chain,
+    job: {
+      id: jobId,
+      name: jobName,
+      query: baseQuery,
+      source: "runtime",
+    },
+    runExecutor,
+    notify: options?.notify,
+  });
+
+  const lastResult = fallbackResult.result;
+  const executorUsed = mapExecutorKindToType(fallbackResult.executorUsed);
+  const fallbacksAttempted = fallbackResult.attempts.length;
+
+  if (!lastResult || lastResult.exitCode !== 0 || fallbackResult.failed) {
+    const lastOutput = lastResult?.output ?? "No output";
     logger.error(
       {
-        executorsAttempted: executorChain.slice(0, fallbacksAttempted + 1),
-        lastError: lastResult.output?.slice(0, 200),
+        executorsAttempted: chain,
+        lastError: lastOutput.slice(0, 200),
         taskType: request.taskType,
         urgency: request.urgency,
       },
@@ -427,27 +479,24 @@ export async function executeWithRouting(
     );
 
     return {
-      output: `EXECUTOR EXHAUSTION: All executors failed. Last error: ${lastResult.output?.slice(0, 500)}`,
+      output: `EXECUTOR EXHAUSTION: All executors failed. Last error: ${lastOutput.slice(0, 500)}`,
       exitCode: 1,
       duration: Date.now() - startTime,
       executor: "router",
       decision,
       executorUsed,
       fallbacksAttempted,
-      failed: true,  // Signal that this needs manual intervention
+      fallbackUsed: fallbackResult.fallbackUsed,
+      failed: true,
     };
   }
 
   return {
-    ...(lastResult || {
-      output: "No executor available",
-      exitCode: 1,
-      duration: Date.now() - startTime,
-      executor: "router",
-    }),
+    ...lastResult,
     decision,
     executorUsed,
     fallbacksAttempted,
+    fallbackUsed: fallbackResult.fallbackUsed,
   };
 }
 
@@ -462,7 +511,7 @@ async function executeOnExecutor(
   const { query, context = "", cwd = process.cwd(), model } = request;
 
   switch (executor) {
-    case "gemini-cli":
+    case "opencode":
       return executeGeminiCLI(query, context, {
         model: model || "gemini-3-flash-preview",
         yolo: true,
@@ -476,10 +525,12 @@ async function executeOnExecutor(
       } as GeminiAPIOptions);
 
     case "kimi":
-      return executeKimiCommand(context ? `${context}\n\n---\n\n${query}` : query, {
-        modelSize: "large",
-        maxTokens: 8192,
-      } as KimiExecutorOptions);
+      return executeKimiCLI(context ? `${context}\n\n---\n\n${query}` : query, "", {
+        model: model || undefined, // Use Kimi CLI config default (moonshot-ai/kimi-k2.5)
+        timeout: 1200000,
+        yolo: true,
+        workDir: cwd,
+      } as KimiCLIOptions);
 
     case "claude":
       return executeClaudeCommand(query, {
@@ -487,11 +538,10 @@ async function executeOnExecutor(
       } as ClaudeExecutorOptions);
 
     case "codex":
-      // Codex is a Claude subagent
-      return executeClaudeCommand(query, {
+      return executeCodexCLI(query, {
         cwd,
-        subagent: "codex",
-      } as ClaudeExecutorOptions);
+        timeout: 1200000,
+      });
 
     default:
       throw new Error(`Unknown executor: ${executor}`);
@@ -582,14 +632,9 @@ export function getRouterStatus(): RouterStatus {
  * Quick check if any executor is available for immediate use
  */
 export function canExecuteImmediately(taskType: TaskType = "general"): boolean {
-  // Claude/Codex always available
-  if (taskType === "code-change" || taskType === "verification") {
-    return true;
-  }
-
-  // Check Gemini CLI or Kimi for free execution
-  const cliStatus = getGeminiCLIPoolStatus();
-  return !cliStatus.allExhausted;
+  // Claude/Codex/Kimi are always available in the CLI chain
+  void taskType;
+  return true;
 }
 
 /**
@@ -633,13 +678,14 @@ export async function executeForSession(
  * Map session executor type to routing executor type
  */
 export function mapSessionExecutorToRouting(
-  sessionExecutor: "claude" | "gemini" | "codex" | "kimi" | "chatgpt"
+  sessionExecutor: "claude" | "gemini" | "codex" | "kimi" | "chatgpt" | "opencode"
 ): ExecutorType {
   switch (sessionExecutor) {
     case "claude":
       return "claude";
     case "gemini":
-      return "gemini-cli";
+    case "opencode":
+      return "opencode";
     case "codex":
       return "codex";
     case "kimi":

@@ -207,7 +207,7 @@ export class AccountManager {
 
 // Approximate costs per 1K tokens (USD)
 const COST_PER_1K_TOKENS: Record<string, { input: number; output: number }> = {
-  "gemini-cli": { input: 0, output: 0 },
+  opencode: { input: 0, output: 0 },
   "gemini-api": { input: 0.00025, output: 0.001 },
   kimi: { input: 0, output: 0 },
   claude: { input: 0.003, output: 0.015 },

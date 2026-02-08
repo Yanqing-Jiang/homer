@@ -2,30 +2,51 @@ import { spawn } from "child_process";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
 
-const DEFAULT_TIMEOUT = 1200_000; // 20 minutes
+const DEFAULT_TIMEOUT = 1800_000; // 30 minutes
 const KILL_GRACE_MS = 5_000;
 
 export interface CodexCLIOptions {
   cwd: string;
   timeout?: number;
   signal?: AbortSignal;
+  sessionId?: string;
 }
 
-export interface CodexCLIResult extends ExecutorResult {}
+export interface CodexCLIResult extends ExecutorResult {
+  sessionId?: string;
+}
+
+interface CodexStreamItem {
+  id?: string;
+  type?: string;
+  text?: string;
+  message?: string;
+  content?: string;
+}
+
+interface CodexStreamEvent {
+  type?: string;
+  thread_id?: string;
+  item?: CodexStreamItem;
+  message?: string;
+}
 
 /**
  * Execute Codex CLI with a full prompt.
- * Command: codex --dangerously-bypass-approvals-and-sandbox <prompt>
+ * Command: codex exec --json --dangerously-bypass-approvals-and-sandbox <prompt>
+ * Resume:  codex exec resume --json --dangerously-bypass-approvals-and-sandbox <sessionId> <prompt>
  */
 export async function executeCodexCLI(
   prompt: string,
   options: CodexCLIOptions
 ): Promise<CodexCLIResult> {
   const startTime = Date.now();
-  const { cwd, timeout = DEFAULT_TIMEOUT, signal } = options;
+  const { cwd, timeout = DEFAULT_TIMEOUT, signal, sessionId } = options;
 
   return new Promise((resolve, reject) => {
-    const args = ["--dangerously-bypass-approvals-and-sandbox", prompt];
+    const args = sessionId
+      ? ["exec", "resume", "--json", "--dangerously-bypass-approvals-and-sandbox", sessionId, prompt]
+      : ["exec", "--json", "--dangerously-bypass-approvals-and-sandbox", prompt];
 
     const child = spawn("codex", args, {
       cwd,
@@ -44,6 +65,10 @@ export async function executeCodexCLI(
     let timedOut = false;
     let aborted = false;
     let settled = false;
+    let buffer = "";
+    let capturedSessionId: string | undefined;
+    const responseChunks: string[] = [];
+    const errorChunks: string[] = [];
 
     const finalize = (exitCode: number, output: string) => {
       if (settled) return;
@@ -53,6 +78,7 @@ export async function executeCodexCLI(
         exitCode,
         duration: Date.now() - startTime,
         executor: "codex",
+        sessionId: capturedSessionId,
       });
     };
 
@@ -87,6 +113,42 @@ export async function executeCodexCLI(
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       stdout += chunk;
+
+      buffer += chunk;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const event = JSON.parse(trimmed) as CodexStreamEvent;
+
+          if (event.type === "thread.started" && event.thread_id) {
+            capturedSessionId = event.thread_id;
+            continue;
+          }
+
+          if (event.type === "item.completed" || event.type === "item.delta") {
+            const item = event.item;
+            if (!item) continue;
+            if (item.type === "agent_message" || item.type === "assistant_message" || item.type === "message") {
+              const text = item.text || (typeof item.content === "string" ? item.content : "");
+              if (text) responseChunks.push(text);
+              continue;
+            }
+            if (item.type === "error") {
+              const message = item.message || item.text;
+              if (message) errorChunks.push(message);
+            }
+          }
+
+          if (event.type === "error" && event.message) {
+            errorChunks.push(event.message);
+          }
+        } catch {
+          // Ignore non-JSON lines
+        }
+      }
     });
 
     child.stderr?.setEncoding("utf8");
@@ -96,6 +158,32 @@ export async function executeCodexCLI(
 
     child.on("close", (code) => {
       clearTimeout(timeoutId);
+
+      if (buffer.trim()) {
+        try {
+          const event = JSON.parse(buffer.trim()) as CodexStreamEvent;
+          if (event.type === "thread.started" && event.thread_id) {
+            capturedSessionId = event.thread_id;
+          } else if (event.type === "item.completed" || event.type === "item.delta") {
+            const item = event.item;
+            if (item?.type === "agent_message" || item?.type === "assistant_message" || item?.type === "message") {
+              const text = item.text || (typeof item.content === "string" ? item.content : "");
+              if (text) responseChunks.push(text);
+            } else if (item?.type === "error") {
+              const message = item.message || item.text;
+              if (message) errorChunks.push(message);
+            }
+          } else if (event.type === "error" && event.message) {
+            errorChunks.push(event.message);
+          }
+        } catch {
+          // Ignore trailing non-JSON
+        }
+      }
+
+      if (!capturedSessionId && sessionId) {
+        capturedSessionId = sessionId;
+      }
 
       if (aborted) {
         finalize(130, "Cancelled");
@@ -107,7 +195,17 @@ export async function executeCodexCLI(
         return;
       }
 
-      const output = stdout.trim() || stderr.trim() || "(No output)";
+      const parsedOutput = responseChunks.join("").trim();
+      const parsedErrors = errorChunks.join("\n").trim();
+      const fallbackOutput = parsedOutput || stderr.trim() || stdout.trim() || "(No output)";
+
+      if (code && code !== 0) {
+        const errorOutput = parsedErrors || stderr.trim() || fallbackOutput;
+        finalize(code, errorOutput);
+        return;
+      }
+
+      const output = parsedOutput || stderr.trim() || "(No output)";
       finalize(code ?? 1, output);
     });
 
