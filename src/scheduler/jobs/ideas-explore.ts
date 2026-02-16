@@ -2,19 +2,25 @@
  * Ideas Explore — Multi-model swarm job
  *
  * Replaces the Claude-based ideas-explore scheduler job.
- * Uses Kimi (bookmark analysis) + OpenCode Flash (GitHub trending),
+ * Uses Gemini Flash + agent-browser (bookmark scraping),
+ * Kimi (bookmark analysis), OpenCode Flash (GitHub trending),
  * consolidated via Gemini Flash API.
  *
- * Pre-swarm: bird CLI scrape + load existing ideas for dedup.
+ * Pre-swarm: agent-browser scrape bookmarks + load existing ideas for dedup.
  * Post-consolidation: write idea files, log results.
  */
 
-import { spawn } from "child_process";
+import { execSync } from "child_process";
 import { readFileSync, existsSync } from "fs";
 import { z } from "zod";
+import type Database from "better-sqlite3";
 import { fanOutAgents, consolidateResults, parseSwarmJSON } from "../../executors/model-swarm.js";
-import { loadIdeasFromDir, saveIdeaFile, type ParsedIdea } from "../../ideas/parser.js";
+import { executeOpenCodeCLI } from "../../executors/opencode-cli.js";
+import { buildBookmarkScrapePrompt, SCRAPE_OPTIONS } from "../../scraping/browser-prompts.js";
+import { loadIdeasFromDir, type ParsedIdea } from "../../ideas/parser.js";
+import { smartSaveIdea, type SmartSaveResult } from "../../ideas/smart-save.js";
 import { buildCondensedContext, extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
+import { getRecentJobOutputs } from "../job-outputs.js";
 import { logger } from "../../utils/logger.js";
 
 const MEMORY_PATH = "/Users/yj/memory";
@@ -29,45 +35,51 @@ const DENY_HISTORY = `${MEMORY_PATH}/deny-history.md`;
 const IdeaSchema = z.object({
   title: z.string().min(5),
   content: z.string().min(20),
-  source: z.enum(["bookmark", "github-trending"]),
+  source: z.enum(["bookmark", "github-trending", "openclaw"]),
   context: z.string(),
-  link: z.string().url(),
-  score: z.number().min(0).max(50),
+  link: z.string().url().or(z.literal("")),
 });
 
 const IdeasArraySchema = z.array(IdeaSchema);
 
 // ============================================
-// PRE-SWARM: Bird CLI scrape
+// PRE-SWARM: Browser-based bookmark scraping
 // ============================================
 
-async function scrapeBookmarks(): Promise<string> {
-  return new Promise((resolve) => {
-    const proc = spawn("bird", ["bookmarks", "-n", "30", "--json"], {
-      timeout: 60_000,
-      env: { ...process.env },
-    });
+async function scrapeBookmarksViaBrowser(): Promise<string> {
+  try {
+    const result = await executeOpenCodeCLI(
+      buildBookmarkScrapePrompt(30),
+      "",
+      SCRAPE_OPTIONS,
+    );
 
-    let stdout = "";
-    let stderr = "";
+    if (result.exitCode !== 0) {
+      logger.warn({ exitCode: result.exitCode, output: result.output?.slice(0, 300) }, "Browser bookmark scrape failed");
+      return "[]";
+    }
 
-    proc.stdout.on("data", (data) => { stdout += data.toString(); });
-    proc.stderr.on("data", (data) => { stderr += data.toString(); });
-
-    proc.on("close", (code) => {
-      if (code === 0 && stdout.length > 10) {
-        resolve(stdout);
-      } else {
-        logger.warn({ code, stderr: stderr.slice(0, 300) }, "Bird CLI bookmark scrape failed");
-        resolve("[]");
+    // Try to extract JSON array from output
+    const output = result.output ?? "";
+    const arrayMatch = output.match(/\[[\s\S]*\]/);
+    if (arrayMatch) {
+      // Validate it's parseable JSON
+      try {
+        JSON.parse(arrayMatch[0]);
+        return arrayMatch[0];
+      } catch {
+        logger.warn({ preview: output.slice(0, 300) }, "Browser bookmark output not valid JSON");
+        return "[]";
       }
-    });
+    }
 
-    proc.on("error", (err) => {
-      logger.warn({ error: err.message }, "Bird CLI spawn error");
-      resolve("[]");
-    });
-  });
+    logger.warn({ outputLen: output.length }, "No JSON array found in browser bookmark output");
+    return "[]";
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ error: msg }, "Browser bookmark scrape error");
+    return "[]";
+  }
 }
 
 function loadFileIfExists(path: string): string {
@@ -88,7 +100,7 @@ function buildExistingIdeasContext(ideas: ParsedIdea[]): string {
 // MAIN
 // ============================================
 
-export async function runIdeasExplore(): Promise<{
+export async function runIdeasExplore(db?: Database.Database): Promise<{
   success: boolean;
   output: string;
   error?: string;
@@ -96,7 +108,7 @@ export async function runIdeasExplore(): Promise<{
   try {
     // Pre-swarm: gather data deterministically
     const [bookmarksJson, existingIdeas] = await Promise.all([
-      scrapeBookmarks(),
+      scrapeBookmarksViaBrowser(),
       Promise.resolve(loadIdeasFromDir()),
     ]);
 
@@ -116,6 +128,17 @@ export async function runIdeasExplore(): Promise<{
     const workContext = loadFileIfExists(WORK_MD);
     const goalContext = `## Yanqing's Identity & Goals\n\n${meContext.slice(0, 8000)}\n\n## Work Context\n\n${workContext.slice(0, 6000)}`;
 
+    // Load HOMER's bot command list for competitive comparison
+    let homerCapabilities = "";
+    try {
+      homerCapabilities = execSync(
+        "grep -E '(bot\\.command|case \"|handler)' /Users/yj/homer/src/bot/index.ts 2>/dev/null | head -30",
+        { encoding: "utf-8", timeout: 5000 }
+      ).trim();
+    } catch {
+      homerCapabilities = "(could not load HOMER capabilities)";
+    }
+
     // Check if bookmarks are empty — adjust Kimi agent accordingly
     let bookmarksEmpty = false;
     try {
@@ -128,11 +151,11 @@ export async function runIdeasExplore(): Promise<{
 
     if (!bookmarksEmpty) {
       agents.push({
-        id: "kimi-analyze",
-        executor: "kimi" as const,
+        id: "flash-analyze",
+        executor: "opencode" as const,
         prompt: `Analyze these Twitter/X bookmarks and explain WHY Yanqing likely bookmarked each.
 
-For each bookmark with an external URL, fetch and analyze the linked content using your FetchURL tool.
+For each bookmark with an external URL, use web search to analyze the linked content.
 
 For each bookmark, provide:
 1. The bookmark text and author
@@ -177,7 +200,6 @@ For each relevant repo, provide:
 1. Repo name and URL
 2. What it does (1-2 sentences)
 3. Which of Yanqing's projects it connects to
-4. Relevance score (0-50)
 
 ## Deny History (skip these)
 
@@ -187,41 +209,63 @@ ${denyHistory.slice(0, 3000)}`,
       required: !bookmarksEmpty ? false : true,
     });
 
+    agents.push({
+      id: "flash-openclaw",
+      executor: "opencode" as const,
+      prompt: `Analyze the OpenClaw repository on GitHub for features HOMER doesn't have.
+
+Run these commands:
+1. gh api /search/repositories -f q="openclaw telegram bot" --jq '.items[:3] | .[] | {name: .full_name, desc: .description, url: .html_url}'
+2. For the best match, fetch: gh api repos/OWNER/REPO/readme -H "Accept: application/vnd.github.raw" | head -200
+3. Recent commits: gh api repos/OWNER/REPO/commits?per_page=15 --jq '.[] | .commit.message'
+
+Compare discovered features to HOMER's current capabilities and identify gaps worth implementing.
+
+## HOMER's Current Capabilities
+${homerCapabilities}
+
+## Yanqing's Priorities
+${goals.slice(0, 1000)}
+
+For each feature gap: feature name, benefit to Yanqing, complexity (low/med/high).`,
+      context: goalContext,
+      timeout: 300_000,
+      required: false,
+    });
+
     const results = await fanOutAgents(agents);
 
-    // Consolidation — with personal context for accurate scoring
+    // Cross-job intelligence: inject recent outputs if db available
+    const recentActivity = db ? getRecentJobOutputs(db) : "";
+
+    // Consolidation — with personal context for accurate filtering
     const consolidationPrompt = `You are a consolidation engine. Merge the agent results below into a final list of idea candidates.
 
-## Who is Yanqing (for scoring context)
+## Who is Yanqing (for context)
 
 ${condensedContext.slice(0, 2500)}
 
 ## Instructions
 
 1. **Dedup against existing ideas** — skip anything that matches by URL or has Jaccard title similarity >= 0.8 with existing ideas.
-2. **Score each candidate** against Yanqing's SPECIFIC goals and projects (0-50 scale):
-   - Career relevance: 0-15 (job hunt, B3/Director positioning, tech switch)
-   - Homer/automation value: 0-15 (personal AI, memory, scheduling)
-   - Income potential: 0-10 (trading, SaaS, content monetization)
-   - Learning value: 0-10 (new skills, architecture patterns)
-3. **Pick top 3** with score >= 15.
-4. For bookmarks: set source="bookmark"
-5. For GitHub repos: set source="github-trending"
+2. **Pick top 3 most relevant candidates.** Drop anything that doesn't connect to Yanqing's active goals/projects.
+3. For bookmarks: set source="bookmark"
+4. For GitHub repos: set source="github-trending"
+5. For OpenClaw competitive intel: set source="openclaw" — weight toward Homer enhancement
 
 ## Existing Ideas (skip duplicates)
 
 ${existingIdeasList.slice(0, 4000)}
-
+${recentActivity ? `\n${recentActivity}\n` : ""}
 ## Output Format
 
 Return ONLY a JSON array:
-[{"title": "...", "content": "...", "source": "bookmark"|"github-trending", "context": "why this matters for Yanqing specifically", "link": "https://...", "score": 25}]
+[{"title": "...", "content": "...", "source": "bookmark"|"github-trending"|"openclaw", "context": "why this matters for Yanqing specifically", "link": "https://..."}]
 
 If no candidates pass the threshold, return an empty array: []`;
 
     const consolidated = await consolidateResults(results, consolidationPrompt, {
       temperature: 0.2,
-      maxTokens: 4096,
     });
 
     // Parse and validate
@@ -234,13 +278,13 @@ If no candidates pass the threshold, return an empty array: []`;
       return { success: false, output: "", error: `Consolidation parse failed: ${msg}` };
     }
 
-    // Filter out any that still match existing URLs
-    const filtered = ideas.filter((idea) => !existingUrls.has(idea.link));
+    // Filter out any that still match existing URLs (skip empty links from openclaw)
+    const filtered = ideas.filter((idea) => !idea.link || !existingUrls.has(idea.link));
 
-    // Write idea files
+    // Write idea files via smart-save (dedup-at-write)
     const now = new Date();
     const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
-    let written = 0;
+    const saveResults: SmartSaveResult[] = [];
 
     for (const idea of filtered) {
       const slug = idea.title
@@ -262,14 +306,23 @@ If no candidates pass the threshold, return an empty array: []`;
         timestamp,
       };
 
-      saveIdeaFile(parsed);
-      written++;
-      logger.info({ id, title: idea.title, score: idea.score }, "Wrote idea from swarm explore");
+      const result = smartSaveIdea(parsed);
+      saveResults.push(result);
+      logger.info({ id, title: idea.title, action: result.action }, "Swarm explore idea processed");
     }
 
-    const output = written > 0
-      ? `Explored ${results.filter((r) => r.success).length} agents, wrote ${written} ideas (${filtered.length} passed filters from ${ideas.length} candidates)`
-      : `Explored ${results.filter((r) => r.success).length} agents, no new ideas passed thresholds (${ideas.length} candidates)`;
+    const created = saveResults.filter((r) => r.action === "created").length;
+    const enhanced = saveResults.filter((r) => r.action === "enhanced").length;
+    const skipped = saveResults.filter((r) => r.action === "skipped").length;
+    const agentCount = results.filter((r) => r.success).length;
+
+    const parts: string[] = [`${agentCount} agents`];
+    if (created > 0) parts.push(`${created} new ideas`);
+    if (enhanced > 0) parts.push(`${enhanced} enhanced`);
+    if (skipped > 0) parts.push(`${skipped} skipped (duplicate)`);
+    if (created === 0 && enhanced === 0) parts.push("no new ideas");
+    parts.push(`from ${ideas.length} candidates`);
+    const output = `Explored ${parts.join(", ")}`;
 
     return { success: true, output };
   } catch (error) {

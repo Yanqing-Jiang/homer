@@ -275,7 +275,6 @@ export async function runWeeklyMemoryCleanup(): Promise<{
       const result = await executeGeminiAPI(prompt, {
         model: "gemini-3-flash-preview",
         systemPrompt: agentContext,
-        maxTokens: 16384,
         temperature: 0.2,
         timeout: 180000, // 3 min per file
         reasoningEffort: "high",

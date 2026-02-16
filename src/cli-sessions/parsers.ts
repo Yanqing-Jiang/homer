@@ -16,6 +16,7 @@ export interface ParsedSession {
   nativeFilePath: string;
   messages: ParsedMessage[];
   model?: string;
+  project?: string;
   startedAt?: string;
   endedAt?: string;
   messageCount: number;
@@ -474,6 +475,202 @@ export function scanOpencodeSessions(homeDir: string, sinceDays: number = 7): st
  * Parse OpenCode CLI session from metadata file
  * Reads session metadata, then traverses message/part structure
  */
+// --- Claude Code Support ---
+
+interface ClaudeHistoryEntry {
+  display: string;
+  timestamp: number;
+  project: string;
+  sessionId: string;
+}
+
+interface ClaudeSessionLine {
+  type: "user" | "assistant" | "queue-operation";
+  sessionId: string;
+  timestamp: string;
+  message?: { role?: string; content?: unknown; model?: string; [key: string]: unknown };
+  uuid?: string;
+  cwd?: string;
+  version?: string;
+  permissionMode?: string;
+}
+
+/**
+ * Scan for Claude Code sessions within a date range
+ * Reads ~/.claude/history.jsonl for session metadata, then finds matching JSONL transcripts
+ */
+export function scanClaudeSessions(homeDir: string, sinceDays: number = 7): string[] {
+  const historyPath = join(homeDir, ".claude", "history.jsonl");
+  if (!existsSync(historyPath)) {
+    return [];
+  }
+
+  const cutoffTime = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
+  const sessionFiles: string[] = [];
+  const seenSessions = new Set<string>();
+
+  try {
+    const content = readFileSync(historyPath, "utf-8");
+    const lines = content.split("\n").filter((line) => line.trim());
+
+    for (const line of lines) {
+      try {
+        const entry: ClaudeHistoryEntry = JSON.parse(line);
+        if (entry.timestamp < cutoffTime) continue;
+        if (seenSessions.has(entry.sessionId)) continue;
+        seenSessions.add(entry.sessionId);
+
+        // Map project path to Claude's directory-based storage
+        // Claude uses format: -Users-yj (leading dash, slashes replaced with dashes)
+        const projectKey = entry.project.replace(/\//g, "-");
+        const sessionPath = join(
+          homeDir, ".claude", "projects", projectKey, `${entry.sessionId}.jsonl`
+        );
+
+        if (existsSync(sessionPath)) {
+          sessionFiles.push(sessionPath);
+        }
+      } catch {
+        // Skip malformed history lines
+      }
+    }
+  } catch (error) {
+    logger.error({ error }, "Failed to scan Claude Code sessions");
+  }
+
+  return sessionFiles;
+}
+
+/**
+ * Parse Claude Code session from JSONL transcript
+ * Location: ~/.claude/projects/{project_key}/{sessionId}.jsonl
+ */
+export function parseClaudeSession(filePath: string): ParsedSession | null {
+  try {
+    const content = readFileSync(filePath, "utf-8");
+    const lines = content.split("\n").filter((line) => line.trim());
+
+    const messages: ParsedMessage[] = [];
+    let sessionId = "";
+    let model = "";
+    let startTime = "";
+    let endTime = "";
+    let project = "";
+    let userMsgCount = 0;
+    let assistantMsgCount = 0;
+
+    const MAX_USER_MESSAGES = 20;
+    const MAX_ASSISTANT_MESSAGES = 10;
+    const MAX_USER_CHARS = 300;
+    const MAX_ASSISTANT_CHARS = 400;
+
+    for (const line of lines) {
+      try {
+        const entry: ClaudeSessionLine = JSON.parse(line);
+
+        if (!sessionId && entry.sessionId) {
+          sessionId = entry.sessionId;
+        }
+
+        if (!startTime && entry.timestamp) {
+          startTime = entry.timestamp;
+        }
+        if (entry.timestamp) {
+          endTime = entry.timestamp;
+        }
+
+        if (entry.type === "user" && entry.message) {
+          if (userMsgCount >= MAX_USER_MESSAGES) continue;
+
+          let msgContent = "";
+          const msgObj = entry.message;
+          if (typeof msgObj.content === "string") {
+            msgContent = msgObj.content;
+          } else if (Array.isArray(msgObj.content)) {
+            msgContent = msgObj.content
+              .filter((c: any) => c.type === "text")
+              .map((c: any) => c.text)
+              .join("\n");
+          }
+
+          if (!project && entry.cwd) {
+            project = entry.cwd;
+          }
+
+          if (msgContent) {
+            messages.push({
+              role: "user",
+              content: msgContent.slice(0, MAX_USER_CHARS),
+              timestamp: entry.timestamp,
+            });
+            userMsgCount++;
+          }
+        } else if (entry.type === "assistant" && entry.message) {
+          if (assistantMsgCount >= MAX_ASSISTANT_MESSAGES) continue;
+
+          let msgContent = "";
+          let msgModel = "";
+          const msgObj = entry.message;
+          if (Array.isArray(msgObj.content)) {
+            msgContent = msgObj.content
+              .filter((c: any) => c.type === "text")
+              .map((c: any) => c.text)
+              .join("\n");
+          } else if (typeof msgObj.content === "string") {
+            msgContent = msgObj.content;
+          }
+          if (msgObj.model) {
+            msgModel = msgObj.model;
+          }
+
+          if (!model && msgModel) {
+            model = msgModel;
+          }
+
+          if (msgContent) {
+            messages.push({
+              role: "assistant",
+              content: msgContent.slice(0, MAX_ASSISTANT_CHARS),
+              timestamp: entry.timestamp,
+            });
+            assistantMsgCount++;
+          }
+        }
+      } catch {
+        // Skip malformed lines
+      }
+    }
+
+    if (messages.length === 0) {
+      return null;
+    }
+
+    // Generate content hash
+    const normalizedContent = messages
+      .map((m) => `${m.role}:${m.content.trim().toLowerCase()}`)
+      .join("\n");
+    const contentHash = createHash("sha256")
+      .update(normalizedContent)
+      .digest("hex");
+
+    return {
+      sessionId: sessionId || `claude-${Date.now()}`,
+      agent: "claude",
+      nativeFilePath: filePath,
+      messages,
+      model: model || "claude-sonnet-4-5",
+      project: project || undefined,
+      startedAt: startTime || undefined,
+      endedAt: endTime || undefined,
+      messageCount: messages.length,
+      contentHash,
+    };
+  } catch (error) {
+    logger.error({ error, filePath }, "Failed to parse Claude Code session");
+    return null;
+  }
+}
+
 export function parseOpencodeSession(filePath: string): ParsedSession | null {
   try {
     // Read session metadata

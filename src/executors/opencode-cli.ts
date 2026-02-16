@@ -1,7 +1,9 @@
 import { spawn, ChildProcess } from "child_process";
+import { mkdirSync } from "fs";
 import * as readline from "readline";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
+import { executeGeminiAPI } from "./gemini.js";
 
 // ============================================
 // TYPES
@@ -38,7 +40,10 @@ export interface OpenCodeCLIOptions {
   timeout?: number;
   signal?: AbortSignal;
   researchOnly?: boolean;
+  browserOnly?: boolean;
   cwd?: string;
+  /** Called with cumulative text as response streams in */
+  onPartial?: (text: string) => void;
   // Legacy options accepted for backward compatibility (ignored by OpenCode)
   resume?: string;
   yolo?: boolean;
@@ -70,11 +75,11 @@ export type GeminiCLIResult = OpenCodeCLIResult;
 // ============================================
 
 function isQuotaError(text: string): boolean {
-  return /exhausted.*quota|quota.*reset|429|rate.limit|capacity.*exhausted/i.test(text);
+  return /exhausted.*quota|quota.*reset|\b429\b.*rate|rate.limit|capacity.*exhausted/i.test(text);
 }
 
 function isAuthError(text: string): boolean {
-  return /401|403|unauthorized|invalid.*credential|auth.*fail/i.test(text);
+  return /\b401\b.*error|\b403\b.*forbidden|unauthorized|invalid.*credential|auth.*fail/i.test(text);
 }
 
 // ============================================
@@ -102,6 +107,22 @@ Now proceed with the task:
 
 `;
 
+const BROWSER_ONLY_PREFIX = `CRITICAL CONSTRAINTS:
+
+ALLOWED:
+- Run agent-browser commands via bash (connect, snapshot, open, click, scroll)
+- Return data as text/JSON in your response
+
+PROHIBITED:
+- DO NOT create, write, or modify any files on disk
+- DO NOT use bash commands that create files (no >, >>, tee, touch, mkdir, cp, mv, curl -o, wget)
+- DO NOT save screenshots unless explicitly asked
+- ALL output must be in your response text, not written to files
+
+Now proceed:
+
+`;
+
 // ============================================
 // MAIN EXECUTOR
 // ============================================
@@ -112,14 +133,19 @@ export async function executeOpenCodeCLI(
   options: OpenCodeCLIOptions = {}
 ): Promise<OpenCodeCLIResult> {
   const {
-    model = "google/gemini-3-flash-preview",
+    model: rawModel = "google/gemini-3-flash-preview",
     timeout = 1200000, // 20 minutes default
     signal,
     researchOnly = true,
+    browserOnly = false,
     cwd,
   } = options;
 
-  const effectivePrompt = researchOnly ? RESEARCH_ONLY_PREFIX + prompt : prompt;
+  // Normalize model name: callers may pass "gemini-3-flash-preview" without provider prefix
+  const model = rawModel.includes("/") ? rawModel : `google/${rawModel}`;
+
+  const prefix = browserOnly ? BROWSER_ONLY_PREFIX : researchOnly ? RESEARCH_ONLY_PREFIX : "";
+  const effectivePrompt = prefix + prompt;
   const startTime = Date.now();
 
   logger.debug({ model, promptLength: effectivePrompt.length, contextLength: context.length, researchOnly }, "Executing OpenCode CLI");
@@ -137,9 +163,13 @@ export async function executeOpenCodeCLI(
       "--format", "json",
     ];
 
+    // Sandbox browserOnly agents to /tmp to prevent file writes to home directory
+    const effectiveCwd = cwd || (browserOnly ? "/tmp/homer-scrape" : (process.env.HOME || "/Users/yj"));
+    if (browserOnly) mkdirSync(effectiveCwd, { recursive: true });
+
     const child: ChildProcess = spawn("opencode", args, {
       stdio: ["pipe", "pipe", "pipe"],
-      cwd: cwd || process.env.HOME || "/Users/yj",
+      cwd: effectiveCwd,
       env: {
         ...process.env,
       },
@@ -203,11 +233,21 @@ export async function executeOpenCodeCLI(
           case "text":
             if (event.part?.text) {
               responseChunks.push(event.part.text);
+              if (options.onPartial) {
+                try { options.onPartial(responseChunks.join("")); } catch { /* don't crash executor */ }
+              }
             }
             break;
 
           case "tool_use":
             toolCallCount++;
+            break;
+
+          case "tool_result":
+            // Capture tool outputs so browser scraping results appear in final output
+            if (event.part?.output) {
+              responseChunks.push(event.part.output);
+            }
             break;
 
           case "step_finish":
@@ -375,7 +415,26 @@ export async function executeOpenCodeWithFallback(
 
   // Retry once on quota/auth error (OpenCode may rotate internally)
   logger.info({ exitCode: result.exitCode }, "Retrying OpenCode after quota/auth error");
-  return executeOpenCodeCLI(prompt, context, options);
+  const retryResult = await executeOpenCodeCLI(prompt, context, options);
+
+  // If retry still quota-exhausted, fall back to direct API key for Gemini models
+  if (retryResult.exitCode === 2 && retryResult.model.includes("gemini")) {
+    logger.info({ model: retryResult.model }, "All OAuth accounts exhausted, falling back to direct API key");
+    const apiModel = retryResult.model.replace("google/", "");
+    const fullPrompt = context ? `${context}\n\n---\n\n${prompt}` : prompt;
+    const apiResult = await executeGeminiAPI(fullPrompt, { model: apiModel });
+    return {
+      output: apiResult.output,
+      exitCode: apiResult.exitCode,
+      duration: apiResult.duration,
+      executor: "opencode",
+      sessionId: "",
+      model: retryResult.model,
+      accountId: 0,
+    } as OpenCodeCLIResult;
+  }
+
+  return retryResult;
 }
 
 // ============================================

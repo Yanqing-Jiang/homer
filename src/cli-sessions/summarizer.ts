@@ -1,133 +1,112 @@
 import type { ParsedSession } from "./parsers.js";
+import { executeGeminiAPI } from "../executors/gemini.js";
+import { logger } from "../utils/logger.js";
 
 /**
- * Format session for daily log with maximum detail preservation
- *
- * IMPORTANT: Do NOT compact content. Preserve as much detail as possible
- * for Yanqing to understand what was achieved in each session.
+ * Smart session summarization with tiered strategy:
+ * - ≤ 4 messages: template (free)
+ * - 5-20 messages: Gemini Flash 3-5 bullets (~$0.001)
+ * - 21+ messages: Gemini Flash 5-8 bullets, truncated (~$0.005)
+ * - Sub-agent: skip (no summary)
  */
-export function formatSessionForDailyLog(session: ParsedSession): string {
-  const startTime = session.startedAt ? new Date(session.startedAt) : null;
-  const endTime = session.endedAt ? new Date(session.endedAt) : null;
+export async function summarizeSession(session: ParsedSession): Promise<string> {
+  const msgCount = session.messageCount;
 
-  // Format time range
-  let timeRange = "";
-  if (startTime && endTime) {
-    const startStr = startTime.toLocaleTimeString("en-US", {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    });
-    const endStr = endTime.toLocaleTimeString("en-US", {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    });
-    timeRange = `${startStr}–${endStr}`;
+  // Small sessions: template summary
+  if (msgCount <= 4) {
+    return templateSummary(session);
   }
 
-  // Build session block
-  let block = `\n## [cli-session: ${session.agent}]\n`;
-  block += `- **Time:** ${timeRange || "unknown"}\n`;
-  block += `- **Session ID:** ${session.sessionId}\n`;
-  block += `- **Model:** ${session.model || "unknown"}\n`;
-  block += `- **Messages:** ${session.messageCount}\n`;
-  if (session.tokenEstimate) {
-    block += `- **Tokens:** ${session.tokenEstimate.toLocaleString()}\n`;
+  // Medium/large sessions: Gemini Flash
+  try {
+    return await geminiSummary(session);
+  } catch (error) {
+    logger.warn({ error, sessionId: session.sessionId }, "Gemini summary failed, falling back to template");
+    return templateSummary(session);
   }
-  block += `- **File:** \`${session.nativeFilePath}\`\n`;
-  block += `- **Hash:** \`${session.contentHash.slice(0, 12)}...\`\n\n`;
-
-  // Add full conversation with detail preservation
-  block += `### Conversation\n\n`;
-
-  for (const msg of session.messages) {
-    // User messages - preserve full content
-    if (msg.role === "user") {
-      block += `**User:**\n${msg.content}\n\n`;
-    }
-    // Assistant messages - preserve full content with structure
-    else if (msg.role === "assistant") {
-      block += `**${session.agent}:**\n${msg.content}\n\n`;
-
-      // For Gemini, include thoughts if present
-      if (msg.metadata?.thoughts && Array.isArray(msg.metadata.thoughts)) {
-        const thoughts = msg.metadata.thoughts as Array<{
-          subject?: string;
-          description?: string;
-        }>;
-        if (thoughts.length > 0) {
-          block += `<details><summary>Reasoning Process</summary>\n\n`;
-          for (const thought of thoughts) {
-            if (thought.subject) {
-              block += `- **${thought.subject}:** ${thought.description || ""}\n`;
-            }
-          }
-          block += `\n</details>\n\n`;
-        }
-      }
-    }
-    // System messages
-    else if (msg.role === "system") {
-      block += `<details><summary>System</summary>\n${msg.content}\n</details>\n\n`;
-    }
-  }
-
-  block += `---\n\n`;
-
-  return block;
 }
 
 /**
- * Generate a concise summary for the session (optional, for overview)
- * This is a SHORT summary, the full conversation is in the daily log
+ * Free template summary for small sessions
  */
-export function generateSessionSummary(session: ParsedSession): {
-  goal: string;
-  outcome: string;
-  topics: string[];
-} {
-  // Extract first user message as goal
-  const firstUserMsg = session.messages.find((m) => m.role === "user");
-  const goal: string = firstUserMsg?.content.slice(0, 200) || "Unknown goal";
-
-  // Extract last assistant message as outcome
-  const lastAssistantMsg = session.messages
+function templateSummary(session: ParsedSession): string {
+  const firstUser = session.messages.find((m) => m.role === "user");
+  const lastAssistant = session.messages
     .slice()
     .reverse()
     .find((m) => m.role === "assistant");
-  const outcome: string = lastAssistantMsg?.content.slice(0, 200) || "No outcome recorded";
 
-  // Extract topics from all messages (simple keyword extraction)
-  const allContent = session.messages
-    .map((m) => m.content)
-    .join(" ")
-    .toLowerCase();
+  const goal = firstUser?.content.slice(0, 200).trim() || "Unknown task";
+  const outcome = lastAssistant?.content.slice(0, 300).trim() || "No outcome recorded";
 
-  const commonTopics = [
-    "database",
-    "schema",
-    "logging",
-    "memory",
-    "session",
-    "parser",
-    "cli",
-    "telegram",
-    "web ui",
-    "nightly job",
-    "summarization",
-    "dedup",
-    "index",
-    "search",
-  ];
+  return `- **Goal:** ${goal}\n- **Outcome:** ${outcome}\n- Messages: ${session.messageCount}`;
+}
 
-  const topics = commonTopics.filter((topic) => allContent.includes(topic));
+/**
+ * Gemini Flash summary for medium/large sessions
+ */
+async function geminiSummary(session: ParsedSession): Promise<string> {
+  const isLarge = session.messageCount > 20;
+  const bulletCount = isLarge ? "5-8" : "3-5";
 
-  return {
-    goal,
-    outcome,
-    topics,
-  };
+  // Build conversation text
+  let conversationText = session.messages
+    .map((m) => `[${m.role}]: ${m.content}`)
+    .join("\n\n");
+
+  // Truncate large sessions
+  if (conversationText.length > 50000) {
+    conversationText = conversationText.slice(0, 50000) + "\n\n[...truncated]";
+  }
+
+  const prompt = `Summarize this ${session.agent} CLI session in ${bulletCount} bullet points. Focus on what was accomplished, key decisions made, and any blockers. Be specific (include file paths, function names, concrete details). Output ONLY bullet points, no preamble.
+
+Agent: ${session.agent}
+Model: ${session.model || "unknown"}
+Messages: ${session.messageCount}
+
+${conversationText}`;
+
+  const result = await executeGeminiAPI(prompt, {
+    model: "gemini-3-flash-preview",
+    temperature: 0.2,
+    timeout: 30000,
+    useGrounding: false,
+  });
+
+  if (result.exitCode !== 0) {
+    throw new Error(`Gemini API error: ${result.output}`);
+  }
+
+  return result.output.trim();
+}
+
+/**
+ * Generate a title from the first user message
+ */
+export function generateTitle(session: ParsedSession): string {
+  const firstUser = session.messages.find((m) => m.role === "user");
+  if (!firstUser) return `${session.agent} session`;
+
+  // Take first line, truncate to 100 chars
+  const firstLine = firstUser.content.split("\n")[0] || "";
+  const cleaned = firstLine.replace(/^(can you |please |help me |i need to |let's )/i, "").trim();
+  return cleaned.slice(0, 100) || `${session.agent} session`;
+}
+
+/**
+ * Build a raw excerpt (first ~2KB of conversation) for context
+ */
+export function buildRawExcerpt(session: ParsedSession, maxBytes: number = 2048): string {
+  let excerpt = "";
+  for (const msg of session.messages) {
+    const line = `[${msg.role}]: ${msg.content}\n`;
+    if (Buffer.byteLength(excerpt + line, "utf-8") > maxBytes) {
+      break;
+    }
+    excerpt += line;
+  }
+  return excerpt;
 }
 
 /**
@@ -140,3 +119,6 @@ export function getLogDate(session: ParsedSession): string {
   const parts = date.toISOString().split("T");
   return parts[0] as string;
 }
+
+// Keep old function name for backward compatibility during transition
+export { templateSummary as formatSessionForDailyLog };

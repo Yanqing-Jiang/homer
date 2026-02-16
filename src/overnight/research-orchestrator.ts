@@ -423,9 +423,7 @@ Respond in JSON:
 \`\`\``;
 
     // Use Kimi for synthesis (2M context window)
-    const result = await executeKimiCommand(synthesisPrompt, {
-      maxTokens: 4096,
-    });
+    const result = await executeKimiCommand(synthesisPrompt, {});
 
     if (result.exitCode !== 0) {
       return this.getDefaultSyntheses();

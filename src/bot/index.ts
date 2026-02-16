@@ -14,9 +14,11 @@ import { registerIdeaCommands, registerIdeaCallbacks } from "./handlers/idea.js"
 import { registerQuickCommands, registerProposalCallbacks } from "./handlers/proposal-approval.js";
 import { registerOvernightCommands, handleOvernightMessage } from "./handlers/overnight.js";
 import { handleYouTubeUrl, initializeYouTubeHandler } from "./handlers/youtube.js";
+import { registerJobApprovalHandlers } from "./handlers/job-approval.js";
+import { registerJobCommands, setJobScheduler } from "./handlers/job-commands.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { StateManager } from "../state/manager.js";
-import { sendThinkingIndicator, editWithResponse } from "./streaming.js";
+import { sendThinkingIndicator, editWithResponse, TelegramDraftStream } from "./streaming.js";
 import { loadBootstrapFiles } from "../memory/loader.js";
 import { searchMemory, formatSearchResults } from "../memory/search.js";
 import { hybridSearch, formatHybridResults } from "../search/index.js";
@@ -92,6 +94,7 @@ function consumePendingAttachments(lane: string): string[] {
 
 export function setScheduler(scheduler: Scheduler): void {
   schedulerRef = scheduler;
+  setJobScheduler(scheduler);
 }
 
 export function setReminderManager(reminderManager: ReminderManager): void {
@@ -127,6 +130,10 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
 
   // Register overnight work commands (/overnight) and inline button callbacks
   registerOvernightCommands(bot, stateManager);
+
+  // Register job hunt approval callbacks and commands
+  registerJobApprovalHandlers(bot, stateManager);
+  registerJobCommands(bot, stateManager);
 
   // Initialize YouTube URL handler
   initializeYouTubeHandler(stateManager);
@@ -1029,9 +1036,18 @@ async function handleNewExecution(
   );
 
   let streamingMsg = null;
+  let draftStream: TelegramDraftStream | null = null;
+
   if (!returnResponse) {
     if (ENABLE_STREAMING) {
       streamingMsg = await sendThinkingIndicator(ctx);
+      if (streamingMsg) {
+        draftStream = new TelegramDraftStream(
+          streamingMsg.chatId,
+          ctx.api,
+          streamingMsg.messageId
+        );
+      }
     } else {
       await ctx.replyWithChatAction("typing");
     }
@@ -1081,9 +1097,13 @@ async function handleNewExecution(
       threadId: thread.id,
       contextBeforeMessageId: userMessageId ?? undefined,
       suppressContext: parsed.isNewSession,
+      onPartial: draftStream ? (text) => draftStream!.update(text) : undefined,
     });
 
     const runResult = await result;
+
+    // Await in-flight edit before final editWithResponse
+    if (draftStream) await draftStream.stop();
 
     // Update session activity
     stateManager.updateSessionActivity(session.id);
@@ -1105,6 +1125,8 @@ async function handleNewExecution(
       }
     }
   } catch (error) {
+    if (draftStream) await draftStream.stop();
+
     logger.error({ error, query: parsed.query }, "Execution failed");
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
 

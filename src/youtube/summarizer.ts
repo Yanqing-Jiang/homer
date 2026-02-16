@@ -70,11 +70,28 @@ function loadMemoryContext(): string {
   return sections.join("\n\n");
 }
 
+const HOMER_ARCHITECTURE_PATH = "/Users/yj/homer/architecture.md";
+
+function loadHomerArchitecture(): string {
+  try {
+    if (existsSync(HOMER_ARCHITECTURE_PATH)) {
+      return readFileSync(HOMER_ARCHITECTURE_PATH, "utf-8");
+    }
+  } catch {
+    logger.debug("Failed to read Homer architecture file");
+  }
+  return "";
+}
+
 // ============================================
 // GEMINI PROMPT
 // ============================================
 
-function buildSummaryPrompt(memoryContext: string, transcript: string, transcriptMethod: string): string {
+function buildSummaryPrompt(memoryContext: string, homerArchitecture: string, transcript: string, transcriptMethod: string): string {
+  const archSection = homerArchitecture
+    ? `\n=== HOMER ARCHITECTURE (detailed internals — use this for Tier 3) ===\n${homerArchitecture.slice(0, 30000)}\n=== END HOMER ARCHITECTURE ===\n`
+    : "";
+
   return `You are a personal strategic advisor for Yanqing Jiang. You have deep knowledge
 of his career, goals, projects, and life context (provided below). Your job is
 NOT just to summarize this YouTube video — it's to extract maximum actionable
@@ -83,7 +100,7 @@ value for Yanqing specifically.
 === YANQING'S FULL CONTEXT ===
 ${memoryContext}
 === END CONTEXT ===
-
+${archSection}
 === VIDEO TRANSCRIPT (extracted via: ${transcriptMethod}) ===
 ${transcript.slice(0, MAX_TRANSCRIPT_CHARS)}
 === END TRANSCRIPT ===
@@ -99,7 +116,7 @@ Analyze this video across 4 tiers and respond with JSON:
 
   "projectConnections": "TIER 2 — Which of Yanqing's active projects can directly benefit? Consider: Homer OS (daemon, scheduler, executors, memory system), MAHORAGA trading system (regime filter, leveraged ETFs), hr-breaker (resume optimization), job hunt automation, Analytics Copilot (Chat-to-SQL on Databricks). Be SPECIFIC about HOW to apply the video's ideas.",
 
-  "homerImprovements": "TIER 3 — How can Homer's architecture or features be improved based on this video? Consider: executor routing, overnight pipeline, idea system, memory indexing, web UI, Telegram bot, MCP tools, scheduler orchestration. Propose concrete enhancements.",
+  "homerImprovements": "TIER 3 — You have Homer's FULL architecture above (scheduler swarm pattern, memory consolidation pipeline, session harvester, MCP tools, executor routing, overnight jobs, idea pipeline, job hunt system, scraping infrastructure). Based on this video, propose SPECIFIC architectural improvements or new features. Reference actual file paths, modules, and patterns from the architecture docs. Examples: 'Add X pattern to model-swarm.ts fan-out logic', 'The session-harvester could use Y technique for better summarization', 'Apply Z to the idea dedup pipeline in ideas-explore.ts'.",
 
   "careerRelevance": "TIER 4 — How does this help Yanqing's career and life? Consider: B3/Director promo path at P&G, $250-350K job hunt positioning, AI/analytics thought leadership, LinkedIn/Medium content strategy, relationship with JT and org dynamics, Army-to-tech narrative, side income goals. What deeper meanings or strategic lessons apply?",
 
@@ -117,6 +134,7 @@ Analyze this video across 4 tiers and respond with JSON:
 IMPORTANT:
 - Be SPECIFIC. Reference actual project names, people (JT, Ravi, Alfredo), and goals.
 - Generic advice like "this could help your career" is useless. Connect dots.
+- For Homer improvements (Tier 3), reference actual modules and file paths from the architecture context.
 - If the video has LOW relevance, say so honestly (score 1-3) with a brief note.
 - If the video is highly relevant, go deep on connections across all 4 tiers.
 - Return ONLY valid JSON, no markdown fences or extra text.`;
@@ -250,11 +268,12 @@ export async function summarizeYouTubeVideo(
   const transcriptText = transcript?.text ?? "No transcript available.";
   const transcriptMethod = transcript?.method ?? "none";
 
-  // Load memory context
+  // Load memory context + Homer architecture
   const memoryContext = loadMemoryContext();
+  const homerArchitecture = loadHomerArchitecture();
 
   // Build prompt
-  const prompt = buildSummaryPrompt(memoryContext, transcriptText, transcriptMethod);
+  const prompt = buildSummaryPrompt(memoryContext, homerArchitecture, transcriptText, transcriptMethod);
 
   // Call Gemini
   try {

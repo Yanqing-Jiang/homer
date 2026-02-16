@@ -34,20 +34,40 @@ export interface ClaudeExecutorOptions {
   subagent?: "gemini" | "codex" | "kimi";
   model?: string; // Model override (e.g., "sonnet", "opus")
   signal?: AbortSignal;
+  timeout?: number; // Override default/subagent timeout
+  /** Called with cumulative text as assistant content streams in */
+  onPartial?: (text: string) => void;
 }
 
 export interface ClaudeExecutorResult extends ExecutorResult {
   claudeSessionId?: string;
 }
 
+interface ContentBlock {
+  type: string;
+  text?: string;
+}
+
 interface StreamEvent {
   type: string;
   session_id?: string;
   message?: {
-    content?: string;
+    content?: string | ContentBlock[];
   };
-  content?: string;
+  content?: string | ContentBlock[];
   result?: string;
+}
+
+function extractTextContent(content: string | ContentBlock[] | undefined): string {
+  if (!content) return "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((block) => block.type === "text" && block.text)
+      .map((block) => block.text)
+      .join("");
+  }
+  return "";
 }
 
 export async function executeClaudeCommand(
@@ -57,8 +77,9 @@ export async function executeClaudeCommand(
   const startTime = Date.now();
   const { cwd, claudeSessionId, subagent, model, signal } = options;
 
-  // Use subagent-specific timeout if applicable
-  const timeout = subagent ? (SUBAGENT_TIMEOUTS[subagent] ?? DEFAULT_TIMEOUT) : DEFAULT_TIMEOUT;
+  // Use explicit timeout, then subagent-specific, then default
+  const timeout = options.timeout
+    ?? (subagent ? (SUBAGENT_TIMEOUTS[subagent] ?? DEFAULT_TIMEOUT) : DEFAULT_TIMEOUT);
 
   // Build the query with optional subagent prompt injection
   let finalQuery = query;
@@ -173,7 +194,10 @@ export async function executeClaudeCommand(
 
         // Capture assistant message content
         if (event.type === "assistant" && event.message?.content) {
-          resultContent += event.message.content;
+          resultContent += extractTextContent(event.message.content);
+          if (options.onPartial && resultContent) {
+            try { options.onPartial(resultContent); } catch { /* don't crash executor */ }
+          }
         }
 
         // Capture result content (final response)

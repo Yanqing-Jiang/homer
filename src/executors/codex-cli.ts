@@ -10,6 +10,8 @@ export interface CodexCLIOptions {
   timeout?: number;
   signal?: AbortSignal;
   sessionId?: string;
+  model?: string;
+  reasoningEffort?: string;
 }
 
 export interface CodexCLIResult extends ExecutorResult {
@@ -41,12 +43,21 @@ export async function executeCodexCLI(
   options: CodexCLIOptions
 ): Promise<CodexCLIResult> {
   const startTime = Date.now();
-  const { cwd, timeout = DEFAULT_TIMEOUT, signal, sessionId } = options;
+  const { cwd, timeout = DEFAULT_TIMEOUT, signal, sessionId, model, reasoningEffort } = options;
 
   return new Promise((resolve, reject) => {
-    const args = sessionId
-      ? ["exec", "resume", "--json", "--dangerously-bypass-approvals-and-sandbox", sessionId, prompt]
-      : ["exec", "--json", "--dangerously-bypass-approvals-and-sandbox", prompt];
+    const args: string[] = sessionId
+      ? ["exec", "resume", "--json", "--dangerously-bypass-approvals-and-sandbox"]
+      : ["exec", "--json", "--dangerously-bypass-approvals-and-sandbox"];
+
+    if (model) args.push("-m", model);
+    if (reasoningEffort) args.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
+
+    if (sessionId) {
+      args.push(sessionId, prompt);
+    } else {
+      args.push(prompt);
+    }
 
     const child = spawn("codex", args, {
       cwd,

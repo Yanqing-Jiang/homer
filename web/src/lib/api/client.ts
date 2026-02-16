@@ -363,7 +363,7 @@ export async function getJobCalendar(options?: {
 export interface Idea {
 	id: string;
 	title: string;
-	status: 'draft' | 'research' | 'archived' | 'researching' | 'exploring' | 'review' | 'planning' | 'execution'; // Include legacy for backwards compatibility
+	status: 'draft' | 'research' | 'archived' | 'researching' | 'exploring' | 'review' | 'planning' | 'execution' | 'completed';
 	source: string;
 	content: string;
 	context?: string | null;

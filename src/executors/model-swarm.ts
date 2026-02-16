@@ -1,8 +1,8 @@
 /**
  * Model Swarm Utility
  *
- * Parallel multi-model execution using OpenCode CLI (Gemini Flash/Pro)
- * and Kimi CLI (K2.5), with consolidation via Gemini API.
+ * Parallel multi-model execution using OpenCode CLI (Gemini Flash/Pro),
+ * Codex CLI (GPT-5.3), and Claude CLI (Sonnet), with consolidation via Gemini API.
  *
  * Two core functions (no opaque runSwarm wrapper — callers have custom logic):
  * - fanOutAgents: parallel execution of multiple model agents
@@ -13,17 +13,22 @@
 
 import { z, type ZodSchema } from "zod";
 import { executeOpenCodeCLI } from "./opencode-cli.js";
-import { executeKimiCLI } from "./kimi-cli.js";
+import { executeCodexCLI } from "./codex-cli.js";
+import { executeClaudeCommand } from "./claude.js";
 import { executeGeminiAPI } from "./gemini.js";
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from "fs";
+import { join } from "path";
 import { logger } from "../utils/logger.js";
 
 // ============================================
 // TYPES
 // ============================================
 
+export type SwarmExecutor = "opencode" | "codex" | "sonnet";
+
 export interface SwarmAgent {
   id: string;
-  executor: "opencode" | "kimi";
+  executor: SwarmExecutor;
   model?: string;
   prompt: string;
   context?: string;
@@ -37,71 +42,120 @@ export interface SwarmResult {
   success: boolean;
   duration: number;
   executor: string;
+  outputFile?: string;
 }
 
-const DEFAULT_AGENT_TIMEOUT = 300_000; // 5 min
+const DEFAULT_AGENT_TIMEOUT = 300_000;  // 5 min (opencode)
+const CODEX_AGENT_TIMEOUT = 180_000;    // 3 min
+const SONNET_AGENT_TIMEOUT = 600_000;   // 10 min
 const MIN_OUTPUT_LENGTH = 100;
 const MAX_OUTPUT_PER_AGENT = 8192; // 8K chars for consolidation input
+
+const SWARM_CWD = "/tmp/homer-swarm";
+
+// ============================================
+// FILE OUTPUT HELPER
+// ============================================
+
+function writeAgentOutput(outputDir: string, agentId: string, content: string): string {
+  mkdirSync(outputDir, { recursive: true });
+  const filepath = join(outputDir, `${agentId}.md`);
+  writeFileSync(filepath, content, "utf-8");
+  return filepath;
+}
 
 // ============================================
 // FAN OUT AGENTS
 // ============================================
 
-export async function fanOutAgents(agents: SwarmAgent[]): Promise<SwarmResult[]> {
+export async function fanOutAgents(
+  agents: SwarmAgent[],
+  outputDir?: string,
+): Promise<SwarmResult[]> {
   const startTime = Date.now();
 
+  // Ensure swarm CWD exists for codex/sonnet
+  mkdirSync(SWARM_CWD, { recursive: true });
+
   logger.info(
-    { agentCount: agents.length, ids: agents.map((a) => a.id) },
+    { agentCount: agents.length, ids: agents.map((a) => a.id), outputDir },
     "Fanning out swarm agents"
   );
 
   const promises = agents.map(async (agent): Promise<SwarmResult> => {
     const agentStart = Date.now();
-    const timeout = agent.timeout ?? DEFAULT_AGENT_TIMEOUT;
 
     try {
+      let output: string;
+      let success: boolean;
+
       if (agent.executor === "opencode") {
+        const timeout = agent.timeout ?? DEFAULT_AGENT_TIMEOUT;
         const result = await executeOpenCodeCLI(agent.prompt, agent.context ?? "", {
           model: agent.model ?? "google/gemini-3-flash-preview",
           timeout,
           researchOnly: true,
         });
 
-        const output = result.output ?? "";
-        const success = result.exitCode === 0 && output.length >= MIN_OUTPUT_LENGTH;
+        output = result.output ?? "";
+        success = result.exitCode === 0 && output.length >= MIN_OUTPUT_LENGTH;
+      } else if (agent.executor === "codex") {
+        const timeout = agent.timeout ?? CODEX_AGENT_TIMEOUT;
+        const fullPrompt = agent.context
+          ? `${agent.context}\n\n---\n\n${agent.prompt}`
+          : agent.prompt;
 
-        if (!success && result.exitCode === 0) {
-          logger.warn({ agentId: agent.id, outputLen: output.length }, "Agent output too short");
-        }
-
-        return {
-          agentId: agent.id,
-          output,
-          success,
-          duration: Date.now() - agentStart,
-          executor: "opencode",
-        };
-      } else {
-        const result = await executeKimiCLI(agent.prompt, agent.context ?? "", {
+        const result = await executeCodexCLI(fullPrompt, {
+          cwd: SWARM_CWD,
           timeout,
-          yolo: true,
+          model: agent.model ?? "gpt-5.3-codex",
+          reasoningEffort: "high",
         });
 
-        const output = result.output ?? "";
-        const success = result.exitCode === 0 && output.length >= MIN_OUTPUT_LENGTH;
+        output = result.output ?? "";
+        success = result.exitCode === 0 && output.length >= MIN_OUTPUT_LENGTH;
+      } else if (agent.executor === "sonnet") {
+        const timeout = agent.timeout ?? SONNET_AGENT_TIMEOUT;
+        const fullPrompt = agent.context
+          ? `${agent.context}\n\n---\n\n${agent.prompt}`
+          : agent.prompt;
 
-        if (!success && result.exitCode === 0) {
-          logger.warn({ agentId: agent.id, outputLen: output.length }, "Agent output too short");
-        }
+        const result = await executeClaudeCommand(fullPrompt, {
+          cwd: SWARM_CWD,
+          model: agent.model ?? "sonnet",
+          timeout,
+        });
 
-        return {
-          agentId: agent.id,
-          output,
-          success,
-          duration: Date.now() - agentStart,
-          executor: "kimi",
-        };
+        output = result.output ?? "";
+        success = result.exitCode === 0 && output.length >= MIN_OUTPUT_LENGTH;
+      } else {
+        throw new Error(`Unknown executor: ${agent.executor}`);
       }
+
+      if (!success && output.length < MIN_OUTPUT_LENGTH) {
+        logger.warn({ agentId: agent.id, outputLen: output.length }, "Agent output too short");
+      }
+
+      // Write output to file if outputDir is set
+      let outputFile: string | undefined;
+      if (outputDir && success) {
+        try {
+          outputFile = writeAgentOutput(outputDir, agent.id, output);
+          logger.debug({ agentId: agent.id, outputFile }, "Wrote agent output to file");
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.warn({ agentId: agent.id, error: msg }, "Failed to write agent output file");
+        }
+      }
+
+      return {
+        agentId: agent.id,
+        output,
+        success,
+        duration: Date.now() - agentStart,
+        executor: agent.executor,
+        outputFile,
+      };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       logger.error({ agentId: agent.id, error: msg }, "Agent execution failed");
@@ -130,7 +184,7 @@ export async function fanOutAgents(agents: SwarmAgent[]): Promise<SwarmResult[]>
   // Log per-agent results
   for (const r of results) {
     logger.info(
-      { agentId: r.agentId, success: r.success, duration: r.duration, outputLen: r.output.length },
+      { agentId: r.agentId, success: r.success, duration: r.duration, outputLen: r.output.length, outputFile: r.outputFile },
       "Swarm agent completed"
     );
   }
@@ -168,6 +222,8 @@ export interface ConsolidateOptions {
   systemPrompt?: string;
   maxTokens?: number;
   temperature?: number;
+  responseMimeType?: "application/json" | "text/plain";
+  reasoningEffort?: "low" | "medium" | "high";
 }
 
 export async function consolidateResults(
@@ -181,11 +237,18 @@ export async function consolidateResults(
     throw new Error("No successful agent results to consolidate");
   }
 
-  // Build consolidation input with truncated agent outputs
+  // Build consolidation input — prefer file content when available
   const agentSections = successful.map((r) => {
-    const truncated = r.output.length > MAX_OUTPUT_PER_AGENT
-      ? r.output.slice(0, MAX_OUTPUT_PER_AGENT) + "\n\n[...truncated]"
-      : r.output;
+    let content = r.output;
+    if (r.outputFile && existsSync(r.outputFile)) {
+      try {
+        content = readFileSync(r.outputFile, "utf-8");
+      } catch {
+        // fall back to in-memory output
+      }
+    }
+    const truncated = content.slice(0, MAX_OUTPUT_PER_AGENT) +
+      (content.length > MAX_OUTPUT_PER_AGENT ? "\n\n[...truncated]" : "");
     return `## Agent: ${r.agentId}\n\n${truncated}`;
   }).join("\n\n---\n\n");
 
@@ -200,8 +263,10 @@ export async function consolidateResults(
     model: options?.model ?? "flash3",
     useGrounding: false,
     systemPrompt: options?.systemPrompt ?? "You are a precise consolidation engine. Follow instructions exactly. Output valid JSON when requested.",
-    maxTokens: options?.maxTokens ?? 8192,
+    maxTokens: options?.maxTokens ?? 65536,
+    reasoningEffort: options?.reasoningEffort,
     temperature: options?.temperature ?? 0.2,
+    responseMimeType: options?.responseMimeType ?? "application/json",
   });
 
   if (result.exitCode !== 0) {
@@ -220,9 +285,12 @@ export async function consolidateResults(
  * For arrays: validates per-element, skips invalid ones.
  */
 export function parseSwarmJSON<T>(raw: string, schema: ZodSchema<T>): T {
-  const candidates = extractJSONCandidates(raw);
+  const { candidates, labels } = extractJSONCandidates(raw);
+  const errors: Array<{ strategy: string; error: string }> = [];
 
-  for (const candidate of candidates) {
+  for (let i = 0; i < candidates.length; i++) {
+    const candidate = candidates[i]!;
+    const strategy = labels[i] ?? `strategy-${i}`;
     try {
       const parsed = JSON.parse(candidate);
 
@@ -233,38 +301,51 @@ export function parseSwarmJSON<T>(raw: string, schema: ZodSchema<T>): T {
 
       const validated = schema.parse(parsed);
       return validated;
-    } catch {
-      // Try next candidate
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push({ strategy, error: msg.slice(0, 200) });
     }
   }
 
-  // All attempts failed
+  // All attempts failed — include per-strategy diagnostics
+  const diagnostics = errors.map((e) => `  ${e.strategy}: ${e.error}`).join("\n");
   const preview = raw.slice(0, 500);
-  throw new Error(`Failed to parse JSON from LLM output. Preview: ${preview}`);
+  throw new Error(
+    `Failed to parse JSON from LLM output (${candidates.length} strategies tried).\n${diagnostics}\nPreview: ${preview}`
+  );
 }
 
-function extractJSONCandidates(raw: string): string[] {
+function extractJSONCandidates(raw: string): { candidates: string[]; labels: string[] } {
   const candidates: string[] = [];
+  const labels: string[] = [];
 
   // 1. Direct parse
   candidates.push(raw.trim());
+  labels.push("direct");
 
-  // 2. Markdown code fence
-  const fenceMatch = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
-  if (fenceMatch?.[1]) {
-    candidates.push(fenceMatch[1].trim());
+  // 2. Markdown code fences — try ALL fenced blocks
+  const fencePattern = /```(?:json)?\s*\n([\s\S]*?)\n```/g;
+  let fenceMatch;
+  let fenceIdx = 0;
+  while ((fenceMatch = fencePattern.exec(raw)) !== null) {
+    if (fenceMatch[1]) {
+      candidates.push(fenceMatch[1].trim());
+      labels.push(`markdown-fence-${fenceIdx++}`);
+    }
   }
 
   // 3. Find outermost array
   const arrayMatch = raw.match(/(\[[\s\S]*\])/);
   if (arrayMatch?.[1]) {
     candidates.push(arrayMatch[1]);
+    labels.push("outermost-array");
   }
 
   // 4. Find outermost object
   const objectMatch = raw.match(/(\{[\s\S]*\})/);
   if (objectMatch?.[1]) {
     candidates.push(objectMatch[1]);
+    labels.push("outermost-object");
   }
 
   // 5. Strip common LLM preamble/postamble
@@ -273,9 +354,10 @@ function extractJSONCandidates(raw: string): string[] {
     .replace(/(?<=[\]}])[\s\S]*$/, "");
   if (stripped !== raw.trim()) {
     candidates.push(stripped);
+    labels.push("stripped-preamble");
   }
 
-  return candidates;
+  return { candidates, labels };
 }
 
 function validateArrayElements<T>(parsed: unknown[], schema: ZodSchema<T>): T {
@@ -285,6 +367,7 @@ function validateArrayElements<T>(parsed: unknown[], schema: ZodSchema<T>): T {
 
   const valid: unknown[] = [];
   let skipped = 0;
+  let firstError: string | undefined;
 
   for (const element of parsed) {
     const result = elementSchema.safeParse(element);
@@ -292,8 +375,10 @@ function validateArrayElements<T>(parsed: unknown[], schema: ZodSchema<T>): T {
       valid.push(result.data);
     } else {
       skipped++;
+      const errMsg = result.error.issues[0]?.message ?? "unknown";
+      if (!firstError) firstError = errMsg;
       logger.warn(
-        { error: result.error.issues[0]?.message, element: JSON.stringify(element).slice(0, 200) },
+        { error: errMsg, element: JSON.stringify(element).slice(0, 200) },
         "Skipping invalid array element in swarm JSON"
       );
     }
@@ -301,6 +386,14 @@ function validateArrayElements<T>(parsed: unknown[], schema: ZodSchema<T>): T {
 
   if (skipped > 0) {
     logger.info({ valid: valid.length, skipped }, "Swarm JSON array: some elements skipped");
+  }
+
+  // All elements failed — this is a schema mismatch, not "no results"
+  if (parsed.length > 0 && valid.length === 0) {
+    throw new Error(
+      `All ${parsed.length} array elements failed Zod validation. ` +
+      `First error: ${firstError}. This usually means the LLM output format doesn't match the expected schema.`
+    );
   }
 
   // Validate the filtered array against the full schema

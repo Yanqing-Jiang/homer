@@ -193,11 +193,11 @@ async function handleGet(ctx: any, idInput?: string): Promise<void> {
 
   // Action buttons based on status
   const keyboard = new InlineKeyboard();
-  if (idea.status === "draft") {
-    keyboard.text("Approve", `a:i:${idea.id}:approve`);
+  if (idea.status === "draft" || idea.status === "review") {
+    keyboard.text("Talk", `a:i:${idea.id}:talk`);
     keyboard.text("Archive", `a:i:${idea.id}:archive`);
     keyboard.text("Note", `a:i:${idea.id}:note`);
-  } else if (idea.status === "review" || idea.status === "planning") {
+  } else if (idea.status === "planning") {
     keyboard.text("Archive", `a:i:${idea.id}:archive`);
     keyboard.text("Note", `a:i:${idea.id}:note`);
   }

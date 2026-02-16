@@ -218,7 +218,7 @@ Type: ${this.task.type}${constraints}${prev}
 
 Instructions:
 1) Use Claude Code to plan. If research is needed, spawn multiple Gemini subagents in parallel.
-2) Use bird CLI for X/Twitter signals when relevant.
+2) Use agent-browser for X/Twitter signals when relevant.
 3) Use NotebookLM MCP for deep research if needed.
 4) Return a crisp step-by-step plan.
 
@@ -244,7 +244,7 @@ ${planOutput}${prev}
 
 Instructions:
 1) Implement the plan using Claude Code.
-2) Use subagents (Gemini, bird, NotebookLM) if they help.
+2) Use subagents (Gemini, agent-browser, NotebookLM) if they help.
 3) Provide a concise summary and next steps.
 
 Output a JSON block at the end:
@@ -269,7 +269,7 @@ ${planOutput}${prev}
 
 Instructions:
 1) Use Claude Code to control multiple Gemini subagents for parallel research.
-2) Use bird CLI for X/Twitter signals if relevant.
+2) Use agent-browser for X/Twitter signals if relevant.
 3) Use NotebookLM MCP for deep research when helpful.
 4) Consolidate findings into a structured summary with sources.
 

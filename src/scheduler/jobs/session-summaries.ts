@@ -1,12 +1,12 @@
 /**
  * Daily Session Summary — Gemini API handler
  *
- * Reads today's daily log, builds full Yanqing context dynamically
- * (soul, identity, career, tools, architecture, preferences),
- * sends to Gemini API for personalized summarization,
- * and rewrites the daily log to summary-only.
+ * Now reads from two sources:
+ * 1. session_summaries table (pre-summarized CLI sessions from session-harvester)
+ * 2. Daily log file (daemon outputs, personal notes — no longer contains raw transcripts)
  *
- * No hardcoded bios or frozen goals — reads live memory files every run.
+ * Generates a combined daily narrative, archives raw log to SQLite,
+ * and rewrites the .md to summary-only.
  */
 
 import { readFile, writeFile } from "fs/promises";
@@ -18,7 +18,7 @@ import { StateManager } from "../../state/manager.js";
 import { buildSchedulerContext, extractCurrentGoals } from "../shared-context.js";
 
 const DAILY_LOG_DIR = "/Users/yj/memory/daily";
-const MAX_INPUT_CHARS = 900_000; // ~225K tokens, well within 1M context
+const MAX_INPUT_CHARS = 900_000;
 
 function getTodayDateString(): string {
   const now = new Date();
@@ -30,18 +30,67 @@ function getTodayDateString(): string {
 
 const DB_PATH = "/Users/yj/homer/data/homer.db";
 
-async function buildUserPrompt(): Promise<string> {
+interface SessionSummaryRow {
+  id: string;
+  agent: string;
+  title: string;
+  summary: string;
+  project: string | null;
+  model: string | null;
+  message_count: number;
+  started_at: string | null;
+  ended_at: string | null;
+}
+
+/**
+ * Load today's pre-summarized sessions from session_summaries table
+ */
+function loadSessionSummaries(db: ReturnType<StateManager["getDb"]>, date: string): SessionSummaryRow[] {
+  try {
+    return db.prepare(`
+      SELECT id, agent, title, summary, project, model, message_count, started_at, ended_at
+      FROM session_summaries
+      WHERE date(started_at) = ? OR date(ended_at) = ? OR date(created_at) = ?
+      ORDER BY started_at ASC
+    `).all(date, date, date) as SessionSummaryRow[];
+  } catch {
+    // Table may not exist yet
+    return [];
+  }
+}
+
+/**
+ * Format session summaries into a structured text block for the narrative prompt
+ */
+function formatSessionsForPrompt(sessions: SessionSummaryRow[]): string {
+  if (sessions.length === 0) return "";
+
+  let text = "## CLI Sessions (Pre-Summarized)\n\n";
+  for (const s of sessions) {
+    const time = s.started_at ? new Date(s.started_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }) : "?";
+    text += `### [${time}] ${s.agent}: ${s.title}\n`;
+    text += `- Model: ${s.model || "unknown"} | Messages: ${s.message_count}`;
+    if (s.project) text += ` | Project: ${s.project}`;
+    text += `\n`;
+    text += `${s.summary}\n\n`;
+  }
+  return text;
+}
+
+async function buildUserPrompt(sessionCount: number): Promise<string> {
   const goals = await extractCurrentGoals();
 
   return `You've been with Yanqing all day. What happened that matters for where he's headed?
 
-The daily log below contains RAW session transcripts between Yanqing and Claude Code (his primary CLI). Pay close attention to:
-- **What Yanqing asked** — his questions reveal what's on his mind, what he's unsure about, what he's exploring
-- **What Yanqing chose** — when given options, which did he pick and why?
-- **What Yanqing corrected** — when he interrupted or redirected, that's a preference signal
-- **What Yanqing's tone was** — frustrated? excited? rapid-fire? contemplative?
-- **What preferences emerged** — technical choices, workflow patterns, architectural opinions
-- **What he told HOMER to do vs. what he did himself** — trust boundaries and delegation patterns
+Below you'll find TWO sources of data:
+1. **CLI Sessions** — pre-summarized bullet points from all CLI tools (Claude Code, Codex, Gemini, Kimi, OpenCode)
+2. **Daily Log** — daemon outputs, scheduled job results, and personal notes
+
+Pay close attention to:
+- **What Yanqing worked on** — connect sessions to goals
+- **Key decisions** — architectural choices, tool preferences, workflow changes
+- **What got stuck** — blockers, errors, failed experiments
+- **Patterns** — was the day focused or scattered?
 
 ## Structure
 
@@ -49,56 +98,47 @@ The daily log below contains RAW session transcripts between Yanqing and Claude 
 Map today's work to Yanqing's actual goals. For each active goal that got attention today:
 - What moved forward, with specific details (file paths, numbers, concrete artifacts created)
 - What's the next concrete step
-- How much time/sessions were spent on this vs other goals
 
 Current goals from me.md:
 ${goals}
 
 ### Yanqing's Voice Today
-This is the most important section. Capture what Yanqing actually said and decided:
-- **Questions he asked** — quote or paraphrase his actual questions to Claude Code
-- **Preferences expressed** — any technical choices, workflow preferences, or opinions he stated
-- **Corrections & redirects** — moments where he course-corrected the AI or changed direction
-- **Frustrations** — what annoyed him? What broke? What took too long?
-- **Wins** — what made him satisfied? What worked well?
+Capture what the session summaries reveal about Yanqing's intent and decisions:
+- **Questions & explorations** — what was he investigating?
+- **Preferences expressed** — technical choices, workflow patterns
+- **Wins** — what worked well?
 
 ### Key Decisions & Why
-Not just "decided X" but WHY it matters in context. Connect decisions to goals. Include the reasoning Yanqing expressed or that's implied by his choices.
+Not just "decided X" but WHY it matters in context. Connect decisions to goals.
 
 ### Technical Details
-Specific artifacts, with fidelity:
+Specific artifacts:
 - Files created/modified (paths)
-- Commands run, tools tested, APIs wired
-- Architecture choices and their rationale
-- Numbers: token counts, durations, file sizes, costs — whatever was measured
+- Architecture choices and rationale
+- Numbers: token counts, durations, costs — whatever was measured
 
 ### What Got Stuck
-Blockers, framed as: what needs to happen next to unblock? Who/what is the dependency? Include error messages or failure modes if they appeared.
+Blockers: what needs to happen next to unblock?
 
 ### Context for Tomorrow
-Things Yanqing needs to know to resume efficiently:
-- Open threads, pending responses, half-finished work
-- State of running experiments or deployments
-- Any time-sensitive items (deadlines, meetings, personal events)
+Things to know for efficient resumption:
+- Open threads, half-finished work
+- Time-sensitive items
 
 ### HOMER's Take
-2-3 sentences. Be honest and opinionated:
-- Is Yanqing spending time on the right things relative to his goals?
-- Was today focused or scattered? Building or firefighting? High-leverage or yak-shaving?
-- Any pattern worth noting? Any risk HOMER sees that Yanqing might not?
-- What's the single highest-leverage thing for tomorrow?
-
-You know Homer's architecture now. If HOMER work happened today, assess whether it was high-leverage (new capability, reliability improvement) or yak-shaving (cosmetic changes, over-engineering).
+2-3 sentences. Honest and opinionated:
+- Right things relative to goals?
+- Focused or scattered? High-leverage or yak-shaving?
+- Single highest-leverage thing for tomorrow?
 
 ## Rules
-- Write in second person ("You did X", "Your trading system...")
-- **Be specific** — names, numbers, file paths, exact error messages, concrete details. Fidelity matters.
-- **Quote Yanqing** when his words reveal preferences or decisions
-- No generic platitudes. No "great progress!" without evidence
-- If something didn't happen today, don't mention it
-- Skip sessions that were just HOMER maintenance unless they produced a meaningful capability
-- Output ONLY the summary content (no preamble)
-- Use markdown formatting with ## Daily Summary as the top heading`;
+- Second person ("You did X")
+- **Be specific** — names, numbers, file paths. Fidelity matters.
+- No generic platitudes
+- If something didn't happen, don't mention it
+- Output ONLY the summary content — NO preamble, NO meta-commentary. Do NOT start with phrases like "Perfect!", "Now I have all the information", "Let me analyze", "Based on the data", etc. Jump straight into the ## Daily Summary heading.
+- Use markdown with ## Daily Summary as top heading
+- Today had ${sessionCount} CLI sessions`;
 }
 
 export async function runSessionSummary(
@@ -112,65 +152,75 @@ export async function runSessionSummary(
   const date = dateOverride ?? getTodayDateString();
   const logPath = `${DAILY_LOG_DIR}/${date}.md`;
 
-  if (!existsSync(logPath)) {
-    return { success: true, output: `No daily log found for ${date}, skipping` };
-  }
-
-  const content = await readFile(logPath, "utf-8");
-
-  // Always archive raw content to SQLite FIRST — even if summary already exists.
-  // This prevents data loss when something adds "## Daily Summary" before session-summaries runs.
   const sm = stateManager ?? new StateManager(DB_PATH);
   const ownedSm = !stateManager;
-  try {
-    sm.archiveDailyLog(date, content);
-    logger.info({ date, sizeKB: Math.round(content.length / 1024) }, "Raw daily log archived to SQLite");
-  } catch (archiveErr) {
-    // If archive fails, abort — do NOT continue to strip the .md or raw data is permanently lost
-    const msg = archiveErr instanceof Error ? archiveErr.message : String(archiveErr);
-    logger.error({ error: msg, date }, "Failed to archive raw daily log — aborting to preserve raw content");
-    if (ownedSm) sm.close();
-    return { success: false, output: "", error: `Archive failed: ${msg}` };
-  }
-
-  // Check if summary already appended (AFTER archiving raw content)
-  if (content.includes("## Daily Summary")) {
-    if (ownedSm) sm.close();
-    return { success: true, output: `Daily summary already exists for ${date}, skipping (raw archived)` };
-  }
-
-  // Build dynamic context — no hardcoded bio, reads live files
-  let systemPrompt: string;
-  try {
-    systemPrompt = await buildSchedulerContext({ dailyLogDays: 0 });
-  } catch (ctxErr) {
-    const msg = ctxErr instanceof Error ? ctxErr.message : String(ctxErr);
-    logger.error({ error: msg }, "Failed to build scheduler context");
-    if (ownedSm) sm.close();
-    return { success: false, output: "", error: msg };
-  }
-
-  logger.info({ date, logPath, sizeKB: Math.round(content.length / 1024) }, "Running session summary via Gemini API");
-
-  // Truncate if extremely large
-  const inputContent = content.length > MAX_INPUT_CHARS
-    ? content.slice(-MAX_INPUT_CHARS)
-    : content;
-
-  const truncated = content.length > MAX_INPUT_CHARS;
-  const truncateNote = truncated
-    ? `\n\n(Note: Log was ${Math.round(content.length / 1024)}KB, truncated to last ${Math.round(MAX_INPUT_CHARS / 1024)}KB)`
-    : "";
-
-  // Build the user prompt with dynamic goals
-  const userPrompt = await buildUserPrompt();
-  const fullPrompt = `${userPrompt}\n\n---\n\n# Daily Log: ${date}\n\n${inputContent}`;
 
   try {
+    // Load pre-summarized sessions from session_summaries table
+    const sessions = loadSessionSummaries(sm.getDb(), date);
+    const sessionsBlock = formatSessionsForPrompt(sessions);
+
+    // Load daily log (now just daemon outputs, much smaller)
+    let dailyLogContent = "";
+    if (existsSync(logPath)) {
+      dailyLogContent = await readFile(logPath, "utf-8");
+
+      // Always archive raw daily log to SQLite FIRST
+      try {
+        sm.archiveDailyLog(date, dailyLogContent);
+        logger.info({ date, sizeKB: Math.round(dailyLogContent.length / 1024) }, "Raw daily log archived to SQLite");
+      } catch (archiveErr) {
+        const msg = archiveErr instanceof Error ? archiveErr.message : String(archiveErr);
+        logger.error({ error: msg, date }, "Failed to archive raw daily log — aborting");
+        return { success: false, output: "", error: `Archive failed: ${msg}` };
+      }
+
+      // Check if summary already exists
+      if (dailyLogContent.includes("## Daily Summary")) {
+        return { success: true, output: `Daily summary already exists for ${date}, skipping (raw archived)` };
+      }
+    }
+
+    // Nothing to summarize?
+    if (sessions.length === 0 && !dailyLogContent.trim()) {
+      return { success: true, output: `No sessions or daily log for ${date}, skipping` };
+    }
+
+    // Build dynamic context
+    let systemPrompt: string;
+    try {
+      systemPrompt = await buildSchedulerContext({ dailyLogDays: 0 });
+    } catch (ctxErr) {
+      const msg = ctxErr instanceof Error ? ctxErr.message : String(ctxErr);
+      logger.error({ error: msg }, "Failed to build scheduler context");
+      return { success: false, output: "", error: msg };
+    }
+
+    // Combine session summaries + daily log into input
+    let combinedInput = "";
+    if (sessionsBlock) {
+      combinedInput += sessionsBlock + "\n---\n\n";
+    }
+    if (dailyLogContent.trim()) {
+      combinedInput += `## Daily Log (Daemon Outputs)\n\n${dailyLogContent}`;
+    }
+
+    // Truncate if needed
+    if (combinedInput.length > MAX_INPUT_CHARS) {
+      combinedInput = combinedInput.slice(-MAX_INPUT_CHARS);
+    }
+
+    const userPrompt = await buildUserPrompt(sessions.length);
+    const fullPrompt = `${userPrompt}\n\n---\n\n# Data for ${date}\n\n${combinedInput}`;
+
+    logger.info(
+      { date, sessions: sessions.length, dailyLogKB: Math.round(dailyLogContent.length / 1024) },
+      "Running session summary via Gemini API"
+    );
+
     const result = await executeGeminiAPI(fullPrompt, {
       model: "gemini-3-flash-preview",
       systemPrompt,
-      maxTokens: 12288,
       temperature: 0.3,
       timeout: 180000,
       reasoningEffort: "high",
@@ -183,19 +233,23 @@ export async function runSessionSummary(
 
     const summaryText = result.output.trim();
 
-    // Rewrite .md to summary-only (strip raw content)
-    const summaryBlock = `# ${date}\n\n---\n\n## Daily Summary\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via Gemini API*${truncateNote}\n\n${summaryText}\n`;
+    // Rewrite .md to summary-only
+    const summaryBlock = `# ${date}\n\n---\n\n## Daily Summary\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via Gemini API (${sessions.length} sessions)*\n\n${summaryText}\n`;
 
+    // Ensure daily log directory exists
+    if (!existsSync(logPath)) {
+      // Create the file even if there was no daily log — we have session data
+    }
     await writeFile(logPath, summaryBlock, "utf-8");
 
-    // Record that we stripped the file
+    // Record stripped
     try {
       sm.markDailyLogStripped(date, summaryText);
     } catch (markErr) {
       logger.warn({ error: markErr, date }, "Failed to mark daily log as stripped");
     }
 
-    // Reindex the now-smaller .md file
+    // Reindex
     try {
       const indexer = getMemoryIndexer();
       await indexer.indexFile(logPath, "general", date);
@@ -207,17 +261,14 @@ export async function runSessionSummary(
       ? ` (${result.inputTokens} in / ${result.outputTokens} out tokens)`
       : "";
 
-    const rawSizeKB = Math.round(content.length / 1024);
-    const newSizeKB = Math.round(summaryBlock.length / 1024);
-
     logger.info(
-      { date, duration: result.duration, inputTokens: result.inputTokens, outputTokens: result.outputTokens, rawSizeKB, newSizeKB },
-      "Session summary: raw archived, .md stripped to summary-only"
+      { date, sessions: sessions.length, duration: result.duration, inputTokens: result.inputTokens },
+      "Daily narrative generated from session_summaries + daily log"
     );
 
     return {
       success: true,
-      output: `Summary for ${date}.md in ${Math.round(result.duration / 1000)}s${tokenInfo} — raw archived (${rawSizeKB}KB → ${newSizeKB}KB)`,
+      output: `Summary for ${date} in ${Math.round(result.duration / 1000)}s${tokenInfo} — ${sessions.length} sessions + daily log`,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
