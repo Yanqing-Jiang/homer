@@ -371,9 +371,11 @@ export async function runWithFallbackChain<T extends ExecutorAttemptResult>(
     maxAttempts?: number;
     /** StateManager for building conversation context on fallback */
     stateManager?: StateManager;
+    /** Skip per-executor LLM diagnosis calls — just switch_next on failure */
+    skipDiagnosis?: boolean;
   }
 ): Promise<FallbackRunResult<T>> {
-  const { primary, chain, job, runExecutor, notify, maxAttempts, stateManager } = params;
+  const { primary, chain, job, runExecutor, notify, maxAttempts, stateManager, skipDiagnosis } = params;
   const attempts: AttemptInfo[] = [];
   let current: ExecutorKind | null = primary;
   let queryOverride: string | undefined;
@@ -436,7 +438,9 @@ export async function runWithFallbackChain<T extends ExecutorAttemptResult>(
       durationMs: result.duration,
     });
 
-    const rawDecision = await diagnoseDecision(job, primary, chain, failure, attempts);
+    const rawDecision = skipDiagnosis
+      ? { action: "switch_next" as const }
+      : await diagnoseDecision(job, primary, chain, failure, attempts);
     const decision = normalizeDecision(rawDecision, primary, chain, current);
     if (decision.action === "retry_primary") {
       const target = decision.executor ?? primary;

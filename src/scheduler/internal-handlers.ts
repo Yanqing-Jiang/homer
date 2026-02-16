@@ -1,7 +1,7 @@
 import type { Bot } from "grammy";
 import type { RegisteredJob, JobExecutionResult } from "./types.js";
 import type { StateManager } from "../state/manager.js";
-import { sendNextIdeaForReview } from "../bot/handlers/approval.js";
+import { sendBatchIdeasForReview } from "../bot/handlers/approval.js";
 import { NightSupervisor } from "../night/supervisor.js";
 import { sendMilestoneNotification, presentOvernightSummaries } from "../bot/handlers/overnight.js";
 import { ingestIdeasFromLegacy } from "../ideas/ingest.js";
@@ -38,21 +38,37 @@ function buildResult(
   };
 }
 
+function isJobHuntPaused(ctx: InternalJobContext): boolean {
+  try {
+    const row = ctx.stateManager.getDb().prepare(
+      "SELECT state FROM circuit_breaker_state WHERE name = 'job_hunt_global'"
+    ).get() as { state: string } | undefined;
+    return row?.state === "open";
+  } catch {
+    return false;
+  }
+}
+
 export async function executeInternalJob(
   job: RegisteredJob,
   ctx: InternalJobContext
 ): Promise<JobExecutionResult> {
   const startedAt = new Date();
 
+  // Check global pause for job_hunt handlers
+  if (job.config.handler?.startsWith("job_hunt_") && isJobHuntPaused(ctx)) {
+    return buildResult(job, startedAt, true, "Skipped — job hunt is paused");
+  }
+
   try {
     switch (job.config.handler) {
       case "ideas_review": {
-        const sent = await sendNextIdeaForReview(ctx.bot, ctx.chatId);
+        const count = await sendBatchIdeasForReview(ctx.bot, ctx.chatId);
         return buildResult(
           job,
           startedAt,
           true,
-          sent ? "Sent next idea for review" : "No new ideas to review"
+          count > 0 ? `Sent ${count} ideas for review` : "No new ideas to review"
         );
       }
       case "night_supervisor": {
@@ -107,7 +123,7 @@ export async function executeInternalJob(
       }
       case "ideas_explore": {
         const { runIdeasExplore } = await import("./jobs/ideas-explore.js");
-        const result = await runIdeasExplore();
+        const result = await runIdeasExplore(ctx.stateManager.getDb());
         return buildResult(job, startedAt, result.success, result.output, result.error);
       }
       case "nightly_memory": {
@@ -117,7 +133,101 @@ export async function executeInternalJob(
       }
       case "homer_improvements": {
         const { runHomerImprovements } = await import("./jobs/homer-improvements.js");
-        const result = await runHomerImprovements();
+        const result = await runHomerImprovements(ctx.stateManager.getDb());
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "learning_engine": {
+        const { runLearningEngine } = await import("./jobs/learning-engine.js");
+        const result = await runLearningEngine(ctx.stateManager.getDb());
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "session_harvester": {
+        const { runSessionHarvester } = await import("./jobs/session-harvester.js");
+        const result = await runSessionHarvester(ctx.stateManager.getDb());
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "memory_embeddings": {
+        const { runMemoryEmbeddings } = await import("./jobs/memory-embeddings.js");
+        const result = await runMemoryEmbeddings();
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "planning_reminder": {
+        const { runPlanningReminder } = await import("./jobs/planning-reminder.js");
+        const result = await runPlanningReminder();
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "job_hunt_discover": {
+        const { runJobHuntDiscover } = await import("./jobs/job-hunt-discover.js");
+        const result = await runJobHuntDiscover(ctx.stateManager.getDb());
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "job_hunt_daily_approval": {
+        const { expireStaleApprovals, getHeldJobsToResurface } = await import("../bot/handlers/job-approval.js");
+        const { processApprovalQueue } = await import("../job-hunt/apply-engine.js");
+        const db = ctx.stateManager.getDb();
+
+        // Expire stale approvals
+        const expired = expireStaleApprovals(db);
+
+        // Resurface held jobs
+        const resurfaced = getHeldJobsToResurface(db).slice(0, 2);
+        for (const held of resurfaced) {
+          db.prepare("UPDATE approval_queue SET decision = 'pending', decided_at = NULL, telegram_message_id = NULL WHERE id = ?").run(held.queue_id);
+        }
+
+        // Auto-apply to queued jobs
+        const applyResult = await processApprovalQueue(db, ctx.bot, ctx.chatId);
+
+        const parts: string[] = [];
+        if (applyResult.applied > 0) parts.push(`${applyResult.applied} applied`);
+        if (applyResult.failed > 0) parts.push(`${applyResult.failed} failed`);
+        if (applyResult.skipped > 0) parts.push(`${applyResult.skipped} escalated`);
+        if (expired > 0) parts.push(`${expired} expired`);
+        if (resurfaced.length > 0) parts.push(`${resurfaced.length} resurfaced from hold`);
+        return buildResult(job, startedAt, true, parts.join(", ") || "No jobs pending in queue");
+      }
+      case "job_hunt_weekly_report": {
+        const { runJobHuntWeeklyReport } = await import("./jobs/job-hunt-report.js");
+        const result = await runJobHuntWeeklyReport(ctx.stateManager.getDb());
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "job_hunt_email_monitor": {
+        const { runJobHuntEmailMonitor } = await import("./jobs/job-hunt-email-monitor.js");
+        const result = await runJobHuntEmailMonitor(ctx.stateManager.getDb());
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "job_hunt_followup": {
+        const { runJobHuntFollowup } = await import("./jobs/job-hunt-followup.js");
+        const result = await runJobHuntFollowup(ctx.stateManager.getDb(), ctx.bot, ctx.chatId);
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "job_hunt_stalled_check": {
+        const db = ctx.stateManager.getDb();
+        const stalled = db.prepare(`
+          SELECT a.id, a.job_id, jp.company, jp.title, a.status, a.updated_at
+          FROM applications a JOIN job_postings jp ON a.job_id = jp.id
+          WHERE a.status = 'applying' AND datetime(a.updated_at) < datetime('now', '-24 hours')
+        `).all() as Array<{ id: string; job_id: string; company: string; title: string; status: string; updated_at: string }>;
+        if (stalled.length > 0) {
+          for (const app of stalled) {
+            db.prepare("UPDATE applications SET status = 'stalled', updated_at = datetime('now') WHERE id = ?").run(app.id);
+          }
+          const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+          const lines = stalled.map(a => `${esc(a.company)} — ${esc(a.title)}`).join("\n");
+          try {
+            await ctx.bot.api.sendMessage(ctx.chatId, `⚠️ <b>Stalled Applications</b>\n\n${lines}\n\nThese were stuck in "applying" for 24h+ and have been flagged.`, { parse_mode: "HTML" });
+          } catch { /* notification best-effort */ }
+        }
+        return buildResult(job, startedAt, true, stalled.length > 0 ? `${stalled.length} stalled applications flagged` : "No stalled applications");
+      }
+      case "memory_git_commit": {
+        const { runMemoryGitCommit } = await import("./jobs/memory-git-commit.js");
+        const result = await runMemoryGitCommit();
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "db_backup": {
+        const { runDbBackup } = await import("./jobs/db-backup.js");
+        const result = await runDbBackup();
         return buildResult(job, startedAt, result.success, result.output, result.error);
       }
       default: {
@@ -125,7 +235,7 @@ export async function executeInternalJob(
       }
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
     return buildResult(job, startedAt, false, "", message);
   }
 }

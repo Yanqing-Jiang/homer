@@ -61,6 +61,7 @@ interface Idea {
   context?: string;
   link?: string;
   notes?: string;
+  tags?: string[];
 }
 
 /**
@@ -83,6 +84,9 @@ function parseIdeaFile(content: string, filename: string): Idea | null {
   const title = get("title");
   if (!title) return null;
 
+  const tagsRaw = get("tags");
+  const tags = tagsRaw ? tagsRaw.replace(/^\[|\]$/g, "").split(",").map(t => t.trim()).filter(Boolean) : [];
+
   // Extract context section if present
   const contextMatch = body.match(/## Context\n([\s\S]*?)(?=\n##|$)/);
   const contextText = contextMatch?.[1]?.trim() ?? "";
@@ -100,6 +104,7 @@ function parseIdeaFile(content: string, filename: string): Idea | null {
     context: contextText || undefined,
     link: get("link") || undefined,
     notes: get("notes") || undefined,
+    tags: tags.length > 0 ? tags : undefined,
   };
 }
 
@@ -349,45 +354,6 @@ function findIdea(ideas: Idea[], id: string): Idea | undefined {
 }
 
 /**
- * Approve an idea - create a plan
- */
-async function approveIdea(ideaId: string): Promise<{ success: boolean; message: string }> {
-  // Try file-based system first
-  const dirIdeas = await loadIdeasFromDir();
-  const dirIdea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
-
-  if (dirIdea) {
-    const updated = await updateIdeaFileField(ideaId, "status", "planning");
-    if (updated) {
-      await appendIdeaNote(ideaId, "Approved, creating plan");
-      await logFeedback("approve", dirIdea.title);
-      return { success: true, message: `Approved: ${dirIdea.title}` };
-    }
-  }
-
-  // Fallback to legacy ideas.md
-  if (!existsSync(IDEAS_FILE)) {
-    return { success: false, message: `Idea not found: ${ideaId}` };
-  }
-
-  const content = await readFile(IDEAS_FILE, "utf-8");
-  const ideas = parseIdeasFile(content);
-  const idea = findIdea(ideas, ideaId);
-
-  if (!idea) {
-    return { success: false, message: `Idea not found: ${ideaId}` };
-  }
-
-  idea.status = "planning";
-  idea.notes = (idea.notes ? idea.notes + "; " : "") + "Approved, creating plan";
-
-  await writeFile(IDEAS_FILE, rebuildIdeasFile(ideas), "utf-8");
-  await logFeedback("approve", idea.title);
-
-  return { success: true, message: `Approved: ${idea.title}` };
-}
-
-/**
  * Archive an idea (no reason required)
  */
 async function archiveIdea(
@@ -429,44 +395,6 @@ async function archiveIdea(
   await logFeedback("archive", idea.title, reason);
 
   return { success: true, message: `Archived: ${idea.title}`, idea };
-}
-
-/**
- * Mark an idea for discussion
- */
-async function talkIdea(ideaId: string): Promise<{ success: boolean; message: string; idea?: Idea }> {
-  // Try file-based system first
-  const dirIdeas = await loadIdeasFromDir();
-  const dirIdea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
-
-  if (dirIdea) {
-    const updated = await updateIdeaFileField(ideaId, "status", "discussion");
-    if (updated) {
-      await appendIdeaNote(ideaId, "Discussion requested");
-      await logFeedback("talk", dirIdea.title);
-      return { success: true, message: `Discussion queued: ${dirIdea.title}`, idea: dirIdea };
-    }
-  }
-
-  // Fallback to legacy ideas.md
-  if (!existsSync(IDEAS_FILE)) {
-    return { success: false, message: `Idea not found: ${ideaId}` };
-  }
-
-  const content = await readFile(IDEAS_FILE, "utf-8");
-  const ideas = parseIdeasFile(content);
-  const idea = findIdea(ideas, ideaId);
-
-  if (!idea) {
-    return { success: false, message: `Idea not found: ${ideaId}` };
-  }
-
-  idea.status = "discussion";
-  idea.notes = (idea.notes ? idea.notes + "; " : "") + "Discussion requested";
-  await writeFile(IDEAS_FILE, rebuildIdeasFile(ideas), "utf-8");
-  await logFeedback("talk", idea.title);
-
-  return { success: true, message: `Discussion queued: ${idea.title}`, idea };
 }
 
 
@@ -564,9 +492,8 @@ export async function getDenyPatterns(): Promise<string[]> {
  */
 export function createIdeaKeyboard(ideaId: string): InlineKeyboard {
   return new InlineKeyboard()
-    .text("✅ Approve", `a:i:${ideaId}:approve`)
-    .text("🗂 Archive", `a:i:${ideaId}:archive`)
-    .text("💬 Talk", `a:i:${ideaId}:talk`);
+    .text("💬 Talk", `a:i:${ideaId}:talk`)
+    .text("🗂 Archive", `a:i:${ideaId}:archive`);
 }
 
 /**
@@ -576,21 +503,25 @@ export function formatIdeaForTelegram(idea: Idea, index: number): string {
   const emoji = ["1️⃣", "2️⃣", "3️⃣"][index] || "▪️";
   const title = escapeHtml(idea.title);
   const source = escapeHtml(idea.source);
-  const content = escapeHtml(idea.content.slice(0, 220)) + (idea.content.length > 220 ? "..." : "");
-  const context = idea.context ? escapeHtml(idea.context.slice(0, 160)) : "";
-  const link = idea.link ? escapeHtml(idea.link) : "";
+  const tagsStr = idea.tags?.length ? ` · ${idea.tags.map(t => escapeHtml(t)).join(", ")}` : "";
   const id = escapeHtml(idea.id);
 
+  // Build summary from content + context, targeting 500-800 chars
+  let summary = idea.content || "";
+  if (idea.context && summary.length < 500) {
+    summary += "\n\n" + idea.context;
+  }
+  summary = summary.slice(0, 800);
+  if (summary.length === 800) summary = summary.slice(0, summary.lastIndexOf(" ")) + "...";
+  const summaryHtml = escapeHtml(summary);
+
   let msg = `<b>${emoji} ${title}</b>\n`;
-  msg += `<b>Source:</b> ${source}\n\n`;
-  msg += `<b>Summary:</b> ${content}\n`;
-  if (context) {
-    msg += `\n<b>Context:</b> ${context}\n`;
+  msg += `${source}${tagsStr}\n\n`;
+  msg += `${summaryHtml}\n`;
+  if (idea.link) {
+    msg += `\n<a href="${escapeHtml(idea.link)}">Source link</a>\n`;
   }
-  if (link) {
-    msg += `\n<b>Link:</b> ${link}\n`;
-  }
-  msg += `\n<b>ID:</b> <code>${id}</code>`;
+  msg += `\n<code>${id}</code>`;
   return msg;
 }
 
@@ -606,36 +537,9 @@ function escapeHtml(text: string): string {
  */
 export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): void {
   stateManagerRef = stateManager;
-  // Handle approve button
+  // Handle legacy approve button (no longer active — kept for old messages)
   bot.callbackQuery(/^a:i:([^:]+):approve$/, async (ctx) => {
-    const ideaId = ctx.match?.[1];
-    if (!ideaId) {
-      await ctx.answerCallbackQuery("Invalid request");
-      return;
-    }
-    logger.info({ ideaId }, "Approve button clicked");
-
-    try {
-      const result = await approveIdea(ideaId);
-
-      if (result.success) {
-        await ctx.editMessageText(
-          `✅ <b>${escapeHtml(result.message)}</b>\n\n<em>Creating plan...</em>`,
-          { parse_mode: "HTML" }
-        );
-        await sendNextIdeaForReview(bot, ctx.chat!.id);
-      } else {
-        await ctx.editMessageText(`❌ ${escapeHtml(result.message)}`, { parse_mode: "HTML" });
-      }
-    } catch (error) {
-      logger.error({ error, ideaId }, "Failed to approve idea");
-      await ctx.editMessageText(
-        `❌ Error: ${escapeHtml(error instanceof Error ? error.message : "Unknown")}`,
-        { parse_mode: "HTML" }
-      );
-    }
-
-    await ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery("This button is no longer active");
   });
 
   // Handle archive button
@@ -652,7 +556,6 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
 
       if (result.success) {
         await ctx.editMessageText(`🗂 <b>${escapeHtml(result.message)}</b>`, { parse_mode: "HTML" });
-        await sendNextIdeaForReview(bot, ctx.chat!.id);
       } else {
         await ctx.editMessageText(`❌ ${escapeHtml(result.message)}`, { parse_mode: "HTML" });
       }
@@ -662,33 +565,75 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
     }
   });
 
-  // Handle talk button
+  // Handle talk button — triggers multi-model analysis
   bot.callbackQuery(/^a:i:([^:]+):talk$/, async (ctx) => {
     const ideaId = ctx.match?.[1];
     if (!ideaId) {
       await ctx.answerCallbackQuery("Invalid request");
       return;
     }
-    logger.info({ ideaId }, "Talk button clicked");
+    logger.info({ ideaId }, "Talk button clicked — starting analysis");
 
     try {
-      const result = await talkIdea(ideaId);
-      if (result.success) {
-        await ctx.editMessageText(`💬 <b>${escapeHtml(result.message)}</b>`, { parse_mode: "HTML" });
-        await ctx.reply(
-          `💬 *Let's discuss this idea*\n\n` +
-          `1) What outcome do you want?\n` +
-          `2) How urgent is this?\n` +
-          `3) Any constraints or dependencies?`,
-          { parse_mode: "Markdown" }
-        );
-        await sendNextIdeaForReview(bot, ctx.chat!.id);
-      } else {
-        await ctx.editMessageText(`❌ ${escapeHtml(result.message)}`, { parse_mode: "HTML" });
+      await ctx.answerCallbackQuery("Starting analysis...");
+
+      // Load idea
+      const dirIdeas = await loadIdeasFromDir();
+      const idea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
+
+      if (!idea) {
+        await ctx.editMessageText(`❌ Idea not found: ${escapeHtml(ideaId)}`, { parse_mode: "HTML" });
+        return;
       }
+
+      // Update message to show analysis in progress
+      await ctx.editMessageText(
+        `🔬 <b>Analyzing: ${escapeHtml(idea.title)}</b>\n` +
+        `Running multi-model analysis (codex + flash + kimi)...\n` +
+        `Results in 1-5 minutes.`,
+        { parse_mode: "HTML" }
+      );
+
+      // Update status + append note
+      await updateIdeaFileField(ideaId, "status", "discussion");
+      await appendIdeaNote(ideaId, "Multi-model analysis started");
+      await logFeedback("talk", idea.title);
+
+      // Build notify callback using bot.api (ctx expires after handler returns)
+      const chatId = ctx.chat?.id;
+      if (!chatId) return;
+
+      const notify = async (text: string, _parseMode?: string) => {
+        await bot.api.sendMessage(chatId, text);
+      };
+
+      // Fire-and-forget analysis
+      import("../../ideas/analyze.js").then(({ analyzeIdea }) => {
+        analyzeIdea(
+          {
+            id: idea.id,
+            title: idea.title,
+            content: idea.content,
+            context: idea.context,
+            link: idea.link,
+            source: idea.source,
+            tags: idea.tags,
+            notes: idea.notes,
+          },
+          notify
+        ).then(() => {
+          appendIdeaNote(ideaId, "Analysis complete").catch(() => {});
+        }).catch(async (err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.error({ ideaId, error: msg }, "Idea analysis failed");
+          await bot.api.sendMessage(chatId, `❌ Analysis failed for "${idea.title}": ${msg}`);
+        });
+      }).catch(err => {
+        logger.error({ ideaId, error: err }, "Failed to import analyze module");
+      });
     } catch (error) {
-      logger.error({ error, ideaId }, "Failed to initiate talk");
-      await ctx.answerCallbackQuery("Error processing talk");
+      logger.error({ error, ideaId }, "Failed to initiate analysis");
+      await ctx.answerCallbackQuery("Error starting analysis");
     }
   });
 
@@ -813,139 +758,97 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
 }
 
 /**
- * Send ideas for review with approval buttons
+ * Send a batch of draft ideas for review (up to daily limit).
+ * Sends all ideas simultaneously as separate messages with Talk+Archive buttons.
+ * Returns the number of ideas sent.
  */
-export async function sendIdeasForReview(
-  bot: Bot,
-  chatId: number,
-  ideas: Idea[]
-): Promise<void> {
-  if (ideas.length === 0) {
-    await bot.api.sendMessage(chatId, "📋 No new ideas to review today.");
-    return;
+export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLimit: number = 3): Promise<number> {
+  // Check remaining daily quota
+  let remaining = dailyLimit;
+  if (stateManagerRef) {
+    const sentCount = stateManagerRef.getIdeaReviewCount();
+    remaining = dailyLimit - sentCount;
+    if (remaining <= 0) {
+      logger.info({ sentCount, dailyLimit }, "Daily idea review limit reached");
+      return 0;
+    }
   }
 
-  // Send header message
-  await bot.api.sendMessage(
-    chatId,
-    `📋 <b>New Ideas for Review</b> (${ideas.length})`,
-    { parse_mode: "HTML" }
-  );
-
-  // Send each idea with its own keyboard
-  for (let i = 0; i < ideas.length; i++) {
-    const idea = ideas[i];
-    if (!idea) continue;
-    const message = formatIdeaForTelegram(idea, i);
-    const keyboard = createIdeaKeyboard(idea.id);
-
-    await bot.api.sendMessage(chatId, message, {
-      parse_mode: "HTML",
-      reply_markup: keyboard,
-    });
-
-    // Small delay to avoid rate limiting
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-}
-
-/**
- * Get ideas awaiting review (from both file-based and legacy systems)
- */
-export async function getIdeasForReview(): Promise<Idea[]> {
-  const allDrafts: Idea[] = [];
-
-  // Load from file-based system (primary)
+  // Load drafts from BOTH systems, dedup by ID
   const dirIdeas = await loadIdeasFromDir();
-  allDrafts.push(...dirIdeas.filter(i => i.status === "draft"));
+  const dirDrafts = dirIdeas.filter(i => i.status === "draft");
 
-  // Load from legacy ideas.md (fallback)
+  let legacyDrafts: Idea[] = [];
   if (existsSync(IDEAS_FILE)) {
     const content = await readFile(IDEAS_FILE, "utf-8");
     const legacyIdeas = parseIdeasFile(content);
-    const legacyDrafts = legacyIdeas.filter(i => i.status === "draft");
-    // Avoid duplicates by ID
-    const existingIds = new Set(allDrafts.map(i => i.id));
-    for (const idea of legacyDrafts) {
-      if (!existingIds.has(idea.id)) {
-        allDrafts.push(idea);
+    const existingIds = new Set(dirDrafts.map(i => i.id));
+    legacyDrafts = legacyIdeas.filter(i => i.status === "draft" && !existingIds.has(i.id));
+  }
+
+  const allDrafts = [...dirDrafts, ...legacyDrafts].slice(0, remaining);
+
+  if (allDrafts.length === 0) {
+    return 0;
+  }
+
+  // Send header
+  await bot.api.sendMessage(
+    chatId,
+    `📋 <b>Ideas for Review</b> (${allDrafts.length})`,
+    { parse_mode: "HTML" }
+  );
+
+  // Send each idea with buttons, mark as "review"
+  let sent = 0;
+  for (let i = 0; i < allDrafts.length; i++) {
+    const idea = allDrafts[i]!;
+    const message = formatIdeaForTelegram(idea, i);
+    const keyboard = createIdeaKeyboard(idea.id);
+
+    try {
+      await bot.api.sendMessage(chatId, message, {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
+      sent++;
+
+      // Mark as review only after successful send
+      const isFileBased = dirDrafts.some(d => d.id === idea.id);
+      if (isFileBased) {
+        await updateIdeaFileField(idea.id, "status", "review");
+      } else {
+        // Legacy system — update in memory and write once after loop
+        idea.status = "review";
       }
+    } catch (error) {
+      logger.error({ error, ideaId: idea.id }, "Failed to send idea for review");
+    }
+
+    // Small delay to avoid rate limiting
+    if (i < allDrafts.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
 
-  return allDrafts;
-}
-
-/**
- * Send the next draft idea for review (one-by-one queue)
- * Reads from both ~/memory/ideas/*.md (primary) and ideas.md (legacy).
- * Returns true if an idea was sent, false otherwise.
- */
-export async function sendNextIdeaForReview(bot: Bot, chatId: number, dailyLimit: number = 3): Promise<boolean> {
-  // Check daily limit
-  if (stateManagerRef) {
-    const sentCount = stateManagerRef.getIdeaReviewCount();
-    if (sentCount >= dailyLimit) {
-      logger.info({ sentCount, dailyLimit }, "Daily idea review limit reached");
-      return false;
-    }
-  }
-
-  // Load ideas from BOTH systems
-  const dirIdeas = await loadIdeasFromDir();
-  let legacyIdeas: Idea[] = [];
-  if (existsSync(IDEAS_FILE)) {
+  // Write legacy file once if any legacy ideas were updated
+  const updatedLegacy = allDrafts.filter(i => i.status === "review" && legacyDrafts.some(l => l.id === i.id));
+  if (updatedLegacy.length > 0 && existsSync(IDEAS_FILE)) {
     const content = await readFile(IDEAS_FILE, "utf-8");
-    legacyIdeas = parseIdeasFile(content);
-  }
-
-  // Check if any idea is already under review/discussion in EITHER system
-  const dirPending = dirIdeas.find(i => i.status === "review" || i.status === "discussion");
-  const legacyPending = legacyIdeas.find(i => i.status === "review" || i.status === "discussion");
-  if (dirPending || legacyPending) {
-    logger.info(
-      { dirPending: dirPending?.id, legacyPending: legacyPending?.id },
-      "Idea already under review, waiting"
-    );
-    return false;
-  }
-
-  // Find next draft — file-based system first (newest ideas), then legacy
-  const dirDrafts = dirIdeas.filter(i => i.status === "draft");
-  const legacyDrafts = legacyIdeas.filter(i => i.status === "draft");
-
-  const next = dirDrafts[0] || legacyDrafts[0];
-  if (!next) {
-    await bot.api.sendMessage(chatId, "📋 No new ideas to review today.");
-    return false;
-  }
-
-  // Determine which system this idea belongs to
-  const isFileBasedIdea = dirDrafts.some(i => i.id === next.id);
-
-  // Send to Telegram with buttons
-  const message = formatIdeaForTelegram(next, 0);
-  const keyboard = createIdeaKeyboard(next.id);
-
-  await bot.api.sendMessage(chatId, message, {
-    parse_mode: "HTML",
-    reply_markup: keyboard,
-  });
-
-  // Mark as "review" in the correct system
-  if (isFileBasedIdea) {
-    await updateIdeaFileField(next.id, "status", "review");
-  } else {
-    next.status = "review";
+    const legacyIdeas = parseIdeasFile(content);
+    for (const updated of updatedLegacy) {
+      const found = findIdea(legacyIdeas, updated.id);
+      if (found) found.status = "review";
+    }
     await writeFile(IDEAS_FILE, rebuildIdeasFile(legacyIdeas), "utf-8");
   }
 
-  if (stateManagerRef) {
-    stateManagerRef.incrementIdeaReviewCount(1);
+  if (stateManagerRef && sent > 0) {
+    stateManagerRef.incrementIdeaReviewCount(sent);
   }
 
-  logger.info({ ideaId: next.id, title: next.title, source: isFileBasedIdea ? "dir" : "legacy" }, "Sent idea for review");
-  return true;
+  logger.info({ count: sent, ids: allDrafts.filter(i => i.status === "review").map(i => i.id) }, "Sent batch ideas for review");
+  return sent;
 }
 
 // ============================================
@@ -986,19 +889,31 @@ export function registerPlanApprovalHandlers(bot: Bot, stateManager: StateManage
       return;
     }
 
-    // Clear the pending plan
+    // Clear the pending plan (prevent double-execution)
     stateManager.clearPendingPlan(jobId);
 
     await ctx.reply(
       `✅ *Plan approved: ${jobId}*\n\n` +
-      `_The plan will be executed. You'll be notified when complete._`,
+      `_Executing on branch..._`,
       { parse_mode: "Markdown" }
     );
 
     logger.info({ jobId }, "Plan approved by user");
 
-    // TODO: Trigger plan execution via Claude
-    // For now, just log approval - execution would require spawning claude with the plan
+    // Fire-and-forget plan execution
+    import("../../scheduler/plan-executor.js").then(({ executePlan }) => {
+      executePlan({
+        jobId,
+        plan,
+        stateManager,
+        bot,
+        chatId: ctx.chat?.id ?? 0,
+      }).catch(err => {
+        logger.error({ jobId, error: err }, "Plan execution failed (command)");
+      });
+    }).catch(err => {
+      logger.error({ jobId, error: err }, "Failed to import plan-executor");
+    });
   });
 
   // /reject <jobId> - Reject and discard a pending plan
@@ -1055,17 +970,19 @@ export function registerPlanApprovalHandlers(bot: Bot, stateManager: StateManage
  * Check if output contains an implementation plan requiring approval
  */
 export function isPlanRequiringApproval(output: string): boolean {
-  const planMarkers = [
-    "## Implementation Plan",
-    "## Proposed Changes",
-    "### Phase 1",
+  // Must have "## Implementation Plan" as primary marker (used by homer-improvements)
+  // Plus at least one detail marker to reduce false positives from other job outputs
+  if (!output.includes("## Implementation Plan")) return false;
+
+  const detailMarkers = [
     "### Step 1:",
-    "## Files to Modify",
-    "## Migration Required",
-    "## Breaking Changes",
+    "### Files to Modify",
+    "### Description",
+    "**Risk:**",
+    "**Files:**",
   ];
 
-  return planMarkers.some(marker => output.includes(marker));
+  return detailMarkers.some(marker => output.includes(marker));
 }
 
 /**
@@ -1097,15 +1014,32 @@ export function registerPlanApprovalCallbacks(bot: Bot, stateManager: StateManag
       return;
     }
 
-    stateManager.clearPendingPlan(jobId);
-
     await ctx.editMessageText(
-      `✅ <b>Plan approved</b>\n<b>ID:</b> <code>${escapeHtml(jobId)}</code>\n\n<em>Executing...</em>`,
+      `✅ <b>Plan approved</b>\n<b>ID:</b> <code>${escapeHtml(jobId)}</code>\n\n<em>Executing on branch...</em>`,
       { parse_mode: "HTML" }
     );
 
-    await ctx.answerCallbackQuery("Plan approved!");
+    await ctx.answerCallbackQuery("Plan approved — executing!");
     logger.info({ jobId }, "Plan approved via inline button");
+
+    // Fire-and-forget plan execution — clear plan only after launch succeeds
+    const chatId = ctx.chat?.id;
+    if (chatId) {
+      import("../../scheduler/plan-executor.js").then(({ executePlan }) => {
+        stateManager.clearPendingPlan(jobId);
+        executePlan({
+          jobId,
+          plan,
+          stateManager,
+          bot,
+          chatId,
+        }).catch(err => {
+          logger.error({ jobId, error: err }, "Plan execution failed (inline)");
+        });
+      }).catch(err => {
+        logger.error({ jobId, error: err }, "Failed to import plan-executor");
+      });
+    }
   });
 
   bot.callbackQuery(/^a:p:([^:]+):reject$/, async (ctx) => {

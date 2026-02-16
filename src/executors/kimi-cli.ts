@@ -55,7 +55,8 @@ export async function executeKimiCLI(
       args.push("-m", model);
     }
 
-    // Thinking mode on by default via config (default_thinking = true)
+    // Thinking mode — always enable explicitly
+    args.push("--thinking");
 
     // Auto-approve actions
     if (yolo) {

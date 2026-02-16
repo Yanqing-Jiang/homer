@@ -53,7 +53,15 @@ async function checkAndSendReminders(bot: Bot): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  logger.info("H.O.M.E.R Phase 5 starting up...");
+  // Log build version for stale-daemon detection
+  try {
+    const { readFileSync } = await import("fs");
+    const versionPath = new URL("./.build-version", import.meta.url).pathname;
+    const buildInfo = JSON.parse(readFileSync(versionPath, "utf-8"));
+    logger.info({ build: buildInfo }, "H.O.M.E.R Phase 5 starting up...");
+  } catch {
+    logger.info("H.O.M.E.R Phase 5 starting up... (no build version stamp)");
+  }
 
   // Acquire OS-level daemon lock FIRST (before any initialization)
   // Exit with code 0 on any lock failure so launchd won't restart

@@ -13,7 +13,7 @@ const DEFAULT_TIMEOUT = 1200_000; // 20 minutes
 const HEARTBEAT_INTERVAL = 30_000; // 30 seconds
 const LOCK_TTL_MS = 22 * 60 * 1000; // 22 minutes (slightly above Claude timeout)
 const FILE_OUTPUT_HINT =
-  "If you create files (html, csv, xlsx, etc.), upload them to Azure Blob Storage using the MCP tools (blob_upload or blob_upload_content) and include the URL in your response.";
+  "If you create files (html, csv, xlsx, docx, etc.), upload them to Azure Blob Storage (homer-data container) using the MCP tools (blob_upload or blob_upload_content). Use the prefix 'reports/' for reports and 'exports/' for data exports. Always include the blob URL in your response so the user can download it.";
 
 /**
  * Thread lock management for preventing concurrent streams

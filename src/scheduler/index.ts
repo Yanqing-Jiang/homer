@@ -207,6 +207,25 @@ export class Scheduler {
     }
   }
 
+  // Dependency triggers — extracted to constant
+  private static readonly DEPENDENCY_TRIGGERS: Record<string, string[]> = {
+    "idea-ingest": ["ideas-explore"],
+    "ideas-explore": ["idea-dedup"],
+    "job-hunt-discover": ["job-hunt-daily-approval"],
+    "session-harvester": ["session-summaries"],
+    "nightly-memory": ["memory-embeddings", "memory-git-commit"],
+  };
+
+  private fireDependencyTriggers(jobId: string): void {
+    const downstream = Scheduler.DEPENDENCY_TRIGGERS[jobId];
+    if (downstream) {
+      for (const targetId of downstream) {
+        logger.info({ jobId: targetId, triggeredBy: jobId }, "Triggering downstream job");
+        this.cronManager.triggerJob(targetId, false);
+      }
+    }
+  }
+
   /**
    * Execute a job and handle results
    */
@@ -225,44 +244,113 @@ export class Scheduler {
         ? (event: ProgressEvent) => void this.sendProgress(job.config.id, event)
         : undefined;
 
+      const isInternal = job.config.executor === "internal" || !!job.config.handler;
+      const takeoverEnabled = job.config.failureTakeover !== false;
+
       // Execute the job (internal handler or CLI executor)
-      const result = job.config.executor === "internal" || job.config.handler
+      const result = isInternal
         ? await executeInternalJob(job, {
             stateManager: this.stateManager,
             bot: this.bot,
             chatId: this.chatId,
           })
-        : await executeScheduledJob(job, onProgress);
+        : await executeScheduledJob(job, onProgress, takeoverEnabled ? { skipDiagnosis: true } : undefined);
 
-      // Update job state
-      this.cronManager.updateJobState(job.config.id, result.success);
+      // === FAILURE + TAKEOVER PATH ===
+      if (!result.success && takeoverEnabled) {
+        // Record failure but keep is_running lock held
+        this.stateManager.recordScheduledJobFailed(
+          runId, job.config.id, result.output, result.error, result.exitCode
+        );
 
-      // Dependency triggers — fire downstream jobs on success
-      if (result.success) {
-        const triggers: Record<string, string[]> = {
-          "idea-ingest": ["ideas-explore"],
-          "ideas-explore": ["idea-dedup"],
-          "github-trending-ideas": ["idea-dedup"],
-          "internal-idea-mining": ["idea-dedup"],
-        };
-        const downstream = triggers[job.config.id];
-        if (downstream) {
-          for (const targetId of downstream) {
-            logger.info({ jobId: targetId, triggeredBy: job.config.id }, "Triggering downstream job");
-            this.cronManager.triggerJob(targetId, false);
+        try {
+          const { runFailureTakeover } = await import("./failure-takeover.js");
+          const takeoverResult = await runFailureTakeover({
+            job,
+            failedResult: result,
+            runId,
+            stateManager: this.stateManager,
+            bot: this.bot,
+            chatId: this.chatId,
+          });
+
+          if (!takeoverResult) {
+            // Guards prevented takeover (daily limit, concurrent limit, etc.)
+            // Fall through to normal failure handling
+            this.stateManager.recordScheduledJobComplete(
+              runId, job.config.id, false,
+              result.output, result.error, result.exitCode
+            );
+            this.cronManager.updateJobState(job.config.id, false);
+            await notifyJobResult(this.bot, this.chatId, result, job);
+            return;
           }
+
+          if (takeoverResult.finalSuccess) {
+            // Takeover saved it — record as success
+            this.stateManager.recordScheduledJobComplete(
+              runId, job.config.id, true,
+              takeoverResult.retryResult?.output ?? result.output, undefined, 0
+            );
+            this.cronManager.updateJobState(job.config.id, true);
+            this.fireDependencyTriggers(job.config.id);
+
+            try {
+              const diagSnippet = escapeHtml(takeoverResult.decision.diagnosis.slice(0, 200));
+              await this.bot.api.sendMessage(
+                this.chatId,
+                `<b>🔧 ${escapeHtml(job.config.name)} recovered</b>\n\nDiagnosis: ${diagSnippet}\nAction: ${takeoverResult.decision.action}`,
+                { parse_mode: "HTML" }
+              );
+            } catch { /* notification best-effort */ }
+            return;
+          }
+
+          // Takeover didn't fix it — record as failure
+          this.stateManager.recordScheduledJobComplete(
+            runId, job.config.id, false,
+            result.output, result.error, result.exitCode
+          );
+          this.cronManager.updateJobState(job.config.id, false);
+
+          const diagnosis = takeoverResult.decision.diagnosis;
+          const reportMsg = takeoverResult.decision.reportMessage;
+          if (job.config.notifyOnFailure !== false) {
+            try {
+              const diagSnippet = escapeHtml(diagnosis.slice(0, 300));
+              const reportSnippet = reportMsg ? `\n\n${escapeHtml(reportMsg.slice(0, 300))}` : "";
+              await this.bot.api.sendMessage(
+                this.chatId,
+                `<b>❌ ${escapeHtml(job.config.name)} failed</b>\n\nDiagnosis: ${diagSnippet}${reportSnippet}`,
+                { parse_mode: "HTML" }
+              );
+            } catch { /* notification best-effort */ }
+          }
+          return;
+
+        } catch (takeoverError) {
+          // Takeover itself crashed — record original failure normally
+          logger.error({ jobId: job.config.id, error: takeoverError }, "Failure takeover crashed");
+          this.stateManager.recordScheduledJobComplete(
+            runId, job.config.id, false,
+            result.output, result.error, result.exitCode
+          );
+          this.cronManager.updateJobState(job.config.id, false);
+          await notifyJobResult(this.bot, this.chatId, result, job);
+          return;
         }
       }
 
-      // Record result in database
+      // === SUCCESS PATH (or failure with takeover disabled) ===
       this.stateManager.recordScheduledJobComplete(
-        runId,
-        job.config.id,
-        result.success,
-        result.output,
-        result.error,
-        result.exitCode
+        runId, job.config.id, result.success,
+        result.output, result.error, result.exitCode
       );
+      this.cronManager.updateJobState(job.config.id, result.success);
+
+      if (result.success) {
+        this.fireDependencyTriggers(job.config.id);
+      }
 
       // Check if output contains an implementation plan requiring approval
       if (result.success && isPlanRequiringApproval(result.output)) {
@@ -283,7 +371,7 @@ export class Scheduler {
             `<b>Job:</b> ${jobName}\n` +
             `<b>ID:</b> <code>${jobId}</code>\n\n` +
             `<pre>${preview}${truncated}</pre>\n\n` +
-            `Choose an action below. Use “Add Instructions” to provide executor context.`,
+            `Choose an action below. Use "Add Instructions" to provide executor context.`,
             {
               parse_mode: "HTML",
               reply_markup: createPlanApprovalKeyboard(job.config.id),

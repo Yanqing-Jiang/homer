@@ -691,13 +691,11 @@ ${stderr.trim()}`
 
 export async function executeScheduledJob(
   job: RegisteredJob,
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
+  options?: { singleExecutor?: ExecutorKind; skipDiagnosis?: boolean }
 ): Promise<JobExecutionResult> {
   const startedAt = new Date();
   const { config } = job;
-  const memoryJob = isMemoryJob(job);
-  const chain: ExecutorKind[] = memoryJob ? [...MEMORY_CHAIN] : [...DEFAULT_CHAIN];
-  const primary: ExecutorKind = chain[0] ?? "claude";
 
   // Emit started event
   onProgress?.({
@@ -707,24 +705,6 @@ export async function executeScheduledJob(
     timestamp: startedAt,
     message: `🚀 Starting: ${config.name}`,
   });
-
-  const jobContext = {
-    id: config.id,
-    name: config.name,
-    query: config.query,
-    lane: config.lane,
-    source: "scheduler" as const,
-  };
-
-  const notify = async (message: string) => {
-    onProgress?.({
-      type: "thinking",
-      jobId: config.id,
-      jobName: config.name,
-      timestamp: new Date(),
-      message,
-    });
-  };
 
   const runExecutor = async (
     executor: ExecutorKind,
@@ -756,12 +736,55 @@ export async function executeScheduledJob(
     });
   };
 
+  // Single executor mode: bypass fallback chain entirely (used by takeover retries)
+  if (options?.singleExecutor) {
+    const result = await runExecutor(options.singleExecutor);
+    onProgress?.({
+      type: "completed",
+      jobId: config.id,
+      jobName: config.name,
+      timestamp: result.completedAt ?? new Date(),
+      message: result.success
+        ? `✅ Completed: ${config.name} (${Math.round(result.duration / 1000)}s, ${options.singleExecutor})`
+        : `❌ Failed: ${config.name} (${options.singleExecutor})`,
+      details: { duration: result.duration, success: result.success },
+    });
+    return {
+      ...result,
+      executorUsed: options.singleExecutor,
+      fallbackUsed: false,
+    } as JobExecutionResult;
+  }
+
+  const memoryJob = isMemoryJob(job);
+  const chain: ExecutorKind[] = memoryJob ? [...MEMORY_CHAIN] : [...DEFAULT_CHAIN];
+  const primary: ExecutorKind = chain[0] ?? "claude";
+
+  const jobContext = {
+    id: config.id,
+    name: config.name,
+    query: config.query,
+    lane: config.lane,
+    source: "scheduler" as const,
+  };
+
+  const notify = async (message: string) => {
+    onProgress?.({
+      type: "thinking",
+      jobId: config.id,
+      jobName: config.name,
+      timestamp: new Date(),
+      message,
+    });
+  };
+
   const fallbackResult = await runWithFallbackChain({
     primary,
     chain,
     job: jobContext,
     runExecutor,
     notify,
+    skipDiagnosis: options?.skipDiagnosis,
   });
 
   const result = fallbackResult.result ?? {
