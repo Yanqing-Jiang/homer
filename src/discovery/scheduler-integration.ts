@@ -52,7 +52,7 @@ export const DISCOVERY_SCHEDULES = {
     cron: "0 22 * * *", // 10:00 PM daily
     query: "Process new Twitter bookmarks for interesting content",
     lane: "default" as const,
-    enabled: false, // Disabled by default (requires bird setup)
+    enabled: false, // Disabled by default (requires Chrome + agent-browser)
     timeout: 300000, // 5 minutes
     executor: "claude" as const,
     notifyOnSuccess: false,

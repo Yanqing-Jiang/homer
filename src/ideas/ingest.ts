@@ -1,10 +1,10 @@
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
 import { join } from "path";
-import { spawn } from "child_process";
 import type Database from "better-sqlite3";
 import { parseIdeasMd, saveIdeaFile, loadIdeasFromDir, type ParsedIdea } from "./parser.js";
 import { logger } from "../utils/logger.js";
-import { executeGeminiWithFallback } from "../executors/opencode-cli.js";
+import { executeGeminiWithFallback, executeOpenCodeCLI } from "../executors/opencode-cli.js";
+import { buildBookmarkScrapePrompt, buildTweetReadPrompt, SCRAPE_OPTIONS, DEEP_FETCH_OPTIONS } from "../scraping/browser-prompts.js";
 
 const MEMORY_PATH = process.env.MEMORY_PATH ?? "/Users/yj/memory";
 const IDEAS_FILE = join(MEMORY_PATH, "ideas.md");
@@ -61,86 +61,76 @@ function ensureIdeaId(idea: ParsedIdea): void {
 }
 
 // ============================================
-// TWITTER/X SCRAPING
+// TWITTER/X SCRAPING (via Gemini Flash + agent-browser)
 // ============================================
 
-async function runBirdCommand(args: string[]): Promise<{ success: boolean; output: string }> {
-  return new Promise((resolve) => {
-    const proc = spawn("bird", args, {
-      timeout: 60000,
-      env: { ...process.env },
-    });
-
-    let stdout = "";
-    let stderr = "";
-
-    proc.stdout.on("data", (data) => { stdout += data.toString(); });
-    proc.stderr.on("data", (data) => { stderr += data.toString(); });
-
-    proc.on("close", (code) => {
-      resolve({
-        success: code === 0,
-        output: stdout || stderr,
-      });
-    });
-
-    proc.on("error", (err) => {
-      resolve({ success: false, output: err.message });
-    });
-  });
-}
-
 async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
-  logger.info("Scraping Twitter/X bookmarks via bird CLI");
+  logger.info("Scraping Twitter/X bookmarks via Gemini Flash + agent-browser");
 
-  const result = await runBirdCommand(["bookmarks", "-n", "20", "--json"]);
-  if (!result.success) {
-    logger.warn({ output: result.output }, "Bird CLI failed to fetch bookmarks");
-    return [];
-  }
-
-  let bookmarks: TwitterBookmark[] = [];
   try {
-    bookmarks = JSON.parse(result.output);
-  } catch {
-    logger.warn("Failed to parse bird CLI output as JSON");
-    return [];
-  }
+    const result = await executeOpenCodeCLI(
+      buildBookmarkScrapePrompt(20),
+      "",
+      SCRAPE_OPTIONS,
+    );
 
-  const ideas: ParsedIdea[] = [];
-  const now = new Date();
-  const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
-
-  for (const bookmark of bookmarks) {
-    // Extract URLs from bookmark
-    const urls = bookmark.urls || [];
-    const hasExternalLink = urls.some(u => !u.includes("twitter.com") && !u.includes("x.com"));
-
-    // Create idea from bookmark
-    const idea: ParsedIdea = {
-      id: `tweet_${bookmark.id}`,
-      title: `X: ${bookmark.text.slice(0, 60)}${bookmark.text.length > 60 ? "..." : ""}`,
-      status: "draft",
-      source: "x-bookmarks",
-      content: `**@${bookmark.author}**: ${bookmark.text}`,
-      link: `https://x.com/i/status/${bookmark.id}`,
-      tags: ["x-bookmark"],
-      timestamp,
-    };
-
-    // If there's an external link, add it for deep fetching
-    if (hasExternalLink) {
-      const externalUrl = urls.find(u => !u.includes("twitter.com") && !u.includes("x.com"));
-      if (externalUrl) {
-        idea.context = `External link: ${externalUrl}`;
-      }
+    if (result.exitCode !== 0) {
+      logger.warn({ exitCode: result.exitCode, output: result.output?.slice(0, 300) }, "Browser bookmark scrape failed");
+      return [];
     }
 
-    ideas.push(idea);
-  }
+    // Extract JSON array from output
+    const output = result.output ?? "";
+    const arrayMatch = output.match(/\[[\s\S]*\]/);
+    if (!arrayMatch) {
+      logger.warn({ outputLen: output.length }, "No JSON array found in browser bookmark output");
+      return [];
+    }
 
-  logger.info({ count: ideas.length }, "Extracted ideas from Twitter bookmarks");
-  return ideas;
+    let bookmarks: TwitterBookmark[];
+    try {
+      bookmarks = JSON.parse(arrayMatch[0]);
+    } catch {
+      logger.warn("Failed to parse browser bookmark output as JSON");
+      return [];
+    }
+
+    const ideas: ParsedIdea[] = [];
+    const now = new Date();
+    const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
+
+    for (const bookmark of bookmarks) {
+      const urls = bookmark.urls || [];
+      const hasExternalLink = urls.some(u => !u.includes("twitter.com") && !u.includes("x.com"));
+
+      const idea: ParsedIdea = {
+        id: `tweet_${bookmark.id}`,
+        title: `X: ${bookmark.text.slice(0, 60)}${bookmark.text.length > 60 ? "..." : ""}`,
+        status: "draft",
+        source: "x-bookmarks",
+        content: `**@${bookmark.author}**: ${bookmark.text}`,
+        link: `https://x.com/${bookmark.author}/status/${bookmark.id}`,
+        tags: ["x-bookmark"],
+        timestamp,
+      };
+
+      if (hasExternalLink) {
+        const externalUrl = urls.find(u => !u.includes("twitter.com") && !u.includes("x.com"));
+        if (externalUrl) {
+          idea.context = `External link: ${externalUrl}`;
+        }
+      }
+
+      ideas.push(idea);
+    }
+
+    logger.info({ count: ideas.length }, "Extracted ideas from Twitter bookmarks via agent-browser");
+    return ideas;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ error: msg }, "Browser bookmark scrape error");
+    return [];
+  }
 }
 
 // YouTube scraping has been moved to Telegram → overnight pipeline.
@@ -150,26 +140,39 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
 // DEEP URL FETCHING
 // ============================================
 
+function cleanAgentOutput(raw: string): string {
+  return raw
+    .split("\n")
+    .filter((line) => {
+      const t = line.trim();
+      if (!t) return false;
+      if (t.startsWith("[tool_call:") || t.startsWith("[bash:")) return false;
+      if (t.startsWith("I will ") || t.startsWith("I'll ")) return false;
+      if (t.startsWith("**Plan") || t.startsWith("**Explanation")) return false;
+      if (t.startsWith("Step ") && t.includes("agent-browser")) return false;
+      return true;
+    })
+    .join("\n")
+    .trim();
+}
+
 async function deepFetchUrl(url: string, ideaTitle: string): Promise<string | null> {
   if (!url) return null;
 
-  // Handle Twitter/X URLs with bird CLI
+  // Handle Twitter/X URLs via agent-browser
   if (url.includes("twitter.com") || url.includes("x.com")) {
-    const tweetIdMatch = url.match(/status\/(\d+)/);
-    if (tweetIdMatch && tweetIdMatch[1]) {
-      const result = await runBirdCommand(["read", tweetIdMatch[1], "--json"]);
-      if (result.success) {
-        try {
-          const thread = JSON.parse(result.output);
-          if (Array.isArray(thread) && thread.length > 0) {
-            return thread.map((t: { author?: string; text?: string }) =>
-              `@${t.author}: ${t.text}`
-            ).join("\n\n");
-          }
-        } catch {
-          return result.output.slice(0, 2000);
-        }
+    try {
+      const result = await executeOpenCodeCLI(
+        buildTweetReadPrompt(url),
+        "",
+        DEEP_FETCH_OPTIONS,
+      );
+      if (result.exitCode === 0 && result.output && result.output.length > 50 && !result.output.includes("FAILED")) {
+        const cleaned = cleanAgentOutput(result.output);
+        return cleaned.slice(0, 10000) || null;
       }
+    } catch {
+      // Fall through to return null
     }
     return null;
   }
@@ -283,22 +286,37 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
   // ========== SOURCE 1: Twitter/X Bookmarks ==========
   try {
     const twitterIdeas = await scrapeTwitterBookmarks();
-    for (const idea of twitterIdeas) {
-      if (existingIds.has(idea.id) || existingTitles.has(idea.title.toLowerCase())) {
-        result.skipped++;
-        continue;
-      }
+    const newIdeas = twitterIdeas.filter(
+      (idea) => !existingIds.has(idea.id) && !existingTitles.has(idea.title.toLowerCase()),
+    );
+    result.skipped += twitterIdeas.length - newIdeas.length;
 
-      // Deep fetch external links if present
-      if (idea.context?.startsWith("External link:")) {
-        const externalUrl = idea.context.replace("External link: ", "");
-        const enriched = await deepFetchUrl(externalUrl, idea.title);
-        if (enriched) {
-          idea.content += `\n\n## Linked Content Analysis\n\n${enriched}`;
-          result.enriched++;
+    // Deep-link tweet threads + external URLs in parallel (3 at a time)
+    const CONCURRENCY = 3;
+    for (let i = 0; i < newIdeas.length; i += CONCURRENCY) {
+      const batch = newIdeas.slice(i, i + CONCURRENCY);
+      await Promise.all(batch.map(async (idea) => {
+        // Deep-link the tweet thread itself for full content
+        if (idea.link) {
+          const threadContent = await deepFetchUrl(idea.link, idea.title);
+          if (threadContent) {
+            idea.content = `**@${idea.link.split("/")[3] ?? ""}**: ${threadContent}`;
+            result.enriched++;
+          }
         }
-      }
 
+        // Also deep-fetch external links if present
+        if (idea.context?.startsWith("External link:")) {
+          const externalUrl = idea.context.replace("External link: ", "");
+          const enriched = await deepFetchUrl(externalUrl, idea.title);
+          if (enriched) {
+            idea.content += `\n\n## Linked Content\n\n${enriched}`;
+          }
+        }
+      }));
+    }
+
+    for (const idea of newIdeas) {
       saveIdeaFile(idea);
       existingIds.add(idea.id);
       existingTitles.add(idea.title.toLowerCase());

@@ -10,7 +10,7 @@
 // ============================================
 
 export type SourceType =
-  | "twitter_bookmarks"   // Via Bird CLI
+  | "twitter_bookmarks"   // Via Gemini Flash + agent-browser
   | "github_trending"     // GitHub trending repos
   | "hackernews"          // HN front page
   | "rss"                 // RSS feeds

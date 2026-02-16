@@ -233,7 +233,6 @@ export async function runWeeklyConsolidation(daysBack = 7): Promise<{
     const result = await executeGeminiAPI(fullInput, {
       model: "gemini-3-flash-preview",
       systemPrompt,
-      maxTokens: 16384,
       temperature: 0.3,
       timeout: 300000, // 5 min
       reasoningEffort: "high",

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { StatusBadge, EmptyState, AuthOverlay } from '$lib/components';
 	import { useAuth } from '$lib/hooks/useAuth.svelte';
 	import * as api from '$lib/api/client';
@@ -12,7 +13,7 @@
 	let ideas = $state<api.Idea[]>([]);
 	let selectedIdea = $state<api.Idea | null>(null);
 	let showCreateModal = $state(false);
-	let filterStatus = $state<IdeaStatus | 'all'>('all');
+	let filterStatus = $state<'all' | 'active' | 'archived' | 'completed'>('all');
 	let searchQuery = $state('');
 	let loading = $state(true);
 	let error = $state<string | null>(null);
@@ -23,6 +24,7 @@
 	let savingIdea = $state(false);
 	let deletingIdea = $state(false);
 	let showDeleteConfirm = $state(false);
+	let updatingStatus = $state(false);
 
 	// Edit form state
 	let editForm = $state({
@@ -70,16 +72,11 @@
 		}
 	}
 
-	// Map legacy statuses to new simplified statuses
-	function mapLegacyStatus(status: string): string {
-		if (['researching', 'exploring', 'review'].includes(status)) {
-			return 'research';
-		}
-		// Ideas in planning/execution should be viewed in Plans, not Ideas
-		if (['planning', 'execution'].includes(status)) {
-			return 'research'; // Show them in research if no linkedPlanId
-		}
-		return status;
+	// Map legacy statuses to simplified statuses
+	function mapLegacyStatus(status: string): 'active' | 'archived' | 'completed' {
+		if (status === 'archived') return 'archived';
+		if (status === 'completed') return 'completed';
+		return 'active'; // everything else (draft, research, researching, exploring, review, planning, execution)
 	}
 
 	const filteredIdeas = $derived(() => {
@@ -96,10 +93,19 @@
 		});
 	});
 
+	function getSourceLabel(source: string): string {
+		switch (source) {
+			case 'user-request': return 'User';
+			case 'claude-research': return 'Claude';
+			case 'web-ui': return 'Web';
+			case 'bookmark': return 'Bookmark';
+			default: return 'Idea';
+		}
+	}
+
 	const statusCounts = $derived(() => {
-		// Filter out ideas with linkedPlanId first
 		const visibleIdeas = ideas.filter(idea => !idea.linkedPlanId);
-		const counts: Record<string, number> = { all: visibleIdeas.length };
+		const counts: Record<string, number> = { all: visibleIdeas.length, active: 0, archived: 0, completed: 0 };
 		visibleIdeas.forEach(idea => {
 			const normalizedStatus = mapLegacyStatus(idea.status);
 			counts[normalizedStatus] = (counts[normalizedStatus] || 0) + 1;
@@ -186,7 +192,8 @@
 		}
 	}
 
-	async function updateIdeaStatus(idea: api.Idea, newStatus: IdeaStatus) {
+	async function updateIdeaStatus(idea: api.Idea, newStatus: IdeaStatus, closeAfter = false) {
+		if (closeAfter) updatingStatus = true;
 		try {
 			const updated = await api.updateIdea(idea.id, { status: newStatus });
 			const index = ideas.findIndex(i => i.id === idea.id);
@@ -196,9 +203,16 @@
 					selectedIdea = ideas[index];
 				}
 			}
+			if (closeAfter) {
+				const label = newStatus === 'archived' ? 'Idea archived' : newStatus === 'completed' ? 'Idea completed' : `Status updated to ${newStatus}`;
+				toast.success(label);
+				closeIdea();
+			}
 		} catch (e) {
 			console.error('Failed to update idea status:', e);
 			toast.error(`Failed to update status: ${e instanceof Error ? e.message : 'Unknown error'}`);
+		} finally {
+			updatingStatus = false;
 		}
 	}
 
@@ -254,8 +268,11 @@
 			// Create a thread
 			const thread = await api.createThread(session.id, { provider: 'claude' });
 
-			// Build the message content
-			const messageContent = `I'd like to discuss this idea:\n\n**${idea.title}**\n\n${idea.content}${idea.context ? `\n\nContext: ${idea.context}` : ''}`;
+			// Build the message content — point Claude at the file for full context
+			const fileRef = idea.filePath ? `\n\nIdea file: ${idea.filePath}` : '';
+			const messageContent = idea.filePath
+				? `I'd like to discuss this idea:\n\n**${idea.title}**${fileRef}\n\nRead the idea file above for full content, context, and exploration notes.`
+				: `I'd like to discuss this idea:\n\n**${idea.title}**\n\n${idea.content}${idea.context ? `\n\nContext: ${idea.context}` : ''}`;
 
 			// Execute the message (this sends it and gets a response)
 			await api.executeMessage(thread.id, messageContent);
@@ -266,8 +283,9 @@
 				threadId: thread.id
 			}));
 
-			// Navigate to home
-			window.location.href = '/';
+			// Smooth client-side navigation
+			closeIdea();
+			await goto('/');
 		} catch (e) {
 			console.error('Failed to create chat about idea:', e);
 			toast.error(`Failed to start chat: ${e instanceof Error ? e.message : 'Unknown error'}`);
@@ -321,6 +339,15 @@
 	<title>Ideas | Homer</title>
 </svelte:head>
 
+<svelte:window onkeydown={(e) => {
+	if (e.key === 'Escape') {
+		if (showDeleteConfirm) showDeleteConfirm = false;
+		else if (editMode) cancelEdit();
+		else if (selectedIdea) closeIdea();
+		else if (showCreateModal) showCreateModal = false;
+	}
+}} />
+
 {#if auth.loading}
 	<div class="loading-screen">
 		<div class="loading-content">
@@ -368,7 +395,7 @@
 				<circle cx="11" cy="11" r="8"/>
 				<path d="M21 21l-4.35-4.35"/>
 			</svg>
-			<input type="text" placeholder="Search ideas..." bind:value={searchQuery} />
+			<input type="text" placeholder="Search ideas..." bind:value={searchQuery} aria-label="Search ideas" />
 		</div>
 		<div class="status-tabs">
 			<button
@@ -380,17 +407,10 @@
 			</button>
 			<button
 				class="tab"
-				class:active={filterStatus === 'draft'}
-				onclick={() => filterStatus = 'draft'}
+				class:active={filterStatus === 'active'}
+				onclick={() => filterStatus = 'active'}
 			>
-				Draft <span class="tab-count">{statusCounts().draft || 0}</span>
-			</button>
-			<button
-				class="tab"
-				class:active={filterStatus === 'research'}
-				onclick={() => filterStatus = 'research'}
-			>
-				Research <span class="tab-count">{statusCounts().research || 0}</span>
+				Active <span class="tab-count">{statusCounts().active || 0}</span>
 			</button>
 			<button
 				class="tab"
@@ -398,6 +418,13 @@
 				onclick={() => filterStatus = 'archived'}
 			>
 				Archived <span class="tab-count">{statusCounts().archived || 0}</span>
+			</button>
+			<button
+				class="tab"
+				class:active={filterStatus === 'completed'}
+				onclick={() => filterStatus = 'completed'}
+			>
+				Completed <span class="tab-count">{statusCounts().completed || 0}</span>
 			</button>
 		</div>
 	</div>
@@ -448,7 +475,7 @@
 <!-- Idea Detail Modal -->
 {#if selectedIdea}
 	<div class="modal-overlay" onclick={closeIdea}>
-		<div class="modal" onclick={(e) => e.stopPropagation()}>
+		<div class="modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
 			<div class="modal-header">
 				{#if editMode}
 					<h2>Edit Idea</h2>
@@ -460,19 +487,19 @@
 				{/if}
 				<div class="modal-header-actions">
 					{#if !editMode}
-						<button class="icon-btn edit-btn" onclick={startEdit} title="Edit">
+						<button class="icon-btn edit-btn" onclick={startEdit} title="Edit" aria-label="Edit idea">
 							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
 								<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
 								<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
 							</svg>
 						</button>
-						<button class="icon-btn delete-btn" onclick={() => showDeleteConfirm = true} title="Delete">
+						<button class="icon-btn delete-btn" onclick={() => showDeleteConfirm = true} title="Delete" aria-label="Delete idea">
 							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
 								<path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
 							</svg>
 						</button>
 					{/if}
-					<button class="modal-close" onclick={closeIdea}>
+					<button class="modal-close" onclick={closeIdea} aria-label="Close">
 						<svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
 							<path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
 						</svg>
@@ -554,37 +581,61 @@
 					</button>
 				</div>
 			{:else}
+				<!-- Compact meta bar -->
+				<div class="modal-meta-bar">
+					<StatusBadge status={selectedIdea.status} size="sm" />
+					<span class="meta-source">{getSourceIcon(selectedIdea.source)} {getSourceLabel(selectedIdea.source)}</span>
+					<span class="meta-dot">&middot;</span>
+					<span class="meta-date">{formatDate(selectedIdea.timestamp || selectedIdea.createdAt)}</span>
+					<span class="meta-dot">&middot;</span>
+					<span class="meta-id">#{selectedIdea.id}</span>
+					{#if selectedIdea.linkedThreadId}
+						<span class="thread-indicator">Research</span>
+					{/if}
+					{#if selectedIdea.linkedExplorationThreadId}
+						<span class="thread-indicator">Exploration</span>
+					{/if}
+				</div>
+
 				<div class="modal-body">
-					<div class="modal-meta">
-						<StatusBadge status={selectedIdea.status} size="md" />
-						<span class="meta-sep">•</span>
-						<span class="meta-date">{selectedIdea.timestamp}</span>
-						<span class="meta-sep">•</span>
-						<span class="meta-id">ID: {selectedIdea.id}</span>
-					</div>
+					<!-- Primary: Content -->
+					<div class="idea-reading-area">{selectedIdea.content}</div>
 
-					<div class="modal-section">
-						<h4>Content</h4>
-						<p>{selectedIdea.content}</p>
-					</div>
-
+					<!-- Secondary: Context -->
 					{#if selectedIdea.context}
-						<div class="modal-section">
-							<h4>Context</h4>
-							<p>{selectedIdea.context}</p>
+						<div class="idea-secondary-section">
+							<div class="idea-secondary-label">Context</div>
+							<div class="idea-secondary-content">{selectedIdea.context}</div>
 						</div>
 					{/if}
 
+					<!-- Secondary: Exploration Notes -->
+					{#if selectedIdea.exploration}
+						<div class="idea-secondary-section">
+							<div class="idea-secondary-label">Exploration Notes</div>
+							<div class="idea-secondary-content exploration-content">{selectedIdea.exploration}</div>
+						</div>
+					{/if}
+
+					<!-- Secondary: Notes -->
+					{#if selectedIdea.notes}
+						<div class="idea-secondary-section">
+							<div class="idea-secondary-label">Notes</div>
+							<div class="idea-secondary-content">{selectedIdea.notes}</div>
+						</div>
+					{/if}
+
+					<!-- Secondary: Link -->
 					{#if selectedIdea.link}
-						<div class="modal-section">
-							<h4>Link</h4>
+						<div class="idea-secondary-section">
+							<div class="idea-secondary-label">Link</div>
 							<a href={selectedIdea.link} target="_blank" rel="noopener noreferrer" class="idea-link">{selectedIdea.link}</a>
 						</div>
 					{/if}
 
+					<!-- Tags -->
 					{#if selectedIdea.tags && selectedIdea.tags.length > 0}
-						<div class="modal-section">
-							<h4>Tags</h4>
+						<div class="idea-secondary-section">
 							<div class="tags-list">
 								{#each selectedIdea.tags as tag}
 									<span class="tag">{tag}</span>
@@ -593,63 +644,42 @@
 						</div>
 					{/if}
 
-					{#if selectedIdea.notes}
-						<div class="modal-section">
-							<h4>Notes</h4>
-							<p>{selectedIdea.notes}</p>
-						</div>
-					{/if}
-
+					<!-- Linked Plan -->
 					{#if selectedIdea.linkedPlanId}
-						<div class="modal-section">
-							<h4>Linked Plan</h4>
+						<div class="idea-secondary-section">
 							<a href="/plans?id={selectedIdea.linkedPlanId}" class="plan-link">
 								View Plan: {selectedIdea.linkedPlanId}
 							</a>
 						</div>
 					{/if}
 
-					<div class="modal-section">
-						<h4>Update Status</h4>
-						<div class="status-buttons">
-							{#each ['draft', 'research', 'archived'] as status}
+					<!-- Status Actions -->
+					<div class="idea-secondary-section">
+						<div class="status-actions">
+							{#if mapLegacyStatus(selectedIdea.status) !== 'archived'}
 								<button
-									class="status-btn {status}"
-									class:active={selectedIdea.status === status}
-									onclick={() => selectedIdea && updateIdeaStatus(selectedIdea, status as IdeaStatus)}
+									class="status-action-btn archive"
+									onclick={() => selectedIdea && updateIdeaStatus(selectedIdea, 'archived', true)}
+									disabled={updatingStatus}
 								>
-									{status}
+									{updatingStatus ? 'Updating...' : 'Archive'}
 								</button>
-							{/each}
+							{/if}
+							{#if mapLegacyStatus(selectedIdea.status) !== 'completed'}
+								<button
+									class="status-action-btn complete"
+									onclick={() => selectedIdea && updateIdeaStatus(selectedIdea, 'completed', true)}
+									disabled={updatingStatus}
+								>
+									{updatingStatus ? 'Updating...' : 'Complete'}
+								</button>
+							{/if}
 						</div>
 					</div>
 				</div>
 
 				<div class="modal-footer">
 					<button class="secondary-btn" onclick={closeIdea}>Close</button>
-					{#if selectedIdea && !selectedIdea.linkedThreadId && (selectedIdea.status === 'draft' || selectedIdea.status === 'review')}
-						<button class="secondary-btn research-btn" onclick={() => selectedIdea && startResearch(selectedIdea)} disabled={startingResearch}>
-							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-								<circle cx="11" cy="11" r="8"/>
-								<path d="M21 21l-4.35-4.35"/>
-							</svg>
-							{startingResearch ? 'Starting...' : 'Start Research'}
-						</button>
-					{/if}
-					{#if selectedIdea && (selectedIdea.status === 'draft' || selectedIdea.status === 'review' || selectedIdea.status === 'researching' || selectedIdea.status === 'exploring')}
-						<button class="secondary-btn explore-btn" onclick={() => selectedIdea && startExploration(selectedIdea)} disabled={startingExploration}>
-							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-								<path d="M12 2L2 7l10 5 10-5-10-5z"/>
-								<path d="M2 17l10 5 10-5"/>
-								<path d="M2 12l10 5 10-5"/>
-							</svg>
-							{#if selectedIdea.linkedExplorationThreadId}
-								{startingExploration ? 'Opening...' : 'Resume Exploration'}
-							{:else}
-								{startingExploration ? 'Starting...' : 'Develop into Plan'}
-							{/if}
-						</button>
-					{/if}
 					<button class="primary-btn" onclick={() => selectedIdea && chatAboutIdea(selectedIdea)} disabled={chattingAboutIdea}>
 						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
 							<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
@@ -665,10 +695,10 @@
 <!-- Create Idea Modal -->
 {#if showCreateModal}
 	<div class="modal-overlay" onclick={() => showCreateModal = false}>
-		<div class="modal" onclick={(e) => e.stopPropagation()}>
+		<div class="modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
 			<div class="modal-header">
 				<h2>New Idea</h2>
-				<button class="modal-close" onclick={() => showCreateModal = false}>
+				<button class="modal-close" onclick={() => showCreateModal = false} aria-label="Close">
 					<svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
 						<path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
 					</svg>
@@ -1129,73 +1159,143 @@
 	}
 
 	.modal-body {
-		padding: 20px;
+		padding: 20px 24px;
 		overflow-y: auto;
 		flex: 1;
+		min-height: 0;
+
+		/* Firefox scrollbar */
+		scrollbar-width: thin;
+		scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+
+		/* Scroll shadows — pure CSS, no JS */
+		background:
+			linear-gradient(to bottom, #ffffff 30%, rgba(255, 255, 255, 0)) center top / 100% 40px no-repeat local,
+			linear-gradient(to top, #ffffff 30%, rgba(255, 255, 255, 0)) center bottom / 100% 40px no-repeat local,
+			linear-gradient(to bottom, rgba(0, 0, 0, 0.06), transparent) center top / 100% 12px no-repeat scroll,
+			linear-gradient(to top, rgba(0, 0, 0, 0.06), transparent) center bottom / 100% 12px no-repeat scroll;
 	}
 
-	.modal-meta {
+	/* Webkit scrollbar (Chrome, Safari, Edge) */
+	.modal-body::-webkit-scrollbar {
+		width: 6px;
+	}
+
+	.modal-body::-webkit-scrollbar-track {
+		background: transparent;
+		margin: 4px 0;
+	}
+
+	.modal-body::-webkit-scrollbar-thumb {
+		background-color: rgba(0, 0, 0, 0.15);
+		border-radius: 3px;
+	}
+
+	.modal-body::-webkit-scrollbar-thumb:hover {
+		background-color: rgba(0, 0, 0, 0.3);
+	}
+
+	.modal-meta-bar {
 		display: flex;
 		align-items: center;
 		gap: 8px;
 		flex-wrap: wrap;
-		margin-bottom: 20px;
-		font-size: 13px;
-		color: #666;
+		padding: 8px 20px;
+		font-size: 12px;
+		color: #888;
+		border-bottom: 1px solid #f0f0f0;
 	}
 
-	.meta-sep {
+	.meta-dot {
 		color: #ccc;
 	}
 
-	.modal-section {
-		margin-bottom: 20px;
-	}
-
-	.modal-section:last-child {
-		margin-bottom: 0;
-	}
-
-	.modal-section h4 {
-		font-size: 12px;
-		font-weight: 600;
-		color: #888;
-		text-transform: uppercase;
-		margin: 0 0 8px 0;
-	}
-
-	.modal-section p {
-		font-size: 14px;
+	.idea-reading-area {
+		font-size: 15px;
+		line-height: 1.7;
 		color: #1b1b1b;
-		line-height: 1.6;
-		margin: 0;
+		white-space: pre-wrap;
+		word-break: break-word;
 	}
 
-	.status-buttons {
+	.idea-secondary-section {
+		margin-top: 20px;
+		padding-top: 16px;
+		border-top: 1px solid #f0f0f0;
+	}
+
+	.idea-secondary-label {
+		font-size: 11px;
+		font-weight: 600;
+		color: #999;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		margin-bottom: 6px;
+	}
+
+	.idea-secondary-content {
+		font-size: 14px;
+		line-height: 1.6;
+		color: #444;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.status-actions {
 		display: flex;
 		gap: 8px;
 		flex-wrap: wrap;
 	}
 
-	.status-btn {
-		padding: 6px 12px;
-		border: 1px solid #e0e0e0;
+	.status-action-btn {
+		padding: 8px 16px;
+		border: 1px solid;
 		border-radius: 4px;
-		background: white;
 		font-size: 13px;
-		text-transform: capitalize;
+		font-weight: 500;
 		cursor: pointer;
 		transition: all 0.15s;
 	}
 
-	.status-btn:hover {
-		border-color: #0078d4;
+	.status-action-btn.archive {
+		color: #92400e;
+		background: #fffbeb;
+		border-color: #f59e0b;
 	}
 
-	.status-btn.active {
-		background: #0078d4;
-		border-color: #0078d4;
-		color: white;
+	.status-action-btn.archive:hover {
+		background: #fef3c7;
+	}
+
+	.status-action-btn.complete {
+		color: #065f46;
+		background: #ecfdf5;
+		border-color: #10b981;
+	}
+
+	.status-action-btn.complete:hover {
+		background: #d1fae5;
+	}
+
+	.meta-source {
+		font-size: 12px;
+		color: #888;
+	}
+
+	.thread-indicator {
+		font-size: 11px;
+		color: #6b7280;
+		background: #f3f4f6;
+		padding: 2px 8px;
+		border-radius: 10px;
+	}
+
+	.exploration-content {
+		font-size: 14px;
+		color: #1b1b1b;
+		line-height: 1.6;
+		white-space: pre-wrap;
+		margin: 0;
 	}
 
 	.modal-footer {
@@ -1297,42 +1397,6 @@
 		background: #006cbe;
 	}
 
-	/* Research button styling */
-	.research-btn {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		color: #107c10;
-		border-color: #107c10;
-	}
-
-	.research-btn:hover:not(:disabled) {
-		background: #e5f3e5;
-	}
-
-	.research-btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	/* Explore button styling */
-	.explore-btn {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		color: #8b5cf6;
-		border-color: #8b5cf6;
-	}
-
-	.explore-btn:hover:not(:disabled) {
-		background: #f3e8ff;
-	}
-
-	.explore-btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
 	/* Plan link styling */
 	.plan-link {
 		color: #0078d4;
@@ -1432,7 +1496,7 @@
 			border-radius: 8px;
 		}
 
-		.status-buttons {
+		.status-actions {
 			justify-content: center;
 		}
 	}
@@ -1457,5 +1521,34 @@
 		.modal-footer button {
 			width: 100%;
 		}
+
+		.status-actions {
+			flex-direction: column;
+		}
+
+		.status-action-btn {
+			width: 100%;
+			text-align: center;
+		}
+
+		.icon-btn {
+			padding: 10px;
+		}
+	}
+
+	/* Focus-visible styles */
+	button:focus-visible,
+	a:focus-visible,
+	input:focus-visible,
+	select:focus-visible,
+	textarea:focus-visible {
+		outline: 2px solid #0078d4;
+		outline-offset: 2px;
+	}
+
+	/* Disabled status action buttons */
+	.status-action-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
 	}
 </style>

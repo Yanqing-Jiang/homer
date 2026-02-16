@@ -31,6 +31,8 @@
 	let currentSessionName = $state('New Session');
 	let editingSessionId = $state<string | null>(null);
 	let editingName = $state('');
+	let deletingSessionId = $state<string | null>(null);
+	let isDeleting = $state(false);
 
 	// File upload state
 	let attachedFiles = $state<api.Upload[]>([]);
@@ -407,6 +409,7 @@
 
 	function startRenaming(sess: api.ChatSession, event: MouseEvent) {
 		event.stopPropagation();
+		deletingSessionId = null;
 		editingSessionId = sess.id;
 		editingName = sess.name;
 	}
@@ -436,6 +439,54 @@
 	function cancelRename() {
 		editingSessionId = null;
 		editingName = '';
+	}
+
+	function startDeleting(sess: api.ChatSession, event: MouseEvent) {
+		event.stopPropagation();
+		editingSessionId = null;
+		editingName = '';
+		deletingSessionId = sess.id;
+	}
+
+	async function confirmDelete() {
+		if (!deletingSessionId || isDeleting) return;
+		const idToDelete = deletingSessionId;
+		isDeleting = true;
+		try {
+			await api.deleteSession(idToDelete).catch(e => {
+				if (!e.message?.includes('404')) throw e;
+			});
+			sessions = sessions.filter(s => s.id !== idToDelete);
+			if (sessionId === idToDelete) {
+				if (currentAbort) {
+					currentAbort.abort();
+					currentAbort = null;
+				}
+				isStreaming = false;
+				streamingContent = '';
+				sessionId = null;
+				threadId = null;
+				messages = [];
+				currentSessionName = 'New Session';
+				currentExecutor = 'claude';
+				currentModel = undefined;
+				executorMessageCount = 0;
+			}
+		} catch (e) {
+			console.error('Failed to delete session:', e);
+		}
+		deletingSessionId = null;
+		isDeleting = false;
+	}
+
+	function cancelDelete() {
+		deletingSessionId = null;
+	}
+
+	function handleDeleteKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape' && deletingSessionId) {
+			cancelDelete();
+		}
 	}
 
 	async function loadThreadMessages(tId: string) {
@@ -640,6 +691,8 @@ Just confirm when done. Keep your response brief.`;
 		userMenuOpen = !userMenuOpen;
 	}
 </script>
+
+<svelte:window onkeydown={handleDeleteKeydown} />
 
 <svelte:head>
 	<title>Microsoft Azure</title>
@@ -860,6 +913,16 @@ Just confirm when done. Keep your response brief.`;
 															</svg>
 														</button>
 													</div>
+												{:else if deletingSessionId === sess.id}
+													<div class="session-dropdown-item deleting">
+														<span class="session-delete-label">Delete this chat?</span>
+														<div class="session-delete-actions">
+															<button class="session-delete-confirm" onclick={() => confirmDelete()} disabled={isDeleting}>
+																{isDeleting ? '...' : 'Delete'}
+															</button>
+															<button class="session-delete-cancel" onclick={() => cancelDelete()} disabled={isDeleting}>Cancel</button>
+														</div>
+													</div>
 												{:else}
 													<div
 														class="session-dropdown-item"
@@ -869,9 +932,14 @@ Just confirm when done. Keep your response brief.`;
 															<span class="session-item-name">{sess.name}</span>
 															<span class="session-item-date">{new Date(sess.updatedAt).toLocaleDateString()}</span>
 														</button>
-														<button class="session-rename-btn" onclick={(e) => startRenaming(sess, e)} title="Rename">
+														<button class="session-rename-btn" onclick={(e) => startRenaming(sess, e)} title="Rename" aria-label="Rename session {sess.name}">
 															<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12">
 																<path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
+															</svg>
+														</button>
+														<button class="session-delete-btn" onclick={(e) => startDeleting(sess, e)} title="Delete" aria-label="Delete session {sess.name}">
+															<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12">
+																<path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
 															</svg>
 														</button>
 													</div>
@@ -1457,6 +1525,86 @@ Just confirm when done. Keep your response brief.`;
 
 	.session-rename-save:hover {
 		background: #e8f4fc;
+	}
+
+	.session-delete-btn {
+		opacity: 0;
+		background: none;
+		border: none;
+		padding: 4px;
+		cursor: pointer;
+		color: #666;
+		border-radius: 4px;
+		transition: all 0.15s;
+		flex-shrink: 0;
+	}
+
+	.session-dropdown-item:hover .session-delete-btn {
+		opacity: 1;
+	}
+
+	.session-delete-btn:hover {
+		background: #fee2e2;
+		color: #dc2626;
+	}
+
+	.session-dropdown-item.deleting {
+		padding: 8px 16px;
+		justify-content: space-between;
+	}
+
+	.session-delete-label {
+		font-size: 13px;
+		color: #1b1b1b;
+	}
+
+	.session-delete-actions {
+		display: flex;
+		gap: 8px;
+	}
+
+	.session-delete-confirm {
+		background: #dc2626;
+		color: white;
+		border: none;
+		padding: 4px 12px;
+		border-radius: 4px;
+		font-size: 12px;
+		cursor: pointer;
+		font-weight: 500;
+	}
+
+	.session-delete-confirm:hover {
+		background: #b91c1c;
+	}
+
+	.session-delete-cancel {
+		background: none;
+		color: #666;
+		border: 1px solid #d0d0d0;
+		padding: 4px 12px;
+		border-radius: 4px;
+		font-size: 12px;
+		cursor: pointer;
+	}
+
+	.session-delete-cancel:hover {
+		background: #f5f5f5;
+		color: #333;
+	}
+
+	.session-delete-confirm:disabled,
+	.session-delete-cancel:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	/* Touch device support: always show action buttons */
+	@media (hover: none) {
+		.session-rename-btn,
+		.session-delete-btn {
+			opacity: 1;
+		}
 	}
 
 	.session-dropdown-divider {

@@ -475,38 +475,56 @@ export class StateManager {
 
   // Scheduled job methods
   recordScheduledJobStart(jobId: string, jobName: string, sourceFile: string): number | null {
-    const now = new Date().toISOString();
+    const txn = this._db.transaction(() => {
+      const now = new Date().toISOString();
 
-    // Check if job is already running (locking check)
-    const runningCheck = this._db.prepare('SELECT is_running FROM scheduled_job_state WHERE job_id = ?')
-      .get(jobId) as { is_running: number } | undefined;
+      const runningCheck = this._db.prepare(
+        'SELECT is_running FROM scheduled_job_state WHERE job_id = ?'
+      ).get(jobId) as { is_running: number } | undefined;
 
-    if (runningCheck && runningCheck.is_running === 1) {
-      logger.warn({ jobId }, "Job already running, skipping this trigger");
-      return null;
-    }
+      if (runningCheck && runningCheck.is_running === 1) return null;
 
-    // Create run record
-    const result = this._db.prepare(
+      const result = this._db.prepare(
         `INSERT INTO scheduled_job_runs (job_id, job_name, source_file, started_at, success)
          VALUES (?, ?, ?, ?, 0)`
-      )
-      .run(jobId, jobName, sourceFile, now);
+      ).run(jobId, jobName, sourceFile, now);
 
-    const runId = result.lastInsertRowid as number;
-
-    // Update or create job state and set is_running flag
-    this._db.prepare(
+      this._db.prepare(
         `INSERT INTO scheduled_job_state (job_id, source_file, last_run_at, is_running, updated_at)
          VALUES (?, ?, ?, 1, ?)
          ON CONFLICT(job_id) DO UPDATE SET
            last_run_at = excluded.last_run_at,
            is_running = 1,
            updated_at = excluded.updated_at`
-      )
-      .run(jobId, sourceFile, now, now);
+      ).run(jobId, sourceFile, now, now);
 
+      return result.lastInsertRowid as number;
+    });
+
+    const runId = txn();
+    if (runId === null) {
+      logger.warn({ jobId }, "Job already running, skipping this trigger");
+    }
     return runId;
+  }
+
+  /**
+   * Record a job failure but keep the is_running lock held.
+   * Used before failure takeover so cron can't re-trigger the job.
+   */
+  recordScheduledJobFailed(
+    runId: number,
+    _jobId: string,
+    output: string,
+    error?: string,
+    exitCode?: number
+  ): void {
+    this._db.prepare(
+      `UPDATE scheduled_job_runs
+       SET completed_at = ?, success = 0, output = ?, error = ?, exit_code = ?
+       WHERE id = ?`
+    ).run(new Date().toISOString(), output, error ?? null, exitCode ?? null, runId);
+    // NOTE: does NOT update scheduled_job_state.is_running or consecutive_failures
   }
 
   recordScheduledJobComplete(

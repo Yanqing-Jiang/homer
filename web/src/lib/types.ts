@@ -1,5 +1,5 @@
 // Idea types
-export type IdeaStatus = 'draft' | 'research' | 'archived';
+export type IdeaStatus = 'draft' | 'research' | 'archived' | 'completed';
 
 export interface Idea {
 	id: string;

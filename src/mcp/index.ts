@@ -8,7 +8,8 @@ import {
 import { getMemoryIndexer } from "../memory/indexer.js";
 import { appendDailyLog, createDailyEntry, readDailyLog } from "../memory/daily.js";
 import { StateManager } from "../state/manager.js";
-import { appendFile, readFile, writeFile, mkdir, readdir } from "fs/promises";
+import { logger } from "../utils/logger.js";
+import { appendFile, readFile, writeFile, mkdir, readdir, rename } from "fs/promises";
 import { existsSync } from "fs";
 import {
   parseIdeaFile,
@@ -18,6 +19,7 @@ import {
   type ParsedIdea,
 } from "../ideas/parser.js";
 import { join } from "path";
+import { savePlanFile, parsePlanFile, loadPlansFromDir, type ParsedPhase } from "../plans/parser.js";
 // Lazy-load azure-blob to avoid startup failure if @azure/storage-blob is not installed
 // Memory tools will work without it; blob tools will fail gracefully
 let azureBlobModule: typeof import("../integrations/azure-blob.js") | null = null;
@@ -35,7 +37,6 @@ async function getAzureBlob() {
 
 const MEMORY_BASE = "/Users/yj/memory";
 const IDEAS_FILE = `${MEMORY_BASE}/ideas.md`;
-const PLANS_FILE = `${MEMORY_BASE}/plans.md`;
 const PLANS_DIR = `${MEMORY_BASE}/plans`;
 const FEEDBACK_FILE = `${MEMORY_BASE}/feedback.md`;
 
@@ -52,15 +53,6 @@ interface Idea {
   context?: string;
   link?: string;
   notes?: string;
-}
-
-interface Plan {
-  id: string;
-  title: string;
-  status: "planning" | "execution" | "completed";
-  currentPhase: string;
-  createdAt: string;
-  updatedAt: string;
 }
 
 /**
@@ -442,7 +434,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       // Plan management tools
       {
         name: "plan_create",
-        description: "Create a new plan file from an approved idea.",
+        description: "Create a new plan file with YAML frontmatter and task checkboxes.",
         inputSchema: {
           type: "object",
           properties: {
@@ -456,8 +448,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             phases: {
               type: "array",
-              items: { type: "string" },
-              description: "List of phase names",
+              items: {
+                type: "object",
+                properties: {
+                  name: { type: "string", description: "Phase name" },
+                  tasks: {
+                    type: "array",
+                    items: { type: "string" },
+                    description: "Task descriptions for this phase",
+                  },
+                },
+                required: ["name", "tasks"],
+              },
+              description: "Phases with task lists",
+            },
+            status: {
+              type: "string",
+              enum: ["planning", "execution", "completed"],
+              description: "Initial status (default: planning)",
             },
             ideaId: {
               type: "string",
@@ -500,6 +508,43 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {},
+        },
+      },
+      {
+        name: "plan_archive",
+        description:
+          "Archive a completed plan. Sets status to 'completed' and moves to archive folder. Plan is preserved but hidden from active listings.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            slug: {
+              type: "string",
+              description: "Plan slug (filename without .md)",
+            },
+          },
+          required: ["slug"],
+        },
+      },
+      {
+        name: "plan_add_task",
+        description: "Add a task to an existing plan phase. Creates the phase if it doesn't exist.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            slug: {
+              type: "string",
+              description: "Plan slug (filename without .md)",
+            },
+            task: {
+              type: "string",
+              description: "Task text to add as a checkbox item",
+            },
+            phase: {
+              type: "string",
+              description: "Phase name (if omitted, adds to first phase)",
+            },
+          },
+          required: ["slug", "task"],
         },
       },
       // Feedback logging
@@ -731,12 +776,89 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           context?: "work" | "life" | "general";
           limit?: number;
         };
-        const results = indexer.search(query, limit || 10, context);
+        const maxResults = limit || 10;
+        const memoryResults = indexer.search(query, maxResults, context);
+
+        // Also search session_summaries_fts and failure_takeover_fts
+        let sessionResults: Array<{ id: string; title: string; summary: string; project: string; agent: string; started_at: string; rank: number }> = [];
+        let takeoverResults: Array<{ id: number; job_id: string; diagnosis: string; fix_description: string | null; decision: string; retry_success: number | null; created_at: string; rank: number }> = [];
+        try {
+          const sm = new StateManager("/Users/yj/homer/data/homer.db");
+          try {
+            const escapedTerms = query
+              .split(/\s+/)
+              .filter(Boolean)
+              .map((t) => t.replace(/[*()":^$]/g, ""))
+              .filter(Boolean)
+              .join(" OR ");
+
+            if (escapedTerms) {
+              sessionResults = sm.getDb().prepare(`
+                SELECT s.id, s.title, s.summary, s.project, s.agent, s.started_at,
+                       bm25(session_summaries_fts) as rank
+                FROM session_summaries_fts fts
+                JOIN session_summaries s ON fts.rowid = s.rowid
+                WHERE session_summaries_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+              `).all(escapedTerms, maxResults) as typeof sessionResults;
+            }
+
+            // Also search failure_takeover_fts for past failure diagnoses
+            if (escapedTerms) {
+              try {
+                takeoverResults = sm.getDb().prepare(`
+                  SELECT t.id, t.job_id, t.diagnosis, t.fix_description, t.decision,
+                         t.retry_success, t.created_at, bm25(failure_takeover_fts) as rank
+                  FROM failure_takeover_fts fts
+                  JOIN failure_takeover_runs t ON fts.rowid = t.rowid
+                  WHERE failure_takeover_fts MATCH ?
+                  ORDER BY rank
+                  LIMIT ?
+                `).all(escapedTerms, maxResults) as typeof takeoverResults;
+              } catch (err) {
+                logger.debug({ error: err }, "Failure takeover FTS search failed (table may not exist)");
+              }
+            }
+          } finally {
+            sm.close();
+          }
+        } catch (err) {
+          // session_summaries_fts may not exist yet — gracefully degrade
+          logger.debug({ error: err }, "Session summaries FTS search failed (table may not exist yet)");
+        }
+
+        // Combine results
+        const combined = {
+          memory: memoryResults,
+          sessions: sessionResults.map((r) => ({
+            type: "session" as const,
+            id: r.id,
+            title: r.title,
+            summary: r.summary,
+            project: r.project,
+            agent: r.agent,
+            startedAt: r.started_at,
+            rank: r.rank,
+          })),
+          takeovers: takeoverResults.map((r) => ({
+            type: "takeover" as const,
+            id: r.id,
+            jobId: r.job_id,
+            diagnosis: r.diagnosis,
+            fixDescription: r.fix_description,
+            decision: r.decision,
+            retrySuccess: r.retry_success,
+            createdAt: r.created_at,
+            rank: r.rank,
+          })),
+        };
+
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(results, null, 2),
+              text: JSON.stringify(combined, null, 2),
             },
           ],
         };
@@ -1196,56 +1318,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "plan_create": {
-        const { title, description, phases, ideaId } = args as {
+        const { title, description, phases, status, ideaId } = args as {
           title: string;
           description: string;
-          phases?: string[];
+          phases?: Array<{ name: string; tasks: string[] }>;
+          status?: string;
           ideaId?: string;
         };
 
         // Create slug from title
         const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
         const planPath = `${PLANS_DIR}/${slug}.md`;
-        const now = new Date().toISOString().slice(0, 10);
 
         // Ensure plans directory exists
         if (!existsSync(PLANS_DIR)) {
           await mkdir(PLANS_DIR, { recursive: true });
         }
 
-        // Create plan file content
-        let planContent = `# ${title}\n\n`;
-        planContent += `**Created:** ${now}\n`;
-        planContent += `**Status:** planning\n`;
-        planContent += `**Current Phase:** ${phases?.[0] || "Phase 1"}\n\n`;
-        planContent += `## Description\n\n${description}\n\n`;
-        planContent += `## Phases\n\n`;
+        // Build phases array for savePlanFile
+        const parsedPhases: ParsedPhase[] = phases
+          ? phases.map((p) => ({
+              name: p.name,
+              status: "pending" as const,
+              tasks: p.tasks.map((t) => ({ text: t, completed: false })),
+            }))
+          : [];
 
-        if (phases && phases.length > 0) {
-          for (let i = 0; i < phases.length; i++) {
-            planContent += `### ${phases[i]}\n`;
-            planContent += `- **Status:** ${i === 0 ? "in_progress" : "pending"}\n`;
-            planContent += `- **Description:** TBD\n\n`;
-          }
-        } else {
-          planContent += `### Phase 1\n- **Status:** in_progress\n- **Description:** TBD\n\n`;
-        }
+        const currentPhase = parsedPhases.length > 0 ? parsedPhases[0]!.name : null;
 
-        planContent += `## Feedback Log\n\n`;
-        planContent += `- **${now}:** Plan created\n`;
-
-        await writeFile(planPath, planContent, "utf-8");
-
-        // Update plans.md index
-        if (existsSync(PLANS_FILE)) {
-          let plansIndex = await readFile(PLANS_FILE, "utf-8");
-          const tableMarker = "<!-- Active plans listed here -->";
-          if (plansIndex.includes(tableMarker)) {
-            const newRow = `| [${title}](plans/${slug}.md) | planning | ${phases?.[0] || "Phase 1"} | ${now} |\n`;
-            plansIndex = plansIndex.replace(tableMarker, newRow + tableMarker);
-            await writeFile(PLANS_FILE, plansIndex, "utf-8");
-          }
-        }
+        savePlanFile({
+          filePath: planPath,
+          title,
+          description: description || null,
+          status: status || "planning",
+          currentPhase,
+          phases: parsedPhases,
+          sourceIdeaId: ideaId || null,
+        });
 
         // If ideaId provided, update the idea status
         if (ideaId && existsSync(IDEAS_FILE)) {
@@ -1278,34 +1387,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         const planPath = `${PLANS_DIR}/${slug}.md`;
-        if (!existsSync(planPath)) {
+        const parsed = parsePlanFile(planPath);
+        if (!parsed) {
           return {
             content: [{ type: "text", text: `Plan not found: ${slug}` }],
             isError: true,
           };
         }
 
-        let planContent = await readFile(planPath, "utf-8");
-        const now = new Date().toISOString().slice(0, 10);
-
-        if (status) {
-          planContent = planContent.replace(/\*\*Status:\*\* \w+/, `**Status:** ${status}`);
-        }
-        if (currentPhase) {
-          planContent = planContent.replace(/\*\*Current Phase:\*\* .+/, `**Current Phase:** ${currentPhase}`);
-        }
-
-        // Append to feedback log in the plan
+        // Add note through structured data
+        const updatedNotes = [...parsed.notes];
         if (notes) {
-          const feedbackSection = planContent.indexOf("## Feedback Log");
-          if (feedbackSection !== -1) {
-            const insertPoint = planContent.indexOf("\n", feedbackSection) + 1;
-            const newNote = `\n- **${now}:** ${notes}\n`;
-            planContent = planContent.slice(0, insertPoint) + newNote + planContent.slice(insertPoint);
-          }
+          const now = new Date().toISOString().slice(0, 10);
+          updatedNotes.push({ date: now, content: notes });
         }
 
-        await writeFile(planPath, planContent, "utf-8");
+        savePlanFile({
+          filePath: planPath,
+          title: parsed.title,
+          description: parsed.description,
+          status: status || parsed.status,
+          currentPhase: currentPhase || parsed.currentPhase,
+          phases: parsed.phases,
+          notes: updatedNotes,
+          sourceIdeaId: parsed.sourceIdeaId,
+          tags: parsed.tags,
+          createdAt: parsed.createdAt,
+        });
 
         return {
           content: [
@@ -1318,40 +1426,133 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "plan_list": {
-        if (!existsSync(PLANS_DIR)) {
-          return {
-            content: [{ type: "text", text: "No plans directory found" }],
-          };
-        }
-
-        const { readdir } = await import("fs/promises");
-        const files = await readdir(PLANS_DIR);
-        const plans: Plan[] = [];
-
-        for (const file of files) {
-          if (!file.endsWith(".md")) continue;
-          const content = await readFile(`${PLANS_DIR}/${file}`, "utf-8");
-
-          const titleMatch = content.match(/^# (.+)$/m);
-          const statusMatch = content.match(/\*\*Status:\*\* (\w+)/);
-          const phaseMatch = content.match(/\*\*Current Phase:\*\* (.+)/);
-          const createdMatch = content.match(/\*\*Created:\*\* (\d{4}-\d{2}-\d{2})/);
-
-          plans.push({
-            id: file.replace(".md", ""),
-            title: titleMatch?.[1] || file,
-            status: (statusMatch?.[1] || "planning") as Plan["status"],
-            currentPhase: phaseMatch?.[1] || "Unknown",
-            createdAt: createdMatch?.[1] || "Unknown",
-            updatedAt: createdMatch?.[1] || "Unknown",
-          });
-        }
+        const plans = loadPlansFromDir();
+        const summary = plans.map((p) => ({
+          id: p.id,
+          title: p.title,
+          status: p.status,
+          currentPhase: p.currentPhase || "Unknown",
+          progress: `${p.completedTasks}/${p.totalTasks}`,
+          createdAt: p.createdAt || "Unknown",
+          updatedAt: p.updatedAt || "Unknown",
+        }));
 
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(plans, null, 2),
+              text: JSON.stringify(summary, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "plan_archive": {
+        const { slug } = args as { slug: string };
+        const planPath = `${PLANS_DIR}/${slug}.md`;
+        const archiveDir = `${PLANS_DIR}/archive`;
+        const archivePath = `${archiveDir}/${slug}.md`;
+
+        const parsed = parsePlanFile(planPath);
+        if (!parsed) {
+          return {
+            content: [{ type: "text", text: `Plan not found: ${slug}` }],
+            isError: true,
+          };
+        }
+
+        const now = new Date().toISOString().slice(0, 10);
+        const archiveNotes = [...parsed.notes, { date: now, content: "Archived. Plan completed and moved to archive." }];
+
+        savePlanFile({
+          filePath: planPath,
+          title: parsed.title,
+          description: parsed.description,
+          status: "completed",
+          currentPhase: parsed.currentPhase,
+          phases: parsed.phases,
+          notes: archiveNotes,
+          sourceIdeaId: parsed.sourceIdeaId,
+          tags: parsed.tags,
+          createdAt: parsed.createdAt,
+        });
+
+        // Ensure archive directory exists and move
+        await mkdir(archiveDir, { recursive: true });
+        await rename(planPath, archivePath);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Archived plan: ${slug} → plans/archive/${slug}.md`,
+            },
+          ],
+        };
+      }
+
+      case "plan_add_task": {
+        const { slug, task, phase: phaseName } = args as {
+          slug: string;
+          task: string;
+          phase?: string;
+        };
+
+        const planPath = `${PLANS_DIR}/${slug}.md`;
+        if (!existsSync(planPath)) {
+          return {
+            content: [{ type: "text", text: `Plan not found: ${slug}` }],
+            isError: true,
+          };
+        }
+
+        const parsed = parsePlanFile(planPath);
+        if (!parsed) {
+          return {
+            content: [{ type: "text", text: `Failed to parse plan: ${slug}` }],
+            isError: true,
+          };
+        }
+
+        // Find the target phase or create it
+        let targetPhase: ParsedPhase | undefined;
+        if (phaseName) {
+          targetPhase = parsed.phases.find(
+            (p) => p.name.toLowerCase() === phaseName.toLowerCase()
+          );
+          if (!targetPhase) {
+            // Create new phase
+            targetPhase = { name: phaseName, status: "pending", tasks: [] };
+            parsed.phases.push(targetPhase);
+          }
+        } else {
+          // Use first phase, or create one
+          targetPhase = parsed.phases[0];
+          if (!targetPhase) {
+            targetPhase = { name: "Tasks", status: "pending", tasks: [] };
+            parsed.phases.push(targetPhase);
+          }
+        }
+
+        targetPhase.tasks.push({ text: task, completed: false });
+
+        savePlanFile({
+          filePath: planPath,
+          title: parsed.title,
+          description: parsed.description,
+          status: parsed.status,
+          currentPhase: parsed.currentPhase,
+          phases: parsed.phases,
+          sourceIdeaId: parsed.sourceIdeaId,
+          tags: parsed.tags,
+          createdAt: parsed.createdAt,
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Added task to ${slug} (phase: ${targetPhase.name}): ${task}`,
             },
           ],
         };

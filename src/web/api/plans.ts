@@ -1,6 +1,8 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
+import { mkdir, rename } from "fs/promises";
+import { join } from "path";
 import type { StateManager } from "../../state/manager.js";
 import { PlansIndexer } from "../../plans/indexer.js";
 import {
@@ -237,6 +239,57 @@ export function registerPlansRoutes(
       threadId,
       message: "Work thread created with plan context",
     };
+  });
+
+  // Archive a plan (mark completed + move to archive folder)
+  server.post("/api/plans/:id/archive", async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+
+    if (!plansIndexer) {
+      reply.status(503);
+      return { error: "Plans indexer not initialized" };
+    }
+
+    const plan = plansIndexer.get(id);
+    if (!plan) {
+      reply.status(404);
+      return { error: "Plan not found" };
+    }
+
+    const parsed = parsePlanFile(plan.filePath);
+    if (!parsed) {
+      reply.status(500);
+      return { error: "Failed to parse plan file" };
+    }
+
+    const now = new Date().toISOString().split("T")[0]!;
+    const archiveNotes = [...parsed.notes, { date: now, content: "Archived. Plan completed and moved to archive." }];
+
+    savePlanFile({
+      filePath: plan.filePath,
+      title: parsed.title,
+      description: parsed.description,
+      status: "completed",
+      currentPhase: parsed.currentPhase,
+      phases: parsed.phases,
+      notes: archiveNotes,
+      sourceIdeaId: parsed.sourceIdeaId,
+      tags: parsed.tags,
+      createdAt: parsed.createdAt,
+    });
+
+    const plansDir = getPlansPath();
+    const archiveDir = join(plansDir, "archive");
+    const archivePath = join(archiveDir, `${id}.md`);
+
+    // Move to archive
+    await mkdir(archiveDir, { recursive: true });
+    await rename(plan.filePath, archivePath);
+
+    // Remove from index
+    plansIndexer.updatePlan(plan.filePath);
+
+    return { message: `Archived plan: ${id}`, archivePath };
   });
 
   // Reindex plans

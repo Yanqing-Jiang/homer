@@ -13,8 +13,11 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync } from "fs";
 import { z } from "zod";
 import { fanOutAgents, consolidateResults, parseSwarmJSON } from "../../executors/model-swarm.js";
 import { buildCondensedContext, extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
+import { getRecentJobOutputs } from "../job-outputs.js";
 import { logger } from "../../utils/logger.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
+import { loadIdeasFromDir, type ParsedIdea } from "../../ideas/parser.js";
+import { smartSaveIdea, type SmartSaveResult } from "../../ideas/smart-save.js";
 import type { StateManager } from "../../state/manager.js";
 
 const MEMORY_PATH = "/Users/yj/memory";
@@ -39,6 +42,17 @@ const PromotionSchema = z.object({
 });
 
 const PromotionsArraySchema = z.array(PromotionSchema);
+
+const MinedIdeaSchema = z.object({
+  title: z.string().min(5),
+  content: z.string().min(20),
+  context: z.string(),
+});
+
+const NightlyOutputSchema = z.object({
+  promotions: PromotionsArraySchema,
+  ideas: z.array(MinedIdeaSchema).default([]),
+});
 
 // ============================================
 // HELPERS
@@ -187,8 +201,36 @@ ${rawLog.slice(0, 80000)}`,
         required: true,
       },
       {
-        id: "kimi-crossref",
-        executor: "kimi",
+        id: "flash-idea-mining",
+        executor: "opencode",
+        prompt: `Extract up to 3 actionable ideas from yesterday's daily log.
+
+An "idea" is different from a "fact to promote":
+- Facts go to permanent memory (what happened, what was decided)
+- Ideas go to the idea pipeline (what SHOULD happen next, what could be built)
+
+Focus on:
+1. Problems Yanqing encountered that could be automated
+2. Tools/repos mentioned that deserve deeper exploration
+3. Patterns or insights that suggest a new project or feature
+4. Career opportunities mentioned or implied
+
+For each idea provide: title, content (2-3 sentences), and why it matters for Yanqing's goals.
+
+## Yanqing's Current Goals
+${goals.slice(0, 1200)}
+
+## Active Projects
+${projects.slice(0, 800)}
+
+## Daily Log (${yesterday})
+${rawLog.slice(0, 40000)}`,
+        timeout: 300_000,
+        required: false,
+      },
+      {
+        id: "flash-crossref",
+        executor: "opencode",
         prompt: `Cross-reference Yanqing's permanent memory files and identify:
 
 1. What's already well-captured in each file
@@ -209,8 +251,15 @@ ${permanentContext}`,
       },
     ]);
 
+    // Cross-job intelligence
+    const recentActivity = getRecentJobOutputs(stateManager.getDb());
+
     // Consolidation — with personal context for accurate dedup
-    const consolidationPrompt = `You are a memory promotion engine. Merge the extracted facts with cross-reference context to produce final promotions.
+    // Build existing idea titles for dedup
+    const existingIdeas = loadIdeasFromDir();
+    const existingTitles = existingIdeas.slice(0, 100).map((i) => i.title).join(", ");
+
+    const consolidationPrompt = `You are a memory promotion engine. Merge the extracted facts with cross-reference context to produce final promotions AND actionable ideas.
 
 ## Who is Yanqing (for context)
 
@@ -218,6 +267,7 @@ ${condensedContext.slice(0, 2000)}
 
 ## Instructions
 
+### Promotions (facts → permanent memory)
 1. Keep only GENUINELY NEW information — deduplicate against what's already in the permanent files (use the cross-reference agent's summary to check).
 2. Map each promotion to the correct file and section.
 3. Quality bar: outcomes over process, specific over vague, milestones over routine.
@@ -225,34 +275,44 @@ ${condensedContext.slice(0, 2000)}
 5. Each promotion should be a single, self-contained statement.
 6. Use existing section names from the files when possible (the cross-reference agent should have listed them).
 
+### Ideas (forward-looking → idea pipeline)
+1. Extract from the idea-mining agent's output.
+2. Deduplicate against existing idea titles: ${existingTitles.slice(0, 2000)}
+3. Only include genuinely actionable ideas that connect to current work.
+4. 0-3 ideas maximum.
+${recentActivity ? `\n${recentActivity}\n` : ""}
 ## Output Format
 
-Return ONLY a JSON array:
-[{"content": "fact to promote", "file": "me"|"work"|"life"|"preferences"|"tools", "section": "Section Name"}]
+Return ONLY a JSON object:
+{"promotions": [{"content": "fact to promote", "file": "me"|"work"|"life"|"preferences"|"tools", "section": "Section Name"}], "ideas": [{"title": "Idea Title", "content": "what and why", "context": "how this connects to Yanqing's goals"}]}
 
-If nothing new to promote, return an empty array: []`;
+If nothing to promote/no ideas, use empty arrays.`;
 
     const consolidated = await consolidateResults(results, consolidationPrompt, {
       temperature: 0.2,
-      maxTokens: 4096,
     });
 
-    // Parse and validate
+    // Parse and validate — try new combined schema first, fall back to promotions-only
     let promotions: z.infer<typeof PromotionsArraySchema>;
-    try {
-      promotions = parseSwarmJSON(consolidated, PromotionsArraySchema);
-    } catch (parseErr) {
-      const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-      logger.error({ error: msg, rawOutput: consolidated.slice(0, 500) }, "Failed to parse nightly memory promotions");
-      return { success: false, output: "", error: `Promotion parse failed: ${msg}` };
-    }
+    let minedIdeas: z.infer<typeof MinedIdeaSchema>[] = [];
 
-    if (promotions.length === 0) {
-      return { success: true, output: `No new facts to promote from ${yesterday}'s daily log` };
+    try {
+      const nightlyOutput = parseSwarmJSON(consolidated, NightlyOutputSchema);
+      promotions = nightlyOutput.promotions ?? [];
+      minedIdeas = nightlyOutput.ideas ?? [];
+    } catch {
+      // Fall back to legacy promotions-only format
+      try {
+        promotions = parseSwarmJSON(consolidated, PromotionsArraySchema);
+      } catch (parseErr) {
+        const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+        logger.error({ error: msg, rawOutput: consolidated.slice(0, 500) }, "Failed to parse nightly memory output");
+        return { success: false, output: "", error: `Nightly output parse failed: ${msg}` };
+      }
     }
 
     // Write promotions
-    let written = 0;
+    let writtenPromos = 0;
     const writeErrors: string[] = [];
 
     for (const promo of promotions) {
@@ -265,7 +325,7 @@ If nothing new to promote, return an empty array: []`;
       try {
         const ok = appendToSection(filePath, promo.section, promo.content);
         if (ok) {
-          written++;
+          writtenPromos++;
           logger.info({ file: promo.file, section: promo.section, content: promo.content.slice(0, 80) }, "Promoted fact to permanent memory");
         } else {
           writeErrors.push(`Failed to write to ${promo.file}/${promo.section}`);
@@ -274,6 +334,40 @@ If nothing new to promote, return an empty array: []`;
         const msg = err instanceof Error ? err.message : String(err);
         writeErrors.push(`Write error for ${promo.file}: ${msg}`);
         logger.error({ error: msg, file: promo.file }, "Failed to promote fact");
+      }
+    }
+
+    // Write mined ideas via smart-save (dedup-at-write)
+    const ideaSaveResults: SmartSaveResult[] = [];
+    const now = new Date();
+    const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
+
+    for (const idea of minedIdeas) {
+      const slug = idea.title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "")
+        .slice(0, 40);
+      const id = `nightly_${now.toISOString().slice(5, 10).replace("-", "")}_${slug}`;
+
+      const parsed: ParsedIdea = {
+        id,
+        title: idea.title,
+        status: "draft",
+        source: "nightly-mining",
+        content: idea.content,
+        context: idea.context,
+        tags: ["nightly-mining", "auto-extracted"],
+        timestamp,
+      };
+
+      try {
+        const result = smartSaveIdea(parsed);
+        ideaSaveResults.push(result);
+        logger.info({ id, title: idea.title, action: result.action }, "Nightly idea processed");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn({ error: msg, title: idea.title }, "Failed to write mined idea");
       }
     }
 
@@ -286,8 +380,22 @@ If nothing new to promote, return an empty array: []`;
       logger.warn({ error: indexErr }, "Failed to reindex memory after promotions");
     }
 
-    const errorSuffix = writeErrors.length > 0 ? `. Errors: ${writeErrors.join("; ")}` : "";
-    const output = `Promoted ${written}/${promotions.length} facts from ${yesterday}'s log to permanent memory${errorSuffix}`;
+    const parts: string[] = [];
+    if (writtenPromos > 0 || promotions.length > 0) {
+      parts.push(`Promoted ${writtenPromos}/${promotions.length} facts`);
+    }
+    const ideaCreated = ideaSaveResults.filter((r) => r.action === "created").length;
+    const ideaEnhanced = ideaSaveResults.filter((r) => r.action === "enhanced").length;
+    const ideaSkipped = ideaSaveResults.filter((r) => r.action === "skipped").length;
+    if (ideaCreated > 0) parts.push(`${ideaCreated} new ideas`);
+    if (ideaEnhanced > 0) parts.push(`${ideaEnhanced} ideas enhanced`);
+    if (ideaSkipped > 0) parts.push(`${ideaSkipped} ideas skipped`);
+    if (writeErrors.length > 0) {
+      parts.push(`errors: ${writeErrors.join("; ")}`);
+    }
+    const output = parts.length > 0
+      ? `${parts.join(", ")} from ${yesterday}'s log`
+      : `No new facts or ideas from ${yesterday}'s daily log`;
 
     return { success: true, output };
   } catch (error) {
