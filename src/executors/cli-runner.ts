@@ -23,6 +23,8 @@ export interface CLIRunStartParams {
   threadId?: string;
   contextBeforeMessageId?: string;
   suppressContext?: boolean;
+  /** Called with cumulative text as Claude streams tokens */
+  onPartial?: (text: string) => void;
 }
 
 export interface CLIRunResult {
@@ -264,6 +266,7 @@ ${pendingContext.context}
               claudeSessionId: executorKind === executor ? sessionId ?? undefined : undefined,
               model: executorKind === executor ? model ?? undefined : undefined,
               signal: abortController.signal,
+              onPartial: params.onPartial,
             });
             return {
               output: result.output,
@@ -289,6 +292,7 @@ ${pendingContext.context}
               signal: abortController.signal,
               sandbox: true,
               yolo: true,
+              onPartial: params.onPartial,
             });
             return {
               output: result.output,
@@ -322,6 +326,7 @@ ${pendingContext.context}
               yolo: true,
               sandbox: true,
               signal: abortController.signal,
+              onPartial: params.onPartial,
             });
             return {
               output: result.output,
@@ -389,6 +394,7 @@ ${pendingContext.context}
             claudeSessionId: sessionId ?? undefined,
             model: model ?? undefined,
             signal: abortController.signal,
+            onPartial: params.onPartial,
           });
           output = result.output;
           exitCode = result.exitCode;

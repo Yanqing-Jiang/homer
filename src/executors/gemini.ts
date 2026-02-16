@@ -17,8 +17,8 @@ const GEMINI_CONFIG = {
     flash3: "gemini-3-flash-preview",
     pro3: "gemini-3-pro-preview",
   },
-  defaultModel: "gemini-2.0-flash",
-  fallbackModel: "gemini-2.0-pro",
+  defaultModel: "gemini-3-flash-preview",
+  fallbackModel: "gemini-3-pro-preview",
 } as const;
 
 type GeminiModel = keyof typeof GEMINI_CONFIG.models | string;
@@ -36,6 +36,7 @@ export interface GeminiAPIOptions {
   useGrounding?: boolean;
   dynamicThreshold?: number; // 0.0 to 1.0
   reasoningEffort?: "low" | "medium" | "high"; // Added back for compatibility
+  responseMimeType?: "application/json" | "text/plain";
 }
 
 export interface GeminiAPIResult extends ExecutorResult {
@@ -43,6 +44,8 @@ export interface GeminiAPIResult extends ExecutorResult {
   inputTokens?: number;
   outputTokens?: number;
   groundingMetadata?: any;
+  finishReason?: string;
+  truncated?: boolean;
 }
 
 // ============================================
@@ -92,8 +95,8 @@ export async function executeGeminiAPI(
     const {
     systemPrompt = "You are a helpful assistant. Be concise and direct.",
     temperature = 0.3,
-    maxTokens = 8192,
-    useGrounding = true, // Default to true for better research
+    maxTokens = 65536,
+    useGrounding = false, // Default off — enable explicitly for research
   } = options;
 
   logger.debug(
@@ -118,15 +121,20 @@ export async function executeGeminiAPI(
       tools,
     });
 
-    const chatConfig = {
+    const chatConfig: Record<string, unknown> = {
       temperature,
       maxOutputTokens: maxTokens,
     };
+    if (options.responseMimeType) {
+      chatConfig.responseMimeType = options.responseMimeType;
+    }
+    if (options.reasoningEffort) {
+      chatConfig.thinkingConfig = {
+        thinkingBudget: options.reasoningEffort === "high" ? 8192 :
+                        options.reasoningEffort === "medium" ? 4096 : 1024,
+      };
+    }
 
-    // Use grounding with dynamic threshold if requested
-    // Note: The SDK structure for tools/grounding is slightly different depending on version
-    // But for 0.24.x, this is the standard way.
-    
     const result = await model.generateContent({
       contents: [{ role: "user", parts: [{ text: query }] }],
       generationConfig: chatConfig,
@@ -138,6 +146,33 @@ export async function executeGeminiAPI(
 
     // Extract grounding metadata if available
     const groundingMetadata = response.candidates?.[0]?.groundingMetadata;
+    const finishReason = response.candidates?.[0]?.finishReason as string | undefined;
+    const truncated = finishReason === "MAX_TOKENS";
+
+    if (truncated) {
+      logger.warn(
+        { model: modelName, maxTokens, outputTokens: response.usageMetadata?.candidatesTokenCount },
+        "Gemini response truncated by token limit"
+      );
+    }
+    if (finishReason === "SAFETY") {
+      logger.error({ model: modelName }, "Gemini response blocked by safety filter");
+    }
+
+    // Truncated JSON is always broken — return error
+    if (truncated && options.responseMimeType === "application/json") {
+      return {
+        output: `Error: Response truncated at ${maxTokens} tokens. Increase maxTokens.`,
+        exitCode: 1,
+        duration,
+        executor: "gemini-api",
+        model: modelName,
+        inputTokens: response.usageMetadata?.promptTokenCount,
+        outputTokens: response.usageMetadata?.candidatesTokenCount,
+        finishReason,
+        truncated,
+      };
+    }
 
     logger.debug(
       {
@@ -146,6 +181,7 @@ export async function executeGeminiAPI(
         inputTokens: response.usageMetadata?.promptTokenCount,
         outputTokens: response.usageMetadata?.candidatesTokenCount,
         grounded: !!groundingMetadata,
+        finishReason,
       },
       "Native Gemini API request completed"
     );
@@ -159,13 +195,16 @@ export async function executeGeminiAPI(
       inputTokens: response.usageMetadata?.promptTokenCount,
       outputTokens: response.usageMetadata?.candidatesTokenCount,
       groundingMetadata,
+      finishReason,
+      truncated,
     };
   } catch (error) {
     const duration = Date.now() - startTime;
     const message = error instanceof Error ? error.message : String(error);
 
-    // Check if it's a model-specific error and try fallback
-    if (message.includes("model") && modelName !== GEMINI_CONFIG.fallbackModel) {
+    // Check if it's a model-specific API error and try fallback
+    const isModelError = message.includes("models/") || message.includes("not found") || message.includes("deprecated");
+    if (isModelError && modelName !== GEMINI_CONFIG.fallbackModel) {
       logger.warn({ model: modelName, error: message }, "Primary model failed, trying fallback");
       return executeGeminiAPI(query, {
         ...options,
@@ -209,7 +248,6 @@ export async function researchWithGemini(
 - Practical implications
 - Citations from web search results when available
 Be thorough but organized. Always prioritize accuracy and recent data.`,
-    maxTokens: 8192,
     temperature: 0.4,
   });
 
@@ -235,7 +273,6 @@ export async function summarizeWithGemini(
       model: "flash",
       useGrounding: false, // Don't need search for summarization
       systemPrompt: "You are an expert at analyzing and summarizing content. Extract key insights concisely.",
-      maxTokens: 4096,
       temperature: 0.2,
     }
   );
@@ -260,11 +297,11 @@ export async function planWithGemini(
   const result = await executeGeminiAPI(
     `Given this context:\n\n${context}\n\n---\n\nCreate a plan to achieve this goal: ${goal}\n\nReturn as JSON:\n{\n  "plan": "overview of approach",\n  "tasks": [\n    {"task": "description", "priority": "high|medium|low", "risk": "low|medium|high"}\n  ]\n}`,
     {
-      model: "pro", // Use pro for planning
+      model: "pro3",
       useGrounding: false,
       systemPrompt: "You are a strategic planner. Create actionable, risk-aware plans. Return valid JSON only.",
-      maxTokens: 4096,
       temperature: 0.3,
+      reasoningEffort: "high",
     }
   );
 
@@ -313,7 +350,6 @@ Keep it actionable and concise.`,
       model: "flash",
       useGrounding: false,
       systemPrompt: "You are a personal assistant creating a morning briefing. Be concise, prioritized, and actionable.",
-      maxTokens: 2048,
       temperature: 0.3,
     }
   );

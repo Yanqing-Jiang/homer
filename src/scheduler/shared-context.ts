@@ -11,6 +11,9 @@
 import { readFile, readdir } from "fs/promises";
 import { existsSync } from "fs";
 
+// Re-export for backward compatibility (function lives in job-outputs.ts)
+export { getRecentJobOutputs } from "./job-outputs.js";
+
 const CLAUDE_MD_PATH = "/Users/yj/.claude/CLAUDE.md";
 const MEMORY_DIR = "/Users/yj/memory";
 const DAILY_DIR = `${MEMORY_DIR}/daily`;
@@ -148,7 +151,7 @@ export async function extractCurrentGoals(): Promise<string> {
   if (!meMd) return "(Goals not available — me.md missing)";
 
   // Find ## Goals and capture everything until the next ## that isn't a sub-heading of Goals
-  const goalsMatch = meMd.match(/## Goals\n([\s\S]*?)(?=\n## (?!#)|\n---|\Z)/);
+  const goalsMatch = meMd.match(/## Goals\n([\s\S]*?)(?=\n## (?!#)|\n---|$)/);
   if (!goalsMatch) return "(No ## Goals section found in me.md)";
 
   return goalsMatch[1]!.trim();
@@ -162,7 +165,7 @@ export async function extractActiveProjects(): Promise<string> {
   const workMd = await readFileIfExists(`${MEMORY_DIR}/work.md`);
   if (!workMd) return "(Active projects not available — work.md missing)";
 
-  const projectsMatch = workMd.match(/## Active Projects\n([\s\S]*?)(?=\n## (?!#)|\n---|\Z)/);
+  const projectsMatch = workMd.match(/## Active Projects\n([\s\S]*?)(?=\n## (?!#)|\n---|$)/);
   if (!projectsMatch) return "(No ## Active Projects section found in work.md)";
 
   return projectsMatch[1]!.trim();
@@ -278,3 +281,4 @@ export async function buildGoalScoreboard(): Promise<string> {
 
   return goalSections.join("\n\n");
 }
+

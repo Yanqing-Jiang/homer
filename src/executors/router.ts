@@ -521,7 +521,6 @@ async function executeOnExecutor(
     case "gemini-api":
       return executeGeminiAPI(context ? `${context}\n\n---\n\n${query}` : query, {
         model: model || "flash",
-        maxTokens: 8192,
       } as GeminiAPIOptions);
 
     case "kimi":

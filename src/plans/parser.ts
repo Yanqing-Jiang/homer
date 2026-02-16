@@ -18,6 +18,11 @@ export interface ParsedPhase {
   tasks: ParsedTask[];
 }
 
+export interface PlanNote {
+  date: string;
+  content: string;
+}
+
 export interface ParsedPlan {
   id: string;               // Derived from filename (slug)
   title: string;
@@ -25,6 +30,7 @@ export interface ParsedPlan {
   currentPhase: string | null;
   description: string | null;
   phases: ParsedPhase[];
+  notes: PlanNote[];
   progress: number;         // 0.0 to 1.0
   totalTasks: number;
   completedTasks: number;
@@ -94,6 +100,7 @@ function parsePlanBody(body: string, plan: Partial<ParsedPlan>): void {
   const lines = body.split("\n");
   let currentPhase: ParsedPhase | null = null;
   let inDescription = false;
+  let inNotes = false;
   const descriptionLines: string[] = [];
 
   for (let i = 0; i < lines.length; i++) {
@@ -105,7 +112,49 @@ function parsePlanBody(body: string, plan: Partial<ParsedPlan>): void {
 
     if (line.startsWith("## Description")) {
       inDescription = true;
+      inNotes = false;
       continue;
+    }
+
+    if (line.startsWith("## Notes")) {
+      inNotes = true;
+      inDescription = false;
+      if (currentPhase) {
+        plan.phases!.push(currentPhase);
+        currentPhase = null;
+      }
+      continue;
+    }
+
+    // Skip Feedback Log section (legacy — parsed into notes)
+    if (line.startsWith("## Feedback Log")) {
+      inNotes = true;
+      inDescription = false;
+      if (currentPhase) {
+        plan.phases!.push(currentPhase);
+        currentPhase = null;
+      }
+      continue;
+    }
+
+    if (inNotes) {
+      // Parse note bullets: - **2026-02-11:** Content here
+      const noteMatch = line.match(/^-\s+\*\*(\d{4}-\d{2}-\d{2}):\*\*\s+(.+)$/);
+      if (noteMatch) {
+        plan.notes!.push({ date: noteMatch[1]!, content: noteMatch[2]! });
+      }
+      // Also parse legacy feedback table rows: | 2026-02-11 | Action | Notes |
+      const tableMatch = line.match(/^\|\s*(\d{4}-\d{2}-\d{2})\s*\|\s*(.+?)\s*\|\s*(.*?)\s*\|$/);
+      if (tableMatch) {
+        const text = tableMatch[3] ? `${tableMatch[2]} — ${tableMatch[3]}` : tableMatch[2]!;
+        plan.notes!.push({ date: tableMatch[1]!, content: text });
+      }
+      if (line.startsWith("## ")) {
+        inNotes = false;
+        // Fall through to check if this is a phase header
+      } else {
+        continue;
+      }
     }
 
     if (inDescription) {
@@ -119,7 +168,7 @@ function parsePlanBody(body: string, plan: Partial<ParsedPlan>): void {
     }
 
     const phaseMatch = line.match(/^## (?:Phase \d+(?:\.\d+)?:\s*)?(.+)$/);
-    if (phaseMatch && !line.toLowerCase().includes("description") && !line.toLowerCase().includes("feedback")) {
+    if (phaseMatch && !line.toLowerCase().includes("description") && !line.toLowerCase().includes("feedback") && !line.toLowerCase().includes("notes")) {
       if (currentPhase) {
         plan.phases!.push(currentPhase);
       }
@@ -174,6 +223,7 @@ export function parsePlanFile(filePath: string): ParsedPlan | null {
     filePath,
     contentHash: hash,
     phases: [],
+    notes: [],
     totalTasks: 0,
     completedTasks: 0,
     description: null,
@@ -361,6 +411,7 @@ export function savePlanFile(plan: {
   status?: string;
   currentPhase?: string | null;
   phases: ParsedPhase[];
+  notes?: PlanNote[];
   sourceIdeaId?: string | null;
   tags?: string[];
   createdAt?: string | null;
@@ -368,6 +419,14 @@ export function savePlanFile(plan: {
 }): void {
   const now = new Date().toISOString().split("T")[0];
   const existingMeta = readExistingPlanMeta(plan.filePath);
+
+  // Safety net: if caller didn't pass notes, preserve existing ones
+  let notes = plan.notes;
+  if (notes === undefined && existsSync(plan.filePath)) {
+    const existing = parsePlanFile(plan.filePath);
+    notes = existing?.notes ?? [];
+  }
+
   const planId = plan.id ?? existingMeta.id ?? basename(plan.filePath, ".md");
   const createdAt = plan.createdAt ?? existingMeta.createdAt ?? now;
   const updatedAt = plan.updatedAt ?? now;
@@ -399,6 +458,14 @@ export function savePlanFile(plan: {
     body += `## Phase ${i + 1}: ${phase.name}\n\n`;
     for (const task of phase.tasks) {
       body += `- [${task.completed ? "x" : " "}] ${task.text}\n`;
+    }
+    body += "\n";
+  }
+
+  if (notes && notes.length > 0) {
+    body += `## Notes\n\n`;
+    for (const note of notes) {
+      body += `- **${note.date}:** ${note.content}\n`;
     }
     body += "\n";
   }

@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "npx tsc && cp src/state/migrations/*.sql dist/state/migrations/",
+    "build": "npx tsc && cp src/state/migrations/*.sql dist/state/migrations/ && echo \"{\\\"sha\\\": \\\"$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')\\\", \\\"time\\\": \\\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\\\"}\" > dist/.build-version",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "tui": "tsx src/tui/index.ts",
@@ -14,7 +14,10 @@
     "migrate": "tsx scripts/run-migrations.ts",
     "migrate:ideas": "tsx scripts/migrate-ideas.ts",
     "migrate:plans": "tsx scripts/migrate-plans.ts",
-    "test:router": "tsx scripts/test-router.ts"
+    "test:router": "tsx scripts/test-router.ts",
+    "test:swarm": "npx tsx --test src/executors/__tests__/parse-swarm-json.test.ts",
+    "restart": "launchctl bootout gui/$(id -u)/com.homer.daemon 2>/dev/null; sleep 3 && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.homer.daemon.plist",
+    "deploy": "npm run build && node scripts/smoke-test.mjs && npm run restart"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",

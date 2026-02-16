@@ -13,6 +13,7 @@ logs/
 uploads/
 night_mode/
 config/
+output/
 
 # Personal documentation
 architecture.md
