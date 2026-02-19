@@ -313,62 +313,7 @@ VALUES
   ('codex', 'codex', 'OpenAI Codex', 'api_key', NULL, NULL);
 
 
--- ============================================
--- EXECUTOR COSTS: Track spending per executor
--- ============================================
--- Merged from 010_executor_routing.sql
-
-CREATE TABLE executor_costs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  executor TEXT NOT NULL,
-  executor_account TEXT,  -- FK to executor_accounts.id
-  input_tokens INTEGER NOT NULL,
-  output_tokens INTEGER NOT NULL,
-  cost_usd REAL NOT NULL,
-  timestamp INTEGER NOT NULL,
-  date_key TEXT NOT NULL,  -- YYYY-MM-DD for daily aggregation
-  job_id TEXT,             -- Optional link to scheduled job
-  intent_id TEXT,          -- Optional link to intent
-  run_id TEXT,             -- Optional link to run
-  query_hash TEXT          -- SHA256 of query for deduplication tracking
-);
-
-CREATE INDEX idx_executor_costs_date ON executor_costs(date_key);
-CREATE INDEX idx_executor_costs_executor ON executor_costs(executor, date_key);
-CREATE INDEX idx_executor_costs_account ON executor_costs(executor_account, date_key);
-
-
--- ============================================
--- DAILY COST SUMMARY: Materialized aggregates
--- ============================================
--- Merged from 010_executor_routing.sql
-
-CREATE TABLE daily_cost_summary (
-  date_key TEXT PRIMARY KEY,
-  gemini_cli_queries INTEGER DEFAULT 0,
-  gemini_api_cost REAL DEFAULT 0,
-  kimi_queries INTEGER DEFAULT 0,
-  claude_cost REAL DEFAULT 0,
-  codex_cost REAL DEFAULT 0,
-  total_cost REAL DEFAULT 0,
-  updated_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
-);
-
--- Trigger to update daily summary on cost insert
-CREATE TRIGGER update_daily_cost_summary
-AFTER INSERT ON executor_costs
-BEGIN
-  INSERT INTO daily_cost_summary (date_key, total_cost)
-  VALUES (NEW.date_key, NEW.cost_usd)
-  ON CONFLICT(date_key) DO UPDATE SET
-    total_cost = total_cost + NEW.cost_usd,
-    gemini_api_cost = CASE WHEN NEW.executor = 'gemini-api' THEN gemini_api_cost + NEW.cost_usd ELSE gemini_api_cost END,
-    claude_cost = CASE WHEN NEW.executor IN ('claude', 'claude-api') THEN claude_cost + NEW.cost_usd ELSE claude_cost END,
-    codex_cost = CASE WHEN NEW.executor = 'codex' THEN codex_cost + NEW.cost_usd ELSE codex_cost END,
-    gemini_cli_queries = CASE WHEN NEW.executor = 'gemini-cli' THEN gemini_cli_queries + 1 ELSE gemini_cli_queries END,
-    kimi_queries = CASE WHEN NEW.executor = 'kimi' THEN kimi_queries + 1 ELSE kimi_queries END,
-    updated_at = strftime('%s', 'now') * 1000;
-END;
+-- Cost telemetry removed.
 
 
 -- ============================================
@@ -536,19 +481,7 @@ SELECT
 FROM executor_accounts ea;
 
 
--- Daily cost overview
-CREATE VIEW v_daily_costs AS
-SELECT
-  date_key,
-  gemini_cli_queries,
-  gemini_api_cost,
-  kimi_queries,
-  claude_cost,
-  codex_cost,
-  total_cost,
-  gemini_cli_queries * 0.0 + gemini_api_cost + claude_cost + codex_cost as paid_cost
-FROM daily_cost_summary
-ORDER BY date_key DESC;
+-- Daily cost overview removed.
 
 
 -- ============================================

@@ -37,13 +37,19 @@ const activeTakeovers = new Set<string>();
 let takeoverCountToday = 0;
 let lastCountResetDate = "";
 let activeTakeoverCount = 0;
+const perJobCountToday = new Map<string, number>();
 const DAILY_LIMIT = 10;
 const CONCURRENT_LIMIT = 2;
+const MAX_PER_JOB_DAILY = 2;
+
+/** Minimum backoff delay (ms) before retrying a job that has failed recently */
+const BASE_BACKOFF_MS = 30_000; // 30 seconds
 
 function resetDailyCountIfNeeded(): void {
   const today = new Date().toISOString().slice(0, 10);
   if (today !== lastCountResetDate) {
     takeoverCountToday = 0;
+    perJobCountToday.clear();
     lastCountResetDate = today;
   }
 }
@@ -307,10 +313,25 @@ export async function runFailureTakeover(params: {
     return null;
   }
 
+  // Guard: per-job daily limit
+  const jobTakeoverCount = perJobCountToday.get(jobId) ?? 0;
+  if (jobTakeoverCount >= MAX_PER_JOB_DAILY) {
+    logger.info({ jobId, jobTakeoverCount, MAX_PER_JOB_DAILY }, "Per-job daily takeover limit reached, skipping");
+    return null;
+  }
+
+  // Guard: exponential backoff — wait longer between retries for repeatedly-failing jobs
+  if (consecutiveFailures >= 2) {
+    const backoffMs = BASE_BACKOFF_MS * Math.pow(2, consecutiveFailures - 2); // 30s, 60s, 120s, 240s
+    logger.info({ jobId, consecutiveFailures, backoffMs }, "Applying exponential backoff before takeover");
+    await new Promise(resolve => setTimeout(resolve, Math.min(backoffMs, 300_000))); // cap at 5 min
+  }
+
   // Acquire guards
   activeTakeovers.add(jobId);
   activeTakeoverCount += 1;
   takeoverCountToday += 1;
+  perJobCountToday.set(jobId, (perJobCountToday.get(jobId) ?? 0) + 1);
 
   try {
     logger.info({ jobId, runId, consecutiveFailures }, "Starting failure takeover");

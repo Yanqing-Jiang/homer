@@ -33,9 +33,9 @@ jobs:
           output_location: "build" # Built app content directory - optional
           ###### End of Repository/Build Configurations ######
         env:
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_API_BASE: https://owendevstorage.icycoast-7ad83edf.westus2.azurecontainerapps.io
+          VITE_SUPABASE_URL: https://muyfrblqagucgijljiir.supabase.co
+          VITE_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im11eWZyYmxxYWd1Y2dpamxqaWlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTM4NDc3ODEsImV4cCI6MjA2OTQyMzc4MX0.D4CN8DMCjCxVnsceBEDOZOgOImA9H_bXR_MgvEic5do
+          VITE_API_BASE: https://homer.jiangyanqing.com
 
   close_pull_request_job:
     if: github.event_name == 'pull_request' && github.event.action == 'closed'

@@ -850,10 +850,118 @@ export function streamMessage(
 }
 
 // ============================================
+// Thread Live Updates (SSE)
+// ============================================
+
+/**
+ * Subscribe to real-time thread message events via SSE.
+ * Uses fetch + ReadableStream (same pattern as streamRunEvents) to support auth headers.
+ * Returns an object with abort function for cleanup.
+ */
+export function subscribeToThread(
+	threadId: string,
+	callbacks: {
+		onMessage?: (message: ThreadMessage) => void;
+		onConnected?: () => void;
+		onError?: (err: Error) => void;
+	}
+): { abort: () => void } {
+	const controller = new AbortController();
+	let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+	let isAborted = false;
+	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const connect = () => {
+		if (isAborted) return;
+
+		// Get fresh token on each reconnect attempt
+		const currentSession = get(session);
+
+		fetch(`${API_BASE}/api/threads/${threadId}/events`, {
+			headers: {
+				...(currentSession?.access_token
+					? { Authorization: `Bearer ${currentSession.access_token}` }
+					: {})
+			},
+			signal: controller.signal
+		})
+			.then(async (response) => {
+				if (!response.ok) {
+					callbacks.onError?.(new Error(`SSE failed: ${response.status}`));
+					scheduleReconnect();
+					return;
+				}
+
+				reader = response.body?.getReader() || null;
+				if (!reader) return;
+
+				const decoder = new TextDecoder();
+				let buffer = '';
+
+				try {
+					while (!isAborted) {
+						const { done, value } = await reader.read();
+						if (done) break;
+
+						buffer += decoder.decode(value, { stream: true });
+						const { events, remaining } = parseSSEStream(buffer);
+						buffer = remaining;
+
+						for (const sseEvent of events) {
+							try {
+								const parsed = JSON.parse(sseEvent.data);
+								if (sseEvent.event === 'connected') {
+									callbacks.onConnected?.();
+								} else if (sseEvent.event === 'message') {
+									callbacks.onMessage?.(parsed as ThreadMessage);
+								}
+							} catch {
+								// Ignore parse errors
+							}
+						}
+					}
+				} finally {
+					reader?.releaseLock();
+				}
+
+				// Stream ended normally — reconnect
+				if (!isAborted) {
+					scheduleReconnect();
+				}
+			})
+			.catch((error) => {
+				if (error.name !== 'AbortError' && !isAborted) {
+					callbacks.onError?.(error);
+					scheduleReconnect();
+				}
+			});
+	};
+
+	const scheduleReconnect = () => {
+		if (isAborted) return;
+		reconnectTimer = setTimeout(() => {
+			if (!isAborted) connect();
+		}, 3000);
+	};
+
+	// Initial connection
+	connect();
+
+	return {
+		abort: () => {
+			isAborted = true;
+			controller.abort();
+			reader?.cancel().catch(() => {});
+			if (reconnectTimer) clearTimeout(reconnectTimer);
+		}
+	};
+}
+
+// ============================================
 // Commands & Executor API
 // ============================================
 
-export type ExecutorType = 'claude' | 'gemini' | 'codex' | 'chatgpt';
+export type ExecutorType = 'claude' | 'gemini' | 'codex' | 'kimi' | 'chatgpt' | 'opencode';
 
 export interface CommandDefinition {
 	name: string;

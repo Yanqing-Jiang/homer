@@ -7,13 +7,17 @@
 	import DOMPurify from 'dompurify';
 	import { useAuth } from '$lib/hooks/useAuth.svelte';
 	import { AuthOverlay } from '$lib/components';
-	import FileUpload from '$lib/components/FileUpload.svelte';
+	import ExecutorBadge from '$lib/components/ExecutorBadge.svelte';
+	import ChatMessages from '$lib/components/ChatMessages.svelte';
+	import ChatInput from '$lib/components/ChatInput.svelte';
+	import SessionDropdown from '$lib/components/SessionDropdown.svelte';
 
 	const auth = useAuth();
 
 	let searchQuery = $state('');
 	let chatInput = $state('');
-	let messages = $state<Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }>>([]);
+	let messages = $state<Array<{ id?: string; role: 'user' | 'assistant'; content: string; timestamp: Date }>>([]);
+	let knownMessageIds = $state<Set<string>>(new Set());
 	let sidebarOpen = $state(false);
 	let userMenuOpen = $state(false);
 
@@ -24,20 +28,38 @@
 	let streamingContent = $state('');
 	let currentAbort = $state<{ abort: () => void } | null>(null);
 	let chatError = $state<string | null>(null);
+	let sessionExpired = $state(false);
 
 	// Session dropdown state
 	let sessions = $state<api.ChatSession[]>([]);
 	let showSessionDropdown = $state(false);
 	let currentSessionName = $state('New Session');
-	let editingSessionId = $state<string | null>(null);
-	let editingName = $state('');
-	let deletingSessionId = $state<string | null>(null);
-	let isDeleting = $state(false);
+
+	// Notification state — track when user last viewed each session
+	const SEEN_KEY = 'homer_session_last_seen';
+	let sessionLastSeen = $state<Record<string, string>>(loadSessionLastSeen());
+
+	function loadSessionLastSeen(): Record<string, string> {
+		try {
+			return JSON.parse(localStorage.getItem(SEEN_KEY) || '{}');
+		} catch { return {}; }
+	}
+
+	function markSessionSeen(sid: string) {
+		sessionLastSeen[sid] = new Date().toISOString();
+		localStorage.setItem(SEEN_KEY, JSON.stringify(sessionLastSeen));
+	}
+
+	function hasUnread(sess: api.ChatSession): boolean {
+		if (sess.id === sessionId) return false; // Active session is always "seen"
+		const seen = sessionLastSeen[sess.id];
+		if (!seen) return true; // Never opened = unread
+		return new Date(sess.updatedAt) > new Date(seen);
+	}
 
 	// File upload state
 	let attachedFiles = $state<api.Upload[]>([]);
-	let fileUploadComponent: FileUpload;
-	let chatInputElement: HTMLTextAreaElement;
+	let chatInputComponent: ChatInput;
 
 	// Slash command state
 	let showSlashCommands = $state(false);
@@ -47,11 +69,13 @@
 
 	// Fallback commands (used until dynamic ones load)
 	const fallbackCommands = [
-		{ name: '/gemini', category: 'executor', description: 'Switch to Gemini CLI', executor: 'gemini' as api.ExecutorType },
-		{ name: '/codex', category: 'executor', description: 'Switch to Codex CLI', executor: 'codex' as api.ExecutorType },
 		{ name: '/claude', category: 'executor', description: 'Switch to Claude (default)', executor: 'claude' as api.ExecutorType },
 		{ name: '/sonnet', category: 'executor', description: 'Switch Claude to Sonnet', executor: 'claude' as api.ExecutorType, model: 'sonnet' },
 		{ name: '/opus', category: 'executor', description: 'Switch Claude to Opus', executor: 'claude' as api.ExecutorType, model: 'opus' },
+		{ name: '/codex', category: 'executor', description: 'Switch to Codex CLI', executor: 'codex' as api.ExecutorType },
+		{ name: '/kimi', category: 'executor', description: 'Kimi K2.5 CLI (long-context)', executor: 'kimi' as api.ExecutorType },
+		{ name: '/open_flash', category: 'executor', description: 'OpenCode + Gemini Flash', executor: 'opencode' as api.ExecutorType, model: 'google/gemini-3-flash-preview' },
+		{ name: '/open_opus', category: 'executor', description: 'OpenCode + Claude Opus', executor: 'opencode' as api.ExecutorType, model: 'github-copilot/claude-opus-4.6' },
 		{ name: '/chatgpt', category: 'executor', description: 'Use ChatGPT via browser skill', executor: 'chatgpt' as api.ExecutorType },
 		{ name: '/new', category: 'session', description: 'Start fresh session (reset executor)' },
 		{ name: '/search', category: 'search', description: 'Search memory files' },
@@ -154,17 +178,6 @@
 		selectedCommandIndex = 0;
 	}
 
-	function autoResizeTextarea(textarea: HTMLTextAreaElement) {
-		textarea.style.height = 'auto';
-		const maxHeight = 200; // Max height before scrolling
-		textarea.style.height = Math.min(textarea.scrollHeight, maxHeight) + 'px';
-		textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : 'hidden';
-	}
-
-	function resetTextareaHeight(textarea: HTMLTextAreaElement) {
-		textarea.style.height = 'auto';
-		textarea.style.overflowY = 'hidden';
-	}
 
 	function selectCommand(cmd: api.CommandDefinition) {
 		// For executor commands, switch immediately if no additional input needed
@@ -198,22 +211,6 @@
 		showSlashCommands = false;
 	}
 
-	function handleCommandKeydown(e: KeyboardEvent) {
-		if (!showSlashCommands || filteredCommands.length === 0) return;
-
-		if (e.key === 'ArrowDown') {
-			e.preventDefault();
-			selectedCommandIndex = Math.min(selectedCommandIndex + 1, filteredCommands.length - 1);
-		} else if (e.key === 'ArrowUp') {
-			e.preventDefault();
-			selectedCommandIndex = Math.max(selectedCommandIndex - 1, 0);
-		} else if (e.key === 'Tab' || (e.key === 'Enter' && showSlashCommands)) {
-			e.preventDefault();
-			selectCommand(filteredCommands[selectedCommandIndex]);
-		} else if (e.key === 'Escape') {
-			showSlashCommands = false;
-		}
-	}
 
 	// Sidebar navigation items
 	const sidebarItems = [
@@ -245,9 +242,15 @@
 		}
 	});
 
+	const markdownCache = new Map<string, string>();
+
 	function renderMarkdown(content: string): string {
+		const cached = markdownCache.get(content);
+		if (cached) return cached;
 		const html = marked.parse(content) as string;
-		return DOMPurify.sanitize(html, DOMPURIFY_CONFIG) as string;
+		const result = DOMPurify.sanitize(html, DOMPURIFY_CONFIG) as string;
+		markdownCache.set(content, result);
+		return result;
 	}
 
 	function formatTime(date: Date): string {
@@ -267,10 +270,17 @@
 			currentAbort.abort();
 			currentAbort = null;
 		}
+		threadSubscription?.abort();
+		threadSubscription = null;
+		if (pollInterval) {
+			clearInterval(pollInterval);
+			pollInterval = null;
+		}
 	});
 
 	// Stored context from sessionStorage (read once, use when auth completes)
 	let pendingContext = $state<{ type: 'session'; data: string } | null>(null);
+	let pendingMessage = $state<string | null>(null);
 
 	// Check for context passed from Ideas or Sessions pages
 	// Read values immediately but defer removal until auth confirms
@@ -279,6 +289,11 @@
 		const resumeSession = sessionStorage.getItem('resume_session');
 		if (resumeSession) {
 			pendingContext = { type: 'session', data: resumeSession };
+			// Also check for a pending message to auto-send
+			const storedMessage = sessionStorage.getItem('pending_message');
+			if (storedMessage) {
+				pendingMessage = storedMessage;
+			}
 			contextChecked = true;
 			return;
 		}
@@ -290,27 +305,37 @@
 	$effect(() => {
 		if (!auth.loading && auth.isAuthorized && pendingContext) {
 			const ctx = pendingContext;
+			const msgToSend = pendingMessage;
 			pendingContext = null; // Clear to prevent re-processing
+			pendingMessage = null;
 
 			sessionStorage.removeItem('resume_session');
-			try {
-				const sessionData = JSON.parse(ctx.data);
-				sessionId = sessionData.sessionId || null;
-				threadId = sessionData.threadId || null;
-				currentSessionName = sessionData.name || 'Resumed Session';
-				// Load thread messages if we have a threadId
-				if (threadId) {
-					loadThreadMessages(threadId);
+			sessionStorage.removeItem('pending_message');
+			(async () => {
+				try {
+					const sessionData = JSON.parse(ctx.data);
+					sessionId = sessionData.sessionId || null;
+					threadId = sessionData.threadId || null;
+					currentSessionName = sessionData.name || 'Resumed Session';
+					// Load thread messages if we have a threadId
+					if (threadId) {
+						await loadThreadMessages(threadId);
+					}
+					// Load executor state for resumed session
+					if (sessionId) {
+						loadExecutorState();
+						// Refresh sessions list to include the new one
+						loadSessions();
+					}
+					// Auto-send pending message after session is restored
+					if (msgToSend) {
+						chatInput = msgToSend;
+						setTimeout(() => handleSendMessage(), 50);
+					}
+				} catch (e) {
+					console.error('Failed to restore session:', e);
 				}
-				// Load executor state for resumed session
-				if (sessionId) {
-					loadExecutorState();
-					// Refresh sessions list to include the new one
-					loadSessions();
-				}
-			} catch (e) {
-				console.error('Failed to restore session:', e);
-			}
+			})();
 		}
 	});
 
@@ -329,6 +354,57 @@
 			loadSessions();
 			loadCommands();
 		}
+	});
+
+	// Background polling for session list (red dot updates)
+	let pollInterval = $state<ReturnType<typeof setInterval> | null>(null);
+
+	$effect(() => {
+		// Clean up any existing interval
+		if (pollInterval) {
+			clearInterval(pollInterval);
+			pollInterval = null;
+		}
+
+		if (!auth.loading && auth.isAuthorized) {
+			pollInterval = setInterval(() => {
+				if (!document.hidden) loadSessions();
+			}, 15000);
+		}
+
+		return () => {
+			if (pollInterval) {
+				clearInterval(pollInterval);
+				pollInterval = null;
+			}
+		};
+	});
+
+	// Thread live updates via SSE — subscribe when threadId changes
+	let threadSubscription = $state<{ abort: () => void } | null>(null);
+
+	$effect(() => {
+		// Clean up previous subscription
+		threadSubscription?.abort();
+		threadSubscription = null;
+
+		if (!threadId || !auth.isAuthorized) return;
+
+		threadSubscription = api.subscribeToThread(threadId, {
+			onMessage: (message) => {
+				// Deduplicate by message ID
+				if (message.id && knownMessageIds.has(message.id)) return;
+				if (message.id) knownMessageIds.add(message.id);
+				// Skip while actively streaming to avoid clobbering optimistic updates
+				if (isStreaming) return;
+				messages = [...messages, {
+					id: message.id,
+					role: message.role as 'user' | 'assistant',
+					content: message.content,
+					timestamp: new Date(message.createdAt)
+				}];
+			}
+		});
 	});
 
 	async function loadSessions() {
@@ -351,6 +427,7 @@
 			const session = await api.getSession(loadedSessions[0].id);
 			sessionId = session.id;
 			currentSessionName = session.name;
+			markSessionSeen(session.id);
 
 			if (session.threads.length === 0) return;
 
@@ -367,6 +444,8 @@
 
 	async function selectSession(session: api.ChatSession | null) {
 		showSessionDropdown = false;
+		markdownCache.clear();
+		sessionExpired = false;
 
 		if (currentAbort) {
 			currentAbort.abort();
@@ -391,6 +470,11 @@
 			const fullSession = await api.getSession(session.id);
 			sessionId = fullSession.id;
 			currentSessionName = fullSession.name;
+			markSessionSeen(fullSession.id);
+
+			// Clear messages immediately to prevent stale flash
+			messages = [];
+			knownMessageIds = new Set();
 
 			if (fullSession.threads.length > 0) {
 				threadId = fullSession.threads[0].id;
@@ -407,57 +491,25 @@
 		}
 	}
 
-	function startRenaming(sess: api.ChatSession, event: MouseEvent) {
-		event.stopPropagation();
-		deletingSessionId = null;
-		editingSessionId = sess.id;
-		editingName = sess.name;
-	}
-
-	async function saveRename(event?: KeyboardEvent) {
-		if (event && event.key !== 'Enter') return;
-		if (!editingSessionId || !editingName.trim()) {
-			cancelRename();
-			return;
-		}
+	async function handleRenameSession(id: string, name: string) {
 		try {
-			await api.updateSession(editingSessionId, { name: editingName.trim() });
-			// Update local state
-			sessions = sessions.map(s =>
-				s.id === editingSessionId ? { ...s, name: editingName.trim() } : s
-			);
-			if (sessionId === editingSessionId) {
-				currentSessionName = editingName.trim();
+			await api.updateSession(id, { name });
+			sessions = sessions.map(s => s.id === id ? { ...s, name } : s);
+			if (sessionId === id) {
+				currentSessionName = name;
 			}
 		} catch (e) {
 			console.error('Failed to rename session:', e);
 		}
-		editingSessionId = null;
-		editingName = '';
 	}
 
-	function cancelRename() {
-		editingSessionId = null;
-		editingName = '';
-	}
-
-	function startDeleting(sess: api.ChatSession, event: MouseEvent) {
-		event.stopPropagation();
-		editingSessionId = null;
-		editingName = '';
-		deletingSessionId = sess.id;
-	}
-
-	async function confirmDelete() {
-		if (!deletingSessionId || isDeleting) return;
-		const idToDelete = deletingSessionId;
-		isDeleting = true;
+	async function handleDeleteSession(id: string) {
 		try {
-			await api.deleteSession(idToDelete).catch(e => {
+			await api.deleteSession(id).catch(e => {
 				if (!e.message?.includes('404')) throw e;
 			});
-			sessions = sessions.filter(s => s.id !== idToDelete);
-			if (sessionId === idToDelete) {
+			sessions = sessions.filter(s => s.id !== id);
+			if (sessionId === id) {
 				if (currentAbort) {
 					currentAbort.abort();
 					currentAbort = null;
@@ -475,24 +527,14 @@
 		} catch (e) {
 			console.error('Failed to delete session:', e);
 		}
-		deletingSessionId = null;
-		isDeleting = false;
-	}
-
-	function cancelDelete() {
-		deletingSessionId = null;
-	}
-
-	function handleDeleteKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape' && deletingSessionId) {
-			cancelDelete();
-		}
 	}
 
 	async function loadThreadMessages(tId: string) {
 		try {
 			const thread = await api.getThread(tId);
+			knownMessageIds = new Set(thread.messages.map(m => m.id));
 			messages = thread.messages.map((m) => ({
+				id: m.id,
 				role: m.role as 'user' | 'assistant',
 				content: m.content,
 				timestamp: m.createdAt ? new Date(m.createdAt) : new Date()
@@ -535,6 +577,36 @@ ${summary}
 ---
 
 Just confirm when done. Keep your response brief.`;
+	}
+
+	async function continueInNewThread() {
+		if (!sessionId) return;
+		try {
+			// Grab last 6 messages as context
+			const recentMessages = messages.slice(-6);
+			const contextSummary = recentMessages
+				.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.slice(0, 500)}`)
+				.join('\n\n');
+
+			// Create new thread
+			const thread = await api.createThread(sessionId, {
+				provider: currentExecutor,
+				parentThreadId: threadId ?? undefined
+			});
+
+			// Switch to new thread
+			threadId = thread.id;
+			messages = [];
+			knownMessageIds = new Set();
+			sessionExpired = false;
+
+			// Auto-send context summary
+			chatInput = `Continuing from expired session. Previous context:\n\n${contextSummary}`;
+			setTimeout(() => handleSendMessage(), 100);
+		} catch (e) {
+			console.error('Failed to continue in new thread:', e);
+			chatError = e instanceof Error ? e.message : 'Failed to create new thread';
+		}
 	}
 
 	async function handleSignOut() {
@@ -603,14 +675,10 @@ Just confirm when done. Keep your response brief.`;
 		chatError = null;
 		messages = [...messages, { role: 'user', content: userMessage, timestamp: new Date() }];
 
-		// Reset textarea height to original size
-		if (chatInputElement) {
-			resetTextareaHeight(chatInputElement);
-		}
-
-		// Clear attachments after sending
+		// Reset textarea height and clear attachments
+		chatInputComponent?.resetHeight();
 		attachedFiles = [];
-		fileUploadComponent?.clearFiles();
+		chatInputComponent?.clearFiles();
 
 		try {
 			// Create session if needed
@@ -641,6 +709,11 @@ Just confirm when done. Keep your response brief.`;
 							try {
 								const run = await api.getRun(runId);
 								const output = run.run.output || (run.run.error ?? '');
+								// Detect session expiry from run output
+								const expiredPattern = /session expired|session not found/i;
+								if (expiredPattern.test(output) || expiredPattern.test(run.run.error ?? '')) {
+									sessionExpired = true;
+								}
 								if (output) {
 									messages = [...messages, { role: 'assistant', content: output, timestamp: new Date() }];
 								} else if (run.run.status === 'cancelled') {
@@ -658,6 +731,10 @@ Just confirm when done. Keep your response brief.`;
 						}
 					},
 					onError: (err) => {
+						// Detect session expiry from error
+						if (/session expired|SESSION_EXPIRED/i.test(err.message)) {
+							sessionExpired = true;
+						}
 						chatError = err.message;
 						streamingContent = '';
 						isStreaming = false;
@@ -691,8 +768,6 @@ Just confirm when done. Keep your response brief.`;
 		userMenuOpen = !userMenuOpen;
 	}
 </script>
-
-<svelte:window onkeydown={handleDeleteKeydown} />
 
 <svelte:head>
 	<title>Microsoft Azure</title>
@@ -810,10 +885,6 @@ Just confirm when done. Keep your response brief.`;
 			</div>
 		</header>
 
-		{#if showSessionDropdown}
-			<div class="session-dropdown-overlay" onclick={() => showSessionDropdown = false}></div>
-		{/if}
-
 		<!-- Sidebar -->
 		{#if sidebarOpen}
 			<div class="sidebar-overlay" onclick={toggleSidebar}></div>
@@ -874,97 +945,20 @@ Just confirm when done. Keep your response brief.`;
 							<!-- Empty or future nav tabs -->
 						</div>
 						<div class="copilot-right">
-							<div class="session-selector">
-								<button class="session-dropdown-btn" onclick={() => showSessionDropdown = !showSessionDropdown}>
-									<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
-										<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-									</svg>
-									<span class="session-name">{currentSessionName}</span>
-									<svg viewBox="0 0 24 24" fill="currentColor" width="10" height="10" class="chevron" class:open={showSessionDropdown}>
-										<path d="M7 10l5 5 5-5z"/>
-									</svg>
-								</button>
-								{#if showSessionDropdown}
-									<div class="session-dropdown">
-										<button class="session-dropdown-item new-session" onclick={() => selectSession(null)}>
-											<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-												<path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
-											</svg>
-											New Session
-										</button>
-										<div class="session-dropdown-divider"></div>
-										{#if sessions.length === 0}
-											<div class="session-dropdown-empty">No recent sessions</div>
-										{:else}
-											{#each sessions as sess}
-												{#if editingSessionId === sess.id}
-													<div class="session-dropdown-item editing">
-														<input
-															type="text"
-															class="session-rename-input"
-															bind:value={editingName}
-															onkeydown={(e) => e.key === 'Enter' ? saveRename() : e.key === 'Escape' ? cancelRename() : null}
-															onblur={() => saveRename()}
-															autofocus
-														/>
-														<button class="session-rename-save" onclick={() => saveRename()}>
-															<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
-																<path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
-															</svg>
-														</button>
-													</div>
-												{:else if deletingSessionId === sess.id}
-													<div class="session-dropdown-item deleting">
-														<span class="session-delete-label">Delete this chat?</span>
-														<div class="session-delete-actions">
-															<button class="session-delete-confirm" onclick={() => confirmDelete()} disabled={isDeleting}>
-																{isDeleting ? '...' : 'Delete'}
-															</button>
-															<button class="session-delete-cancel" onclick={() => cancelDelete()} disabled={isDeleting}>Cancel</button>
-														</div>
-													</div>
-												{:else}
-													<div
-														class="session-dropdown-item"
-														class:active={sess.id === sessionId}
-													>
-														<button class="session-item-main" onclick={() => selectSession(sess)}>
-															<span class="session-item-name">{sess.name}</span>
-															<span class="session-item-date">{new Date(sess.updatedAt).toLocaleDateString()}</span>
-														</button>
-														<button class="session-rename-btn" onclick={(e) => startRenaming(sess, e)} title="Rename" aria-label="Rename session {sess.name}">
-															<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12">
-																<path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
-															</svg>
-														</button>
-														<button class="session-delete-btn" onclick={(e) => startDeleting(sess, e)} title="Delete" aria-label="Delete session {sess.name}">
-															<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12">
-																<path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
-															</svg>
-														</button>
-													</div>
-												{/if}
-											{/each}
-										{/if}
-										<div class="session-dropdown-divider"></div>
-										<a href="/sessions" class="session-dropdown-item view-all">
-											View All Sessions
-											<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
-												<path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/>
-											</svg>
-										</a>
-									</div>
-								{/if}
-							</div>
+							<SessionDropdown
+								{sessions}
+								currentSessionId={sessionId}
+								{currentSessionName}
+								bind:isOpen={showSessionDropdown}
+								{hasUnread}
+								onSelectSession={(sess) => selectSession(sess)}
+								onNewSession={() => selectSession(null)}
+								onRenameSession={handleRenameSession}
+								onDeleteSession={handleDeleteSession}
+								onLoadSessions={loadSessions}
+							/>
 						<div class="executor-indicator">
-							<span class="executor-badge" class:executor-claude={currentExecutor === 'claude'}
-								class:executor-gemini={currentExecutor === 'gemini'}
-								class:executor-codex={currentExecutor === 'codex'}>
-								{currentExecutor}
-								{#if currentModel}
-									<span class="executor-model">({currentModel})</span>
-								{/if}
-							</span>
+							<ExecutorBadge executor={currentExecutor} model={currentModel} />
 						</div>
 					</div>
 				</div>
@@ -977,130 +971,32 @@ Just confirm when done. Keep your response brief.`;
 						</div>
 					{/if}
 
+					<!-- Session Expired Banner -->
+					{#if sessionExpired}
+						<div class="session-expired-banner">
+							<span>Session expired. Context will be carried over.</span>
+							<button onclick={() => continueInNewThread()}>Continue in New Thread</button>
+							<button class="dismiss-btn" onclick={() => sessionExpired = false}>Dismiss</button>
+						</div>
+					{/if}
+
 					<!-- Chat Messages Area -->
-					<div class="chat-messages">
-						{#if messages.length === 0 && !isStreaming}
-							<!-- Welcome Message -->
-							<div class="message assistant">
-								<div class="message-avatar">
-									<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-										<path d="M12 2L9.5 9.5L2 12L9.5 14.5L12 22L14.5 14.5L22 12L14.5 9.5L12 2Z"/>
-									</svg>
-								</div>
-								<div class="message-content">
-									<div class="message-bubble">
-										Hi! I'm Homer AI. I can help you manage your sessions, ideas, plans, and jobs. What would you like to do?
-									</div>
-								</div>
-							</div>
-						{:else}
-							{#each messages as message}
-								<div class="message {message.role}">
-									{#if message.role === 'assistant'}
-										<div class="message-avatar">
-											<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-												<path d="M12 2L9.5 9.5L2 12L9.5 14.5L12 22L14.5 14.5L22 12L14.5 9.5L12 2Z"/>
-											</svg>
-										</div>
-									{/if}
-									<div class="message-content">
-										{#if message.role === 'assistant'}
-											<div class="message-bubble markdown-content">{@html renderMarkdown(message.content)}</div>
-										{:else}
-											<div class="message-bubble">{message.content}</div>
-										{/if}
-									<span class="message-timestamp">{formatTime(message.timestamp)}</span>
-									</div>
-								</div>
-							{/each}
-							{#if isStreaming && streamingContent}
-								<div class="message assistant streaming">
-									<div class="message-avatar">
-										<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-											<path d="M12 2L9.5 9.5L2 12L9.5 14.5L12 22L14.5 14.5L22 12L14.5 9.5L12 2Z"/>
-										</svg>
-									</div>
-									<div class="message-content">
-										<div class="message-bubble markdown-content">{@html renderMarkdown(streamingContent)}<span class="cursor">|</span></div>
-									</div>
-								</div>
-							{:else if isStreaming}
-								<div class="message assistant streaming">
-									<div class="message-avatar">
-										<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-											<path d="M12 2L9.5 9.5L2 12L9.5 14.5L12 22L14.5 14.5L22 12L14.5 9.5L12 2Z"/>
-										</svg>
-									</div>
-									<div class="message-content">
-										<div class="message-bubble"><span class="typing-indicator"><span></span><span></span><span></span></span></div>
-									</div>
-								</div>
-							{/if}
-						{/if}
-					</div>
+					<ChatMessages {messages} {isStreaming} {streamingContent} {renderMarkdown} {formatTime} />
 
 					<!-- Chat Input Area -->
-					<div class="chat-input-area">
-						<div class="input-row">
-							<FileUpload
-								bind:this={fileUploadComponent}
-								sessionId={sessionId}
-								onFilesChange={(files) => attachedFiles = files}
-							/>
-							<div class="input-container">
-								{#if showSlashCommands && filteredCommands.length > 0}
-									<div class="slash-command-dropdown">
-										{#each filteredCommands as cmd, i}
-											<button
-												class="slash-command-item"
-												class:selected={i === selectedCommandIndex}
-												onclick={() => selectCommand(cmd)}
-											>
-												<span class="cmd-name">{cmd.name}</span>
-												{#if cmd.category === 'executor'}
-													<span class="cmd-badge executor">switch</span>
-												{:else if cmd.category === 'session'}
-													<span class="cmd-badge session">session</span>
-												{/if}
-												<span class="cmd-desc">{cmd.description}</span>
-											</button>
-										{/each}
-									</div>
-								{/if}
-								<textarea
-									placeholder="Ask me anything... (type / for commands)"
-									class="chat-input"
-									bind:value={chatInput}
-									bind:this={chatInputElement}
-									disabled={isStreaming}
-									oninput={(e) => {
-										handleInputChange(e);
-										autoResizeTextarea(e.target as HTMLTextAreaElement);
-									}}
-									onkeydown={(e) => {
-										handleCommandKeydown(e);
-										if (e.key === 'Enter' && !e.shiftKey && !showSlashCommands) {
-											e.preventDefault();
-											handleSendMessage();
-										}
-									}}
-									rows="1"
-								></textarea>
-								<button class="send-btn" onclick={handleSendMessage} disabled={!chatInput.trim() || isStreaming} aria-label="Send">
-									{#if isStreaming}
-										<span class="spinner-small"></span>
-									{:else}
-										<svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
-											<path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-										</svg>
-									{/if}
-								</button>
-							</div>
-						</div>
-						<div class="input-disclaimer">
-							AI-generated content may be incorrect
-						</div>
-					</div>
+					<ChatInput
+						bind:this={chatInputComponent}
+						bind:value={chatInput}
+						{isStreaming}
+						{sessionId}
+						bind:attachedFiles
+						bind:showSlashCommands
+						{filteredCommands}
+						bind:selectedCommandIndex
+						onSend={handleSendMessage}
+						onSelectCommand={selectCommand}
+						onInputChange={handleInputChange}
+					/>
 				</div>
 			</section>
 		</main>
@@ -1363,272 +1259,6 @@ Just confirm when done. Keep your response brief.`;
 		background: #f5f5f5;
 	}
 
-	/* Session Selector (in Copilot Header) */
-	.session-selector {
-		position: relative;
-	}
-
-	.session-dropdown-btn {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		color: white;
-		font-size: 12px;
-		cursor: pointer;
-		background: rgba(255, 255, 255, 0.15);
-		border: none;
-		padding: 4px 10px;
-		border-radius: 4px;
-		transition: background 0.15s;
-	}
-
-	.session-dropdown-btn:hover {
-		background: rgba(255, 255, 255, 0.25);
-	}
-
-	.session-name {
-		font-weight: 500;
-		max-width: 150px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.chevron {
-		opacity: 0.8;
-		transition: transform 0.2s;
-	}
-
-	.chevron.open {
-		transform: rotate(180deg);
-	}
-
-	.session-dropdown {
-		position: absolute;
-		top: 100%;
-		right: 0;
-		margin-top: 8px;
-		background: white;
-		border: 1px solid #e0e0e0;
-		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
-		min-width: 280px;
-		max-width: calc(100vw - 40px);
-		z-index: 1000;
-		border-radius: 4px;
-		max-height: 400px;
-		overflow-y: auto;
-	}
-
-	.session-dropdown-item {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		width: 100%;
-		padding: 10px 16px;
-		background: none;
-		border: none;
-		font-size: 13px;
-		color: #1b1b1b;
-		text-align: left;
-		text-decoration: none;
-	}
-
-	.session-dropdown-item:hover {
-		background: #f5f5f5;
-	}
-
-	.session-dropdown-item.active {
-		background: #e8f4fc;
-		color: #0078d4;
-	}
-
-	.session-dropdown-item.new-session {
-		color: #0078d4;
-		font-weight: 500;
-	}
-
-	.session-dropdown-item.view-all {
-		color: #0078d4;
-	}
-
-	.session-item-name {
-		flex: 1;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.session-item-date {
-		font-size: 11px;
-		color: #666;
-		flex-shrink: 0;
-	}
-
-	.session-item-main {
-		flex: 1;
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 10px;
-		background: none;
-		border: none;
-		padding: 0;
-		font-size: 13px;
-		color: #1b1b1b;
-		cursor: pointer;
-		text-align: left;
-		min-width: 0;
-	}
-
-	.session-rename-btn {
-		opacity: 0;
-		background: none;
-		border: none;
-		padding: 4px;
-		cursor: pointer;
-		color: #666;
-		border-radius: 4px;
-		transition: all 0.15s;
-		flex-shrink: 0;
-	}
-
-	.session-dropdown-item:hover .session-rename-btn {
-		opacity: 1;
-	}
-
-	.session-rename-btn:hover {
-		background: #e0e0e0;
-		color: #333;
-	}
-
-	.session-dropdown-item.editing {
-		padding: 6px 10px;
-	}
-
-	.session-rename-input {
-		flex: 1;
-		padding: 4px 8px;
-		border: 1px solid #0078d4;
-		border-radius: 4px;
-		font-size: 13px;
-		outline: none;
-	}
-
-	.session-rename-save {
-		background: none;
-		border: none;
-		padding: 4px;
-		cursor: pointer;
-		color: #0078d4;
-		border-radius: 4px;
-	}
-
-	.session-rename-save:hover {
-		background: #e8f4fc;
-	}
-
-	.session-delete-btn {
-		opacity: 0;
-		background: none;
-		border: none;
-		padding: 4px;
-		cursor: pointer;
-		color: #666;
-		border-radius: 4px;
-		transition: all 0.15s;
-		flex-shrink: 0;
-	}
-
-	.session-dropdown-item:hover .session-delete-btn {
-		opacity: 1;
-	}
-
-	.session-delete-btn:hover {
-		background: #fee2e2;
-		color: #dc2626;
-	}
-
-	.session-dropdown-item.deleting {
-		padding: 8px 16px;
-		justify-content: space-between;
-	}
-
-	.session-delete-label {
-		font-size: 13px;
-		color: #1b1b1b;
-	}
-
-	.session-delete-actions {
-		display: flex;
-		gap: 8px;
-	}
-
-	.session-delete-confirm {
-		background: #dc2626;
-		color: white;
-		border: none;
-		padding: 4px 12px;
-		border-radius: 4px;
-		font-size: 12px;
-		cursor: pointer;
-		font-weight: 500;
-	}
-
-	.session-delete-confirm:hover {
-		background: #b91c1c;
-	}
-
-	.session-delete-cancel {
-		background: none;
-		color: #666;
-		border: 1px solid #d0d0d0;
-		padding: 4px 12px;
-		border-radius: 4px;
-		font-size: 12px;
-		cursor: pointer;
-	}
-
-	.session-delete-cancel:hover {
-		background: #f5f5f5;
-		color: #333;
-	}
-
-	.session-delete-confirm:disabled,
-	.session-delete-cancel:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	/* Touch device support: always show action buttons */
-	@media (hover: none) {
-		.session-rename-btn,
-		.session-delete-btn {
-			opacity: 1;
-		}
-	}
-
-	.session-dropdown-divider {
-		height: 1px;
-		background: #e0e0e0;
-		margin: 4px 0;
-	}
-
-	.session-dropdown-empty {
-		padding: 12px 16px;
-		color: #666;
-		font-size: 13px;
-		font-style: italic;
-	}
-
-	.session-dropdown-overlay {
-		position: fixed;
-		top: 0;
-		left: 0;
-		right: 0;
-		bottom: 0;
-		z-index: 49;
-	}
-
 	/* Executor Indicator (in Copilot Header) */
 	.executor-indicator {
 		display: flex;
@@ -1636,37 +1266,6 @@ Just confirm when done. Keep your response brief.`;
 		gap: 6px;
 	}
 
-	.executor-badge {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		padding: 3px 10px;
-		border-radius: 12px;
-		font-size: 11px;
-		font-weight: 600;
-		text-transform: capitalize;
-		white-space: nowrap;
-	}
-
-	.executor-badge.executor-claude {
-		background: rgba(255, 255, 255, 0.9);
-		color: #0078d4;
-	}
-
-	.executor-badge.executor-gemini {
-		background: #4285f4;
-		color: white;
-	}
-
-	.executor-badge.executor-codex {
-		background: #10b981;
-		color: white;
-	}
-
-	.executor-model {
-		font-weight: 400;
-		opacity: 0.8;
-	}
 
 	/* Sidebar - Azure Portal Style (Dark Theme) */
 	.sidebar-overlay {
@@ -1801,6 +1400,42 @@ Just confirm when done. Keep your response brief.`;
 		font-size: 12px;
 	}
 
+	/* Session Expired Banner */
+	.session-expired-banner {
+		background: #fffbeb;
+		border-bottom: 1px solid #fde68a;
+		color: #92400e;
+		padding: 10px 16px;
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		font-size: 13px;
+	}
+
+	.session-expired-banner button {
+		background: #f59e0b;
+		border: none;
+		color: white;
+		cursor: pointer;
+		padding: 4px 12px;
+		border-radius: 4px;
+		font-size: 12px;
+		font-weight: 600;
+		white-space: nowrap;
+	}
+
+	.session-expired-banner button:hover {
+		background: #d97706;
+	}
+
+	.session-expired-banner button.dismiss-btn {
+		background: none;
+		color: #92400e;
+		text-decoration: underline;
+		padding: 0;
+		font-weight: 400;
+	}
+
 	/* Copilot Header (Purple - Azure Copilot style) */
 	.copilot-header {
 		background: linear-gradient(135deg, #7B4FBE 0%, #5B3FA0 100%);
@@ -1844,371 +1479,13 @@ Just confirm when done. Keep your response brief.`;
 	}
 
 	/* Chat Messages */
-	.chat-messages {
-		flex: 1;
-		min-height: 0;
-		overflow-y: auto;
-		padding: 24px;
-		display: flex;
-		flex-direction: column;
-		gap: 16px;
-		background: #faf9f8;
-	}
 
-	/* Center messages in full-width layout */
-	.chat-messages .message {
-		max-width: 900px;
-	}
 
-	.chat-messages .message.assistant {
-		margin-right: auto;
-	}
-
-	.chat-messages .message.user {
-		margin-left: auto;
-	}
-
-	.message {
-		display: flex;
-		gap: 10px;
-	}
-
-	.message.user {
-		flex-direction: row-reverse;
-	}
-
-	.message-avatar {
-		width: 28px;
-		height: 28px;
-		border-radius: 50%;
-		background: linear-gradient(135deg, #0078d4 0%, #004578 100%);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		flex-shrink: 0;
-		color: white;
-	}
-
-	.message-content {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	.message-bubble {
-		padding: 10px 14px;
-		font-size: 14px;
-		line-height: 1.5;
-	}
-
-	.message.assistant .message-bubble {
-		background: white;
-		border: 1px solid #e0e0e0;
-		border-radius: 2px 8px 8px 8px;
-		color: #1b1b1b;
-	}
-
-	.message.user .message-bubble {
-		background: #e1dfdd;
-		border-radius: 8px 2px 8px 8px;
-		color: #1b1b1b;
-	}
-
-	.message-timestamp {
-		display: block;
-		font-size: 11px;
-		color: #888;
-		margin-top: 4px;
-	}
-
-	.message.user .message-timestamp {
-		text-align: right;
-	}
-
-	.message.assistant .message-timestamp {
-		text-align: left;
-	}
-
-	/* Chat Input */
-	.chat-input-area {
-		padding: 12px 24px;
-		border-top: 1px solid #e0e0e0;
-		background: white;
-	}
-
-	.input-row {
-		display: flex;
-		align-items: flex-end;
-		gap: 8px;
-		max-width: 900px;
-		margin: 0 auto;
-	}
-
-	.input-container {
-		display: flex;
-		align-items: flex-end;
-		gap: 8px;
-		background: #f5f5f5;
-		border: 1px solid #e0e0e0;
-		border-radius: 8px;
-		padding: 8px 8px 8px 12px;
-		flex: 1;
-		position: relative;
-	}
-
-	.input-container:focus-within {
-		border-color: #0078d4;
-		box-shadow: 0 0 0 1px #0078d4;
-	}
-
-	/* Slash Command Dropdown */
-	.slash-command-dropdown {
-		position: absolute;
-		bottom: 100%;
-		left: 0;
-		right: 0;
-		background: white;
-		border: 1px solid #e0e0e0;
-		border-radius: 8px;
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-		margin-bottom: 4px;
-		max-height: 240px;
-		overflow-y: auto;
-		z-index: 100;
-	}
-
-	.slash-command-item {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: 4px 8px;
-		width: 100%;
-		padding: 10px 14px;
-		border: none;
-		background: transparent;
-		cursor: pointer;
-		text-align: left;
-		transition: background 0.1s;
-	}
-
-	.slash-command-item:hover,
-	.slash-command-item.selected {
-		background: #f0f4ff;
-	}
-
-	.slash-command-item .cmd-name {
-		font-weight: 600;
-		font-size: 14px;
-		color: #0078d4;
-	}
-
-	.slash-command-item .cmd-desc {
-		font-size: 12px;
-		color: #666;
-		width: 100%;
-		flex-basis: 100%;
-	}
-
-	.slash-command-item .cmd-badge {
-		font-size: 10px;
-		padding: 2px 6px;
-		border-radius: 10px;
-		font-weight: 500;
-		text-transform: uppercase;
-	}
-
-	.slash-command-item .cmd-badge.executor {
-		background: #ddd6fe;
-		color: #7c3aed;
-	}
-
-	.slash-command-item .cmd-badge.session {
-		background: #fef3c7;
-		color: #d97706;
-	}
-
-	.chat-input {
-		flex: 1;
-		border: none;
-		background: transparent;
-		font-size: 14px;
-		padding: 8px 0;
-		outline: none;
-		resize: none;
-		min-height: 24px;
-		max-height: 200px;
-		line-height: 1.5;
-		font-family: inherit;
-		overflow-y: hidden;
-	}
-
-	.chat-input::placeholder {
-		color: #888;
-	}
-
-	.send-btn {
-		width: 36px;
-		height: 36px;
-		border-radius: 4px;
-		background: #0078d4;
-		border: none;
-		color: white;
-		cursor: pointer;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		transition: all 0.15s;
-	}
-
-	.send-btn:hover:not(:disabled) {
-		background: #106ebe;
-	}
-
-	.send-btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.input-disclaimer {
-		font-size: 11px;
-		color: #888;
-		margin-top: 8px;
-		text-align: center;
-	}
-
-	/* Streaming and typing indicators */
-	.streaming .message-bubble {
-		border-color: #0078d4;
-	}
-
-	.cursor {
-		animation: blink 1s infinite;
-		color: #0078d4;
-	}
-
-	@keyframes blink {
-		0%, 50% { opacity: 1; }
-		51%, 100% { opacity: 0; }
-	}
-
-	.typing-indicator {
-		display: flex;
-		gap: 4px;
-		padding: 4px 0;
-	}
-
-	.typing-indicator span {
-		width: 8px;
-		height: 8px;
-		background: #0078d4;
-		border-radius: 50%;
-		animation: bounce 1.4s infinite ease-in-out both;
-	}
-
-	.typing-indicator span:nth-child(1) { animation-delay: -0.32s; }
-	.typing-indicator span:nth-child(2) { animation-delay: -0.16s; }
-	.typing-indicator span:nth-child(3) { animation-delay: 0; }
-
-	@keyframes bounce {
-		0%, 80%, 100% { transform: scale(0); }
-		40% { transform: scale(1); }
-	}
-
-	.spinner-small {
-		width: 16px;
-		height: 16px;
-		border: 2px solid rgba(255, 255, 255, 0.3);
-		border-top-color: white;
-		border-radius: 50%;
-		animation: spin 0.8s linear infinite;
-	}
-
-	@keyframes spin {
-		to { transform: rotate(360deg); }
-	}
-
-	/* Markdown content styling */
-	.markdown-content {
-		line-height: 1.6;
-	}
-
-	.markdown-content :global(p) {
-		margin: 0 0 0.5em 0;
-	}
-
-	.markdown-content :global(p:last-child) {
-		margin-bottom: 0;
-	}
-
-	.markdown-content :global(code) {
-		background: rgba(0, 0, 0, 0.05);
-		padding: 2px 6px;
-		border-radius: 3px;
-		font-family: monospace;
-		font-size: 0.9em;
-	}
-
-	.markdown-content :global(pre) {
-		background: #1e1e1e;
-		color: #d4d4d4;
-		padding: 12px;
-		border-radius: 6px;
-		overflow-x: auto;
-		margin: 8px 0;
-	}
-
-	.markdown-content :global(pre code) {
-		background: none;
-		padding: 0;
-		color: inherit;
-	}
-
-	.markdown-content :global(ul), .markdown-content :global(ol) {
-		margin: 8px 0;
-		padding-left: 20px;
-	}
-
-	.markdown-content :global(li) {
-		margin: 4px 0;
-	}
-
-	.markdown-content :global(h1), .markdown-content :global(h2), .markdown-content :global(h3) {
-		margin: 12px 0 8px 0;
-		font-weight: 600;
-	}
-
-	.markdown-content :global(h1) { font-size: 1.4em; }
-	.markdown-content :global(h2) { font-size: 1.2em; }
-	.markdown-content :global(h3) { font-size: 1.1em; }
-
-	.markdown-content :global(blockquote) {
-		border-left: 3px solid #0078d4;
-		padding-left: 12px;
-		margin: 8px 0;
-		color: #666;
-	}
-
-	.markdown-content :global(a) {
-		color: #0078d4;
-		text-decoration: none;
-	}
-
-	.markdown-content :global(a:hover) {
-		text-decoration: underline;
-	}
 
 	/* Mobile Responsiveness */
 	@media (max-width: 768px) {
 		.search-container {
 			display: none;
-		}
-
-		.chat-messages {
-			padding: 16px;
-		}
-
-		.chat-messages .message {
-			max-width: 100%;
 		}
 	}
 
@@ -2219,10 +1496,6 @@ Just confirm when done. Keep your response brief.`;
 
 		.azure-text {
 			display: none;
-		}
-
-		.session-name {
-			max-width: 120px;
 		}
 	}
 </style>

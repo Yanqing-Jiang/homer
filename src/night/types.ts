@@ -207,6 +207,7 @@ export interface NightModeConfig {
   // Schedule
   startHour: number;  // 0-23, default 1 (1 AM)
   endHour: number;    // 0-23, default 6 (6 AM)
+  generateMorningBriefing: boolean; // default false, use scheduled morning-brief job as source of truth
 
   // Autonomy
   autoApproveGreen: boolean;
@@ -230,6 +231,7 @@ export interface NightModeConfig {
 export const DEFAULT_CONFIG: NightModeConfig = {
   startHour: 1,
   endHour: 6,
+  generateMorningBriefing: false,
   autoApproveGreen: true,
   notifyOnYellow: true,
   requireApprovalForRed: true,

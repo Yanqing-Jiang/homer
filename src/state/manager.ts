@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
+import { threadEvents } from "../events/thread-events.js";
 
 export interface Session {
   id: string;
@@ -843,7 +844,7 @@ export class StateManager {
                 branch_point_message_id as branchPointMessageId, last_message_at as lastMessageAt,
                 created_at as createdAt
          FROM threads WHERE chat_session_id = ?
-         ORDER BY created_at DESC`
+         ORDER BY last_message_at DESC NULLS LAST, created_at DESC`
       )
       .all(sessionId) as Thread[];
   }
@@ -1043,7 +1044,7 @@ export class StateManager {
       )
       .run(now, message.threadId);
 
-    return {
+    const result: ThreadMessage = {
       id: message.id,
       threadId: message.threadId,
       role: message.role,
@@ -1051,6 +1052,15 @@ export class StateManager {
       metadata: message.metadata ?? null,
       createdAt: now,
     };
+
+    // Emit event for real-time SSE subscribers
+    try {
+      threadEvents.emitMessage(message.threadId, result);
+    } catch (e) {
+      logger.warn({ error: e, threadId: message.threadId }, "Thread event emission failed");
+    }
+
+    return result;
   }
 
   getThreadLinks(threadId: string): ThreadLink[] {

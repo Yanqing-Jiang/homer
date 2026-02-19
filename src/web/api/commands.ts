@@ -139,13 +139,18 @@ export function registerCommandRoutes(
       let contextBuilt = false;
       if (previousExecutor !== body.executor) {
         try {
-          // Extract threadId from sessionId (web:threadId format -> threadId)
-          const threadId = sessionId;
-          const context = await buildConversationContext(
+          // Look up the most recently active thread for this session
+          const threads = stateManager.listThreads(sessionId);
+          const firstThread = threads[0];
+          const threadId = firstThread ? firstThread.id : null;
+          if (!threadId) {
+            logger.debug({ sessionId }, "No threads found for context building, skipping");
+          }
+          const context = threadId ? await buildConversationContext(
             stateManager,
             { type: "thread", id: threadId },
             { maxMessages: 10, maxTokens: 2000 }
-          );
+          ) : { messageCount: 0, anchorCount: 0, formatted: '' };
 
           if (context.messageCount > 0) {
             stateManager.setPendingContext(lane, context.formatted, previousExecutor);

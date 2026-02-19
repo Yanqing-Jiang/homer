@@ -2,6 +2,7 @@ import { readFileSync, readdirSync, statSync, existsSync } from "fs";
 import { join } from "path";
 import { createHash } from "crypto";
 import { logger } from "../utils/logger.js";
+import { SONNET_MODEL } from "../models.js";
 
 export interface ParsedMessage {
   role: "user" | "assistant" | "system";
@@ -129,69 +130,6 @@ export function parseCodexSession(filePath: string): ParsedSession | null {
 }
 
 /**
- * Parse Gemini CLI session from JSON file
- * Location: ~/.gemini/tmp/{project_hash}/chats/session-*.json
- */
-export function parseGeminiSession(filePath: string): ParsedSession | null {
-  try {
-    const content = readFileSync(filePath, "utf-8");
-    const data = JSON.parse(content);
-
-    const messages: ParsedMessage[] = [];
-
-    // Gemini format: { sessionId, messages: [...], model, startTime, lastUpdated }
-    if (data.messages && Array.isArray(data.messages)) {
-      for (const msg of data.messages) {
-        const role = msg.type === "user" ? "user" : msg.type === "gemini" ? "assistant" : "system";
-
-        messages.push({
-          role,
-          content: msg.content || "",
-          timestamp: msg.timestamp,
-          metadata: {
-            thoughts: msg.thoughts || [],
-            tokens: msg.tokens || {},
-          },
-        });
-      }
-    }
-
-    if (messages.length === 0) {
-      return null;
-    }
-
-    // Generate content hash
-    const normalizedContent = messages
-      .map((m) => `${m.role}:${m.content.trim().toLowerCase()}`)
-      .join("\n");
-    const contentHash = createHash("sha256")
-      .update(normalizedContent)
-      .digest("hex");
-
-    // Estimate tokens from metadata if available
-    const tokenEstimate = data.messages.reduce((sum: number, msg: any) => {
-      return sum + (msg.tokens?.total || 0);
-    }, 0);
-
-    return {
-      sessionId: data.sessionId || `gemini-${Date.now()}`,
-      agent: "gemini",
-      nativeFilePath: filePath,
-      messages,
-      model: data.model || "gemini-3-flash-preview",
-      startedAt: data.startTime,
-      endedAt: data.lastUpdated,
-      messageCount: messages.length,
-      tokenEstimate: tokenEstimate > 0 ? tokenEstimate : undefined,
-      contentHash,
-    };
-  } catch (error) {
-    logger.error({ error, filePath }, "Failed to parse Gemini session");
-    return null;
-  }
-}
-
-/**
  * Parse Kimi CLI session from JSONL file
  * Location: ~/.kimi/sessions/{account_hash}/{session_uuid}/context.jsonl
  */
@@ -290,43 +228,6 @@ export function scanCodexSessions(homeDir: string, sinceDays: number = 7): strin
     }
   } catch (error) {
     logger.error({ error }, "Failed to scan Codex sessions");
-  }
-
-  return sessionFiles;
-}
-
-/**
- * Scan for Gemini session files within a date range
- */
-export function scanGeminiSessions(homeDir: string, sinceDays: number = 7): string[] {
-  const geminiBase = join(homeDir, ".gemini", "tmp");
-  if (!existsSync(geminiBase)) {
-    return [];
-  }
-
-  const cutoffTime = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
-  const sessionFiles: string[] = [];
-
-  try {
-    const projectDirs = readdirSync(geminiBase);
-
-    for (const projectDir of projectDirs) {
-      const chatsPath = join(geminiBase, projectDir, "chats");
-      if (!existsSync(chatsPath)) continue;
-
-      const files = readdirSync(chatsPath).filter((f) => f.startsWith("session-") && f.endsWith(".json"));
-
-      for (const file of files) {
-        const filePath = join(chatsPath, file);
-        const stats = statSync(filePath);
-
-        if (stats.mtimeMs >= cutoffTime) {
-          sessionFiles.push(filePath);
-        }
-      }
-    }
-  } catch (error) {
-    logger.error({ error }, "Failed to scan Gemini sessions");
   }
 
   return sessionFiles;
@@ -658,7 +559,7 @@ export function parseClaudeSession(filePath: string): ParsedSession | null {
       agent: "claude",
       nativeFilePath: filePath,
       messages,
-      model: model || "claude-sonnet-4-5",
+      model: model || SONNET_MODEL,
       project: project || undefined,
       startedAt: startTime || undefined,
       endedAt: endTime || undefined,
@@ -778,12 +679,8 @@ export function parseOpencodeSession(filePath: string): ParsedSession | null {
       .join("\n");
     const contentHash = createHash("sha256").update(normalizedContent).digest("hex");
 
-    // Extract model info from last assistant message or session metadata
-    let model = "unknown";
-    const lastAssistantMsg = messages
-      .slice()
-      .reverse()
-      .find((m) => m.role === "assistant");
+    // Extract model info from message metadata
+    let model = "opencode-unknown";
 
     // Format timestamps
     const startedAt = sessionMeta.time?.created
@@ -798,7 +695,7 @@ export function parseOpencodeSession(filePath: string): ParsedSession | null {
       agent: "opencode",
       nativeFilePath: filePath,
       messages,
-      model: lastAssistantMsg ? "opencode-multi-model" : model,
+      model: model || "opencode-unknown",
       startedAt,
       endedAt,
       messageCount: messages.length,

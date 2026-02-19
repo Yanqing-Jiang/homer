@@ -16,6 +16,7 @@ import { registerOvernightCommands, handleOvernightMessage } from "./handlers/ov
 import { handleYouTubeUrl, initializeYouTubeHandler } from "./handlers/youtube.js";
 import { registerJobApprovalHandlers } from "./handlers/job-approval.js";
 import { registerJobCommands, setJobScheduler } from "./handlers/job-commands.js";
+import { registerOutcomeHandlers } from "./handlers/outcome.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { StateManager } from "../state/manager.js";
 import { sendThinkingIndicator, editWithResponse, TelegramDraftStream } from "./streaming.js";
@@ -135,6 +136,9 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
   registerJobApprovalHandlers(bot, stateManager);
   registerJobCommands(bot, stateManager);
 
+  // Register outcome check callbacks
+  registerOutcomeHandlers(bot);
+
   // Initialize YouTube URL handler
   initializeYouTubeHandler(stateManager);
 
@@ -150,7 +154,8 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
         `*Current executor:* ${currentExecutor}\n\n` +
         "*Executor Commands:* (persistent)\n" +
         "/claude - Claude (default)\n" +
-        "/gemini - Gemini CLI\n" +
+        "/open_flash - OpenCode + Gemini Flash\n" +
+        "/open_opus - OpenCode + Claude Opus\n" +
         "/codex - Codex (deep reasoning)\n" +
         "/kimi - Kimi K2.5 (long-context)\n\n" +
         "*Session:*\n" +
@@ -792,22 +797,7 @@ ${checksStr}`;
         return;
       }
 
-      // Inject voice-mode instruction: produce spoken response + bullet-point summary
-      parsed.query = `<voice-mode>
-You MUST structure your response in exactly two sections using these XML tags:
-
-<spoken>
-Your full spoken response here. Natural spoken language suitable for text-to-speech. No markdown, no bullet lists, no code blocks. Use conversational transitions. Cover all key points thoroughly but concisely.
-</spoken>
-
-<summary>
-A bullet-point summary (using • or -) of the key takeaways. This is a separate written summary for reading, NOT a transcript of the spoken part. Keep it concise — max 5-8 bullets. Use markdown formatting.
-</summary>
-
-IMPORTANT: You MUST include both <spoken> and <summary> tags. The spoken section is for audio playback. The summary is a complementary text reference with the main points.
-</voice-mode>\n\n${parsed.query}`;
-
-      const responseText = await handleNewExecution(ctx, parsed, stateManager, runManager, true);
+      const responseText = await handleNewExecution(ctx, parsed, stateManager, runManager, true, [], true);
 
       // Voice in = voice out: always reply with voice
       if (voiceConfig.elevenLabsApiKey && responseText) {
@@ -1003,13 +993,28 @@ IMPORTANT: You MUST include both <spoken> and <summary> tags. The spoken section
 /**
  * Handle execution with the new command system
  */
+const VOICE_MODE_INSTRUCTION = `<voice-mode>
+You MUST structure your response in exactly two sections using these XML tags:
+
+<spoken>
+Your full spoken response here. Natural spoken language suitable for text-to-speech. No markdown, no bullet lists, no code blocks. Use conversational transitions. Cover all key points thoroughly but concisely.
+</spoken>
+
+<summary>
+A bullet-point summary (using • or -) of the key takeaways. This is a separate written summary for reading, NOT a transcript of the spoken part. Keep it concise — max 5-8 bullets. Use markdown formatting.
+</summary>
+
+IMPORTANT: You MUST include both <spoken> and <summary> tags. The spoken section is for audio playback. The summary is a complementary text reference with the main points.
+</voice-mode>`;
+
 async function handleNewExecution(
   ctx: Context,
   parsed: ParsedCommand,
   stateManager: StateManager,
   runManager: CLIRunManager,
   returnResponse: boolean,
-  attachments: string[] = []
+  attachments: string[] = [],
+  voiceMode: boolean = false
 ): Promise<string | void> {
   if (!ctx.chat) {
     if (returnResponse) return "Error: chat context unavailable.";
@@ -1087,7 +1092,7 @@ async function handleNewExecution(
       return;
     }
 
-    const finalQuery = memoryContext + parsed.query;
+    const finalQuery = memoryContext + (voiceMode ? `${VOICE_MODE_INSTRUCTION}\n\n${parsed.query}` : parsed.query);
 
     const { result } = await runManager.startRun({
       lane,

@@ -43,7 +43,7 @@ export function registerJobCommands(bot: Bot, stateManager: StateManager): void 
 
       // Today's applied count
       const todayApplied = (db.prepare(
-        "SELECT COUNT(*) as c FROM applications WHERE status = 'application_submitted' AND date(updated_at) = date('now')"
+        "SELECT COUNT(*) as c FROM applications WHERE status = 'application_submitted' AND updated_at >= date('now') AND updated_at < date('now', '+1 day')"
       ).get() as { c: number }).c;
 
       let msg = "<b>Job Hunt Pipeline</b>\n\n";

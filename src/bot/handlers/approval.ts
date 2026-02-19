@@ -1,13 +1,19 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { logger } from "../../utils/logger.js";
-import { readFile, writeFile, appendFile, readdir } from "fs/promises";
+import { readFile, writeFile, appendFile } from "fs/promises";
 import { existsSync } from "fs";
-import { join } from "path";
 import type { StateManager } from "../../state/manager.js";
+import { trackIdeaProgress, trackIdeaArchived } from "../../outcomes/hooks.js";
+import {
+  loadIdeasFromDir,
+  parseIdeasMd,
+  updateIdeaField,
+  appendIdeaNote,
+  type ParsedIdea,
+} from "../../ideas/parser.js";
 
 const MEMORY_BASE = "/Users/yj/memory";
 const IDEAS_FILE = `${MEMORY_BASE}/ideas.md`;
-const IDEAS_DIR = `${MEMORY_BASE}/ideas`;
 const FEEDBACK_FILE = `${MEMORY_BASE}/feedback.md`;
 const DENY_HISTORY_FILE = `${MEMORY_BASE}/deny-history.md`;
 
@@ -49,250 +55,10 @@ setInterval(() => {
   }
 }, 300000); // Every 5 minutes
 
-type IdeaStatus = "draft" | "review" | "discussion" | "planning" | "execution" | "archived";
-
-interface Idea {
-  id: string;
-  timestamp: string;
-  source: string;
-  status: IdeaStatus;
-  title: string;
-  content: string;
-  context?: string;
-  link?: string;
-  notes?: string;
-  tags?: string[];
-}
-
 /**
- * Parse a single idea file with YAML frontmatter (~/memory/ideas/*.md)
+ * Format an idea for ideas.md (LEGACY — only used for ideas.md write-back)
  */
-function parseIdeaFile(content: string, filename: string): Idea | null {
-  const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
-  if (!fmMatch) return null;
-
-  const frontmatter = fmMatch[1] ?? "";
-  const body = fmMatch[2] ?? "";
-
-  const get = (key: string): string => {
-    const m = frontmatter.match(new RegExp(`^${key}:\\s*(.+)$`, "m"));
-    return m?.[1]?.trim() ?? "";
-  };
-
-  const id = get("id") || filename.replace(/\.md$/, "");
-  const status = get("status") as IdeaStatus || "draft";
-  const title = get("title");
-  if (!title) return null;
-
-  const tagsRaw = get("tags");
-  const tags = tagsRaw ? tagsRaw.replace(/^\[|\]$/g, "").split(",").map(t => t.trim()).filter(Boolean) : [];
-
-  // Extract context section if present
-  const contextMatch = body.match(/## Context\n([\s\S]*?)(?=\n##|$)/);
-  const contextText = contextMatch?.[1]?.trim() ?? "";
-
-  // Body before first ## section is the main content
-  const mainContent = body.split(/\n## /)[0]?.trim() ?? "";
-
-  return {
-    id,
-    timestamp: get("created") || "",
-    source: get("source") || "unknown",
-    status,
-    title,
-    content: mainContent,
-    context: contextText || undefined,
-    link: get("link") || undefined,
-    notes: get("notes") || undefined,
-    tags: tags.length > 0 ? tags : undefined,
-  };
-}
-
-/**
- * Load all ideas from ~/memory/ideas/ directory (new file-based system)
- */
-async function loadIdeasFromDir(): Promise<Idea[]> {
-  if (!existsSync(IDEAS_DIR)) return [];
-
-  const files = await readdir(IDEAS_DIR);
-  const mdFiles = files.filter(f => f.endsWith(".md")).sort();
-  const ideas: Idea[] = [];
-
-  for (const file of mdFiles) {
-    try {
-      const content = await readFile(join(IDEAS_DIR, file), "utf-8");
-      const idea = parseIdeaFile(content, file);
-      if (idea) ideas.push(idea);
-    } catch (error) {
-      logger.warn({ file, error }, "Failed to parse idea file");
-    }
-  }
-
-  return ideas;
-}
-
-/**
- * Update an idea file's YAML frontmatter field
- */
-async function updateIdeaFileField(ideaId: string, field: string, value: string): Promise<boolean> {
-  if (!existsSync(IDEAS_DIR)) return false;
-
-  const files = await readdir(IDEAS_DIR);
-  for (const file of files) {
-    if (!file.endsWith(".md")) continue;
-    const filepath = join(IDEAS_DIR, file);
-    const content = await readFile(filepath, "utf-8");
-    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
-    if (!fmMatch) continue;
-
-    const fm = fmMatch[1] ?? "";
-    const idMatch = fm.match(/^id:\s*(.+)$/m);
-    const fileId = idMatch?.[1]?.trim() ?? file.replace(/\.md$/, "");
-
-    if (fileId === ideaId || fileId.startsWith(ideaId) || file.replace(/\.md$/, "") === ideaId) {
-      const fieldRegex = new RegExp(`^${field}:.*$`, "m");
-      let newContent: string;
-      if (fieldRegex.test(fm)) {
-        newContent = content.replace(
-          new RegExp(`(^---\\n[\\s\\S]*?)^${field}:.*$`, "m"),
-          `$1${field}: ${value}`
-        );
-      } else {
-        // Add field before closing ---
-        newContent = content.replace(/^(---\n[\s\S]*?)\n---/, `$1\n${field}: ${value}\n---`);
-      }
-      await writeFile(filepath, newContent, "utf-8");
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Append a note to an idea file's body
- */
-async function appendIdeaNote(ideaId: string, note: string): Promise<boolean> {
-  if (!existsSync(IDEAS_DIR)) return false;
-
-  const files = await readdir(IDEAS_DIR);
-  for (const file of files) {
-    if (!file.endsWith(".md")) continue;
-    const filepath = join(IDEAS_DIR, file);
-    const content = await readFile(filepath, "utf-8");
-    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
-    if (!fmMatch) continue;
-
-    const fm = fmMatch[1] ?? "";
-    const idMatch = fm.match(/^id:\s*(.+)$/m);
-    const fileId = idMatch?.[1]?.trim() ?? file.replace(/\.md$/, "");
-
-    if (fileId === ideaId || fileId.startsWith(ideaId) || file.replace(/\.md$/, "") === ideaId) {
-      const timestamp = new Date().toISOString().slice(0, 16).replace("T", " ");
-      const appendText = `\n\n## Notes\n- [${timestamp}] ${note}\n`;
-      await writeFile(filepath, content.trimEnd() + appendText, "utf-8");
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Parse ideas.md file into structured data (LEGACY - kept for backward compat)
- */
-function parseIdeasFile(content: string): Idea[] {
-  const ideas: Idea[] = [];
-  const lines = content.split("\n");
-  let currentIdea: Partial<Idea> | null = null;
-  let currentSection = "";
-
-  for (const line of lines) {
-    if (line.startsWith("## Draft Ideas")) {
-      currentSection = "draft";
-      continue;
-    }
-    if (line.startsWith("## Under Review")) {
-      currentSection = "review";
-      continue;
-    }
-    if (line.startsWith("## Archived")) {
-      currentSection = "archived";
-      continue;
-    }
-
-    const headerMatch = line.match(/^### \[(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\] (.+)$/);
-    if (headerMatch) {
-      if (currentIdea && currentIdea.id) {
-        ideas.push(currentIdea as Idea);
-      }
-      // Generate deterministic ID from timestamp (will be overwritten if ID field found)
-      const timestampHash = (headerMatch[1] ?? "").replace(/[- :]/g, "").slice(-8);
-      currentIdea = {
-        id: timestampHash,
-        timestamp: headerMatch[1] ?? "",
-        title: headerMatch[2] ?? "",
-        status: currentSection as IdeaStatus || "draft",
-        source: "unknown",
-        content: "",
-      };
-      continue;
-    }
-
-    if (currentIdea) {
-      const idMatch = line.match(/^- \*\*ID:\*\* (.+)$/);
-      if (idMatch) {
-        currentIdea.id = idMatch[1];
-        continue;
-      }
-
-      const sourceMatch = line.match(/^- \*\*Source:\*\* (.+)$/);
-      if (sourceMatch) {
-        currentIdea.source = sourceMatch[1];
-        continue;
-      }
-
-      const statusMatch = line.match(/^- \*\*Status:\*\* (.+)$/);
-      if (statusMatch) {
-        currentIdea.status = statusMatch[1] as IdeaStatus;
-        continue;
-      }
-
-      const contentMatch = line.match(/^- \*\*Content:\*\* (.+)$/);
-      if (contentMatch) {
-        currentIdea.content = contentMatch[1];
-        continue;
-      }
-
-      const contextMatch = line.match(/^- \*\*Context:\*\* (.+)$/);
-      if (contextMatch) {
-        currentIdea.context = contextMatch[1];
-        continue;
-      }
-
-      const linkMatch = line.match(/^- \*\*Link:\*\* (.+)$/);
-      if (linkMatch) {
-        currentIdea.link = linkMatch[1];
-        continue;
-      }
-
-      const notesMatch = line.match(/^- \*\*Notes:\*\* (.+)$/);
-      if (notesMatch) {
-        currentIdea.notes = notesMatch[1];
-        continue;
-      }
-    }
-  }
-
-  if (currentIdea && currentIdea.id) {
-    ideas.push(currentIdea as Idea);
-  }
-
-  return ideas;
-}
-
-/**
- * Format an idea for ideas.md
- */
-function formatIdea(idea: Idea): string {
+function formatIdea(idea: ParsedIdea): string {
   let output = `### [${idea.timestamp}] ${idea.title}\n`;
   output += `- **ID:** ${idea.id}\n`;
   output += `- **Source:** ${idea.source}\n`;
@@ -305,9 +71,9 @@ function formatIdea(idea: Idea): string {
 }
 
 /**
- * Rebuild ideas.md from parsed ideas
+ * Rebuild ideas.md from parsed ideas (LEGACY — only used for ideas.md write-back)
  */
-function rebuildIdeasFile(ideas: Idea[]): string {
+function rebuildIdeasFile(ideas: ParsedIdea[]): string {
   const draft = ideas.filter(i => i.status === "draft");
   const review = ideas.filter(i => i.status === "review" || i.status === "discussion");
   const archived = ideas.filter(i => i.status === "archived" || i.status === "planning" || i.status === "execution");
@@ -343,9 +109,9 @@ async function logFeedback(action: string, target: string, notes?: string): Prom
 }
 
 /**
- * Find idea by ID (partial match)
+ * Find idea by ID (partial match) — used for legacy ideas.md fallback
  */
-function findIdea(ideas: Idea[], id: string): Idea | undefined {
+function findIdea(ideas: ParsedIdea[], id: string): ParsedIdea | undefined {
   return ideas.find(i =>
     i.id === id ||
     i.id.startsWith(id) ||
@@ -359,17 +125,23 @@ function findIdea(ideas: Idea[], id: string): Idea | undefined {
 async function archiveIdea(
   ideaId: string,
   reason: string = "Archived"
-): Promise<{ success: boolean; message: string; idea?: Idea }> {
+): Promise<{ success: boolean; message: string; idea?: ParsedIdea }> {
   // Try file-based system first
-  const dirIdeas = await loadIdeasFromDir();
+  const dirIdeas = loadIdeasFromDir();
   const dirIdea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
 
   if (dirIdea) {
-    const updated = await updateIdeaFileField(ideaId, "status", "archived");
+    const updated = await updateIdeaField(ideaId, "status", "archived");
     if (updated) {
       await appendIdeaNote(ideaId, reason);
       await logDenyHistory(dirIdea.title, dirIdea.source, reason, dirIdea.link);
       await logFeedback("archive", dirIdea.title, reason);
+      // Track outcome for archived idea
+      try {
+        if (stateManagerRef) {
+          trackIdeaArchived(stateManagerRef.getDb(), ideaId, dirIdea.title);
+        }
+      } catch { /* outcome tracking best-effort */ }
       return { success: true, message: `Archived: ${dirIdea.title}`, idea: dirIdea };
     }
   }
@@ -380,7 +152,7 @@ async function archiveIdea(
   }
 
   const content = await readFile(IDEAS_FILE, "utf-8");
-  const ideas = parseIdeasFile(content);
+  const ideas = parseIdeasMd(content);
   const idea = findIdea(ideas, ideaId);
 
   if (!idea) {
@@ -406,7 +178,7 @@ async function addIdeaInstructions(
   instructions: string
 ): Promise<{ success: boolean; message: string; title?: string }> {
   // Try file-based system first
-  const dirIdeas = await loadIdeasFromDir();
+  const dirIdeas = loadIdeasFromDir();
   const dirIdea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
 
   if (dirIdea) {
@@ -423,7 +195,7 @@ async function addIdeaInstructions(
   }
 
   const content = await readFile(IDEAS_FILE, "utf-8");
-  const ideas = parseIdeasFile(content);
+  const ideas = parseIdeasMd(content);
   const idea = findIdea(ideas, ideaId);
 
   if (!idea) {
@@ -488,18 +260,23 @@ export async function getDenyPatterns(): Promise<string[]> {
 }
 
 /**
- * Create inline keyboard for an idea
+ * Create inline keyboard for an idea.
+ * Telegram callback_data max is 64 bytes — truncate ID to fit.
+ * Callback handlers use startsWith matching, so truncation is safe.
  */
 export function createIdeaKeyboard(ideaId: string): InlineKeyboard {
+  // Longest payload: "a:i:" + id + ":archive" = 12 + id.length
+  const maxIdLen = 64 - "a:i:".length - ":archive".length; // 52
+  const id = ideaId.length > maxIdLen ? ideaId.slice(0, maxIdLen) : ideaId;
   return new InlineKeyboard()
-    .text("💬 Talk", `a:i:${ideaId}:talk`)
-    .text("🗂 Archive", `a:i:${ideaId}:archive`);
+    .text("💬 Talk", `a:i:${id}:talk`)
+    .text("🗂 Archive", `a:i:${id}:archive`);
 }
 
 /**
  * Format idea for Telegram message with intent summary
  */
-export function formatIdeaForTelegram(idea: Idea, index: number): string {
+export function formatIdeaForTelegram(idea: ParsedIdea, index: number): string {
   const emoji = ["1️⃣", "2️⃣", "3️⃣"][index] || "▪️";
   const title = escapeHtml(idea.title);
   const source = escapeHtml(idea.source);
@@ -578,7 +355,7 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       await ctx.answerCallbackQuery("Starting analysis...");
 
       // Load idea
-      const dirIdeas = await loadIdeasFromDir();
+      const dirIdeas = loadIdeasFromDir();
       const idea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
 
       if (!idea) {
@@ -595,9 +372,16 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       );
 
       // Update status + append note
-      await updateIdeaFileField(ideaId, "status", "discussion");
+      await updateIdeaField(ideaId, "status", "discussion");
       await appendIdeaNote(ideaId, "Multi-model analysis started");
       await logFeedback("talk", idea.title);
+
+      // Track outcome for this idea entering discussion
+      try {
+        if (stateManagerRef) {
+          trackIdeaProgress(stateManagerRef.getDb(), ideaId, idea.title);
+        }
+      } catch { /* outcome tracking best-effort */ }
 
       // Build notify callback using bot.api (ctx expires after handler returns)
       const chatId = ctx.chat?.id;
@@ -648,12 +432,12 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
 
     try {
       // Look up idea from both systems
-      const dirIdeas = await loadIdeasFromDir();
+      const dirIdeas = loadIdeasFromDir();
       let idea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
 
       if (!idea && existsSync(IDEAS_FILE)) {
         const content = await readFile(IDEAS_FILE, "utf-8");
-        const legacyIdeas = parseIdeasFile(content);
+        const legacyIdeas = parseIdeasMd(content);
         idea = findIdea(legacyIdeas, ideaId);
       }
 
@@ -775,18 +559,20 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
   }
 
   // Load drafts from BOTH systems, dedup by ID
-  const dirIdeas = await loadIdeasFromDir();
+  const dirIdeas = loadIdeasFromDir();
   const dirDrafts = dirIdeas.filter(i => i.status === "draft");
 
-  let legacyDrafts: Idea[] = [];
+  let legacyDrafts: ParsedIdea[] = [];
   if (existsSync(IDEAS_FILE)) {
     const content = await readFile(IDEAS_FILE, "utf-8");
-    const legacyIdeas = parseIdeasFile(content);
+    const legacyIdeas = parseIdeasMd(content);
     const existingIds = new Set(dirDrafts.map(i => i.id));
     legacyDrafts = legacyIdeas.filter(i => i.status === "draft" && !existingIds.has(i.id));
   }
 
-  const allDrafts = [...dirDrafts, ...legacyDrafts].slice(0, remaining);
+  const allDrafts = [...dirDrafts, ...legacyDrafts]
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+    .slice(0, remaining);
 
   if (allDrafts.length === 0) {
     return 0;
@@ -816,7 +602,7 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
       // Mark as review only after successful send
       const isFileBased = dirDrafts.some(d => d.id === idea.id);
       if (isFileBased) {
-        await updateIdeaFileField(idea.id, "status", "review");
+        await updateIdeaField(idea.id, "status", "review");
       } else {
         // Legacy system — update in memory and write once after loop
         idea.status = "review";
@@ -835,7 +621,7 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
   const updatedLegacy = allDrafts.filter(i => i.status === "review" && legacyDrafts.some(l => l.id === i.id));
   if (updatedLegacy.length > 0 && existsSync(IDEAS_FILE)) {
     const content = await readFile(IDEAS_FILE, "utf-8");
-    const legacyIdeas = parseIdeasFile(content);
+    const legacyIdeas = parseIdeasMd(content);
     for (const updated of updatedLegacy) {
       const found = findIdea(legacyIdeas, updated.id);
       if (found) found.status = "review";
