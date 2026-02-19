@@ -79,7 +79,7 @@
 		return 'active'; // everything else (draft, research, researching, exploring, review, planning, execution)
 	}
 
-	const filteredIdeas = $derived(() => {
+	const filteredIdeas = $derived.by(() => {
 		return ideas.filter(idea => {
 			// Hide ideas that are linked to plans - they should be viewed in Plans tab
 			if (idea.linkedPlanId) return false;
@@ -103,7 +103,7 @@
 		}
 	}
 
-	const statusCounts = $derived(() => {
+	const statusCounts = $derived.by(() => {
 		const visibleIdeas = ideas.filter(idea => !idea.linkedPlanId);
 		const counts: Record<string, number> = { all: visibleIdeas.length, active: 0, archived: 0, completed: 0 };
 		visibleIdeas.forEach(idea => {
@@ -274,16 +274,14 @@
 				? `I'd like to discuss this idea:\n\n**${idea.title}**${fileRef}\n\nRead the idea file above for full content, context, and exploration notes.`
 				: `I'd like to discuss this idea:\n\n**${idea.title}**\n\n${idea.content}${idea.context ? `\n\nContext: ${idea.context}` : ''}`;
 
-			// Execute the message (this sends it and gets a response)
-			await api.executeMessage(thread.id, messageContent);
-
-			// Store session info for navigation
+			// Store session info + pending message for navigation
 			sessionStorage.setItem('resume_session', JSON.stringify({
 				sessionId: session.id,
 				threadId: thread.id
 			}));
+			sessionStorage.setItem('pending_message', messageContent);
 
-			// Smooth client-side navigation
+			// Navigate immediately — message will auto-send on main page
 			closeIdea();
 			await goto('/');
 		} catch (e) {
@@ -403,28 +401,28 @@
 				class:active={filterStatus === 'all'}
 				onclick={() => filterStatus = 'all'}
 			>
-				All <span class="tab-count">{statusCounts().all}</span>
+				All <span class="tab-count">{statusCounts.all}</span>
 			</button>
 			<button
 				class="tab"
 				class:active={filterStatus === 'active'}
 				onclick={() => filterStatus = 'active'}
 			>
-				Active <span class="tab-count">{statusCounts().active || 0}</span>
+				Active <span class="tab-count">{statusCounts.active || 0}</span>
 			</button>
 			<button
 				class="tab"
 				class:active={filterStatus === 'archived'}
 				onclick={() => filterStatus = 'archived'}
 			>
-				Archived <span class="tab-count">{statusCounts().archived || 0}</span>
+				Archived <span class="tab-count">{statusCounts.archived || 0}</span>
 			</button>
 			<button
 				class="tab"
 				class:active={filterStatus === 'completed'}
 				onclick={() => filterStatus = 'completed'}
 			>
-				Completed <span class="tab-count">{statusCounts().completed || 0}</span>
+				Completed <span class="tab-count">{statusCounts.completed || 0}</span>
 			</button>
 		</div>
 	</div>
@@ -441,7 +439,7 @@
 	<div class="ideas-list">
 		{#if loading}
 			<div class="loading">Loading ideas...</div>
-		{:else if filteredIdeas().length === 0}
+		{:else if filteredIdeas.length === 0}
 			<EmptyState
 				icon="ideas"
 				title="No ideas found"
@@ -454,7 +452,7 @@
 				{/if}
 			</EmptyState>
 		{:else}
-			{#each filteredIdeas() as idea}
+			{#each filteredIdeas as idea}
 				<button class="idea-card" onclick={() => openIdea(idea)}>
 					<div class="idea-header">
 						<span class="idea-source">{getSourceIcon(idea.source)}</span>

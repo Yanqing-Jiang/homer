@@ -289,8 +289,12 @@ export function saveIdeaFile(idea: ParsedIdea): string {
     mkdirSync(IDEAS_DIR, { recursive: true });
   }
 
-  const fileName = `idea_${idea.id}.md`;
-  const filePath = join(IDEAS_DIR, fileName);
+  // If filePath already set (existing file), save in place to avoid duplicates.
+  // Otherwise: don't double-prefix IDs that already start with "idea_".
+  const filePath = idea.filePath ?? join(
+    IDEAS_DIR,
+    idea.id.startsWith("idea_") ? `${idea.id}.md` : `idea_${idea.id}.md`
+  );
   const content = formatIdeaFile(idea);
 
   writeFileSync(filePath, content, "utf-8");
@@ -314,6 +318,84 @@ export function getIdeasPaths(): { legacyFile: string; directory: string } {
     legacyFile: IDEAS_FILE,
     directory: IDEAS_DIR,
   };
+}
+
+/**
+ * Update an idea file's YAML frontmatter field by idea ID.
+ * Matches by frontmatter id (exact, prefix, or filename stem).
+ * Uses surgical regex replacement — no full round-trip through formatIdeaFile().
+ */
+export async function updateIdeaField(
+  ideaId: string,
+  field: string,
+  value: string
+): Promise<boolean> {
+  if (!existsSync(IDEAS_DIR)) return false;
+
+  const files = readdirSync(IDEAS_DIR);
+  for (const file of files) {
+    if (!file.endsWith(".md")) continue;
+
+    const filePath = join(IDEAS_DIR, file);
+    const content = readFileSync(filePath, "utf-8");
+    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    if (!fmMatch) continue;
+
+    const fm = fmMatch[1] ?? "";
+    const idMatch = fm.match(/^id:\s*(.+)$/m);
+    const fileId = idMatch?.[1]?.trim() ?? file.replace(/\.md$/, "");
+
+    if (fileId === ideaId || fileId.startsWith(ideaId) || file.replace(/\.md$/, "") === ideaId) {
+      const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const fieldRegex = new RegExp(`^${escapedField}:.*$`, "m");
+      let newContent: string;
+
+      if (fieldRegex.test(fm)) {
+        newContent = content.replace(
+          new RegExp(`(^---\\n[\\s\\S]*?)^${escapedField}:.*$`, "m"),
+          `$1${field}: ${value}`
+        );
+      } else {
+        newContent = content.replace(/^(---\n[\s\S]*?)\n---/, `$1\n${field}: ${value}\n---`);
+      }
+      writeFileSync(filePath, newContent, "utf-8");
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Append a timestamped note to an idea file body by idea ID.
+ * Surgical append — does not rewrite the file through formatIdeaFile().
+ */
+export async function appendIdeaNote(
+  ideaId: string,
+  note: string
+): Promise<boolean> {
+  if (!existsSync(IDEAS_DIR)) return false;
+
+  const files = readdirSync(IDEAS_DIR);
+  for (const file of files) {
+    if (!file.endsWith(".md")) continue;
+
+    const filePath = join(IDEAS_DIR, file);
+    const content = readFileSync(filePath, "utf-8");
+    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    if (!fmMatch) continue;
+
+    const fm = fmMatch[1] ?? "";
+    const idMatch = fm.match(/^id:\s*(.+)$/m);
+    const fileId = idMatch?.[1]?.trim() ?? file.replace(/\.md$/, "");
+
+    if (fileId === ideaId || fileId.startsWith(ideaId) || file.replace(/\.md$/, "") === ideaId) {
+      const timestamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+      const appendText = `\n\n## Notes\n- [${timestamp}] ${note}\n`;
+      writeFileSync(filePath, content.trimEnd() + appendText, "utf-8");
+      return true;
+    }
+  }
+  return false;
 }
 
 /**

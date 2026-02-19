@@ -11,6 +11,7 @@ export interface KimiCLIOptions {
   timeout?: number;
   yolo?: boolean;
   workDir?: string;
+  signal?: AbortSignal;
 }
 
 export interface KimiCLIResult extends ExecutorResult {
@@ -37,6 +38,7 @@ export async function executeKimiCLI(
     timeout = DEFAULT_TIMEOUT,
     yolo = true,
     workDir,
+    signal,
   } = options;
 
   const resolvedModel = model ?? "moonshot-ai/kimi-k2.5";
@@ -92,6 +94,7 @@ export async function executeKimiCLI(
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let aborted = false;
 
     // Timeout: SIGTERM then SIGKILL after grace period
     const timeoutId = setTimeout(() => {
@@ -99,6 +102,20 @@ export async function executeKimiCLI(
       child.kill("SIGTERM");
       setTimeout(() => child.kill("SIGKILL"), 5000);
     }, timeout);
+
+    // AbortSignal support
+    const abortHandler = () => {
+      aborted = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 5000);
+    };
+    if (signal) {
+      if (signal.aborted) {
+        abortHandler();
+      } else {
+        signal.addEventListener("abort", abortHandler, { once: true });
+      }
+    }
 
     child.stdin?.end();
 
@@ -120,8 +137,20 @@ export async function executeKimiCLI(
 
     child.on("close", (code: number | null) => {
       clearTimeout(timeoutId);
+      if (signal) signal.removeEventListener("abort", abortHandler);
       const duration = Date.now() - startTime;
       const output = stdout.trim();
+
+      if (aborted) {
+        resolve({
+          output: output || "Aborted by signal",
+          exitCode: 5,
+          duration,
+          executor: "kimi-cli",
+          model: resolvedModel,
+        });
+        return;
+      }
 
       if (timedOut) {
         resolve({

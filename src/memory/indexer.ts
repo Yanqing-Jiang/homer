@@ -147,6 +147,8 @@ export class MemoryIndexer {
       { path: "/Users/yj/memory/life.md", context: "life" },
       { path: "/Users/yj/memory/preferences.md", context: "general" },
       { path: "/Users/yj/memory/tools.md", context: "general" },
+      { path: "/Users/yj/memory/patterns.md", context: "general" },
+      { path: "/Users/yj/memory/deny-history.md", context: "general" },
     ];
 
     for (const { path, context } of coreFiles) {
@@ -303,7 +305,7 @@ export class MemoryIndexer {
   async generateEmbeddings(): Promise<{ generated: number; skipped: number; errors: number }> {
     const stats = { generated: 0, skipped: 0, errors: 0 };
 
-    // Get all chunks without embeddings
+    // Get all memory chunks without embeddings
     const chunks = this.db.prepare(`
       SELECT f.file_path, f.chunk_index, f.content
       FROM memory_fts f
@@ -311,14 +313,30 @@ export class MemoryIndexer {
       WHERE e.file_path IS NULL
     `).all() as Array<{ file_path: string; chunk_index: number; content: string }>;
 
-    logger.info({ totalChunks: chunks.length }, "Generating embeddings for chunks");
+    // Also get session summaries not yet embedded (using session:{id} as file_path key)
+    let sessionChunks: Array<{ file_path: string; chunk_index: number; content: string }> = [];
+    try {
+      sessionChunks = this.db.prepare(`
+        SELECT 'session:' || s.id as file_path, 0 as chunk_index,
+               COALESCE(s.title, '') || ' — ' || COALESCE(s.summary, '') as content
+        FROM session_summaries s
+        LEFT JOIN memory_embeddings e ON e.file_path = 'session:' || s.id AND e.chunk_index = 0
+        WHERE e.file_path IS NULL
+          AND s.summary IS NOT NULL AND s.summary != ''
+      `).all() as typeof sessionChunks;
+    } catch (err) {
+      logger.debug({ error: err }, "session_summaries table may not exist yet");
+    }
+
+    const allChunks = [...chunks, ...sessionChunks];
+    logger.info({ memoryChunks: chunks.length, sessionChunks: sessionChunks.length }, "Generating embeddings for chunks");
 
     const insertStmt = this.db.prepare(`
       INSERT OR REPLACE INTO memory_embeddings (file_path, chunk_index, embedding, dimensions, updated_at)
       VALUES (?, ?, ?, ?, ?)
     `);
 
-    for (const chunk of chunks) {
+    for (const chunk of allChunks) {
       try {
         const result = await generateEmbedding(chunk.content);
         const buffer = Buffer.from(result.embedding.buffer);
@@ -362,17 +380,18 @@ export class MemoryIndexer {
       // Generate query embedding and search vector store
       const queryEmbedding = await generateQueryEmbedding(query);
 
-      // Get all embeddings from database
+      // Get memory file embeddings from database
       let embeddingSql = `
         SELECT e.file_path, e.chunk_index, e.embedding, e.dimensions,
                f.content, f.context, f.entry_date
         FROM memory_embeddings e
         JOIN memory_fts f ON e.file_path = f.file_path AND e.chunk_index = f.chunk_index
+        WHERE e.file_path NOT LIKE 'session:%'
       `;
       const params: string[] = [];
 
       if (context) {
-        embeddingSql += " WHERE f.context = ?";
+        embeddingSql += " AND f.context = ?";
         params.push(context);
       }
 
@@ -386,11 +405,28 @@ export class MemoryIndexer {
         entry_date: string | null;
       }>;
 
+      // Also get session summary embeddings (no memory_fts row, metadata from session_summaries)
+      let sessionEmbeddingRows: typeof embeddingRows = [];
+      try {
+        sessionEmbeddingRows = this.db.prepare(`
+          SELECT e.file_path, e.chunk_index, e.embedding, e.dimensions,
+                 COALESCE(s.title, '') || ' — ' || COALESCE(s.summary, '') as content,
+                 'general' as context, s.started_at as entry_date
+          FROM memory_embeddings e
+          JOIN session_summaries s ON e.file_path = 'session:' || s.id
+          WHERE e.file_path LIKE 'session:%'
+        `).all() as typeof embeddingRows;
+      } catch {
+        // session_summaries table may not exist
+      }
+
+      const allEmbeddingRows = [...embeddingRows, ...sessionEmbeddingRows];
+
       // Calculate similarities and normalize to common type
       type SearchItem = { filePath: string; chunkIndex: number; content: string; context: "work" | "life" | "general"; entryDate: string | null };
       type SearchItemWithScore = SearchItem & { _similarity: number };
 
-      const vectorResults: SearchItem[] = embeddingRows
+      const vectorResults: SearchItem[] = allEmbeddingRows
         .map(row => {
           try {
             const embedding = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.dimensions);

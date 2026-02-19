@@ -280,16 +280,18 @@ export async function executeClaudeCommand(
         const byteLen = Buffer.byteLength(chunk);
         stdoutBytes += byteLen;
 
+        // Always parse stream events (captures result/session_id even if raw log is truncated)
+        buffer += chunk;
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          parseStreamEvent(line);
+        }
+
+        // Cap raw stdout separately (only used for fallback logging)
         if (!stdoutTruncated) {
           if (stdoutBytes <= MAX_OUTPUT_BYTES) {
             stdout += chunk;
-            // Parse streaming JSON events line by line
-            buffer += chunk;
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-            for (const line of lines) {
-              parseStreamEvent(line);
-            }
           } else {
             const over = stdoutBytes - MAX_OUTPUT_BYTES;
             const keep = chunk.length - over;

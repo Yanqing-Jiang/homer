@@ -41,7 +41,7 @@ export async function runJobHuntFollowup(
       JOIN job_postings jp ON a.job_id = jp.id
       WHERE a.status IN ('application_submitted', 'confirmation_received')
         AND a.follow_up_date IS NOT NULL
-        AND date(a.follow_up_date) <= date('now')
+        AND a.follow_up_date <= date('now')
     `).all() as FollowUpCandidate[];
 
     if (candidates.length === 0) {

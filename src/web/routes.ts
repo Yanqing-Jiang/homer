@@ -18,6 +18,7 @@ import { registerProposalRoutes } from "./routes/proposals.js";
 import { registerCommandRoutes } from "./api/commands.js";
 import { registerRunRoutes } from "./api/runs.js";
 import { registerTradingRoutes } from "./api/trading.js";
+import { registerThreadEventRoutes } from "./api/thread-events.js";
 import type { CLIRunManager } from "../executors/cli-runner.js";
 import type { Bot } from "grammy";
 
@@ -89,6 +90,9 @@ export function createRoutes(
 
   // Register trading API proxy routes
   registerTradingRoutes(server);
+
+  // Register thread-level SSE for real-time message updates
+  registerThreadEventRoutes(server, stateManager);
 
   // Health check counter for periodic integrity checks
   let healthCheckCounter = 0;
