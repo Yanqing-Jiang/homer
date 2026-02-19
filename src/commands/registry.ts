@@ -30,7 +30,7 @@ export interface CommandDefinition {
  * Model configurations for each executor
  */
 export const EXECUTOR_MODELS: Record<ExecutorType, string | undefined> = {
-  claude: "opus",                   // Default: highest-quality
+  claude: "sonnet",                  // Default: Sonnet 4.6 (fast + smart)
   codex: undefined,                 // Codex CLI (model handled by CLI)
   gemini: "gemini-3-flash-preview", // Fast, cheap
   kimi: "kimi-k2-5",                // Kimi K2.5 via NVIDIA NIM
@@ -55,7 +55,7 @@ export const COMMANDS: CommandDefinition[] = [
     category: "executor",
     description: "Switch to Claude (default, tool use)",
     executor: "claude",
-    model: "opus",
+    model: "sonnet",
   },
   {
     name: "/gemini",
@@ -98,8 +98,6 @@ export const COMMANDS: CommandDefinition[] = [
     description: "Switch to Kimi CLI (long-context, multilingual)",
     executor: "kimi",
     model: "kimi-k2-5",
-    deprecated: true,
-    deprecatedMessage: "Use /open_kimi instead. /kimi still works but will be removed.",
   },
   {
     name: "/open_flash",
@@ -109,11 +107,11 @@ export const COMMANDS: CommandDefinition[] = [
     model: "google/gemini-3-flash-preview",
   },
   {
-    name: "/open_kimi",
+    name: "/open_opus",
     category: "executor",
-    description: "OpenCode with Kimi K2.5",
+    description: "OpenCode with Claude Opus (GitHub Copilot)",
     executor: "opencode",
-    model: "opencode/kimi-k2.5-free",
+    model: "github-copilot/claude-opus-4.6",
   },
 
   // Search commands

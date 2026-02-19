@@ -72,7 +72,7 @@ async function executeKimiJob(
   job: RegisteredJob,
   startedAt: Date,
   onProgress?: ProgressCallback,
-  options?: { queryOverride?: string; emitCompletedEvent?: boolean; timeoutOverride?: number }
+  options?: { queryOverride?: string; emitCompletedEvent?: boolean; timeoutOverride?: number; modelOverride?: string }
 ): Promise<JobExecutionResult> {
   const { config, sourceFile } = job;
   const timeout = options?.timeoutOverride ?? config.timeout ?? 1200000; // 20 minutes default for kimi
@@ -95,6 +95,7 @@ async function executeKimiJob(
       timeout,
       yolo: true,
       workDir: cwd,
+      model: options?.modelOverride,
     });
 
     const completedAt = new Date();
@@ -177,7 +178,7 @@ async function executeGeminiJob(
   job: RegisteredJob,
   startedAt: Date,
   onProgress?: ProgressCallback,
-  options?: { queryOverride?: string; emitCompletedEvent?: boolean; timeoutOverride?: number }
+  options?: { queryOverride?: string; emitCompletedEvent?: boolean; timeoutOverride?: number; modelOverride?: string }
 ): Promise<JobExecutionResult> {
   const { config, sourceFile } = job;
   const timeout = options?.timeoutOverride ?? config.timeout ?? 1200000;
@@ -199,6 +200,7 @@ async function executeGeminiJob(
       timeout,
       cwd,
       researchOnly: true,
+      model: options?.modelOverride,
     });
 
     const completedAt = new Date();
@@ -275,7 +277,7 @@ async function executeCodexJob(
   job: RegisteredJob,
   startedAt: Date,
   onProgress?: ProgressCallback,
-  options?: { queryOverride?: string; emitCompletedEvent?: boolean; timeoutOverride?: number }
+  options?: { queryOverride?: string; emitCompletedEvent?: boolean; timeoutOverride?: number; modelOverride?: string }
 ): Promise<JobExecutionResult> {
   const { config, sourceFile } = job;
   const timeout = options?.timeoutOverride ?? config.timeout ?? 1800000;
@@ -297,7 +299,11 @@ async function executeCodexJob(
   );
 
   try {
-    const result = await executeCodexCLI(fullQuery, { cwd, timeout });
+    const result = await executeCodexCLI(fullQuery, {
+      cwd,
+      timeout,
+      model: options?.modelOverride,
+    });
     const completedAt = new Date();
     const duration = completedAt.getTime() - startedAt.getTime();
     const success = result.exitCode === 0;
@@ -706,32 +712,59 @@ export async function executeScheduledJob(
     message: `🚀 Starting: ${config.name}`,
   });
 
+  const memoryJob = isMemoryJob(job);
+  const configuredExecutor = config.executor && config.executor !== "internal"
+    ? config.executor as ExecutorKind
+    : undefined;
+  const configuredModel = typeof config.model === "string" && config.model.length > 0
+    ? config.model
+    : undefined;
+
+  const defaultChain: ExecutorKind[] = memoryJob ? [...MEMORY_CHAIN] : [...DEFAULT_CHAIN];
+  const chain: ExecutorKind[] = configuredExecutor
+    ? [configuredExecutor, ...defaultChain.filter((e) => e !== configuredExecutor)]
+    : defaultChain;
+  const primary: ExecutorKind = chain[0] ?? "claude";
+
+  // If a model is configured, pin it to the configured executor.
+  // If no executor is configured, pin to whichever executor is primary.
+  const modelPinnedExecutor: ExecutorKind | undefined = configuredModel
+    ? (configuredExecutor ?? primary)
+    : undefined;
+
   const runExecutor = async (
     executor: ExecutorKind,
     queryOverride?: string,
     modelOverride?: string
   ): Promise<JobExecutionResult> => {
+    const effectiveModel =
+      modelOverride
+      ?? (modelPinnedExecutor === executor ? configuredModel : undefined);
+
     if (executor === "kimi") {
       return executeKimiJob(job, startedAt, onProgress, {
         queryOverride,
         emitCompletedEvent: false,
+        modelOverride: effectiveModel,
       });
     }
     if (executor === "gemini") {
       return executeGeminiJob(job, startedAt, onProgress, {
         queryOverride,
         emitCompletedEvent: false,
+        modelOverride: effectiveModel,
       });
     }
     if (executor === "codex") {
       return executeCodexJob(job, startedAt, onProgress, {
         queryOverride,
         emitCompletedEvent: false,
+        modelOverride: effectiveModel,
       });
     }
     return executeClaudeJob(job, startedAt, onProgress, {
       queryOverride,
-      modelOverride,
+      modelOverride: effectiveModel,
       emitCompletedEvent: false,
     });
   };
@@ -755,10 +788,6 @@ export async function executeScheduledJob(
       fallbackUsed: false,
     } as JobExecutionResult;
   }
-
-  const memoryJob = isMemoryJob(job);
-  const chain: ExecutorKind[] = memoryJob ? [...MEMORY_CHAIN] : [...DEFAULT_CHAIN];
-  const primary: ExecutorKind = chain[0] ?? "claude";
 
   const jobContext = {
     id: config.id,

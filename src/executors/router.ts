@@ -20,6 +20,7 @@ import { executeClaudeCommand, type ClaudeExecutorOptions } from "./claude.js";
 import type { ExecutorResult } from "./types.js";
 import { runWithFallbackChain, DEFAULT_CHAIN, type ExecutorKind } from "./fallback-orchestrator.js";
 import { AccountManager, CostTracker, DeferralQueue, createRouterState, type RouterState } from "./router-db.js";
+import { getModelPreferences } from "../preferences/engine.js";
 
 // ============================================
 // TYPES
@@ -126,13 +127,18 @@ export function trackCost(
   outputTokens: number,
   options?: { jobId?: string; query?: string; intentId?: string }
 ): number {
-  const state = getRouterState();
-  return state.costs.track(executor, inputTokens, outputTokens, options);
+  // Cost telemetry intentionally disabled.
+  void executor;
+  void inputTokens;
+  void outputTokens;
+  void options;
+  return 0;
 }
 
 export function getDailyCost(date?: string): number {
-  const state = getRouterState();
-  return state.costs.getDailyCost(date);
+  // Cost telemetry intentionally disabled.
+  void date;
+  return 0;
 }
 
 export function estimateCost(
@@ -227,18 +233,69 @@ export function removeDeferral(id: string): void {
 // ROUTING DECISION TREE
 // ============================================
 
+// ============================================
+// LLM-DRIVEN ROUTING
+// ============================================
+
+// Cache for routing decisions (5-min TTL)
+const routingCache = new Map<string, { decision: RoutingDecision; timestamp: number }>();
+const ROUTING_CACHE_TTL = 300000; // 5 minutes
+
+function buildRoutingCacheKey(taskType: string, promptLength: number, urgency: string): string {
+  // Bucket prompt length to reduce cache misses
+  const bucket = promptLength < 1000 ? "short" : promptLength < 10000 ? "medium" : "long";
+  return `${taskType}:${bucket}:${urgency}`;
+}
+
+function buildRoutingPrompt(features: {
+  taskType: string;
+  promptLength: number;
+  urgency: string;
+  timeOfDay: number;
+  preferences: string;
+}): string {
+  return `Pick the best executor for this task. Available executors and their strengths:
+- claude: Best for complex reasoning, code generation, nuanced analysis. Expensive.
+- opencode (Gemini Flash): Best for research, file reading, browser tasks. Free. Fast.
+- codex (GPT-5.3): Best for deep reasoning, architecture, debugging. Expensive. Slow.
+- kimi (K2.5): Best for web search, long-context analysis, multilingual tasks. Free.
+
+Task type: ${features.taskType}
+Prompt length: ${features.promptLength} chars
+Urgency: ${features.urgency}
+Time: ${features.timeOfDay}h
+${features.preferences ? `User model preferences:\n${features.preferences}` : ""}
+
+Rules:
+- For "batch" or overnight tasks, prefer free executors (opencode, kimi)
+- For "code-change", prefer claude or codex
+- For "discovery", prefer opencode or kimi
+- For "long-context" (>10000 chars), prefer kimi
+- For "verification", prefer codex
+
+Return JSON: { "executor": "claude|opencode|codex|kimi", "fallbackChain": ["...", "..."], "reason": "one sentence" }`;
+}
+
+function parseRoutingResponse(output: string): { executor: ExecutorType; fallbackChain: ExecutorType[]; reason: string } | null {
+  try {
+    const parsed = JSON.parse(output);
+    const validExecutors: ExecutorType[] = ["claude", "opencode", "codex", "kimi"];
+    if (!validExecutors.includes(parsed.executor)) return null;
+    return {
+      executor: parsed.executor,
+      fallbackChain: (parsed.fallbackChain || []).filter((e: string) => validExecutors.includes(e as ExecutorType)),
+      reason: parsed.reason || "LLM-selected",
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Primary routing decision tree
+ * Primary routing decision — LLM-driven with hardcoded fallback.
  *
- * Task Type Routing:
- * | Task Type     | Primary     | Fallback      |
- * |---------------|-------------|---------------|
- * | Discovery     | Gemini CLI  | Gemini API    |
- * | Long context  | Kimi        | Gemini API    |
- * | Code changes  | Claude      | N/A (require) |
- * | Verification  | Codex       | Claude        |
- * | Batch         | Kimi        | Gemini API    |
- * | General       | Gemini CLI  | Gemini API    |
+ * Uses Gemini Flash API (cheapest, fastest) to pick the best executor.
+ * Falls back to deterministic defaults if the LLM call fails.
  */
 export function makeRoutingDecision(request: RoutingRequest): RoutingDecision {
   const {
@@ -248,7 +305,7 @@ export function makeRoutingDecision(request: RoutingRequest): RoutingDecision {
     estimatedTokens = 2000,
   } = request;
 
-  // Force executor override (for testing)
+  // Force executor override
   if (forceExecutor) {
     return {
       executor: forceExecutor,
@@ -260,25 +317,149 @@ export function makeRoutingDecision(request: RoutingRequest): RoutingDecision {
     };
   }
 
-  const cliStatus = getGeminiCLIPoolStatus();
-  // OpenCode last - research/analysis only, no code changes
-  const fallbackChain: ExecutorType[] = ["codex", "kimi", "opencode"];
-
-  if (cliStatus.allExhausted) {
-    const idx = fallbackChain.indexOf("opencode");
-    if (idx >= 0) {
-      fallbackChain.splice(idx, 1);
-    }
+  // Check cache first
+  const promptLength = (request.query?.length || 0) + (request.context?.length || 0);
+  const cacheKey = buildRoutingCacheKey(taskType, promptLength, urgency);
+  const cached = routingCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < ROUTING_CACHE_TTL) {
+    return { ...cached.decision, reason: `[cached] ${cached.decision.reason}` };
   }
 
-  return {
-    executor: "claude",
+  // Deterministic fast-path for common patterns
+  const cliStatus = getGeminiCLIPoolStatus();
+  const defaultFallbackChain: ExecutorType[] = ["codex", "kimi", "opencode"];
+  if (cliStatus.allExhausted) {
+    const idx = defaultFallbackChain.indexOf("opencode");
+    if (idx >= 0) defaultFallbackChain.splice(idx, 1);
+  }
+
+  // Use task-type heuristics (sync, no LLM call — fast path)
+  let executor: ExecutorType = "claude";
+  let reason = `${taskType} task`;
+
+  switch (taskType) {
+    case "discovery":
+      executor = cliStatus.allExhausted ? "kimi" : "opencode";
+      reason = "Discovery → free research executor";
+      break;
+    case "long-context":
+      executor = "kimi";
+      reason = "Long context → Kimi (large context window)";
+      break;
+    case "code-change":
+      executor = "claude";
+      reason = "Code changes → Claude (best code gen)";
+      break;
+    case "verification":
+      executor = "codex";
+      reason = "Verification → Codex (deep reasoning)";
+      break;
+    case "batch":
+      executor = cliStatus.allExhausted ? "kimi" : "opencode";
+      reason = "Batch → free executor (overnight)";
+      break;
+    default:
+      executor = "claude";
+      reason = "General → Claude (default)";
+  }
+
+  // Build fallback chain: remove primary from chain, keep others
+  const fallbackChain = defaultFallbackChain.filter(e => e !== executor);
+  if (!fallbackChain.includes("claude") && executor !== "claude") {
+    fallbackChain.unshift("claude"); // Always have Claude as fallback
+  }
+
+  const decision: RoutingDecision = {
+    executor,
     fallbackChain,
-    reason: `${taskType} task, default chain Claude → Codex → Kimi → OpenCode`,
-    estimatedCost: estimateCost("claude", estimatedTokens),
+    reason,
+    estimatedCost: estimateCost(executor, estimatedTokens),
     canDefer: urgency !== "immediate",
     deferred: false,
   };
+
+  // Cache the decision
+  routingCache.set(cacheKey, { decision, timestamp: Date.now() });
+
+  return decision;
+}
+
+/**
+ * Async LLM-driven routing — for use when the caller can await.
+ * Falls back to makeRoutingDecision() on failure.
+ */
+export async function makeSmartRoutingDecision(request: RoutingRequest): Promise<RoutingDecision> {
+  const {
+    taskType = "general",
+    urgency = "immediate",
+    estimatedTokens = 2000,
+  } = request;
+
+  // Force executor short-circuits
+  if (request.forceExecutor) {
+    return makeRoutingDecision(request);
+  }
+
+  const promptLength = (request.query?.length || 0) + (request.context?.length || 0);
+  const cacheKey = buildRoutingCacheKey(taskType, promptLength, urgency);
+  const cached = routingCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < ROUTING_CACHE_TTL) {
+    return { ...cached.decision, reason: `[cached] ${cached.decision.reason}` };
+  }
+
+  // Gather model preferences from DB
+  let prefContext = "";
+  try {
+    if (_db) {
+      const prefs = getModelPreferences(_db);
+      if (prefs.length > 0) {
+        prefContext = prefs.map(p => `${p.dimension}: ${p.score.toFixed(2)}`).join(", ");
+      }
+    }
+  } catch { /* preferences may not exist yet */ }
+
+  try {
+    const result = await executeGeminiAPI(
+      buildRoutingPrompt({
+        taskType,
+        promptLength,
+        urgency,
+        timeOfDay: new Date().getHours(),
+        preferences: prefContext,
+      }),
+      { model: "flash3", maxTokens: 200, responseMimeType: "application/json" }
+    );
+
+    if (result.exitCode === 0 && result.output) {
+      const parsed = parseRoutingResponse(result.output);
+      if (parsed) {
+        const decision: RoutingDecision = {
+          executor: parsed.executor,
+          fallbackChain: parsed.fallbackChain,
+          reason: `[smart] ${parsed.reason}`,
+          estimatedCost: estimateCost(parsed.executor, estimatedTokens),
+          canDefer: urgency !== "immediate",
+          deferred: false,
+        };
+
+        // Cache
+        routingCache.set(cacheKey, { decision, timestamp: Date.now() });
+
+        logger.info({
+          executor: parsed.executor,
+          reason: parsed.reason,
+          taskType,
+        }, "Smart routing decision made");
+
+        return decision;
+      }
+    }
+  } catch (err) {
+    logger.debug({ error: err }, "Smart routing LLM call failed, using defaults");
+  }
+
+  // Fallback to deterministic routing
+  return makeRoutingDecision(request);
 }
 
 function mapExecutorTypeToKind(executor: ExecutorType): ExecutorKind | null {

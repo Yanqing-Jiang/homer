@@ -4,12 +4,10 @@ import { logger } from "../utils/logger.js";
 import type { ParsedSession } from "./parsers.js";
 import {
   parseCodexSession,
-  parseGeminiSession,
   parseKimiSession,
   parseClaudeSession,
   parseOpencodeSession,
   scanCodexSessions,
-  scanGeminiSessions,
   scanKimiSessions,
   scanClaudeSessions,
   scanOpencodeSessions,
@@ -122,11 +120,6 @@ export class CLISessionImporter {
       sessionFiles.push(...codexFiles.map((path) => ({ agent: "codex", path })));
     }
 
-    if (agent === "all" || agent === "gemini") {
-      const geminiFiles = scanGeminiSessions(this.homeDir, sinceDays);
-      sessionFiles.push(...geminiFiles.map((path) => ({ agent: "gemini", path })));
-    }
-
     if (agent === "all" || agent === "kimi") {
       const kimiFiles = scanKimiSessions(this.homeDir, sinceDays);
       sessionFiles.push(...kimiFiles.map((path) => ({ agent: "kimi", path })));
@@ -153,8 +146,6 @@ export class CLISessionImporter {
 
         if (sessionAgent === "codex") {
           session = parseCodexSession(path);
-        } else if (sessionAgent === "gemini") {
-          session = parseGeminiSession(path);
         } else if (sessionAgent === "kimi") {
           session = parseKimiSession(path);
         } else if (sessionAgent === "claude") {

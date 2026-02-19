@@ -26,6 +26,10 @@ const modules = [
   "dist/cli-sessions/importer.js",
   "dist/cli-sessions/parsers.js",
   "dist/cli-sessions/summarizer.js",
+  "dist/scheduler/jobs/outcome-tracker.js",
+  "dist/scheduler/jobs/preference-updater.js",
+  "dist/preferences/engine.js",
+  "dist/outcomes/hooks.js",
 ];
 
 let failed = 0;

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { StatusBadge, EmptyState, AuthOverlay } from '$lib/components';
 	import { useAuth } from '$lib/hooks/useAuth.svelte';
 	import * as api from '$lib/api/client';
@@ -38,6 +38,36 @@
 	let attachedFiles = $state<File[]>([]);
 	let uploadingFiles = $state(false);
 	let uploadError = $state<string | null>(null);
+
+	// Thread live updates via SSE
+	let threadSubscription = $state<{ abort: () => void } | null>(null);
+
+	$effect(() => {
+		threadSubscription?.abort();
+		threadSubscription = null;
+
+		const tid = selectedThread?.id;
+		if (!tid) return;
+
+		threadSubscription = api.subscribeToThread(tid, {
+			onMessage: (message) => {
+				if (!selectedThread || selectedThread.id !== tid) return;
+				// Deduplicate by ID
+				if (selectedThread.messages.some(m => m.id === message.id)) return;
+				// Skip while sending to avoid clobbering optimistic updates
+				if (sendingMessage) return;
+				selectedThread = {
+					...selectedThread,
+					messages: [...selectedThread.messages, message]
+				};
+			}
+		});
+	});
+
+	onDestroy(() => {
+		threadSubscription?.abort();
+		threadSubscription = null;
+	});
 
 	// Load sessions on mount
 	onMount(async () => {
@@ -172,7 +202,7 @@
 		const content = messageInput.trim();
 		const threadId = selectedThread.id;
 		const provider = selectedThread.provider;
-		const isExecutorCommand = /^\/(gemini|codex|claude|sonnet|opus|chatgpt|g|x|new)\b/i.test(content);
+		const isExecutorCommand = /^\/(gemini|codex|claude|sonnet|opus|chatgpt|kimi|open_flash|open_opus|g|x|new)\b/i.test(content);
 		let sessionExecutor: api.ExecutorType = 'claude';
 		if (selectedSession) {
 			try {

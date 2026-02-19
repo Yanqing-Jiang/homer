@@ -424,12 +424,16 @@ ${pendingContext.context}
         const persistedSessionId = executorUsed === executor ? newSessionId ?? null : null;
 
         // Save assistant message if threadId is provided
-        if (params.threadId && cleanedResponse.trim()) {
+        // Strip voice-mode XML tags so they don't leak into conversation history
+        const threadContent = cleanedResponse.trim()
+          .replace(/<\/?(?:spoken|summary|voice-mode)>/g, "")
+          .trim();
+        if (params.threadId && threadContent) {
           this.stateManager.createThreadMessage({
             id: randomUUID(),
             threadId: params.threadId,
             role: "assistant",
-            content: cleanedResponse.trim(),
+            content: threadContent,
             metadata: {
               executor: executorUsed,
               exitCode,

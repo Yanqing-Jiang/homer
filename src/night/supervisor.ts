@@ -19,12 +19,12 @@ import { DEFAULT_CONFIG } from "./types.js";
 import { buildContextPack } from "./context.js";
 import { JobQueue, shouldAutoExecute, formatJobsForBriefing } from "./jobs.js";
 import { executeGeminiWithFallback } from "../executors/opencode-cli.js";
-import { generateMorningBriefing } from "../executors/gemini.js";
+import { executeClaudeCommand } from "../executors/claude.js";
 import { logger } from "../utils/logger.js";
 import { OvernightTaskStore, PipelineOrchestrator } from "../overnight/index.js";
 import type { OvernightTask, YouTubeSummaryMetadata } from "../overnight/types.js";
 import type Database from "better-sqlite3";
-import { dedupeIdeasFile } from "../ideas/dedup.js";
+// dedupeIdeasFile import removed — dedup handled by dedicated idea-dedup cron job
 import {
   summarizeYouTubeVideo,
   geminiSemaphore,
@@ -89,8 +89,8 @@ export class NightSupervisor {
       // Ensure output directories exist
       await this.ensureDirectories();
 
-      // Phase 0.5: Automatic idea dedup (LLM + deterministic)
-      await this.runIdeaDedup();
+      // Phase 0.5: Idea dedup handled by dedicated cron job (idea-dedup at 5 AM)
+      // and via dependency trigger from ideas-explore
 
       // Phase 0: Process queued overnight tasks (ad-hoc user requests)
       await this.processOvernightTasks();
@@ -123,9 +123,13 @@ export class NightSupervisor {
       // Phase 3: Execute jobs
       await this.executeJobs();
 
-      // Phase 4: Synthesis - Generate morning briefing
-      await this.setPhase("synthesis");
-      await this.generateBriefing(contextPack.dailyLog);
+      // Phase 4: Synthesis - optional morning briefing generation
+      if (this.config.generateMorningBriefing) {
+        await this.setPhase("synthesis");
+        await this.generateBriefing(contextPack.dailyLog);
+      } else {
+        this.session.findings.push("Morning briefing skipped by Night Supervisor (scheduled morning-brief job is source of truth).");
+      }
 
       // Phase 5: Finalize
       await this.setPhase("briefing");
@@ -368,16 +372,7 @@ export class NightSupervisor {
     }
   }
 
-  private async runIdeaDedup(): Promise<void> {
-    try {
-      const result = await dedupeIdeasFile();
-      if (result.merged > 0 || result.archived > 0) {
-        logger.info({ ...result }, "Idea dedup completed");
-      }
-    } catch (error) {
-      logger.warn({ error }, "Idea dedup failed");
-    }
-  }
+  // runIdeaDedup removed — handled by dedicated idea-dedup cron job at 5 AM
 
   // ----------------------------------------
   // Planning
@@ -589,11 +584,11 @@ Be selective - quality over quantity.`;
         }
 
         case "idea_consolidation": {
-          const result = await dedupeIdeasFile();
-          const output = `Duplicates merged: ${result.merged}\nArchived: ${result.archived}\nBlocklist added: ${result.blocklistAdded.length}`;
+          // Dedup is handled by dedicated idea-dedup cron job — skip if supervisor triggers it
+          logger.info("Skipping idea_consolidation — handled by dedicated cron job");
           return {
             success: true,
-            output,
+            output: "Skipped: handled by dedicated idea-dedup cron job",
             duration: Date.now() - startTime,
           };
         }
@@ -627,10 +622,39 @@ Be selective - quality over quantity.`;
     const jobsSummary = formatJobsForBriefing(this.session!.jobs);
 
     try {
-      const briefing = await generateMorningBriefing(
-        `${findings}\n\n${jobsSummary}`,
-        dailyLog
-      );
+      const prompt = `Generate a concise, actionable morning briefing.
+
+## Overnight Findings
+${findings}
+
+## Overnight Job Summary
+${jobsSummary}
+
+## Yesterday Daily Log
+${dailyLog}
+
+Output sections:
+1. The Big 3
+2. Overnight Findings
+3. Needs Attention
+4. Context for Today
+
+Rules:
+- concise and actionable
+- no approval requests
+- markdown only`;
+
+      const result = await executeClaudeCommand(prompt, {
+        cwd: process.env.HOME ?? "/Users/yj",
+        model: "sonnet",
+        timeout: this.config.jobTimeout,
+      });
+
+      if (result.exitCode !== 0 || !result.output?.trim()) {
+        throw new Error(result.output || "Morning briefing generation failed");
+      }
+
+      const briefing = result.output.trim();
 
       this.session!.morningBriefing = briefing;
       await this.saveBriefing(briefing);

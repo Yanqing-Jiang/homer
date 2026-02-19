@@ -13,7 +13,8 @@
 
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { z } from "zod";
-import { fanOutAgents, consolidateResults, parseSwarmJSON } from "../../executors/model-swarm.js";
+import { parseSwarmJSON } from "../../executors/model-swarm.js";
+import { executeOpenCodeCLI } from "../../executors/opencode-cli.js";
 import type Database from "better-sqlite3";
 import { buildCondensedContext, extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
 import { getRecentJobOutputs } from "../job-outputs.js";
@@ -132,66 +133,51 @@ ${projects.slice(0, 800)}
 ## Existing patterns (update, don't repeat)
 ${patternsFile.slice(0, 2000)}`;
 
-    // Swarm: parallel execution — same task, two independent runs
-    const results = await fanOutAgents([
-      {
-        id: "flash-learning-1",
-        executor: "opencode",
-        prompt: swarmPrompt,
-        timeout: 300_000,
-        required: false,
-      },
-      {
-        id: "flash-learning-2",
-        executor: "opencode",
-        prompt: swarmPrompt,
-        timeout: 300_000,
-        required: false,
-      },
-    ]);
-
-    // Check if any agent succeeded
-    const succeeded = results.filter((r) => r.success);
-    if (succeeded.length === 0) {
-      const failures = results.map((r) => `${r.agentId}: ${r.output.slice(0, 100)}`).join("; ");
-      return { success: false, output: "", error: `All agents failed: ${failures}` };
-    }
-
     // Cross-job intelligence
     const recentActivity = db ? getRecentJobOutputs(db) : "";
 
-    // Consolidation
-    const consolidationPrompt = `You are a content strategy engine. Merge the agent results into patterns and content ideas for Yanqing.
+    // Single Flash call with web search — replaces duplicate 2-agent swarm
+    const fullPrompt = `${swarmPrompt}
 
-## Who is Yanqing (for context)
+## Additional Context
 
+### Who is Yanqing
 ${condensedContext.slice(0, 2500)}
 
-## Instructions
-
-### Patterns
-1. Identify reusable content patterns (hook formulas, post structures, topic angles).
-2. Merge with existing patterns — update stale ones, add genuinely new ones.
-3. 3-8 patterns maximum.
-
-### Content Ideas
-1. Pick the top 3 most timely content ideas that connect to this week's actual work.
-2. Each idea must have a specific hook (first line), platform recommendation, and outline.
-
-## What Yanqing worked on this week
+### What Yanqing worked on this week
 ${recentTopics}
 
-## Existing patterns (avoid duplicates)
+### Existing patterns (update, don't repeat)
 ${patternsFile.slice(0, 1500)}
 ${recentActivity ? `\n${recentActivity}\n` : ""}
 ## Output Format
 
-Return ONLY a JSON object:
-{"patterns": [{"platform": "linkedin"|"medium"|"x"|"general", "pattern": "description of the pattern", "example": "optional example"}], "contentIdeas": [{"title": "Post Title", "platform": "linkedin"|"medium"|"x", "hook": "First line that grabs attention", "outline": "2-3 sentence outline", "whyNow": "connects to current work/events"}]}`;
+Return ONLY a valid JSON object (no markdown, no preamble):
+{"patterns": [{"platform": "linkedin"|"medium"|"x"|"general", "pattern": "description of the pattern", "example": "optional example"}], "contentIdeas": [{"title": "Post Title", "platform": "linkedin"|"medium"|"x", "hook": "First line that grabs attention", "outline": "2-3 sentence outline", "whyNow": "connects to current work/events"}]}
 
-    const consolidated = await consolidateResults(results, consolidationPrompt, {
-      temperature: 0.3,
+If no patterns or ideas found, use empty arrays.`;
+
+    const result = await executeOpenCodeCLI(fullPrompt, "", {
+      model: "google/gemini-3-flash-preview",
+      timeout: 300_000,
+      researchOnly: true,
     });
+
+    if (result.exitCode !== 0 || !result.output || result.output.length < 50) {
+      logger.warn({ exitCode: result.exitCode, outputLen: result.output?.length }, "Learning engine Flash call failed, retrying...");
+      // Single retry with higher timeout
+      const retry = await executeOpenCodeCLI(fullPrompt, "", {
+        model: "google/gemini-3-flash-preview",
+        timeout: 600_000,
+        researchOnly: true,
+      });
+      if (retry.exitCode !== 0 || !retry.output || retry.output.length < 50) {
+        return { success: false, output: "", error: `Learning engine failed after retry: ${retry.output?.slice(0, 200)}` };
+      }
+      result.output = retry.output;
+    }
+
+    const consolidated = result.output ?? "";
 
     // Parse and validate
     let output: { patterns: z.infer<typeof PatternSchema>[]; contentIdeas: z.infer<typeof ContentIdeaSchema>[] };
@@ -256,7 +242,7 @@ Return ONLY a JSON object:
     }
 
     const resultParts: string[] = [];
-    resultParts.push(`${results.filter((r) => r.success).length} agents succeeded`);
+    resultParts.push("single Flash call");
     if (patternsWritten > 0) resultParts.push(`${patternsWritten} patterns updated`);
     const ideaCreated = ideaSaveResults.filter((r) => r.action === "created").length;
     const ideaEnhanced = ideaSaveResults.filter((r) => r.action === "enhanced").length;
