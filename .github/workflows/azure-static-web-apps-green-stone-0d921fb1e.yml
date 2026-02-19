@@ -1,4 +1,4 @@
-name: Azure Static Web Apps CI/CD
+name: Azure Blob Storage CI/CD
 
 on:
   push:
@@ -19,32 +19,31 @@ jobs:
         with:
           submodules: true
           lfs: false
-      - name: Build And Deploy
-        id: builddeploy
-        uses: Azure/static-web-apps-deploy@v1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_GREEN_STONE_0D921FB1E }}
-          repo_token: ${{ secrets.GITHUB_TOKEN }} # Used for Github integrations (i.e. PR comments)
-          action: "upload"
-          ###### Repository/Build Configurations - These values can be configured to match your app requirements. ######
-          # For more information regarding Static Web App workflow configurations, please visit: https://aka.ms/swaworkflowconfig
-          app_location: "/web" # App source code path
-          api_location: "" # No server-side API (using adapter-static)
-          output_location: "build" # Built app content directory - optional
-          ###### End of Repository/Build Configurations ######
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Build
+        run: npm run build
+        working-directory: web
         env:
           VITE_SUPABASE_URL: https://muyfrblqagucgijljiir.supabase.co
           VITE_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im11eWZyYmxxYWd1Y2dpamxqaWlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTM4NDc3ODEsImV4cCI6MjA2OTQyMzc4MX0.D4CN8DMCjCxVnsceBEDOZOgOImA9H_bXR_MgvEic5do
           VITE_API_BASE: https://homer.jiangyanqing.com
 
-  close_pull_request_job:
-    if: github.event_name == 'pull_request' && github.event.action == 'closed'
-    runs-on: ubuntu-latest
-    name: Close Pull Request Job
-    steps:
-      - name: Close Pull Request
-        id: closepullrequest
-        uses: Azure/static-web-apps-deploy@v1
-        with:
-          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_GREEN_STONE_0D921FB1E }}
-          action: "close"
+      - name: Deploy to Azure Blob Storage
+        run: |
+          az storage blob upload-batch \
+            --account-name amazonowendevstorage2 \
+            --account-key "${{ secrets.AZURE_STORAGE_KEY }}" \
+            --destination '$web' \
+            --source web/build \
+            --overwrite true
