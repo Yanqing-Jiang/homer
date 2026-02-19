@@ -46,7 +46,9 @@ export async function runJobHuntDiscover(db: Database.Database): Promise<{
       // 1. Get search URLs from config + taxonomy
       const searchUrls = getSearchUrls();
       const taxonomyUrls = generateSearchUrls(
-        ["ml-engineer", "data-platform", "data-science", "applied-science"],
+        ["ml-engineer", "analytics-engineer", "ai-engineer", "data-platform",
+         "data-science", "applied-science", "engineering-management",
+         "staff-engineer", "principal-engineer", "analytics-manager", "data-science-manager"],
         "Seattle, WA",
         "past_week"
       );
@@ -55,7 +57,7 @@ export async function runJobHuntDiscover(db: Database.Database): Promise<{
       logger.info({ urlCount: allUrls.length }, "Job hunt discovery starting");
 
       // 2. Connect to browser
-      const connected = runBrowser("connect 9222");
+      const connected = await runBrowser("connect 9222");
       if (!connected) {
         return { success: false, output: "", error: "Could not connect to browser on port 9222" };
       }
@@ -226,74 +228,56 @@ function getSearchUrls(): string[] {
 }
 
 async function extractJobList(searchUrl: string): Promise<RawJob[]> {
-  safeNavigate(searchUrl);
+  const navResult = await safeNavigate(searchUrl);
+  logger.info({ searchUrl: searchUrl.slice(0, 80), navResult: navResult.slice(0, 100) }, "safeNavigate result");
   await sleep(5000);
 
   // Scroll to load more results
   for (let i = 0; i < 3; i++) {
-    runBrowser("scroll down 800");
+    await runBrowser("scroll down 800");
     await sleep(2000);
   }
 
-  const script = `
-    (function() {
-      return JSON.stringify(Array.from(document.querySelectorAll('a'))
-        .filter(a => a.href.includes('/jobs/view/'))
-        .map(a => {
-          const card = a.closest('.job-card-container, .jobs-search-results-list__list-item');
-          const company = card ? card.querySelector('.job-card-container__primary-description, .artdeco-entity-lockup__subtitle, .job-card-container__company-name') : null;
-          return {
-            url: a.href.split('?')[0],
-            title: a.innerText.split('\\n')[0].trim(),
-            company: company ? company.innerText.trim() : "Unknown"
-          };
-        })
-        .filter(j => j.title.length > 5 && j.url.includes('/view/')));
-    })()
-  `;
+  // Debug: check current page title and link count
+  const titleCheck = await safeEval("document.title + ' | links:' + document.querySelectorAll('a[href*=\"/jobs/view/\"]').length");
+  logger.info({ titleCheck }, "Page state before extraction");
+
+  // Return array directly — agent-browser eval wraps string returns in extra quotes,
+  // so avoid JSON.stringify and let agent-browser serialize the array as plain JSON.
+  const script = `Array.from(document.querySelectorAll('a')).filter(a => a.href.includes('/jobs/view/')).map(a => { const card = a.closest('.job-card-container, .jobs-search-results-list__list-item'); const company = card ? card.querySelector('.job-card-container__primary-description, .artdeco-entity-lockup__subtitle, .job-card-container__company-name') : null; return { url: a.href.split('?')[0], title: a.innerText.split('\\n')[0].trim(), company: company ? company.innerText.trim() : 'Unknown' }; }).filter(j => j.title.length > 5 && j.url.includes('/view/'))`;
 
   try {
-    const raw = safeEval(script);
+    const raw = await safeEval(script);
+    logger.info({ rawLen: raw.length, rawHead: raw.slice(0, 100) }, "safeEval raw result");
     const jsonStart = raw.indexOf("[");
     if (jsonStart === -1) return [];
     return JSON.parse(raw.substring(jsonStart));
-  } catch {
+  } catch (err: any) {
+    logger.warn({ error: err?.message }, "extractJobList parse failed");
     return [];
   }
 }
 
 async function getJobDetails(url: string): Promise<JobDetails> {
-  safeNavigate(url);
+  await safeNavigate(url);
   await sleep(5000);
 
   // Click "See more" if present
-  safeEval(
+  await safeEval(
     'document.querySelector("button.jobs-description__footer-button, button[aria-label=\\"Show more\\"]")?.click()'
   );
   await sleep(2000);
 
-  const script = `
-    (function() {
-      const descEl = document.querySelector(".jobs-description__content, .jobs-box__html-content, .description__text, .show-more-less-html__markup") || document.querySelector("main");
-      const locEl = document.querySelector(".jobs-unified-top-card__bullet, .job-card-container__metadata-item");
-      const wpEl = document.querySelector(".jobs-unified-top-card__workplace-type");
-      const applyBtn = document.querySelector("button.jobs-apply-button");
-      const isEasy = applyBtn ? applyBtn.innerText.toLowerCase().includes("easy apply") : false;
-      return JSON.stringify({
-        description: descEl ? descEl.innerText.trim() : "",
-        location: locEl ? locEl.innerText.trim() : "",
-        workArrangement: wpEl ? wpEl.innerText.trim() : "",
-        isEasyApply: isEasy
-      });
-    })()
-  `;
+  // Return object directly — agent-browser eval serializes objects as plain JSON (no extra quoting)
+  const script = `(function() { const descEl = document.querySelector(".jobs-description__content, .jobs-box__html-content, .description__text, .show-more-less-html__markup") || document.querySelector("main"); const locEl = document.querySelector(".jobs-unified-top-card__bullet, .job-card-container__metadata-item"); const wpEl = document.querySelector(".jobs-unified-top-card__workplace-type"); const applyBtn = document.querySelector("button.jobs-apply-button"); const isEasy = applyBtn ? applyBtn.innerText.toLowerCase().includes("easy apply") : false; return { description: descEl ? descEl.innerText.trim() : "", location: locEl ? locEl.innerText.trim() : "", workArrangement: wpEl ? wpEl.innerText.trim() : "", isEasyApply: isEasy }; })()`;
 
   try {
-    const raw = safeEval(script);
+    const raw = await safeEval(script);
     const jsonStart = raw.indexOf("{");
     if (jsonStart === -1) return { description: "", location: "", workArrangement: "", isEasyApply: false };
     return JSON.parse(raw.substring(jsonStart));
-  } catch {
+  } catch (err: any) {
+    logger.warn({ error: err?.message }, "getJobDetails parse failed");
     return { description: "", location: "", workArrangement: "", isEasyApply: false };
   }
 }

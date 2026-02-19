@@ -3,8 +3,10 @@ import { join } from "path";
 import type Database from "better-sqlite3";
 import { parseIdeasMd, saveIdeaFile, loadIdeasFromDir, type ParsedIdea } from "./parser.js";
 import { logger } from "../utils/logger.js";
-import { executeGeminiWithFallback, executeOpenCodeCLI } from "../executors/opencode-cli.js";
+import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
+import { executeClaudeCommand } from "../executors/claude.js";
 import { buildBookmarkScrapePrompt, buildTweetReadPrompt, SCRAPE_OPTIONS, DEEP_FETCH_OPTIONS } from "../scraping/browser-prompts.js";
+import { cleanAgentOutput } from "../scraping/clean-output.js";
 
 const MEMORY_PATH = process.env.MEMORY_PATH ?? "/Users/yj/memory";
 const IDEAS_FILE = join(MEMORY_PATH, "ideas.md");
@@ -140,21 +142,7 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
 // DEEP URL FETCHING
 // ============================================
 
-function cleanAgentOutput(raw: string): string {
-  return raw
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      if (!t) return false;
-      if (t.startsWith("[tool_call:") || t.startsWith("[bash:")) return false;
-      if (t.startsWith("I will ") || t.startsWith("I'll ")) return false;
-      if (t.startsWith("**Plan") || t.startsWith("**Explanation")) return false;
-      if (t.startsWith("Step ") && t.includes("agent-browser")) return false;
-      return true;
-    })
-    .join("\n")
-    .trim();
-}
+// cleanAgentOutput imported from ../scraping/clean-output.js
 
 async function deepFetchUrl(url: string, ideaTitle: string): Promise<string | null> {
   if (!url) return null;
@@ -197,15 +185,28 @@ Instructions:
 Return ONLY the analysis, no preamble.`;
 
   try {
-    const result = await executeGeminiWithFallback(prompt, "", {
-      model: "gemini-3-flash-preview",
-      sandbox: true,
+    // Primary: OpenCode Gemini Flash
+    const result = await executeOpenCodeCLI(prompt, "", {
+      model: "google/gemini-3-flash-preview",
+      researchOnly: true,
       timeout: 60000,
     });
 
     if (result.exitCode === 0 && result.output && result.output.length > 100) {
       return result.output.trim();
     }
+
+    // Fallback: Claude Code Sonnet
+    const fallback = await executeClaudeCommand(prompt, {
+      cwd: process.env.HOME ?? "/Users/yj",
+      model: "sonnet",
+      timeout: 60000,
+    });
+
+    if (fallback.exitCode === 0 && fallback.output && fallback.output.length > 100) {
+      return fallback.output.trim();
+    }
+
     return null;
   } catch (error) {
     logger.warn({ url, error }, "Deep fetch failed");

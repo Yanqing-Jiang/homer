@@ -84,3 +84,64 @@ export async function getThread(threadId: string): Promise<GmailThread> {
   const output = await runGmailHelper(["thread", "--thread-id", threadId]);
   return JSON.parse(output) as GmailThread;
 }
+
+export interface GmailMessageMeta {
+  id: string;
+  from: string;
+  subject: string;
+  date: string;
+}
+
+export async function searchMessages(query: string, max = 10): Promise<GmailMessageMeta[]> {
+  const output = await runGmailHelper(["search", "--query", query, "--max", String(max)]);
+  try {
+    const parsed = JSON.parse(output);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    logger.warn({ output: output.slice(0, 200) }, "Failed to parse gmail search output");
+    return [];
+  }
+}
+
+export async function getMessageBody(
+  messageId: string
+): Promise<{ id: string; plainText: string; html: string }> {
+  const output = await runGmailHelper(["body", "--message-id", messageId]);
+  return JSON.parse(output) as { id: string; plainText: string; html: string };
+}
+
+const VERIFY_URL_RE = /(https?:\/\/[^\s"'<>]+(?:verif|confirm|activ|account)[^\s"'<>]*)/i;
+
+export async function waitForVerificationEmail(
+  domain: string,
+  timeoutMs = 300_000
+): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  const pollIntervalMs = 15_000;
+
+  logger.info({ domain, timeoutMs }, "Polling for verification email");
+
+  while (Date.now() < deadline) {
+    await new Promise<void>((r) => setTimeout(r, pollIntervalMs));
+    try {
+      const msgs = await searchMessages(
+        `from:@${domain} subject:(verify OR confirm OR activate) newer_than:8m`,
+        5
+      );
+      for (const msg of msgs) {
+        const body = await getMessageBody(msg.id);
+        const combined = body.plainText + " " + body.html;
+        const match = combined.match(VERIFY_URL_RE);
+        if (match) {
+          logger.info({ domain, url: match[1]!.slice(0, 80) }, "Found verification URL");
+          return match[1]!;
+        }
+      }
+    } catch (err) {
+      logger.warn({ err, domain }, "Error polling for verification email");
+    }
+  }
+
+  logger.warn({ domain }, "Verification email poll timed out");
+  return null;
+}

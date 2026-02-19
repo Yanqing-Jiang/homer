@@ -37,7 +37,7 @@ function canExecuteToday(db: ReturnType<StateManager["getDb"]>): boolean {
   try {
     const row = db.prepare(`
       SELECT COUNT(*) as cnt FROM plan_executions
-      WHERE date(started_at) = date('now')
+      WHERE started_at >= date('now') AND started_at < date('now', '+1 day')
     `).get() as { cnt: number };
     return row.cnt < MAX_PLAN_EXECUTIONS_PER_DAY;
   } catch {

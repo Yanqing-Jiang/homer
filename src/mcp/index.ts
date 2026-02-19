@@ -9,17 +9,25 @@ import { getMemoryIndexer } from "../memory/indexer.js";
 import { appendDailyLog, createDailyEntry, readDailyLog } from "../memory/daily.js";
 import { StateManager } from "../state/manager.js";
 import { logger } from "../utils/logger.js";
-import { appendFile, readFile, writeFile, mkdir, readdir, rename } from "fs/promises";
+import { appendFile, readFile, mkdir, readdir, rename } from "fs/promises";
 import { existsSync } from "fs";
 import {
   parseIdeaFile,
   saveIdeaFile,
   loadIdeasFromDir,
-  isIdeasMigrated,
   type ParsedIdea,
 } from "../ideas/parser.js";
 import { join } from "path";
 import { savePlanFile, parsePlanFile, loadPlansFromDir, type ParsedPhase } from "../plans/parser.js";
+// Shared StateManager singleton — better-sqlite3 is synchronous, MCP is single-threaded
+let sharedSM: StateManager | null = null;
+function getSharedStateManager(): StateManager {
+  if (!sharedSM) {
+    sharedSM = new StateManager("/Users/yj/homer/data/homer.db");
+  }
+  return sharedSM;
+}
+
 // Lazy-load azure-blob to avoid startup failure if @azure/storage-blob is not installed
 // Memory tools will work without it; blob tools will fail gracefully
 let azureBlobModule: typeof import("../integrations/azure-blob.js") | null = null;
@@ -36,160 +44,8 @@ async function getAzureBlob() {
 // randomUUID removed - using timestamp-based IDs for consistency
 
 const MEMORY_BASE = "/Users/yj/memory";
-const IDEAS_FILE = `${MEMORY_BASE}/ideas.md`;
 const PLANS_DIR = `${MEMORY_BASE}/plans`;
 const FEEDBACK_FILE = `${MEMORY_BASE}/feedback.md`;
-
-// Idea status values
-type IdeaStatus = "draft" | "review" | "discussion" | "planning" | "execution" | "archived";
-
-interface Idea {
-  id: string;
-  timestamp: string;
-  source: string;
-  status: IdeaStatus;
-  title: string;
-  content: string;
-  context?: string;
-  link?: string;
-  notes?: string;
-}
-
-/**
- * Parse ideas.md file into structured data
- */
-function parseIdeasFile(content: string): Idea[] {
-  const ideas: Idea[] = [];
-  const lines = content.split("\n");
-  let currentIdea: Partial<Idea> | null = null;
-  let currentSection = "";
-
-  for (const line of lines) {
-    // Detect section headers
-    if (line.startsWith("## Draft Ideas")) {
-      currentSection = "draft";
-      continue;
-    }
-    if (line.startsWith("## Under Review")) {
-      currentSection = "review";
-      continue;
-    }
-    if (line.startsWith("## Archived")) {
-      currentSection = "archived";
-      continue;
-    }
-
-    // Parse idea header: ### [2026-01-29 14:30] Title
-    const headerMatch = line.match(/^### \[(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\] (.+)$/);
-    if (headerMatch) {
-      if (currentIdea && currentIdea.id) {
-        ideas.push(currentIdea as Idea);
-      }
-      // Generate deterministic ID from timestamp (will be overwritten if ID field found)
-      const timestampId = (headerMatch[1] ?? "").replace(/[- :]/g, "").slice(-8);
-      currentIdea = {
-        id: timestampId,
-        timestamp: headerMatch[1] ?? "",
-        title: headerMatch[2] ?? "",
-        status: currentSection as IdeaStatus || "draft",
-        source: "unknown",
-        content: "",
-      };
-      continue;
-    }
-
-    // Parse idea fields
-    if (currentIdea) {
-      const idMatch = line.match(/^- \*\*ID:\*\* (.+)$/);
-      if (idMatch) {
-        currentIdea.id = idMatch[1];
-        continue;
-      }
-
-      const sourceMatch = line.match(/^- \*\*Source:\*\* (.+)$/);
-      if (sourceMatch) {
-        currentIdea.source = sourceMatch[1];
-        continue;
-      }
-
-      const statusMatch = line.match(/^- \*\*Status:\*\* (.+)$/);
-      if (statusMatch) {
-        currentIdea.status = statusMatch[1] as IdeaStatus;
-        continue;
-      }
-
-      const contentMatch = line.match(/^- \*\*Content:\*\* (.+)$/);
-      if (contentMatch) {
-        currentIdea.content = contentMatch[1];
-        continue;
-      }
-
-      const contextMatch = line.match(/^- \*\*Context:\*\* (.+)$/);
-      if (contextMatch) {
-        currentIdea.context = contextMatch[1];
-        continue;
-      }
-
-      const linkMatch = line.match(/^- \*\*Link:\*\* (.+)$/);
-      if (linkMatch) {
-        currentIdea.link = linkMatch[1];
-        continue;
-      }
-
-      const notesMatch = line.match(/^- \*\*Notes:\*\* (.+)$/);
-      if (notesMatch) {
-        currentIdea.notes = notesMatch[1];
-        continue;
-      }
-    }
-  }
-
-  // Don't forget the last idea
-  if (currentIdea && currentIdea.id) {
-    ideas.push(currentIdea as Idea);
-  }
-
-  return ideas;
-}
-
-/**
- * Format an idea for ideas.md
- */
-function formatIdea(idea: Idea): string {
-  let output = `### [${idea.timestamp}] ${idea.title}\n`;
-  output += `- **ID:** ${idea.id}\n`;
-  output += `- **Source:** ${idea.source}\n`;
-  output += `- **Status:** ${idea.status}\n`;
-  output += `- **Content:** ${idea.content}\n`;
-  if (idea.context) output += `- **Context:** ${idea.context}\n`;
-  if (idea.link) output += `- **Link:** ${idea.link}\n`;
-  if (idea.notes) output += `- **Notes:** ${idea.notes}\n`;
-  return output;
-}
-
-/**
- * Rebuild ideas.md from parsed ideas
- */
-function rebuildIdeasFile(ideas: Idea[]): string {
-  const draft = ideas.filter(i => i.status === "draft");
-  const review = ideas.filter(i => i.status === "review" || i.status === "discussion");
-  const archived = ideas.filter(i => i.status === "archived" || i.status === "planning" || i.status === "execution");
-
-  let output = "# Ideas\n\nRaw ideas collected by HOMER. Reviewed daily at 7 AM.\n\n";
-  output += "## Draft Ideas\n\n";
-  for (const idea of draft) {
-    output += formatIdea(idea) + "\n";
-  }
-  output += "## Under Review\n\n";
-  for (const idea of review) {
-    output += formatIdea(idea) + "\n";
-  }
-  output += "## Archived\n\n";
-  for (const idea of archived) {
-    output += formatIdea(idea) + "\n";
-  }
-  return output;
-}
 
 /**
  * Homer Memory MCP Server
@@ -703,6 +559,64 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["blobName"],
         },
       },
+      // Context & intelligence tools
+      {
+        name: "memory_context",
+        description: "Returns recent session context, active plans, pending decisions, and project momentum for session warmup. No LLM call, pure SQL + file reads, fast.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            days: {
+              type: "number",
+              description: "Number of days to look back (default: 7)",
+            },
+          },
+        },
+      },
+      {
+        name: "outcome_check",
+        description: "Manually trigger an outcome check for a specific item. Creates an outcome_check entry for tracking.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            source_type: {
+              type: "string",
+              enum: ["idea", "plan", "application", "promotion", "improvement"],
+              description: "Type of item to check",
+            },
+            source_id: {
+              type: "string",
+              description: "ID of the item",
+            },
+            source_title: {
+              type: "string",
+              description: "Title/description of the item",
+            },
+            check_days: {
+              type: "number",
+              description: "Days from now to schedule the check (default: 14)",
+            },
+          },
+          required: ["source_type", "source_id", "source_title"],
+        },
+      },
+      {
+        name: "preference_query",
+        description: "Query the preference model for learned user preferences. Returns top preferences with scores and evidence counts.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            dimension: {
+              type: "string",
+              description: "Optional prefix filter (e.g., 'topic:', 'source:', 'project:')",
+            },
+            limit: {
+              type: "number",
+              description: "Max results (default: 20)",
+            },
+          },
+        },
+      },
       // Meeting tools
       {
         name: "meeting_list",
@@ -777,51 +691,52 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           limit?: number;
         };
         const maxResults = limit || 10;
-        const memoryResults = indexer.search(query, maxResults, context);
+
+        // Auto-upgrade to hybrid search when embeddings exist
+        const hasEmbeddings = indexer.getEmbeddingStats().totalEmbeddings > 0;
+        const memoryResults = hasEmbeddings
+          ? await indexer.hybridSearch(query, maxResults, context)
+          : indexer.search(query, maxResults, context);
 
         // Also search session_summaries_fts and failure_takeover_fts
         let sessionResults: Array<{ id: string; title: string; summary: string; project: string; agent: string; started_at: string; rank: number }> = [];
         let takeoverResults: Array<{ id: number; job_id: string; diagnosis: string; fix_description: string | null; decision: string; retry_success: number | null; created_at: string; rank: number }> = [];
         try {
-          const sm = new StateManager("/Users/yj/homer/data/homer.db");
-          try {
-            const escapedTerms = query
-              .split(/\s+/)
-              .filter(Boolean)
-              .map((t) => t.replace(/[*()":^$]/g, ""))
-              .filter(Boolean)
-              .join(" OR ");
+          const sm = getSharedStateManager();
+          const escapedTerms = query
+            .split(/\s+/)
+            .filter(Boolean)
+            .map((t) => t.replace(/[*()":^$]/g, ""))
+            .filter(Boolean)
+            .join(" OR ");
 
-            if (escapedTerms) {
-              sessionResults = sm.getDb().prepare(`
-                SELECT s.id, s.title, s.summary, s.project, s.agent, s.started_at,
-                       bm25(session_summaries_fts) as rank
-                FROM session_summaries_fts fts
-                JOIN session_summaries s ON fts.rowid = s.rowid
-                WHERE session_summaries_fts MATCH ?
+          if (escapedTerms) {
+            sessionResults = sm.getDb().prepare(`
+              SELECT s.id, s.title, s.summary, s.project, s.agent, s.started_at,
+                     bm25(session_summaries_fts) as rank
+              FROM session_summaries_fts fts
+              JOIN session_summaries s ON fts.rowid = s.rowid
+              WHERE session_summaries_fts MATCH ?
+              ORDER BY rank
+              LIMIT ?
+            `).all(escapedTerms, maxResults) as typeof sessionResults;
+          }
+
+          // Also search failure_takeover_fts for past failure diagnoses
+          if (escapedTerms) {
+            try {
+              takeoverResults = sm.getDb().prepare(`
+                SELECT t.id, t.job_id, t.diagnosis, t.fix_description, t.decision,
+                       t.retry_success, t.created_at, bm25(failure_takeover_fts) as rank
+                FROM failure_takeover_fts fts
+                JOIN failure_takeover_runs t ON fts.rowid = t.rowid
+                WHERE failure_takeover_fts MATCH ?
                 ORDER BY rank
                 LIMIT ?
-              `).all(escapedTerms, maxResults) as typeof sessionResults;
+              `).all(escapedTerms, maxResults) as typeof takeoverResults;
+            } catch (err) {
+              logger.debug({ error: err }, "Failure takeover FTS search failed (table may not exist)");
             }
-
-            // Also search failure_takeover_fts for past failure diagnoses
-            if (escapedTerms) {
-              try {
-                takeoverResults = sm.getDb().prepare(`
-                  SELECT t.id, t.job_id, t.diagnosis, t.fix_description, t.decision,
-                         t.retry_success, t.created_at, bm25(failure_takeover_fts) as rank
-                  FROM failure_takeover_fts fts
-                  JOIN failure_takeover_runs t ON fts.rowid = t.rowid
-                  WHERE failure_takeover_fts MATCH ?
-                  ORDER BY rank
-                  LIMIT ?
-                `).all(escapedTerms, maxResults) as typeof takeoverResults;
-              } catch (err) {
-                logger.debug({ error: err }, "Failure takeover FTS search failed (table may not exist)");
-              }
-            }
-          } finally {
-            sm.close();
           }
         } catch (err) {
           // session_summaries_fts may not exist yet — gracefully degrade
@@ -900,6 +815,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
         const entry = createDailyEntry(content, context || "general", "conversation");
         await appendDailyLog(entry);
+
+        // Re-index today's daily file into FTS5 for immediate searchability
+        const today = new Date().toISOString().slice(0, 10);
+        const dailyPath = `/Users/yj/memory/daily/${today}.md`;
+        await indexer.indexFile(dailyPath, context || "general", today);
+
         return {
           content: [
             {
@@ -948,25 +869,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         if (file === "daily" && source === "archive") {
           const dateStr = date ?? new Date().toISOString().slice(0, 10);
-          const sm = new StateManager("/Users/yj/homer/data/homer.db");
-          try {
-            const archive = sm.getDailyLogArchive(dateStr);
-            if (!archive) {
-              return {
-                content: [{ type: "text", text: `No archive found for ${dateStr}` }],
-              };
-            }
+          const sm = getSharedStateManager();
+          const archive = sm.getDailyLogArchive(dateStr);
+          if (!archive) {
             return {
-              content: [
-                {
-                  type: "text",
-                  text: archive.rawContent,
-                },
-              ],
+              content: [{ type: "text", text: `No archive found for ${dateStr}` }],
             };
-          } finally {
-            sm.close();
           }
+          return {
+            content: [
+              {
+                type: "text",
+                text: archive.rawContent,
+              },
+            ],
+          };
         }
 
         if (file === "daily") {
@@ -1077,73 +994,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Use timestamp-based ID for consistency
         const timestampId = `idea_${now.toISOString().replace(/[-:T]/g, "").slice(0, 12)}`;
 
-        // Check if migrated to new format (individual files)
-        if (isIdeasMigrated()) {
-          // Use new format - create individual file
-          const idea: ParsedIdea = {
-            id: timestampId,
-            title,
-            content,
-            status: "draft",
-            source,
-            context,
-            link,
-            tags: [],
-            timestamp,
-          };
-
-          const filePath = saveIdeaFile(idea);
-
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Added idea: ${title} (ID: ${timestampId}, file: ${filePath})`,
-              },
-            ],
-          };
-        }
-
-        // Legacy format - append to ideas.md
-        const idea: Idea = {
+        const idea: ParsedIdea = {
           id: timestampId,
-          timestamp,
           title,
           content,
-          source,
           status: "draft",
+          source,
           context,
           link,
+          tags: [],
+          timestamp,
         };
 
-        // Read current ideas file
-        let ideasContent = "";
-        if (existsSync(IDEAS_FILE)) {
-          ideasContent = await readFile(IDEAS_FILE, "utf-8");
-        }
-
-        // Find the "## Draft Ideas" section and insert after it
-        const insertPoint = ideasContent.indexOf("## Draft Ideas");
-        if (insertPoint !== -1) {
-          const afterHeader = ideasContent.indexOf("\n", insertPoint) + 1;
-          // Skip any blank lines after header
-          let insertIdx = afterHeader;
-          while (ideasContent[insertIdx] === "\n") insertIdx++;
-
-          const newIdea = "\n" + formatIdea(idea) + "\n";
-          ideasContent = ideasContent.slice(0, insertIdx) + newIdea + ideasContent.slice(insertIdx);
-        } else {
-          // Fallback: append to file
-          ideasContent += "\n" + formatIdea(idea);
-        }
-
-        await writeFile(IDEAS_FILE, ideasContent, "utf-8");
+        const filePath = saveIdeaFile(idea);
 
         return {
           content: [
             {
               type: "text",
-              text: `Added idea: ${title} (ID: ${idea.id})`,
+              text: `Added idea: ${title} (ID: ${timestampId}, file: ${filePath})`,
             },
           ],
         };
@@ -1152,76 +1021,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "idea_update": {
         const { id, status, notes } = args as {
           id: string;
-          status?: IdeaStatus;
+          status?: string;
           notes?: string;
         };
 
-        // Check if migrated to new format
-        if (isIdeasMigrated()) {
-          // Find idea file in directory
-          const IDEAS_DIR = join(MEMORY_BASE, "ideas");
-          const files = await readdir(IDEAS_DIR);
-          let ideaFile: string | null = null;
+        const IDEAS_DIR = join(MEMORY_BASE, "ideas");
+        const files = await readdir(IDEAS_DIR);
+        let ideaFile: string | null = null;
 
-          for (const file of files) {
-            if (!file.endsWith(".md")) continue;
-            const filePath = join(IDEAS_DIR, file);
-            const parsed = parseIdeaFile(filePath);
-            if (parsed && (parsed.id === id || parsed.id.includes(id) || file.includes(id))) {
-              ideaFile = filePath;
-              break;
-            }
+        for (const file of files) {
+          if (!file.endsWith(".md")) continue;
+          const filePath = join(IDEAS_DIR, file);
+          const parsed = parseIdeaFile(filePath);
+          if (parsed && (parsed.id === id || parsed.id.includes(id) || file.includes(id))) {
+            ideaFile = filePath;
+            break;
           }
-
-          if (!ideaFile) {
-            return {
-              content: [{ type: "text", text: `Idea not found: ${id}` }],
-              isError: true,
-            };
-          }
-
-          const idea = parseIdeaFile(ideaFile);
-          if (!idea) {
-            return {
-              content: [{ type: "text", text: `Could not parse idea file: ${ideaFile}` }],
-              isError: true,
-            };
-          }
-
-          if (status) idea.status = status;
-          if (notes) idea.notes = (idea.notes ? idea.notes + "; " : "") + notes;
-
-          saveIdeaFile(idea);
-
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Updated idea: ${idea.title} (status: ${idea.status})`,
-              },
-            ],
-          };
         }
 
-        // Legacy format
-        if (!existsSync(IDEAS_FILE)) {
+        if (!ideaFile) {
           return {
-            content: [{ type: "text", text: "ideas.md not found" }],
+            content: [{ type: "text", text: `Idea not found: ${id}` }],
             isError: true,
           };
         }
 
-        const ideasContent = await readFile(IDEAS_FILE, "utf-8");
-        const ideas = parseIdeasFile(ideasContent);
-
-        // Find idea by ID (partial match on timestamp or id field)
-        const idea = ideas.find(i =>
-          i.id.startsWith(id) || i.timestamp.includes(id)
-        );
-
+        const idea = parseIdeaFile(ideaFile);
         if (!idea) {
           return {
-            content: [{ type: "text", text: `Idea not found: ${id}` }],
+            content: [{ type: "text", text: `Could not parse idea file: ${ideaFile}` }],
             isError: true,
           };
         }
@@ -1229,8 +1057,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (status) idea.status = status;
         if (notes) idea.notes = (idea.notes ? idea.notes + "; " : "") + notes;
 
-        const newContent = rebuildIdeasFile(ideas);
-        await writeFile(IDEAS_FILE, newContent, "utf-8");
+        saveIdeaFile(idea);
 
         return {
           content: [
@@ -1245,49 +1072,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "idea_list": {
         const { status } = args as { status?: string };
         const filterStatus = status || "draft";
-
-        // Check if migrated to new format
-        if (isIdeasMigrated()) {
-          const ideas = loadIdeasFromDir();
-
-          const filtered = filterStatus === "all"
-            ? ideas
-            : ideas.filter(i => i.status === filterStatus);
-
-          if (filtered.length === 0) {
-            return {
-              content: [{ type: "text", text: `No ideas with status: ${filterStatus}` }],
-            };
-          }
-
-          const summary = filtered.map(i => ({
-            id: i.id,
-            title: i.title,
-            source: i.source,
-            status: i.status,
-            timestamp: i.timestamp,
-            filePath: i.filePath,
-          }));
-
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(summary, null, 2),
-              },
-            ],
-          };
-        }
-
-        // Legacy format
-        if (!existsSync(IDEAS_FILE)) {
-          return {
-            content: [{ type: "text", text: "No ideas file found" }],
-          };
-        }
-
-        const ideasContent = await readFile(IDEAS_FILE, "utf-8");
-        const ideas = parseIdeasFile(ideasContent);
+        const ideas = loadIdeasFromDir();
 
         const filtered = filterStatus === "all"
           ? ideas
@@ -1305,6 +1090,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           source: i.source,
           status: i.status,
           timestamp: i.timestamp,
+          filePath: i.filePath,
         }));
 
         return {
@@ -1355,18 +1141,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           phases: parsedPhases,
           sourceIdeaId: ideaId || null,
         });
-
-        // If ideaId provided, update the idea status
-        if (ideaId && existsSync(IDEAS_FILE)) {
-          const ideasContent = await readFile(IDEAS_FILE, "utf-8");
-          const ideas = parseIdeasFile(ideasContent);
-          const idea = ideas.find(i => i.id.startsWith(ideaId) || i.timestamp.includes(ideaId));
-          if (idea) {
-            idea.status = "planning";
-            idea.notes = (idea.notes ? idea.notes + "; " : "") + `Plan created: ${slug}`;
-            await writeFile(IDEAS_FILE, rebuildIdeasFile(ideas), "utf-8");
-          }
-        }
 
         return {
           content: [
@@ -1822,6 +1596,192 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               },
             ],
             isError: true,
+          };
+        }
+      }
+
+      // === Context & Intelligence tools ===
+      case "memory_context": {
+        const { days } = args as { days?: number };
+        const lookbackDays = days || 7;
+        const sections: string[] = [];
+
+        const sm = getSharedStateManager();
+
+        // 1. Recent sessions (non-sub-agent)
+        const sessions = sm.getDb().prepare(`
+          SELECT title, project, agent, started_at, message_count
+          FROM session_summaries
+          WHERE is_sub_agent = 0
+            AND started_at > datetime('now', ?)
+          ORDER BY started_at DESC LIMIT 5
+        `).all(`-${lookbackDays} days`) as Array<{
+          title: string; project: string; agent: string;
+          started_at: string; message_count: number;
+        }>;
+
+        if (sessions.length > 0) {
+          sections.push("## Recent Sessions");
+          for (const s of sessions) {
+            const date = s.started_at.slice(5, 10); // MM-DD
+            const proj = s.project || "unknown";
+            const title = (s.title || "untitled").slice(0, 60);
+            sections.push(`- [${date}] ${proj}: ${title} (${s.message_count} msgs)`);
+          }
+        }
+
+        // 2. Active plans
+        const plans = loadPlansFromDir();
+        const activePlans = plans.filter(p =>
+          p.status === "execution" || p.status === "planning"
+        );
+        if (activePlans.length > 0) {
+          sections.push("\n## Active Plans");
+          for (const p of activePlans) {
+            sections.push(`- ${p.title} (${p.status}, ${p.completedTasks}/${p.totalTasks} tasks)${p.currentPhase ? ` — phase: ${p.currentPhase}` : ""}`);
+          }
+        }
+
+        // 3. Pending decisions (ideas in review)
+        const reviewIdeas = loadIdeasFromDir().filter(i => i.status === "review");
+        if (reviewIdeas.length > 0) {
+          sections.push("\n## Pending Decisions");
+          for (const idea of reviewIdeas.slice(0, 5)) {
+            sections.push(`- Idea: "${idea.title}" (in review)`);
+          }
+        }
+
+        // 4. Project momentum
+        const momentum = sm.getDb().prepare(`
+          SELECT project, COUNT(*) as count
+          FROM session_summaries
+          WHERE is_sub_agent = 0
+            AND started_at > datetime('now', ?)
+            AND project IS NOT NULL AND project != ''
+          GROUP BY project
+          ORDER BY count DESC LIMIT 8
+        `).all(`-${lookbackDays} days`) as Array<{ project: string; count: number }>;
+
+        if (momentum.length > 0) {
+          sections.push("\n## Project Momentum (" + lookbackDays + " days)");
+          for (const m of momentum) {
+            const heat = m.count >= 6 ? "hot" : m.count >= 3 ? "active" : "light";
+            sections.push(`- ${m.project}: ${m.count} sessions (${heat})`);
+          }
+        }
+
+        // 5. Recent Homer activity (last 24h successful jobs)
+        const recentJobs = sm.getDb().prepare(`
+          SELECT job_name, output, completed_at
+          FROM scheduled_job_runs
+          WHERE success = 1
+            AND completed_at > datetime('now', '-24 hours')
+            AND output IS NOT NULL AND output != ''
+          ORDER BY completed_at DESC LIMIT 5
+        `).all() as Array<{ job_name: string; output: string; completed_at: string }>;
+
+        if (recentJobs.length > 0) {
+          sections.push("\n## Recent Homer Activity");
+          for (const j of recentJobs) {
+            sections.push(`- ${j.job_name}: ${j.output.slice(0, 100)}`);
+          }
+        }
+
+        // 6. Pending outcome checks (if table exists)
+        try {
+          const pendingOutcomes = sm.getDb().prepare(`
+            SELECT source_type, source_title, check_at
+            FROM outcome_checks
+            WHERE status = 'pending' AND check_at <= datetime('now', '+3 days')
+            ORDER BY check_at ASC LIMIT 3
+          `).all() as Array<{ source_type: string; source_title: string; check_at: string }>;
+
+          if (pendingOutcomes.length > 0) {
+            sections.push("\n## Upcoming Outcome Checks");
+            for (const o of pendingOutcomes) {
+              sections.push(`- [${o.source_type}] ${o.source_title} (due: ${o.check_at.slice(0, 10)})`);
+            }
+          }
+        } catch {
+          // outcome_checks table may not exist yet
+        }
+
+        const output = sections.length > 0
+          ? sections.join("\n")
+          : "No recent activity found.";
+
+        return {
+          content: [{ type: "text", text: output }],
+        };
+      }
+
+      case "outcome_check": {
+        const { source_type, source_id, source_title, check_days } = args as {
+          source_type: string;
+          source_id: string;
+          source_title: string;
+          check_days?: number;
+        };
+
+        const daysOut = check_days || 14;
+        const id = `oc_${Date.now()}`;
+        const sm = getSharedStateManager();
+        sm.getDb().prepare(`
+          INSERT INTO outcome_checks (id, source_type, source_id, source_title, check_at)
+          VALUES (?, ?, ?, ?, datetime('now', ?))
+        `).run(id, source_type, source_id, source_title, `+${daysOut} days`);
+
+        return {
+          content: [{
+            type: "text",
+            text: `Created outcome check: ${source_title} (${source_type}), due in ${daysOut} days (ID: ${id})`,
+          }],
+        };
+      }
+
+      case "preference_query": {
+        const { dimension, limit } = args as {
+          dimension?: string;
+          limit?: number;
+        };
+
+        const maxResults = limit || 20;
+        try {
+          const sm = getSharedStateManager();
+          let rows: Array<{ dimension: string; score: number; evidence_count: number; last_updated: string }>;
+          if (dimension) {
+            rows = sm.getDb().prepare(`
+              SELECT dimension, score, evidence_count, last_updated
+              FROM preference_model
+              WHERE dimension LIKE ?
+              ORDER BY score DESC LIMIT ?
+            `).all(`${dimension}%`, maxResults) as typeof rows;
+          } else {
+            rows = sm.getDb().prepare(`
+              SELECT dimension, score, evidence_count, last_updated
+              FROM preference_model
+              ORDER BY ABS(score - 0.5) DESC LIMIT ?
+            `).all(maxResults) as typeof rows;
+          }
+
+          if (rows.length === 0) {
+            return {
+              content: [{ type: "text", text: "No preferences found." + (dimension ? ` Filter: ${dimension}` : "") }],
+            };
+          }
+
+          const lines = rows.map(r => {
+            const bar = r.score > 0.6 ? "+" : r.score < 0.4 ? "-" : "~";
+            return `${bar} ${r.dimension}: ${r.score.toFixed(2)} (${r.evidence_count} signals, updated ${r.last_updated.slice(0, 10)})`;
+          });
+
+          return {
+            content: [{ type: "text", text: `## Preferences${dimension ? ` (${dimension}*)` : ""}\n\n${lines.join("\n")}` }],
+          };
+        } catch (err) {
+          // Table may not exist yet
+          return {
+            content: [{ type: "text", text: `Preference model not initialized yet. Run migration 030 first.` }],
           };
         }
       }

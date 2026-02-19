@@ -1,10 +1,24 @@
 /**
  * Safe browser automation utilities — prevents shell injection from scraped URLs.
+ * All functions are async to avoid blocking the Node.js event loop during I/O.
  */
 
-import { execSync } from "child_process";
-import { writeFileSync } from "fs";
+import { execFile } from "child_process";
 import { logger } from "../utils/logger.js";
+
+function execFileAsync(cmd: string, args: string[], timeout: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { encoding: "utf8", timeout }, (err, stdout, stderr) => {
+      if (err) {
+        const e: any = err;
+        e.stderr = stderr;
+        reject(e);
+      } else {
+        resolve((stdout as string).trim());
+      }
+    });
+  });
+}
 
 /**
  * Validate and normalize a URL. Throws on invalid or non-HTTP(S) URLs.
@@ -20,33 +34,26 @@ export function validateUrl(url: string): string {
 /**
  * Navigate agent-browser to a URL safely (no shell interpolation).
  */
-export function safeNavigate(url: string, timeout = 15000): string {
+export async function safeNavigate(url: string, timeout = 15000): Promise<string> {
   const safe = validateUrl(url);
-  const script = `window.location.href=${JSON.stringify(safe)}`;
-  writeFileSync("/tmp/jh_nav.js", script);
   try {
-    return execSync('agent-browser eval "$(cat /tmp/jh_nav.js)"', {
-      encoding: "utf8",
-      timeout,
-    }).trim();
-  } catch {
+    return await execFileAsync("agent-browser", ["open", safe], timeout);
+  } catch (err: any) {
+    logger.warn({ url: safe, error: err?.message }, "safeNavigate failed");
     return "";
   }
 }
 
 /**
- * Run an arbitrary JS script in agent-browser by writing to a temp file
- * (avoids shell interpolation of untrusted content).
+ * Run an arbitrary JS script in agent-browser.
+ * Minifies to single line — agent-browser eval requires single-line input.
  */
-export function safeEval(script: string, timeout = 15000): string {
-  const scriptPath = `/tmp/jh_eval_${Date.now()}.js`;
-  writeFileSync(scriptPath, script);
+export async function safeEval(script: string, timeout = 15000): Promise<string> {
+  const oneliner = script.replace(/\n/g, " ").replace(/\s{2,}/g, " ").trim();
   try {
-    return execSync(`agent-browser eval "$(cat ${scriptPath})"`, {
-      encoding: "utf8",
-      timeout,
-    }).trim();
-  } catch {
+    return await execFileAsync("agent-browser", ["eval", oneliner], timeout);
+  } catch (err: any) {
+    logger.warn({ error: err?.message, stderr: err?.stderr?.slice(0, 300) }, "safeEval failed");
     return "";
   }
 }
@@ -54,9 +61,10 @@ export function safeEval(script: string, timeout = 15000): string {
 /**
  * Run a simple agent-browser command (connect, screenshot, scroll — no user data).
  */
-export function runBrowser(cmd: string, timeout = 15000): string {
+export async function runBrowser(cmd: string, timeout = 15000): Promise<string> {
+  const parts = cmd.trim().split(/\s+/);
   try {
-    return execSync(`agent-browser ${cmd}`, { encoding: "utf8", timeout }).trim();
+    return await execFileAsync("agent-browser", parts, timeout);
   } catch (error: any) {
     logger.warn({ cmd, error: error?.message }, "agent-browser command failed");
     return "";

@@ -1,69 +1,17 @@
 /**
- * Speaker mapping using Claude Sonnet with structured output
+ * Speaker mapping using Claude CLI with JSON output
  *
  * Maps speaker_0, speaker_1, etc. from diarization to actual names
  * using context clues from the transcript and provided attendee list.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
 import type {
   SpeakerMapping,
   SpeakerMappingResult,
 } from "./types.js";
 import type { TranscriptionResult, TranscriptionWord } from "../voice/types.js";
 import { logger } from "../utils/logger.js";
-
-const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
-
-// Tool schema for structured output
-const SPEAKER_MAPPINGS_TOOL = {
-  name: "speaker_mappings",
-  description: "Record the speaker identification mappings",
-  input_schema: {
-    type: "object" as const,
-    properties: {
-      mappings: {
-        type: "array" as const,
-        description: "List of speaker mappings",
-        items: {
-          type: "object" as const,
-          properties: {
-            speaker_id: {
-              type: "string" as const,
-              description: "Original speaker ID (e.g., speaker_0)",
-            },
-            name: {
-              type: "string" as const,
-              description: "Identified name, or null if unknown",
-            },
-            confidence: {
-              type: "number" as const,
-              description: "Confidence score 0-1",
-            },
-            evidence: {
-              type: "string" as const,
-              description: "Evidence for this mapping (quote or observation)",
-            },
-            needs_review: {
-              type: "boolean" as const,
-              description: "True if this mapping is uncertain",
-            },
-          },
-          required: ["speaker_id", "name", "confidence", "evidence", "needs_review"],
-        },
-      },
-      overall_confidence: {
-        type: "number" as const,
-        description: "Overall confidence in the mappings 0-1",
-      },
-      notes: {
-        type: "string" as const,
-        description: "Any additional observations about the speakers",
-      },
-    },
-    required: ["mappings", "overall_confidence"],
-  },
-};
+import { executeClaudeCommand } from "../executors/claude.js";
 
 interface MappingToolResult {
   mappings: Array<{
@@ -75,6 +23,19 @@ interface MappingToolResult {
   }>;
   overall_confidence: number;
   notes?: string;
+}
+
+/**
+ * Extract JSON from Claude CLI output (handles markdown fences)
+ */
+function extractJSON(text: string): string {
+  const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+  if (fenceMatch) return fenceMatch[1]!.trim();
+
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (jsonMatch) return jsonMatch[0];
+
+  return text.trim();
 }
 
 /**
@@ -140,15 +101,13 @@ function getUniqueSpeakers(words: TranscriptionWord[]): string[] {
 }
 
 /**
- * Map speakers using Claude Sonnet
+ * Map speakers using Claude CLI
  */
 export async function mapSpeakers(
   transcription: TranscriptionResult,
   attendees: string[],
   context?: string
 ): Promise<SpeakerMappingResult> {
-  const client = new Anthropic();
-
   const words = transcription.words || [];
   const speakers = getUniqueSpeakers(words);
 
@@ -177,7 +136,7 @@ export async function mapSpeakers(
 
   const transcriptPreview = buildTranscriptPreview(words);
 
-  const prompt = `You are analyzing a meeting transcript to identify who is speaking.
+  const prompt = `You are analyzing a meeting transcript to identify who is speaking. Respond with ONLY a JSON object, no other text.
 
 ## Attendees
 ${attendees.map((a, i) => `${i + 1}. ${a}`).join("\n")}
@@ -191,36 +150,39 @@ ${context ? `## Additional Context\n${context}\n` : ""}
 ${transcriptPreview}
 
 ## Task
-Identify which attendee corresponds to each speaker ID (speaker_0, speaker_1, etc.).
+Identify which attendee corresponds to each speaker ID. Respond with ONLY this JSON:
 
-Look for:
-1. Self-introductions ("I'm Sarah" or "This is Mike")
-2. Others addressing someone by name ("Sarah, what do you think?")
-3. Speaking patterns, roles, or topics that match known attendee roles
-4. Order of speaking if attendance order is known
+{
+  "mappings": [
+    {
+      "speaker_id": "speaker_0",
+      "name": "Person Name or null if unknown",
+      "confidence": 0.0-1.0,
+      "evidence": "quote or observation supporting this mapping",
+      "needs_review": true/false
+    }
+  ],
+  "overall_confidence": 0.0-1.0,
+  "notes": "any additional observations"
+}
 
-If you cannot confidently identify a speaker, set their name to null and needs_review to true.
-
-Use the speaker_mappings tool to record your findings.`;
+Look for self-introductions, others addressing someone by name, speaking patterns, roles, or topics that match known attendee roles.
+If you cannot confidently identify a speaker, set name to null and needs_review to true.`;
 
   try {
-    const response = await client.messages.create({
-      model: ANTHROPIC_MODEL,
-      max_tokens: 2048,
-      tools: [SPEAKER_MAPPINGS_TOOL],
-      tool_choice: { type: "tool", name: "speaker_mappings" },
-      messages: [{ role: "user", content: prompt }],
+    const result = await executeClaudeCommand(prompt, {
+      cwd: "/tmp",
+      model: "opus",
+      timeout: 60_000,
     });
 
-    // Extract tool use result
-    const toolUse = response.content.find((c): c is Anthropic.ToolUseBlock => c.type === "tool_use");
-    if (!toolUse) {
-      throw new Error("No tool use in response");
+    if (result.exitCode !== 0 || !result.output || result.output.length < 20) {
+      throw new Error(`Claude CLI failed: exit=${result.exitCode}, output=${result.output?.slice(0, 200)}`);
     }
 
-    const result = toolUse.input as MappingToolResult;
+    const parsed = JSON.parse(extractJSON(result.output)) as MappingToolResult;
 
-    const mappings: SpeakerMapping[] = result.mappings.map((m) => ({
+    const mappings: SpeakerMapping[] = parsed.mappings.map((m) => ({
       speakerId: m.speaker_id,
       mappedName: m.name,
       confidence: m.confidence,
@@ -248,7 +210,7 @@ Use the speaker_mappings tool to record your findings.`;
         attendees: attendees.length,
         speakers: speakers.length,
         mappings: mappings.length,
-        confidence: result.overall_confidence,
+        confidence: parsed.overall_confidence,
         needsReview,
       },
       "Speaker mapping completed"
@@ -256,7 +218,7 @@ Use the speaker_mappings tool to record your findings.`;
 
     return {
       mappings,
-      confidence: result.overall_confidence,
+      confidence: parsed.overall_confidence,
       needsReview,
     };
   } catch (error) {

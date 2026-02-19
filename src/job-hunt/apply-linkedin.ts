@@ -54,11 +54,11 @@ function findClosest(options: string[], target: string): string {
   return options.find((o) => o.toLowerCase().includes(lower)) ?? options[0] ?? target;
 }
 
-function takeScreenshot(label: string, jobId: string): string | null {
+async function takeScreenshot(label: string, jobId: string): Promise<string | null> {
   if (!existsSync(SCREENSHOTS_DIR)) mkdirSync(SCREENSHOTS_DIR, { recursive: true });
   const path = `${SCREENSHOTS_DIR}/${jobId}_${label}_${Date.now()}.png`;
   try {
-    runBrowser(`screenshot "${path}"`);
+    await runBrowser(`screenshot "${path}"`);
     return existsSync(path) ? path : null;
   } catch {
     return null;
@@ -77,8 +77,8 @@ export async function linkedInEasyApply(
   try {
     // 1. Navigate to job page (safe — no shell interpolation)
     stepNum++;
-    runBrowser("connect 9222");
-    safeNavigate(job.url);
+    await runBrowser("connect 9222");
+    await safeNavigate(job.url);
     await sleep(5000);
     const navStep: ApplicationStep = { stepNumber: stepNum, stepType: "navigate", stepStatus: "completed", pageUrl: job.url };
     steps.push(navStep);
@@ -86,7 +86,7 @@ export async function linkedInEasyApply(
 
     // 2. Click Easy Apply button
     stepNum++;
-    const clickResult = safeEval(
+    const clickResult = await safeEval(
       "document.querySelector('button.jobs-apply-button, button[aria-label*=\"Easy Apply\"], .jobs-s-apply button')?.click(); true"
     );
     await sleep(3000);
@@ -108,11 +108,11 @@ export async function linkedInEasyApply(
       await sleep(2000);
 
       // Check if we're on a confirmation page
-      const isConfirmation = safeEval(
+      const isConfirmation = await safeEval(
         "document.querySelector('.artdeco-modal__content')?.innerText?.includes('submitted') || false"
       );
       if (isConfirmation.includes("true")) {
-        const screenshot = takeScreenshot("confirmation", job.id);
+        const screenshot = await takeScreenshot("confirmation", job.id);
         const confStep: ApplicationStep = {
           stepNumber: stepNum, stepType: "verify_confirmation", stepStatus: "completed",
           screenshotPath: screenshot ?? undefined,
@@ -123,7 +123,7 @@ export async function linkedInEasyApply(
       }
 
       // Extract form fields (static script, no user data)
-      const fieldsJson = safeEval(EXTRACT_FIELDS_SCRIPT);
+      const fieldsJson = await safeEval(EXTRACT_FIELDS_SCRIPT);
       let fields: Array<{ label: string; type: string; options: string[]; name: string }> = [];
       try {
         const jsonStart = fieldsJson.indexOf("[");
@@ -167,16 +167,16 @@ export async function linkedInEasyApply(
               }
             })()
           `;
-          safeEval(fillScript);
+          await safeEval(fillScript);
         }
       }
 
       // Upload resume via agent-browser file upload
       if (application.resume_version && existsSync(application.resume_version)) {
-        runBrowser(`upload "input[type=file]" "${application.resume_version}"`);
+        await runBrowser(`upload "input[type=file]" "${application.resume_version}"`);
         await sleep(1000);
         // Dispatch events for React-based forms
-        safeEval(`
+        await safeEval(`
           (function() {
             const el = document.querySelector('input[type=file]');
             if (el) {
@@ -188,10 +188,10 @@ export async function linkedInEasyApply(
       }
 
       // Take pre-submit screenshot
-      takeScreenshot(`page_${page}`, job.id);
+      await takeScreenshot(`page_${page}`, job.id);
 
       // Click Next or Submit
-      const submitted = safeEval(
+      const submitted = await safeEval(
         "const btn = document.querySelector('button[aria-label*=\"Submit\"], button[aria-label*=\"Review\"], footer button.artdeco-button--primary'); btn?.click(); btn?.innerText || ''"
       );
 

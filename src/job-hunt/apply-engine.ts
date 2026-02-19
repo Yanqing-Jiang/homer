@@ -13,6 +13,7 @@ import { generateCoverLetter } from "./cover-letter.js";
 import { validateOptimizedResume } from "./resume-validator.js";
 import { readFileSync } from "fs";
 import { logger } from "../utils/logger.js";
+import { trackApplicationSubmitted } from "../outcomes/hooks.js";
 
 export interface ApplyResult {
   success: boolean;
@@ -77,7 +78,7 @@ export class ApplyEngine {
       SELECT COUNT(*) as c FROM applications a
       JOIN job_postings jp ON a.job_id = jp.id
       WHERE a.status = 'application_submitted'
-        AND date(a.updated_at) = date('now')
+        AND a.updated_at >= date('now') AND a.updated_at < date('now', '+1 day')
         AND jp.application_type = 'easy_apply'
     `).get() as { c: number }).c;
 
@@ -85,7 +86,7 @@ export class ApplyEngine {
       SELECT COUNT(*) as c FROM applications a
       JOIN job_postings jp ON a.job_id = jp.id
       WHERE a.status = 'application_submitted'
-        AND date(a.updated_at) = date('now')
+        AND a.updated_at >= date('now') AND a.updated_at < date('now', '+1 day')
         AND (jp.application_type = 'external' OR jp.application_type IS NULL)
     `).get() as { c: number }).c;
 
@@ -155,8 +156,14 @@ export class ApplyEngine {
       `).run(result.confirmationNumber ?? null, result.confirmationScreenshot ?? null, app.id);
 
       this.db.prepare("UPDATE job_postings SET status = 'applied' WHERE id = ?").run(jobId);
+
+      // Track outcome for this application
+      try {
+        trackApplicationSubmitted(this.db, jobId, `${job.company} — ${job.title}`);
+      } catch { /* outcome tracking best-effort */ }
     } else if (!result.escalation) {
-      this.db.prepare("UPDATE applications SET status = 'failed', updated_at = datetime('now') WHERE id = ?").run(app.id);
+      this.db.prepare("UPDATE applications SET status = 'failed', notes = ?, updated_at = datetime('now') WHERE id = ?")
+        .run(result.error ?? null, app.id);
     }
 
     // Escalate to Telegram if needed

@@ -214,6 +214,7 @@ export class Scheduler {
     "job-hunt-discover": ["job-hunt-daily-approval"],
     "session-harvester": ["session-summaries"],
     "nightly-memory": ["memory-embeddings", "memory-git-commit"],
+    "outcome-tracker": ["preference-updater"],
   };
 
   private fireDependencyTriggers(jobId: string): void {

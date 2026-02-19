@@ -11,12 +11,13 @@ import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { execSync } from "child_process";
 import { z } from "zod";
-import { executeGeminiAPI } from "../../executors/gemini.js";
+import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { buildSchedulerContext } from "../shared-context.js";
 import { loadIdeasFromDir, saveIdeaFile, type ParsedIdea } from "../../ideas/parser.js";
 import { logger } from "../../utils/logger.js";
 import type Database from "better-sqlite3";
+import { trackImprovement } from "../../outcomes/hooks.js";
 
 const HOMER_DIR = "/Users/yj/homer";
 const MAX_SOURCE_CHARS = 80_000;
@@ -185,17 +186,16 @@ Return ONLY a JSON object:
 
 One improvement only. Make it good.`;
 
-    const result = await executeGeminiAPI(prompt, {
-      model: "pro3",
-      useGrounding: false,
-      systemPrompt: schedulerContext.slice(0, 30000),
-      temperature: 0.4,
-      responseMimeType: "application/json",
-      reasoningEffort: "high",
+    const fullPrompt = `## Context\n${schedulerContext.slice(0, 30000)}\n\n${prompt}`;
+    const result = await executeCodexCLI(fullPrompt, {
+      cwd: HOMER_DIR,
+      model: "gpt-5.3-codex",
+      reasoningEffort: "xhigh",
+      timeout: 1_200_000,
     });
 
     if (result.exitCode !== 0) {
-      return { success: false, output: "", error: `Gemini Pro API error: ${result.output}` };
+      return { success: false, output: "", error: `Codex CLI error: ${result.output}` };
     }
 
     let improvement: z.infer<typeof ImprovementSchema>;
@@ -273,7 +273,12 @@ ${improvement.files_affected.map(f => `- \`${f}\``).join("\n")}
 
     saveIdeaFile(parsed);
 
-    const output = `Generated improvement "${improvement.title}" (risk ${improvement.risk_score}/10 — saved as idea for review) (${result.inputTokens ?? "?"} in / ${result.outputTokens ?? "?"} out tokens)`;
+    // Track outcome for this improvement proposal
+    try {
+      if (db) trackImprovement(db, id, improvement.title);
+    } catch { /* outcome tracking best-effort */ }
+
+    const output = `Generated improvement "${improvement.title}" (risk ${improvement.risk_score}/10 — saved as idea for review)`;
     logger.info({ id, title: improvement.title, risk: improvement.risk_score }, "Wrote high-risk homer improvement as idea");
 
     return { success: true, output };

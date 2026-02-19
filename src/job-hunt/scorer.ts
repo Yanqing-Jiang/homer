@@ -168,7 +168,7 @@ export function scoreJob(posting: JobPosting): ScoringResult {
 
   // Step 2: Title relevance check
   const titleMatch = matchTitleToCategory(posting.title);
-  const hasRelevantKeywords = /\b(data|ml|machine learning|ai|analytics|scientist|artificial intelligence)\b/i.test(posting.title);
+  const hasRelevantKeywords = /\b(data|ml|machine learning|ai|analytics|scientist|artificial intelligence|engineering manager|staff engineer|principal engineer|genai|gen ai)\b/i.test(posting.title);
   if (!titleMatch && !hasRelevantKeywords) {
     return {
       totalScore: 0,
@@ -249,9 +249,9 @@ function checkDealBreakers(posting: JobPosting, text: string): string[] {
     breaks.push("Contract/temporary position");
   }
 
-  // Salary below $220K total comp
-  if (posting.salary_max && posting.salary_max < 220000) {
-    breaks.push(`TC below $220K (max: $${(posting.salary_max / 1000).toFixed(0)}K)`);
+  // Salary below $250K total comp
+  if (posting.salary_max && posting.salary_max < 250000) {
+    breaks.push(`TC below $250K (max: $${(posting.salary_max / 1000).toFixed(0)}K)`);
   }
 
   // Relocation required outside Seattle
@@ -267,11 +267,15 @@ function checkDealBreakers(posting: JobPosting, text: string): string[] {
     breaks.push("Startup < Series B");
   }
 
-  // Pure management (no IC)
+  // Pure management (no IC) — exclude Engineering Manager and technical management
   const titleLower = posting.title.toLowerCase();
-  if (/\b(director|vp|head of|chief)\b/.test(titleLower) && !/\b(engineer|scientist|architect)\b/.test(titleLower)) {
+  if (
+    /\b(director|vp|head of|chief)\b/.test(titleLower) &&
+    !/\b(engineer|scientist|architect|technical|data)\b/.test(titleLower) &&
+    !/\b(engineering manager|em|eng manager)\b/i.test(titleLower)
+  ) {
     if (!/\b(ic|individual contributor|hands.on|coding)\b/i.test(text)) {
-      breaks.push("Pure management role (no IC)");
+      breaks.push("Pure management role (no technical component)");
     }
   }
 

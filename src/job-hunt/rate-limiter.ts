@@ -10,7 +10,7 @@ interface RateLimit {
 }
 
 const LIMITS: Record<string, RateLimit> = {
-  linkedin_search: { max: 5, windowHours: 1 },
+  linkedin_search: { max: 50, windowHours: 1 },
   linkedin_easy_apply: { max: 10, windowHours: 24 },
   career_site_login: { max: 3, windowHours: 1 },
   career_site_apply: { max: 5, windowHours: 24 },

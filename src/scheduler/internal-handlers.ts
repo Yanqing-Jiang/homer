@@ -220,14 +220,34 @@ export async function executeInternalJob(
         }
         return buildResult(job, startedAt, true, stalled.length > 0 ? `${stalled.length} stalled applications flagged` : "No stalled applications");
       }
+      case "outcome_tracker": {
+        const { runOutcomeTracker } = await import("./jobs/outcome-tracker.js");
+        const result = await runOutcomeTracker(ctx.stateManager.getDb(), ctx.bot, ctx.chatId);
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "preference_updater": {
+        const { runPreferenceUpdater } = await import("./jobs/preference-updater.js");
+        const result = await runPreferenceUpdater(ctx.stateManager.getDb());
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
       case "memory_git_commit": {
         const { runMemoryGitCommit } = await import("./jobs/memory-git-commit.js");
         const result = await runMemoryGitCommit();
         return buildResult(job, startedAt, result.success, result.output, result.error);
       }
+      case "nightly_code_push": {
+        const { runNightlyCodePush } = await import("./jobs/nightly-code-push.js");
+        const result = await runNightlyCodePush();
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
       case "db_backup": {
         const { runDbBackup } = await import("./jobs/db-backup.js");
         const result = await runDbBackup();
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "content_scraper": {
+        const { runContentScraper } = await import("./jobs/content-scraper.js");
+        const result = await runContentScraper(ctx.stateManager.getDb());
         return buildResult(job, startedAt, result.success, result.output, result.error);
       }
       default: {

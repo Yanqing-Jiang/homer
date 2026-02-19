@@ -1,10 +1,9 @@
 /**
- * Meeting summarizer using Claude Sonnet
+ * Meeting summarizer using Claude CLI
  *
  * Generates summary, action items, and key topics from transcript
  */
 
-import Anthropic from "@anthropic-ai/sdk";
 import type {
   ActionItem,
   KeyTopic,
@@ -14,72 +13,7 @@ import type {
 import type { TranscriptionResult } from "../voice/types.js";
 import { groupWordsIntoSegments } from "./types.js";
 import { logger } from "../utils/logger.js";
-
-const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
-
-// Tool schema for structured summary output
-const MEETING_SUMMARY_TOOL = {
-  name: "meeting_summary",
-  description: "Record the meeting summary and extracted items",
-  input_schema: {
-    type: "object" as const,
-    properties: {
-      summary: {
-        type: "string" as const,
-        description: "2-4 paragraph summary of the meeting's key discussions and outcomes",
-      },
-      action_items: {
-        type: "array" as const,
-        description: "Action items assigned during the meeting",
-        items: {
-          type: "object" as const,
-          properties: {
-            assignee: {
-              type: "string" as const,
-              description: "Person responsible for the action",
-            },
-            task: {
-              type: "string" as const,
-              description: "Description of what needs to be done",
-            },
-            due_date: {
-              type: "string" as const,
-              description: "Due date if mentioned (ISO format or relative like 'next week')",
-            },
-          },
-          required: ["assignee", "task"],
-        },
-      },
-      key_topics: {
-        type: "array" as const,
-        description: "Main topics discussed in the meeting",
-        items: {
-          type: "object" as const,
-          properties: {
-            title: {
-              type: "string" as const,
-              description: "Topic title (2-5 words)",
-            },
-            description: {
-              type: "string" as const,
-              description: "Brief description of discussion (1-2 sentences)",
-            },
-            timestamp: {
-              type: "string" as const,
-              description: "Approximate timestamp when discussed (MM:SS format)",
-            },
-          },
-          required: ["title", "description"],
-        },
-      },
-      meeting_type: {
-        type: "string" as const,
-        description: "Type of meeting (standup, planning, 1:1, brainstorm, review, etc.)",
-      },
-    },
-    required: ["summary", "action_items", "key_topics"],
-  },
-};
+import { executeClaudeCommand } from "../executors/claude.js";
 
 interface SummaryToolResult {
   summary: string;
@@ -104,6 +38,21 @@ export interface SummarizeResult {
 }
 
 /**
+ * Extract JSON from Claude CLI output (handles markdown fences)
+ */
+function extractJSON(text: string): string {
+  // Try to find JSON in code fences first
+  const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+  if (fenceMatch) return fenceMatch[1]!.trim();
+
+  // Try to find raw JSON object
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (jsonMatch) return jsonMatch[0];
+
+  return text.trim();
+}
+
+/**
  * Format transcript for the summarizer prompt
  */
 function formatTranscriptForSummary(
@@ -125,7 +74,7 @@ function formatTranscriptForSummary(
 }
 
 /**
- * Generate meeting summary using Claude
+ * Generate meeting summary using Claude CLI
  */
 export async function summarizeMeeting(
   transcription: TranscriptionResult,
@@ -133,8 +82,6 @@ export async function summarizeMeeting(
   title: string,
   attendees: string[]
 ): Promise<SummarizeResult> {
-  const client = new Anthropic();
-
   // Group words into segments with speaker names
   const segments = groupWordsIntoSegments(
     transcription.words || [],
@@ -151,7 +98,7 @@ export async function summarizeMeeting(
 
   const transcriptText = formatTranscriptForSummary(segments);
 
-  const prompt = `You are summarizing a meeting transcript.
+  const prompt = `You are summarizing a meeting transcript. Respond with ONLY a JSON object, no other text.
 
 ## Meeting Information
 - Title: ${title}
@@ -162,57 +109,55 @@ export async function summarizeMeeting(
 ${transcriptText}
 
 ## Task
-Analyze this meeting and extract:
-1. A concise summary (2-4 paragraphs) focusing on decisions made and key discussion points
-2. Action items with assignees (only explicit commitments, not general discussion)
-3. Key topics discussed
+Analyze this meeting and respond with ONLY this JSON structure:
 
-Be specific about who said what when relevant. Focus on outcomes over process.
+{
+  "summary": "2-4 paragraph summary focusing on decisions and key discussion points",
+  "action_items": [{"assignee": "name", "task": "description", "due_date": "if mentioned"}],
+  "key_topics": [{"title": "2-5 words", "description": "1-2 sentences", "timestamp": "MM:SS"}],
+  "meeting_type": "standup|planning|1:1|brainstorm|review|etc"
+}
 
-Use the meeting_summary tool to record your analysis.`;
+Be specific about who said what. Focus on outcomes over process. Only include explicit commitments as action items.`;
 
   try {
-    const response = await client.messages.create({
-      model: ANTHROPIC_MODEL,
-      max_tokens: 4096,
-      tools: [MEETING_SUMMARY_TOOL],
-      tool_choice: { type: "tool", name: "meeting_summary" },
-      messages: [{ role: "user", content: prompt }],
+    const result = await executeClaudeCommand(prompt, {
+      cwd: "/tmp",
+      model: "opus",
+      timeout: 120_000,
     });
 
-    // Extract tool use result
-    const toolUse = response.content.find((c) => c.type === "tool_use");
-    if (!toolUse || toolUse.type !== "tool_use") {
-      throw new Error("No tool use in response");
+    if (result.exitCode !== 0 || !result.output || result.output.length < 20) {
+      throw new Error(`Claude CLI failed: exit=${result.exitCode}, output=${result.output?.slice(0, 200)}`);
     }
 
-    const result = toolUse.input as SummaryToolResult;
+    const parsed = JSON.parse(extractJSON(result.output)) as SummaryToolResult;
 
     logger.info(
       {
         title,
-        summaryLength: result.summary.length,
-        actionItems: result.action_items.length,
-        keyTopics: result.key_topics.length,
-        meetingType: result.meeting_type,
+        summaryLength: parsed.summary.length,
+        actionItems: parsed.action_items.length,
+        keyTopics: parsed.key_topics.length,
+        meetingType: parsed.meeting_type,
       },
       "Meeting summary generated"
     );
 
     return {
-      summary: result.summary,
-      actionItems: result.action_items.map((item) => ({
+      summary: parsed.summary,
+      actionItems: (parsed.action_items || []).map((item) => ({
         assignee: item.assignee,
         task: item.task,
         dueDate: item.due_date,
         completed: false,
       })),
-      keyTopics: result.key_topics.map((topic) => ({
+      keyTopics: (parsed.key_topics || []).map((topic) => ({
         title: topic.title,
         description: topic.description,
         timestamp: topic.timestamp,
       })),
-      meetingType: result.meeting_type,
+      meetingType: parsed.meeting_type,
     };
   } catch (error) {
     logger.error({ error, title }, "Meeting summarization failed");
@@ -233,17 +178,11 @@ export async function generateMeetingTitle(
   transcription: TranscriptionResult,
   attendees: string[]
 ): Promise<string> {
-  const client = new Anthropic();
-
   const text = transcription.text.slice(0, 2000);
 
   try {
-    const response = await client.messages.create({
-      model: ANTHROPIC_MODEL,
-      max_tokens: 100,
-      messages: [{
-        role: "user",
-        content: `Generate a short title (3-6 words) for this meeting.
+    const result = await executeClaudeCommand(
+      `Generate a short title (3-6 words) for this meeting.
 
 Attendees: ${attendees.join(", ")}
 
@@ -255,12 +194,15 @@ Reply with just the title, nothing else. Examples:
 - API Design Review
 - Q1 Planning Session
 - Sarah 1:1 Check-in`,
-      }],
-    });
+      {
+        cwd: "/tmp",
+        model: "opus",
+        timeout: 30_000,
+      }
+    );
 
-    const content = response.content[0];
-    if (content && content.type === "text") {
-      return content.text.trim().replace(/^["']|["']$/g, "");
+    if (result.exitCode === 0 && result.output) {
+      return result.output.trim().replace(/^["']|["']$/g, "");
     }
   } catch (error) {
     logger.warn({ error }, "Title generation failed");
@@ -281,8 +223,6 @@ export async function extractActionItems(
   transcription: TranscriptionResult,
   speakerMappings: SpeakerMapping[]
 ): Promise<ActionItem[]> {
-  const client = new Anthropic();
-
   const segments = groupWordsIntoSegments(
     transcription.words || [],
     speakerMappings
@@ -290,51 +230,28 @@ export async function extractActionItems(
 
   const transcriptText = formatTranscriptForSummary(segments, 10000);
 
-  const ACTION_ITEMS_TOOL = {
-    name: "action_items",
-    description: "Extract action items from the meeting",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        items: {
-          type: "array" as const,
-          items: {
-            type: "object" as const,
-            properties: {
-              assignee: { type: "string" as const },
-              task: { type: "string" as const },
-              due_date: { type: "string" as const },
-            },
-            required: ["assignee", "task"],
-          },
-        },
-      },
-      required: ["items"],
-    },
-  };
-
   try {
-    const response = await client.messages.create({
-      model: ANTHROPIC_MODEL,
-      max_tokens: 1024,
-      tools: [ACTION_ITEMS_TOOL],
-      tool_choice: { type: "tool", name: "action_items" },
-      messages: [{
-        role: "user",
-        content: `Extract action items from this meeting transcript. Only include explicit commitments.
+    const result = await executeClaudeCommand(
+      `Extract action items from this meeting transcript. Only include explicit commitments.
 
-${transcriptText}`,
-      }],
-    });
+${transcriptText}
 
-    const toolUse = response.content.find((c) => c.type === "tool_use");
-    if (!toolUse || toolUse.type !== "tool_use") {
+Respond with ONLY a JSON object:
+{"items": [{"assignee": "name", "task": "description", "due_date": "if mentioned"}]}`,
+      {
+        cwd: "/tmp",
+        model: "opus",
+        timeout: 60_000,
+      }
+    );
+
+    if (result.exitCode !== 0 || !result.output) {
       return [];
     }
 
-    const result = toolUse.input as { items: Array<{ assignee: string; task: string; due_date?: string }> };
+    const parsed = JSON.parse(extractJSON(result.output)) as { items: Array<{ assignee: string; task: string; due_date?: string }> };
 
-    return result.items.map((item) => ({
+    return (parsed.items || []).map((item) => ({
       assignee: item.assignee,
       task: item.task,
       dueDate: item.due_date,

@@ -25,7 +25,7 @@ interface QueuedJob {
 
 function getDailyApprovalCount(db: Database.Database): number {
   const row = db.prepare(
-    "SELECT COUNT(*) as c FROM approval_queue WHERE decision = 'approved' AND date(decided_at) = date('now')"
+    "SELECT COUNT(*) as c FROM approval_queue WHERE decision = 'approved' AND decided_at >= date('now') AND decided_at < date('now', '+1 day')"
   ).get() as { c: number };
   return row.c;
 }

@@ -20,8 +20,10 @@ import { buildBookmarkScrapePrompt, SCRAPE_OPTIONS } from "../../scraping/browse
 import { loadIdeasFromDir, type ParsedIdea } from "../../ideas/parser.js";
 import { smartSaveIdea, type SmartSaveResult } from "../../ideas/smart-save.js";
 import { buildCondensedContext, extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
+import { formatForPrompt as getPreferenceContext } from "../../preferences/engine.js";
 import { getRecentJobOutputs } from "../job-outputs.js";
 import { logger } from "../../utils/logger.js";
+import { OPUS_COPILOT_MODEL } from "../../models.js";
 
 const MEMORY_PATH = "/Users/yj/memory";
 const ME_MD = `${MEMORY_PATH}/me.md`;
@@ -146,42 +148,30 @@ export async function runIdeasExplore(db?: Database.Database): Promise<{
       bookmarksEmpty = !Array.isArray(parsed) || parsed.length === 0;
     } catch { bookmarksEmpty = true; }
 
-    // Swarm: parallel execution
+    // Swarm: 2 agents — Flash (discovery) + Opus (gap analysis)
     const agents = [];
 
+    // Agent 1: Flash — bookmark analysis + GitHub trending (merged)
+    const discoveryParts: string[] = [];
     if (!bookmarksEmpty) {
-      agents.push({
-        id: "flash-analyze",
-        executor: "opencode" as const,
-        prompt: `Analyze these Twitter/X bookmarks and explain WHY Yanqing likely bookmarked each.
+      discoveryParts.push(`## Part 1: Twitter/X Bookmark Analysis
 
+Analyze these bookmarks and explain WHY Yanqing likely bookmarked each.
 For each bookmark with an external URL, use web search to analyze the linked content.
 
 For each bookmark, provide:
 1. The bookmark text and author
 2. Any external URL found
-3. A 2-3 sentence analysis of WHY this was bookmarked (connect to Yanqing's specific active projects and goals below)
+3. A 2-3 sentence analysis of WHY this was bookmarked (connect to Yanqing's active projects and goals)
 4. Key themes and tags
 
-## Yanqing's Active Goals
-${goals.slice(0, 1500)}
-
-## Yanqing's Active Projects
-${projects.slice(0, 1000)}
-
-## Bookmarks JSON
-
-${bookmarksJson}`,
-        context: goalContext,
-        timeout: 300_000,
-        required: true,
-      });
+### Bookmarks JSON
+${bookmarksJson}`);
     }
 
-    agents.push({
-      id: "flash-github",
-      executor: "opencode" as const,
-      prompt: `Search GitHub trending repositories from the last 7 days that match Yanqing's interests.
+    discoveryParts.push(`## ${bookmarksEmpty ? "Part 1" : "Part 2"}: GitHub Trending Repos
+
+Search GitHub trending repositories from the last 7 days that match Yanqing's interests.
 
 Use this command to find trending repos:
 gh api /search/repositories -f q='created:>${new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10)} stars:>100' -f sort=stars --jq '.items[:15] | .[] | {name: .full_name, description: .description, stars: .stargazers_count, language: .language, url: .html_url}'
@@ -201,25 +191,38 @@ For each relevant repo, provide:
 2. What it does (1-2 sentences)
 3. Which of Yanqing's projects it connects to
 
-## Deny History (skip these)
-
-${denyHistory.slice(0, 3000)}`,
-      context: goalContext,
-      timeout: 300_000,
-      required: !bookmarksEmpty ? false : true,
-    });
+### Deny History (skip these)
+${denyHistory.slice(0, 3000)}`);
 
     agents.push({
-      id: "flash-openclaw",
+      id: "flash-discover",
       executor: "opencode" as const,
-      prompt: `Analyze the OpenClaw repository on GitHub for features HOMER doesn't have.
+      prompt: `You are a discovery agent. Complete ALL parts below sequentially.
 
-Run these commands:
-1. gh api /search/repositories -f q="openclaw telegram bot" --jq '.items[:3] | .[] | {name: .full_name, desc: .description, url: .html_url}'
-2. For the best match, fetch: gh api repos/OWNER/REPO/readme -H "Accept: application/vnd.github.raw" | head -200
-3. Recent commits: gh api repos/OWNER/REPO/commits?per_page=15 --jq '.[] | .commit.message'
+## Yanqing's Active Goals
+${goals.slice(0, 1500)}
 
-Compare discovered features to HOMER's current capabilities and identify gaps worth implementing.
+## Yanqing's Active Projects
+${projects.slice(0, 1000)}
+
+${discoveryParts.join("\n\n---\n\n")}`,
+      context: goalContext,
+      timeout: 300_000,
+      required: true,
+    });
+
+    // Agent 2: Opus 4.6 via OpenCode — deep competitive gap analysis
+    agents.push({
+      id: "opus-gap-analysis",
+      executor: "opencode" as const,
+      model: OPUS_COPILOT_MODEL,
+      prompt: `Perform a deep competitive analysis of personal AI assistant projects on GitHub. Identify features and patterns that HOMER doesn't have but should.
+
+Steps:
+1. Search for similar projects: gh api /search/repositories -f q="personal AI assistant telegram bot" --jq '.items[:5] | .[] | {name: .full_name, desc: .description, url: .html_url, stars: .stargazers_count}'
+2. Also search: gh api /search/repositories -f q="AI agent memory orchestration" --jq '.items[:5] | .[] | {name: .full_name, desc: .description, url: .html_url, stars: .stargazers_count}'
+3. For the top 2-3 most relevant repos, fetch their READMEs: gh api repos/OWNER/REPO/readme -H "Accept: application/vnd.github.raw"
+4. Analyze feature gaps compared to HOMER
 
 ## HOMER's Current Capabilities
 ${homerCapabilities}
@@ -227,9 +230,11 @@ ${homerCapabilities}
 ## Yanqing's Priorities
 ${goals.slice(0, 1000)}
 
-For each feature gap: feature name, benefit to Yanqing, complexity (low/med/high).`,
+For each feature gap provide: feature name, what it enables, benefit to Yanqing, implementation complexity (low/med/high), and which of Yanqing's projects it connects to.
+
+Focus on genuinely useful gaps — not cosmetic differences. Quality over quantity.`,
       context: goalContext,
-      timeout: 300_000,
+      timeout: 600_000, // 10 min — Opus is slower
       required: false,
     });
 
@@ -264,8 +269,18 @@ Return ONLY a JSON array:
 
 If no candidates pass the threshold, return an empty array: []`;
 
+    // Inject preference context if available
+    let preferenceContext = "";
+    try {
+      const Database = (await import("better-sqlite3")).default;
+      const prefDb = new Database("/Users/yj/homer/data/homer.db", { readonly: true });
+      preferenceContext = getPreferenceContext(prefDb);
+      prefDb.close();
+    } catch { /* preference model may not exist yet */ }
+
     const consolidated = await consolidateResults(results, consolidationPrompt, {
       temperature: 0.2,
+      preferenceContext,
     });
 
     // Parse and validate

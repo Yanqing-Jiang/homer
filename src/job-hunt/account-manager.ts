@@ -92,17 +92,34 @@ export class AccountManager {
 
     try {
       const encrypted: EncryptedValue = JSON.parse(row.password_encrypted);
-      decrypt(encrypted); // verify we can decrypt
+      const password = decrypt(encrypted);
 
-      // TODO: Browser-based login using agent-browser
-      // For now, return success if we can decrypt (proving encryption works)
-      logger.info({ company: account.company }, "Login would be performed here");
+      // Browser-based login via OpenCode CLI (Gemini Flash)
+      const { executeOpenCodeCLI } = await import("../executors/opencode-cli.js");
+      const prompt = `Use agent-browser to log into ${account.loginUrl} with email ${account.username} and password ${password}.
+Connect: agent-browser connect 9222
+Navigate to the login page, fill in email and password fields, click the submit/login button.
+Report COOKIE_SUCCESS if login succeeds and you land on a dashboard or profile page.
+Report COOKIE_FAILED if login fails (wrong credentials, CAPTCHA, etc).`;
 
-      this.db.prepare(
-        "UPDATE career_accounts SET last_login = datetime('now') WHERE id = ?"
-      ).run(account.id);
+      const result = await executeOpenCodeCLI(prompt, "", {
+        model: "google/gemini-3-flash-preview",
+        researchOnly: false,
+        cwd: "/Users/yj/job-hunt",
+        timeout: 120_000,
+      });
 
-      return { success: true };
+      const success = result.output.includes("COOKIE_SUCCESS");
+      if (success) {
+        this.db.prepare(
+          "UPDATE career_accounts SET last_login = datetime('now') WHERE id = ?"
+        ).run(account.id);
+        logger.info({ company: account.company }, "Browser login succeeded");
+        return { success: true };
+      }
+
+      logger.warn({ company: account.company }, "Browser login failed");
+      return { success: false };
     } catch (error) {
       logger.warn({ error, accountId: account.id }, "Login failed");
       return { success: false };

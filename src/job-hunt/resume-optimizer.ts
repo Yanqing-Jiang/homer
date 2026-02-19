@@ -3,7 +3,7 @@
  * Fallback: use base resume if optimization fails.
  */
 
-import { spawn } from "child_process";
+import { spawn, execSync } from "child_process";
 import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { logger } from "../utils/logger.js";
 
@@ -52,6 +52,16 @@ export async function optimizeResume(
       const stderr = Buffer.concat(errChunks).toString("utf8");
 
       if (code === 0 && existsSync(outputPath)) {
+        // Extract text sidecar for validation
+        const txtPath = outputPath.replace(/\.pdf$/i, ".txt");
+        if (!existsSync(txtPath)) {
+          try {
+            execSync(`pdftotext "${outputPath}" "${txtPath}"`, { timeout: 30_000 });
+          } catch {
+            logger.warn({ outputPath }, "pdftotext failed — resume will submit without text validation");
+          }
+        }
+
         const iterMatch = stdout.match(/iteration[s]?\s*[:=]\s*(\d+)/i);
         resolve({
           success: true,

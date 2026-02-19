@@ -8,7 +8,6 @@
  */
 
 import type Database from "better-sqlite3";
-import { createHash } from "crypto";
 import { logger } from "../utils/logger.js";
 import type { RoutingRequest, RoutingDecision, TaskType, DeferredTask } from "./router.js";
 
@@ -215,37 +214,8 @@ const COST_PER_1K_TOKENS: Record<string, { input: number; output: number }> = {
 };
 
 export class CostTracker {
-  private stmts: {
-    insert: Database.Statement<[string, string | null, number, number, number, number, string, string | null, string | null, string | null, string | null]>;
-    getDailySummary: Database.Statement<[string]>;
-    getWeeklyCosts: Database.Statement<[]>;
-  };
-
-  constructor(db: Database.Database) {
-    this.stmts = {
-      insert: db.prepare(`
-        INSERT INTO executor_costs
-          (executor, executor_account, input_tokens, output_tokens, cost_usd, timestamp, date_key, job_id, intent_id, run_id, query_hash)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `),
-      getDailySummary: db.prepare(`
-        SELECT * FROM daily_cost_summary WHERE date_key = ?
-      `),
-      getWeeklyCosts: db.prepare(`
-        SELECT date_key, total_cost, gemini_cli_queries, gemini_api_cost, kimi_queries, claude_cost, codex_cost
-        FROM daily_cost_summary
-        WHERE date_key >= date('now', '-7 days')
-        ORDER BY date_key DESC
-      `),
-    };
-  }
-
-  private getDateKey(): string {
-    return new Date().toISOString().split("T")[0]!;
-  }
-
-  private hashQuery(query: string): string {
-    return createHash("sha256").update(query).digest("hex").slice(0, 16);
+  constructor(_db: Database.Database) {
+    // Cost telemetry has been intentionally removed.
   }
 
   calculateCost(
@@ -278,39 +248,17 @@ export class CostTracker {
     outputTokens: number,
     options?: { jobId?: string; query?: string; intentId?: string; runId?: string; executorAccount?: string }
   ): number {
-    const cost = this.calculateCost(executor, inputTokens, outputTokens);
-    const timestamp = Date.now();
-    const dateKey = this.getDateKey();
-    const queryHash = options?.query ? this.hashQuery(options.query) : null;
-
-    this.stmts.insert.run(
-      executor,
-      options?.executorAccount || null,
-      inputTokens,
-      outputTokens,
-      cost,
-      timestamp,
-      dateKey,
-      options?.jobId || null,
-      options?.intentId || null,
-      options?.runId || null,
-      queryHash
-    );
-
-    logger.debug(
-      { executor, inputTokens, outputTokens, cost, dateKey },
-      "Cost tracked"
-    );
-
-    return cost;
+    // Cost telemetry has been intentionally removed.
+    void executor;
+    void inputTokens;
+    void outputTokens;
+    void options;
+    return 0;
   }
 
   getDailyCost(date?: string): number {
-    const dateKey = date || this.getDateKey();
-    const row = this.stmts.getDailySummary.get(dateKey) as
-      | { total_cost: number }
-      | undefined;
-    return row?.total_cost || 0;
+    void date;
+    return 0;
   }
 
   getDailySummary(
@@ -324,30 +272,8 @@ export class CostTracker {
     claudeCost: number;
     codexCost: number;
   } | null {
-    const dateKey = date || this.getDateKey();
-    const row = this.stmts.getDailySummary.get(dateKey) as
-      | {
-          date_key: string;
-          total_cost: number;
-          gemini_cli_queries: number;
-          gemini_api_cost: number;
-          kimi_queries: number;
-          claude_cost: number;
-          codex_cost: number;
-        }
-      | undefined;
-
-    if (!row) return null;
-
-    return {
-      dateKey: row.date_key,
-      totalCost: row.total_cost,
-      geminiCliQueries: row.gemini_cli_queries,
-      geminiApiCost: row.gemini_api_cost,
-      kimiQueries: row.kimi_queries,
-      claudeCost: row.claude_cost,
-      codexCost: row.codex_cost,
-    };
+    void date;
+    return null;
   }
 
   getWeeklyCosts(): Array<{
@@ -359,25 +285,7 @@ export class CostTracker {
     claudeCost: number;
     codexCost: number;
   }> {
-    const rows = this.stmts.getWeeklyCosts.all() as Array<{
-      date_key: string;
-      total_cost: number;
-      gemini_cli_queries: number;
-      gemini_api_cost: number;
-      kimi_queries: number;
-      claude_cost: number;
-      codex_cost: number;
-    }>;
-
-    return rows.map((row) => ({
-      dateKey: row.date_key,
-      totalCost: row.total_cost,
-      geminiCliQueries: row.gemini_cli_queries,
-      geminiApiCost: row.gemini_api_cost,
-      kimiQueries: row.kimi_queries,
-      claudeCost: row.claude_cost,
-      codexCost: row.codex_cost,
-    }));
+    return [];
   }
 }
 

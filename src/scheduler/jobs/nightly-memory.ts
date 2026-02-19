@@ -11,14 +11,18 @@
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync } from "fs";
 import { z } from "zod";
-import { fanOutAgents, consolidateResults, parseSwarmJSON } from "../../executors/model-swarm.js";
+import { parseSwarmJSON } from "../../executors/model-swarm.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
+import { executeOpenCodeCLI } from "../../executors/opencode-cli.js";
 import { buildCondensedContext, extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
 import { getRecentJobOutputs } from "../job-outputs.js";
 import { logger } from "../../utils/logger.js";
+import { OPUS_COPILOT_MODEL } from "../../models.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
 import { loadIdeasFromDir, type ParsedIdea } from "../../ideas/parser.js";
 import { smartSaveIdea, type SmartSaveResult } from "../../ideas/smart-save.js";
 import type { StateManager } from "../../state/manager.js";
+import { trackPromotion } from "../../outcomes/hooks.js";
 
 const MEMORY_PATH = "/Users/yj/memory";
 const DAILY_DIR = `${MEMORY_PATH}/daily`;
@@ -159,16 +163,21 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
         "Daily log appears to be summary-only, not raw. Fact extraction may be degraded.");
     }
 
-    // Swarm: parallel execution
-    const results = await fanOutAgents([
-      {
-        id: "flash-parser",
-        executor: "opencode",
-        prompt: `Extract promotable facts from yesterday's daily log.
+    // Cross-job intelligence
+    const recentActivity = getRecentJobOutputs(stateManager.getDb());
 
-A "promotable fact" is information that should be persisted in permanent memory files. Focus on:
+    // Build existing idea titles for dedup
+    const existingIdeas = loadIdeasFromDir();
+    const existingTitles = existingIdeas.slice(0, 100).map((i) => i.title).join(", ");
+
+    // Single Opus 4.6 call — replaces 3-agent swarm + consolidation
+    const unifiedPrompt = `You are a memory processing engine for Yanqing's personal AI assistant. Analyze yesterday's daily log, cross-reference against permanent memory files, and produce two outputs:
+
+## Task 1: Extract Promotable Facts (3-8 max)
+
+A "promotable fact" is information worth persisting in permanent memory. Focus on:
 - Outcomes and decisions (NOT process steps)
-- New preferences expressed by Yanqing
+- New preferences expressed
 - Career milestones or changes
 - Tool configurations or subscriptions changed
 - Life events or context changes
@@ -181,116 +190,76 @@ For each fact, classify which file it belongs to:
 - preferences: communication style, technical choices, workflow preferences
 - tools: tool configs, subscriptions, API keys, service settings
 
-And specify which SECTION within that file (use existing section names from the file when possible).
+And specify which SECTION within that file. Use EXISTING section names from the permanent files below when possible. Only genuinely NEW information — skip anything already well-captured.
 
-## What Yanqing Cares About (for calibrating "promotable")
+## Task 2: Extract Actionable Ideas (0-3 max)
 
-Use this to distinguish milestones from routine work. A fact about MAHORAGA trading or Career OS pipeline is a milestone. A fact about routine daemon restarts is noise.
+An "idea" is forward-looking — what SHOULD happen next, what could be built:
+1. Problems encountered that could be automated
+2. Tools/repos mentioned that deserve deeper exploration
+3. Patterns or insights suggesting a new project or feature
+4. Career opportunities mentioned or implied
 
+Deduplicate against existing idea titles: ${existingTitles.slice(0, 2000)}
+
+## Context
+
+### Who is Yanqing
+${condensedContext.slice(0, 2000)}
+
+### Current Goals
 ${goals.slice(0, 1200)}
 
 ### Active Projects
 ${projects.slice(0, 800)}
+${recentActivity ? `\n### Recent Job Activity\n${recentActivity}\n` : ""}
+## Permanent Memory Files (cross-reference to avoid duplicates)
 
-Quality bar: 3-8 facts max. Skip trivial/routine items.
-
-## Daily Log (${yesterday})
-
-${rawLog.slice(0, 80000)}`,
-        timeout: 300_000,
-        required: true,
-      },
-      {
-        id: "flash-idea-mining",
-        executor: "opencode",
-        prompt: `Extract up to 3 actionable ideas from yesterday's daily log.
-
-An "idea" is different from a "fact to promote":
-- Facts go to permanent memory (what happened, what was decided)
-- Ideas go to the idea pipeline (what SHOULD happen next, what could be built)
-
-Focus on:
-1. Problems Yanqing encountered that could be automated
-2. Tools/repos mentioned that deserve deeper exploration
-3. Patterns or insights that suggest a new project or feature
-4. Career opportunities mentioned or implied
-
-For each idea provide: title, content (2-3 sentences), and why it matters for Yanqing's goals.
-
-## Yanqing's Current Goals
-${goals.slice(0, 1200)}
-
-## Active Projects
-${projects.slice(0, 800)}
+${permanentContext}
 
 ## Daily Log (${yesterday})
-${rawLog.slice(0, 40000)}`,
-        timeout: 300_000,
-        required: false,
-      },
-      {
-        id: "flash-crossref",
-        executor: "opencode",
-        prompt: `Cross-reference Yanqing's permanent memory files and identify:
 
-1. What's already well-captured in each file
-2. Any areas that seem stale or outdated
-3. Gaps — things that should be documented but aren't
+${rawLog.slice(0, 80000)}
 
-For each file, list the SECTION NAMES so the consolidation step can target promotions accurately.
-
-This helps the consolidation step avoid duplicating existing content.
-
-Summarize each file's coverage in 2-3 sentences, then list section names.
-
-## Permanent Memory Files
-
-${permanentContext}`,
-        timeout: 300_000,
-        required: false,
-      },
-    ]);
-
-    // Cross-job intelligence
-    const recentActivity = getRecentJobOutputs(stateManager.getDb());
-
-    // Consolidation — with personal context for accurate dedup
-    // Build existing idea titles for dedup
-    const existingIdeas = loadIdeasFromDir();
-    const existingTitles = existingIdeas.slice(0, 100).map((i) => i.title).join(", ");
-
-    const consolidationPrompt = `You are a memory promotion engine. Merge the extracted facts with cross-reference context to produce final promotions AND actionable ideas.
-
-## Who is Yanqing (for context)
-
-${condensedContext.slice(0, 2000)}
-
-## Instructions
-
-### Promotions (facts → permanent memory)
-1. Keep only GENUINELY NEW information — deduplicate against what's already in the permanent files (use the cross-reference agent's summary to check).
-2. Map each promotion to the correct file and section.
-3. Quality bar: outcomes over process, specific over vague, milestones over routine.
-4. 3-8 promotions maximum.
-5. Each promotion should be a single, self-contained statement.
-6. Use existing section names from the files when possible (the cross-reference agent should have listed them).
-
-### Ideas (forward-looking → idea pipeline)
-1. Extract from the idea-mining agent's output.
-2. Deduplicate against existing idea titles: ${existingTitles.slice(0, 2000)}
-3. Only include genuinely actionable ideas that connect to current work.
-4. 0-3 ideas maximum.
-${recentActivity ? `\n${recentActivity}\n` : ""}
 ## Output Format
 
-Return ONLY a JSON object:
+Return ONLY a valid JSON object (no markdown, no preamble):
 {"promotions": [{"content": "fact to promote", "file": "me"|"work"|"life"|"preferences"|"tools", "section": "Section Name"}], "ideas": [{"title": "Idea Title", "content": "what and why", "context": "how this connects to Yanqing's goals"}]}
 
 If nothing to promote/no ideas, use empty arrays.`;
 
-    const consolidated = await consolidateResults(results, consolidationPrompt, {
-      temperature: 0.2,
-    });
+    logger.info({ promptLength: unifiedPrompt.length, date: yesterday }, "Running nightly memory via Claude Opus 4.6");
+
+    let consolidated = "";
+
+    try {
+      const opusResult = await executeClaudeCommand(unifiedPrompt, {
+        cwd: "/tmp/homer-swarm",
+        model: "opus",
+        timeout: 600_000, // 10 min — Opus is slower but one call replaces 4
+      });
+
+      consolidated = opusResult.output ?? "";
+
+      if (!consolidated || consolidated.length < 50) {
+        throw new Error(`Opus output too short: ${consolidated.length} chars`);
+      }
+    } catch (opusErr) {
+      // Fallback to Opus 4.6 via opencode (free tokens via Copilot)
+      const msg = opusErr instanceof Error ? opusErr.message : String(opusErr);
+      logger.warn({ error: msg }, "Claude CLI Opus failed, falling back to Opus 4.6 via opencode");
+
+      const fallback = await executeOpenCodeCLI(unifiedPrompt, "", {
+        model: OPUS_COPILOT_MODEL,
+        timeout: 600_000,
+        researchOnly: true,
+      });
+
+      if (fallback.exitCode !== 0 || !fallback.output || fallback.output.length < 50) {
+        return { success: false, output: "", error: `Nightly memory failed (both Opus paths): ${fallback.output?.slice(0, 200)}` };
+      }
+      consolidated = fallback.output;
+    }
 
     // Parse and validate — try new combined schema first, fall back to promotions-only
     let promotions: z.infer<typeof PromotionsArraySchema>;
@@ -327,6 +296,10 @@ If nothing to promote/no ideas, use empty arrays.`;
         if (ok) {
           writtenPromos++;
           logger.info({ file: promo.file, section: promo.section, content: promo.content.slice(0, 80) }, "Promoted fact to permanent memory");
+          // Track outcome for this promotion
+          try {
+            trackPromotion(stateManager.getDb(), promo.content.slice(0, 80), promo.file);
+          } catch { /* outcome tracking best-effort */ }
         } else {
           writeErrors.push(`Failed to write to ${promo.file}/${promo.section}`);
         }

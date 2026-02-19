@@ -79,6 +79,93 @@ Do NOT try alternative URLs if the page fails — just return FAILED.`;
 }
 
 // ============================================
+// CONTENT SCRAPER PROMPTS (Medium + LinkedIn)
+// ============================================
+
+const MEDIUM_URL = "https://medium.com/@yanqing_j";
+const LINKEDIN_URL = "https://www.linkedin.com/in/jiangyanqing/recent-activity/all/";
+
+export function buildMediumScrapePrompt(): string {
+  return `Scrape all published articles from a Medium profile page using agent-browser CLI.
+
+You MUST execute these bash commands in sequence — do not just list them, actually RUN them:
+
+${AGENT_BROWSER_TOOLS}
+
+Step 1: agent-browser connect 9222
+Step 2: agent-browser open "${MEDIUM_URL}"
+Step 3: sleep 3
+Step 4: agent-browser snapshot -i
+
+Read the snapshot carefully. For each article card visible, extract:
+- **Title**: the article headline text
+- **URL**: the href from the article title link (MUST be from actual @ref)
+- **Date**: publication date exactly as shown (e.g. "Jan 15, 2026")
+- **Read time**: if visible in the card
+- **Preview text**: the subtitle/preview snippet shown on the card
+
+Step 5: agent-browser scroll down
+Step 6: sleep 2
+Step 7: agent-browser snapshot -i
+Step 8: Extract any NEW articles not already in your list (compare titles)
+Step 9: Repeat Steps 5-8 until no new articles appear in two consecutive scrolls
+
+CRITICAL RULES:
+- DO NOT click into individual articles. Extract only what is visible on the profile page.
+- Article titles MUST come from actual headline elements in the snapshot. Do NOT fabricate titles.
+- Publication dates MUST come from visible date elements, NOT invented.
+- Clap counts MUST be visible numbers (e.g., "42 claps", "1.2K"). If not visible, use null.
+- If the page shows "Sign in", "Open in app", or a Cloudflare challenge, return ONLY the text: AUTH_REQUIRED
+- If the page loads but shows 0 articles, return: []
+- Stop scrolling after 2 consecutive scrolls with no new articles, or after 30 scrolls total.
+
+OUTPUT FORMAT - Return ONLY a JSON array, no other text:
+[{"title": "Article Title", "date": "Jan 2026", "read_time": "5 min", "claps": 42, "responses": 3, "content": "Preview/subtitle text from the card...", "link": "https://medium.com/..."}]
+
+If any error or blocking, return: []`;
+}
+
+export function buildLinkedInScrapePrompt(): string {
+  return `Scrape all published posts from a LinkedIn activity page using agent-browser CLI.
+
+You MUST execute these bash commands in sequence — do not just list them, actually RUN them:
+
+${AGENT_BROWSER_TOOLS}
+
+Step 1: agent-browser connect 9222
+Step 2: agent-browser open "${LINKEDIN_URL}"
+Step 3: sleep 5
+Step 4: agent-browser snapshot -i
+
+FIRST: Check if the page shows "Sign in", "Join LinkedIn", or a login modal. If so, return ONLY the text: AUTH_REQUIRED
+
+For each post visible, extract:
+- **Content**: the full post text visible in the feed
+- **Date**: relative date exactly as shown (e.g. "2d", "1w", "1mo")
+- **Reactions**: count of reactions/likes (number only, MUST be visible)
+- **Comments**: count of comments (number only, MUST be visible)
+- **Links**: any external URLs in the post
+
+Step 5: agent-browser scroll down
+Step 6: sleep 3
+Step 7: agent-browser snapshot -i
+Step 8: Extract any NEW posts not already in your list (compare by first 10 words of content)
+Step 9: Repeat Steps 5-8 until no new posts appear in two consecutive scrolls
+
+CRITICAL RULES:
+- Reaction/comment counts MUST come from actual numbers shown in the snapshot. If not visible, use null.
+- Do NOT fabricate or estimate engagement numbers.
+- If a "Verification Required" or CAPTCHA appears, return ONLY the text: BOT_DETECTED
+- LinkedIn truncates posts with "...see more". Extract only the visible text, do NOT click "see more".
+- Stop scrolling after 2 consecutive scrolls with no new content, or after 20 scrolls total.
+
+OUTPUT FORMAT - Return ONLY a JSON array, no other text:
+[{"title": "First 10 words as title", "date": "2d", "reactions": 5, "comments": 2, "content": "Full visible post text", "link": "https://..."}]
+
+If login required or blocked, return: []`;
+}
+
+// ============================================
 // SHARED OPTIONS
 // ============================================
 

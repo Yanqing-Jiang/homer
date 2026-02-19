@@ -46,13 +46,19 @@ interface SessionSummaryRow {
  * Load today's pre-summarized sessions from session_summaries table
  */
 function loadSessionSummaries(db: ReturnType<StateManager["getDb"]>, date: string): SessionSummaryRow[] {
+  // Compute next day for range query (avoids date() wrapper which defeats indexes)
+  const nextDay = new Date(date + "T00:00:00");
+  nextDay.setDate(nextDay.getDate() + 1);
+  const nextDayStr = nextDay.toISOString().slice(0, 10);
   try {
     return db.prepare(`
       SELECT id, agent, title, summary, project, model, message_count, started_at, ended_at
       FROM session_summaries
-      WHERE date(started_at) = ? OR date(ended_at) = ? OR date(created_at) = ?
+      WHERE (started_at >= ? AND started_at < ?)
+         OR (ended_at >= ? AND ended_at < ?)
+         OR (created_at >= ? AND created_at < ?)
       ORDER BY started_at ASC
-    `).all(date, date, date) as SessionSummaryRow[];
+    `).all(date, nextDayStr, date, nextDayStr, date, nextDayStr) as SessionSummaryRow[];
   } catch {
     // Table may not exist yet
     return [];

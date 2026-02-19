@@ -4,16 +4,31 @@
  * career-site apply chain: navigate, register, fill form, upload resume, submit.
  */
 
-import { readFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
+import { join } from "path";
 import type Database from "better-sqlite3";
 import type { ApplyResult, ApplicationStep } from "./apply-engine.js";
 import { AccountManager, type CareerAccount } from "./account-manager.js";
 import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
+import { waitForVerificationEmail } from "./gmail-client.js";
 import { logger } from "../utils/logger.js";
+
+const DEBUG_OUTPUT_DIR = "/Users/yj/homer/output/gemini";
 
 const SCREENSHOTS_DIR = "/Users/yj/job-hunt/screenshots";
 const ANSWERS_BANK_PATH = "/Users/yj/job-hunt/config/answers-bank.md";
 const CAREER_APPLY_TIMEOUT = 600000; // 10 minutes
+
+async function checkChromeReachable(): Promise<boolean> {
+  try {
+    const r = await fetch("http://localhost:9222/json/version", {
+      signal: AbortSignal.timeout(3000),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
 
 interface CareerSiteJob {
   id: string;
@@ -41,7 +56,9 @@ function buildAgentPrompt(
 
   const jdExcerpt = job.description ? job.description.slice(0, 1500) : "(no description available)";
 
-  return `You are applying to a job on a company career site using agent-browser CLI.
+  return `CRITICAL OUTPUT REQUIREMENT: You MUST end your response with a JSON block in \`\`\`json ... \`\`\` fences. No exceptions. If you cannot complete the task, still output JSON with success:false and an error message.
+
+You are applying to a job on a company career site. You MUST use agent-browser CLI commands via bash to actually navigate and fill forms. Do NOT just describe what you would do — execute the commands.
 
 JOB CONTEXT:
 - Company: ${job.company}
@@ -54,37 +71,42 @@ ${accountSection}
 RESUME PDF: ${resumePath}
 ${coverSection}
 
-TOOLS AVAILABLE (via bash):
-- agent-browser connect 9222          # connect to Chrome
-- agent-browser snapshot -i           # get interactive elements with @refs
-- agent-browser open <url>            # navigate
-- agent-browser fill @ref "value"     # fill input
-- agent-browser select @ref "value"   # select dropdown
-- agent-browser click @ref            # click button/link
-- agent-browser upload @ref <file>    # upload file
-- agent-browser screenshot [path]     # take screenshot
-- agent-browser check @ref            # check checkbox
+TOOLS — execute these bash commands directly:
+  agent-browser connect 9222          # ALWAYS run this first
+  agent-browser open "<url>"          # navigate (waits for page load)
+  agent-browser snapshot -i           # get interactive elements with @refs
+  agent-browser fill @ref "value"     # fill input
+  agent-browser select @ref "value"   # select dropdown
+  agent-browser click @ref            # click button/link
+  agent-browser upload @ref <file>    # upload file
+  agent-browser screenshot <path>     # take screenshot
+  agent-browser check @ref            # check checkbox
 
-WORKFLOW:
-1. Connect to browser: agent-browser connect 9222
-2. Navigate to the job URL
-3. snapshot -i to see the page
-4. If redirected to career site → handle login/registration
+AGENT-BROWSER RULES:
+- NEVER use JSON.stringify in eval scripts — return raw JS objects
+- Use agent-browser open "<url>" NOT eval "window.location.href='url'" for navigation
+- eval scripts must be single-line (no newlines)
+
+WORKFLOW — execute each step:
+1. agent-browser connect 9222
+2. agent-browser open "${job.url}"
+3. agent-browser snapshot -i  →  inspect the page
+4. Handle login/registration if redirected to career site
 5. Find and click "Apply" or similar button
-6. Fill application form using candidate info below
-7. Upload resume PDF: ${resumePath}
-8. Upload cover letter if field exists
-9. SKIP all optional fields (salary expectations, diversity questions unless required)
-10. NEVER fill salary/compensation fields — leave blank or skip
-11. Screenshot before submit to: ${SCREENSHOTS_DIR}/${job.id}_pre_submit.png
-12. Click submit
-13. Screenshot after submit to: ${SCREENSHOTS_DIR}/${job.id}_post_submit.png
+6. Fill application form fields using candidate info below
+7. agent-browser upload @ref ${resumePath}  →  upload resume
+8. Upload cover letter if the form has a cover letter field
+9. SKIP all optional fields (salary, diversity questions unless required)
+10. NEVER fill salary/compensation — leave blank or "Prefer not to say"
+11. agent-browser screenshot ${SCREENSHOTS_DIR}/${job.id}_pre_submit.png
+12. Click submit button
+13. agent-browser screenshot ${SCREENSHOTS_DIR}/${job.id}_post_submit.png
 
 IF REGISTRATION REQUIRED:
 - Register with email from candidate info below
 - Generate a random secure password (16+ chars, mixed case, numbers, symbols)
-- Output the password in format: CREDENTIAL:${job.company}:<email>:<password>
-- Complete email verification if needed
+- Output the password as: CREDENTIAL:${job.company}:<email>:<password>
+- If you hit a "verify your email" screen after registering, stop and set needs_email_verification:true in the JSON
 
 IF LOGIN REQUIRED AND CREDENTIALS PROVIDED:
 - Login with the existing account credentials above
@@ -93,23 +115,27 @@ CANDIDATE INFO:
 ${answersBank}
 
 FORM FILLING RULES:
-- Required fields: fill with candidate info above
-- Optional fields: SKIP (leave blank, don't check optional checkboxes)
+- Required fields: fill with candidate info
+- Optional fields: SKIP entirely
 - "How did you hear": LinkedIn
 - Work authorization: Yes (US Citizen)
 - Sponsorship: No
 - Veteran: Yes
-- Salary: NEVER FILL — leave blank or type "Prefer not to say"
-- Diversity/EEO: "Decline to self-identify" if forced, otherwise skip
+- Salary: NEVER FILL
+- Diversity/EEO: "Decline to self-identify" if required, otherwise skip
 
-OUTPUT: Return a JSON summary at the very end of your response wrapped in \`\`\`json ... \`\`\` fences:
+MANDATORY FINAL OUTPUT — your response MUST end with this JSON block:
+\`\`\`json
 {
-  "success": true/false,
-  "steps": ["navigated to career page", "registered account", "filled form", "uploaded resume", "submitted"],
+  "success": true or false,
+  "steps": ["list", "of", "completed", "steps"],
   "credential": "CREDENTIAL:company:email:password" or null,
   "confirmationScreenshot": "/path/to/screenshot.png" or null,
-  "error": "description" or null
-}`;
+  "needs_email_verification": false,
+  "company_domain": null,
+  "error": "error description" or null
+}
+\`\`\``;
 }
 
 interface GeminiApplyResult {
@@ -118,9 +144,11 @@ interface GeminiApplyResult {
   credential: string | null;
   confirmationScreenshot: string | null;
   error: string | null;
+  needs_email_verification?: boolean;
+  company_domain?: string;
 }
 
-function parseGeminiResult(output: string): GeminiApplyResult {
+function parseGeminiResult(output: string, jobId?: string): GeminiApplyResult {
   // Try to find JSON in code fences first
   const fenced = output.match(/```json\s*([\s\S]*?)```/);
   if (fenced) {
@@ -137,7 +165,18 @@ function parseGeminiResult(output: string): GeminiApplyResult {
     } catch { /* fall through */ }
   }
 
-  // Couldn't parse — derive from output text
+  // Couldn't parse — save raw output to debug file and derive from text
+  try {
+    mkdirSync(DEBUG_OUTPUT_DIR, { recursive: true });
+    const slug = jobId ? `apply-${jobId}` : "apply-unknown";
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const debugPath = join(DEBUG_OUTPUT_DIR, `${slug}-${ts}.md`);
+    writeFileSync(debugPath, `# Gemini Apply Debug — ${jobId ?? "unknown"}\n\nRaw output (JSON parse failed):\n\n${output}`);
+    logger.warn({ jobId, debugPath }, "Gemini apply: could not parse JSON — saved raw output");
+  } catch (e) {
+    logger.warn({ error: e }, "Could not write Gemini debug output");
+  }
+
   const hasSubmit = /submit|submitted|application.*(?:sent|complete|received)/i.test(output);
   const hasError = /error|failed|captcha|blocked|timeout/i.test(output);
   const credMatch = output.match(/CREDENTIAL:([^:\n]+):([^:\n]+):([^\n]+)/);
@@ -147,7 +186,7 @@ function parseGeminiResult(output: string): GeminiApplyResult {
     steps: ["gemini agent ran (could not parse structured output)"],
     credential: credMatch ? credMatch[0] : null,
     confirmationScreenshot: null,
-    error: hasError ? "Agent reported an error (see logs)" : null,
+    error: hasError ? "Agent reported an error (see logs)" : "No JSON output from agent",
   };
 }
 
@@ -168,6 +207,12 @@ export async function careerSiteApply(
   const accountMgr = new AccountManager(db);
 
   if (!existsSync(SCREENSHOTS_DIR)) mkdirSync(SCREENSHOTS_DIR, { recursive: true });
+
+  // Chrome preflight check
+  const chromeOk = await checkChromeReachable();
+  if (!chromeOk) {
+    return { success: false, steps, error: "Chrome not running on port 9222" };
+  }
 
   try {
     // 1. Load answers bank
@@ -216,12 +261,24 @@ export async function careerSiteApply(
 
     logger.info({ jobId: job.id, company: job.company }, "Starting Gemini career-site agent");
 
-    const result = await executeOpenCodeCLI(prompt, "", {
+    let result = await executeOpenCodeCLI(prompt, "", {
       model: "google/gemini-3-flash-preview",
       researchOnly: false,
       timeout: CAREER_APPLY_TIMEOUT,
       cwd: "/Users/yj/job-hunt",
     });
+
+    // Retry once on transient auth errors (token expiry, network blip)
+    if (result.exitCode === 3 && result.output.startsWith("Auth error:")) {
+      logger.warn({ jobId: job.id }, "Gemini auth error — retrying after 15s");
+      await new Promise(r => setTimeout(r, 15_000));
+      result = await executeOpenCodeCLI(prompt, "", {
+        model: "google/gemini-3-flash-preview",
+        researchOnly: false,
+        timeout: CAREER_APPLY_TIMEOUT,
+        cwd: "/Users/yj/job-hunt",
+      });
+    }
 
     if (result.exitCode !== 0) {
       agentStep.stepStatus = "failed";
@@ -239,7 +296,45 @@ export async function careerSiteApply(
     onStep(agentStep);
 
     // 5. Parse Gemini output
-    const geminiResult = parseGeminiResult(result.output);
+    let geminiResult = parseGeminiResult(result.output, job.id);
+
+    // 5a. Handle email verification gate
+    if (geminiResult.needs_email_verification && geminiResult.company_domain) {
+      stepNum++;
+      const verifyStep: ApplicationStep = {
+        stepNumber: stepNum,
+        stepType: "email_verification_wait",
+        stepStatus: "completed",
+      };
+      steps.push(verifyStep);
+      onStep(verifyStep);
+
+      logger.info({ domain: geminiResult.company_domain }, "Waiting for verification email");
+      const verifyUrl = await waitForVerificationEmail(geminiResult.company_domain, 300_000);
+
+      if (!verifyUrl) {
+        return { success: false, steps, error: "Email verification timeout — no link received within 5 min" };
+      }
+
+      // Re-invoke agent to click verification link and complete application
+      const verifyPrompt = `Navigate to this email verification link: ${verifyUrl}
+After verifying, continue the job application for ${job.company} - ${job.title} at ${job.url}.
+Use the same resume at ${application.resume_version ?? "/Users/yj/job-hunt/resumes/base-resume.txt"}.
+Complete the form and submit. Return the same JSON format as before.`;
+
+      const verifyResult = await executeOpenCodeCLI(verifyPrompt, "", {
+        model: "google/gemini-3-flash-preview",
+        researchOnly: false,
+        timeout: 480_000, // 8 min remaining
+        cwd: "/Users/yj/job-hunt",
+      });
+
+      if (verifyResult.exitCode === 0) {
+        geminiResult = parseGeminiResult(verifyResult.output, job.id);
+      } else {
+        return { success: false, steps, error: "Post-verification apply failed" };
+      }
+    }
 
     // 6. Store credential if returned
     if (geminiResult.credential) {

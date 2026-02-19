@@ -14,6 +14,7 @@
 import { z, type ZodSchema } from "zod";
 import { executeOpenCodeCLI } from "./opencode-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
+import { executeKimiCLI } from "./kimi-cli.js";
 import { executeClaudeCommand } from "./claude.js";
 import { executeGeminiAPI } from "./gemini.js";
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from "fs";
@@ -24,7 +25,7 @@ import { logger } from "../utils/logger.js";
 // TYPES
 // ============================================
 
-export type SwarmExecutor = "opencode" | "codex" | "sonnet";
+export type SwarmExecutor = "opencode" | "codex" | "kimi" | "claude";
 
 export interface SwarmAgent {
   id: string;
@@ -43,11 +44,21 @@ export interface SwarmResult {
   duration: number;
   executor: string;
   outputFile?: string;
+  cancelled?: boolean;
 }
 
-const DEFAULT_AGENT_TIMEOUT = 300_000;  // 5 min (opencode)
-const CODEX_AGENT_TIMEOUT = 180_000;    // 3 min
-const SONNET_AGENT_TIMEOUT = 600_000;   // 10 min
+export interface FanOutPolicy {
+  /** Abort non-required agents immediately if a required agent fails. Default: true */
+  abortOnRequiredFailure?: boolean;
+  /** Once all required agents succeed + this fraction of total agents are done,
+   *  start straggler timer. Default: 0.5 */
+  quorumRatio?: number;
+  /** Max ms to wait for remaining agents after quorum is met. Default: 120_000 (2min) */
+  stragglerTimeoutMs?: number;
+}
+
+const DEFAULT_AGENT_TIMEOUT = 900_000;   // 15 min (opencode, sonnet)
+const CODEX_AGENT_TIMEOUT = 1_800_000;  // 30 min
 const MIN_OUTPUT_LENGTH = 100;
 const MAX_OUTPUT_PER_AGENT = 8192; // 8K chars for consolidation input
 
@@ -65,12 +76,159 @@ function writeAgentOutput(outputDir: string, agentId: string, content: string): 
 }
 
 // ============================================
+// PER-AGENT EXECUTOR
+// ============================================
+
+async function executeAgent(
+  agent: SwarmAgent,
+  signal: AbortSignal,
+  outputDir?: string,
+): Promise<SwarmResult> {
+  const agentStart = Date.now();
+
+  try {
+    let output: string;
+    let success: boolean;
+
+    if (agent.executor === "opencode") {
+      const timeout = agent.timeout ?? DEFAULT_AGENT_TIMEOUT;
+      const result = await executeOpenCodeCLI(agent.prompt, agent.context ?? "", {
+        model: agent.model ?? "google/gemini-3-flash-preview",
+        timeout,
+        researchOnly: true,
+        signal,
+      });
+
+      output = result.output ?? "";
+      success = result.exitCode === 0 && output.length >= MIN_OUTPUT_LENGTH;
+    } else if (agent.executor === "codex") {
+      const timeout = agent.timeout ?? CODEX_AGENT_TIMEOUT;
+      const fullPrompt = agent.context
+        ? `${agent.context}\n\n---\n\n${agent.prompt}`
+        : agent.prompt;
+
+      const result = await executeCodexCLI(fullPrompt, {
+        cwd: SWARM_CWD,
+        timeout,
+        model: agent.model ?? "gpt-5.3-codex",
+        reasoningEffort: "high",
+        signal,
+      });
+
+      output = result.output ?? "";
+      success = result.exitCode === 0 && output.length >= MIN_OUTPUT_LENGTH;
+    } else if (agent.executor === "kimi") {
+      const timeout = agent.timeout ?? DEFAULT_AGENT_TIMEOUT;
+
+      const result = await executeKimiCLI(agent.prompt, agent.context ?? "", {
+        timeout,
+        workDir: SWARM_CWD,
+        signal,
+      });
+
+      output = result.output ?? "";
+      success = result.exitCode === 0 && output.length >= MIN_OUTPUT_LENGTH;
+    } else if (agent.executor === "claude") {
+      const timeout = agent.timeout ?? DEFAULT_AGENT_TIMEOUT;
+      const fullPrompt = agent.context
+        ? `${agent.context}\n\n---\n\n${agent.prompt}`
+        : agent.prompt;
+
+      // executeClaudeCommand rejects on abort/timeout — caught by outer try/catch
+      const result = await executeClaudeCommand(fullPrompt, {
+        cwd: SWARM_CWD,
+        model: agent.model ?? "opus",
+        timeout,
+        signal,
+      });
+
+      output = result.output ?? "";
+      success = result.exitCode === 0 && output.length >= MIN_OUTPUT_LENGTH;
+    } else {
+      throw new Error(`Unknown executor: ${agent.executor}`);
+    }
+
+    // Check if we were aborted after the executor returned
+    if (signal.aborted) {
+      return {
+        agentId: agent.id,
+        output: output || "Cancelled by quorum policy",
+        success: false,
+        duration: Date.now() - agentStart,
+        executor: agent.executor,
+        cancelled: true,
+      };
+    }
+
+    if (!success && output.length < MIN_OUTPUT_LENGTH) {
+      logger.warn({ agentId: agent.id, outputLen: output.length }, "Agent output too short");
+    }
+
+    // Write output to file if outputDir is set
+    let outputFile: string | undefined;
+    if (outputDir && success) {
+      try {
+        outputFile = writeAgentOutput(outputDir, agent.id, output);
+        logger.debug({ agentId: agent.id, outputFile }, "Wrote agent output to file");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn({ agentId: agent.id, error: msg }, "Failed to write agent output file");
+      }
+    }
+
+    return {
+      agentId: agent.id,
+      output,
+      success,
+      duration: Date.now() - agentStart,
+      executor: agent.executor,
+      outputFile,
+    };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    const cancelled = signal.aborted ||
+      msg.includes("abort") || msg.includes("ABORT") || msg.includes("cancel");
+
+    if (cancelled) {
+      logger.info({ agentId: agent.id, duration: Date.now() - agentStart }, "Agent cancelled");
+    } else {
+      logger.error({ agentId: agent.id, error: msg }, "Agent execution failed");
+    }
+
+    return {
+      agentId: agent.id,
+      output: cancelled ? "Cancelled by quorum policy" : `Error: ${msg}`,
+      success: false,
+      duration: Date.now() - agentStart,
+      executor: agent.executor,
+      cancelled,
+    };
+  }
+}
+
+// ============================================
+// ABORT HELPER
+// ============================================
+
+function abortRemaining(
+  controllers: Map<string, AbortController>,
+  settled: Set<string>,
+): void {
+  for (const [id, ctrl] of controllers) {
+    if (!settled.has(id)) {
+      ctrl.abort();
+    }
+  }
+}
+
+// ============================================
 // FAN OUT AGENTS
 // ============================================
 
 export async function fanOutAgents(
   agents: SwarmAgent[],
   outputDir?: string,
+  policy?: FanOutPolicy,
 ): Promise<SwarmResult[]> {
   const startTime = Date.now();
 
@@ -78,134 +236,153 @@ export async function fanOutAgents(
   mkdirSync(SWARM_CWD, { recursive: true });
 
   logger.info(
-    { agentCount: agents.length, ids: agents.map((a) => a.id), outputDir },
+    { agentCount: agents.length, ids: agents.map((a) => a.id), outputDir, policy },
     "Fanning out swarm agents"
   );
 
-  const promises = agents.map(async (agent): Promise<SwarmResult> => {
-    const agentStart = Date.now();
+  // No agents → return immediately
+  if (agents.length === 0) return [];
 
-    try {
-      let output: string;
-      let success: boolean;
+  // Policy defaults
+  const abortOnRequiredFailure = policy?.abortOnRequiredFailure ?? true;
+  const quorumRatio = policy?.quorumRatio ?? 0.5;
+  const stragglerTimeoutMs = policy?.stragglerTimeoutMs ?? 120_000;
 
-      if (agent.executor === "opencode") {
-        const timeout = agent.timeout ?? DEFAULT_AGENT_TIMEOUT;
-        const result = await executeOpenCodeCLI(agent.prompt, agent.context ?? "", {
-          model: agent.model ?? "google/gemini-3-flash-preview",
-          timeout,
-          researchOnly: true,
-        });
+  const requiredIds = new Set(agents.filter((a) => a.required).map((a) => a.id));
+  const controllers = new Map<string, AbortController>();
+  const settledIds = new Set<string>();
+  const resultMap = new Map<string, SwarmResult>();
 
-        output = result.output ?? "";
-        success = result.exitCode === 0 && output.length >= MIN_OUTPUT_LENGTH;
-      } else if (agent.executor === "codex") {
-        const timeout = agent.timeout ?? CODEX_AGENT_TIMEOUT;
-        const fullPrompt = agent.context
-          ? `${agent.context}\n\n---\n\n${agent.prompt}`
-          : agent.prompt;
+  let stragglerTimer: ReturnType<typeof setTimeout> | undefined;
+  let quorumStarted = false;
+  let requiredFailed = false;
 
-        const result = await executeCodexCLI(fullPrompt, {
-          cwd: SWARM_CWD,
-          timeout,
-          model: agent.model ?? "gpt-5.3-codex",
-          reasoningEffort: "high",
-        });
+  const results = await new Promise<SwarmResult[]>((resolveAll) => {
+    const tryResolve = () => {
+      if (settledIds.size < agents.length) return;
+      if (stragglerTimer) clearTimeout(stragglerTimer);
+      resolveAll(agents.map((a) => resultMap.get(a.id)!));
+    };
 
-        output = result.output ?? "";
-        success = result.exitCode === 0 && output.length >= MIN_OUTPUT_LENGTH;
-      } else if (agent.executor === "sonnet") {
-        const timeout = agent.timeout ?? SONNET_AGENT_TIMEOUT;
-        const fullPrompt = agent.context
-          ? `${agent.context}\n\n---\n\n${agent.prompt}`
-          : agent.prompt;
+    const onAgentSettled = (result: SwarmResult) => {
+      // Guard against double-settle (abort can race with natural completion)
+      if (settledIds.has(result.agentId)) return;
+      settledIds.add(result.agentId);
+      resultMap.set(result.agentId, result);
 
-        const result = await executeClaudeCommand(fullPrompt, {
-          cwd: SWARM_CWD,
-          model: agent.model ?? "sonnet",
-          timeout,
-        });
+      logger.info(
+        {
+          agentId: result.agentId,
+          success: result.success,
+          cancelled: result.cancelled,
+          duration: result.duration,
+          outputLen: result.output.length,
+          outputFile: result.outputFile,
+          settled: settledIds.size,
+          total: agents.length,
+        },
+        "Swarm agent settled"
+      );
 
-        output = result.output ?? "";
-        success = result.exitCode === 0 && output.length >= MIN_OUTPUT_LENGTH;
-      } else {
-        throw new Error(`Unknown executor: ${agent.executor}`);
+      // STOP CONDITION 1: Required agent failed → abort remaining
+      if (
+        abortOnRequiredFailure &&
+        !requiredFailed &&
+        requiredIds.has(result.agentId) &&
+        !result.success &&
+        !result.cancelled
+      ) {
+        requiredFailed = true;
+        logger.warn(
+          { agentId: result.agentId },
+          "Required agent failed — aborting remaining agents"
+        );
+        abortRemaining(controllers, settledIds);
+        // Don't resolve yet — let aborted agents settle naturally
       }
 
-      if (!success && output.length < MIN_OUTPUT_LENGTH) {
-        logger.warn({ agentId: agent.id, outputLen: output.length }, "Agent output too short");
-      }
+      // STOP CONDITION 2: Quorum met → start straggler timer
+      if (!quorumStarted && !requiredFailed) {
+        const allRequiredDone = [...requiredIds].every((id) => settledIds.has(id));
+        const allRequiredOk = [...requiredIds].every(
+          (id) => resultMap.get(id)?.success
+        );
+        const ratio = settledIds.size / agents.length;
 
-      // Write output to file if outputDir is set
-      let outputFile: string | undefined;
-      if (outputDir && success) {
-        try {
-          outputFile = writeAgentOutput(outputDir, agent.id, output);
-          logger.debug({ agentId: agent.id, outputFile }, "Wrote agent output to file");
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          logger.warn({ agentId: agent.id, error: msg }, "Failed to write agent output file");
+        if (allRequiredDone && allRequiredOk && ratio >= quorumRatio) {
+          quorumStarted = true;
+          if (settledIds.size < agents.length) {
+            const remaining = agents
+              .filter((a) => !settledIds.has(a.id))
+              .map((a) => a.id);
+            logger.info(
+              { quorumRatio, stragglerTimeoutMs, remaining },
+              "Quorum met — starting straggler timer"
+            );
+            stragglerTimer = setTimeout(() => {
+              logger.warn(
+                {
+                  remaining: agents
+                    .filter((a) => !settledIds.has(a.id))
+                    .map((a) => a.id),
+                },
+                "Straggler timeout — aborting remaining agents"
+              );
+              abortRemaining(controllers, settledIds);
+            }, stragglerTimeoutMs);
+          }
         }
       }
 
-      return {
-        agentId: agent.id,
-        output,
-        success,
-        duration: Date.now() - agentStart,
-        executor: agent.executor,
-        outputFile,
-      };
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      logger.error({ agentId: agent.id, error: msg }, "Agent execution failed");
-      return {
-        agentId: agent.id,
-        output: `Error: ${msg}`,
-        success: false,
-        duration: Date.now() - agentStart,
-        executor: agent.executor,
-      };
+      // STOP CONDITION 3: All done
+      tryResolve();
+    };
+
+    // Launch all agents with per-agent AbortControllers
+    for (const agent of agents) {
+      const ctrl = new AbortController();
+      controllers.set(agent.id, ctrl);
+
+      executeAgent(agent, ctrl.signal, outputDir)
+        .then(onAgentSettled)
+        .catch((err) => {
+          // Should not happen — executeAgent catches internally — but be safe
+          const msg = err instanceof Error ? err.message : String(err);
+          onAgentSettled({
+            agentId: agent.id,
+            output: `Promise rejected: ${msg}`,
+            success: false,
+            duration: Date.now() - startTime,
+            executor: agent.executor,
+          });
+        });
     }
   });
 
-  const settled = await Promise.allSettled(promises);
-  const results: SwarmResult[] = settled.map((s, i) => {
-    if (s.status === "fulfilled") return s.value;
-    return {
-      agentId: agents[i]!.id,
-      output: `Promise rejected: ${s.reason}`,
-      success: false,
-      duration: 0,
-      executor: agents[i]!.executor,
-    };
-  });
+  // Clean up timer if still pending (safety net)
+  if (stragglerTimer) clearTimeout(stragglerTimer);
 
-  // Log per-agent results
-  for (const r of results) {
-    logger.info(
-      { agentId: r.agentId, success: r.success, duration: r.duration, outputLen: r.output.length, outputFile: r.outputFile },
-      "Swarm agent completed"
-    );
-  }
-
-  // Check required agents
-  const requiredAgents = agents.filter((a) => a.required);
-  for (const req of requiredAgents) {
-    const result = results.find((r) => r.agentId === req.id);
+  // Check required agents — throw if any non-cancelled required agent failed
+  for (const reqId of requiredIds) {
+    const result = resultMap.get(reqId);
     if (!result?.success) {
       const totalDuration = Date.now() - startTime;
-      const error = `Required agent "${req.id}" failed: ${result?.output?.slice(0, 200) ?? "no result"}`;
-      logger.error({ agentId: req.id, totalDuration }, error);
+      const error = `Required agent "${reqId}" failed: ${result?.output?.slice(0, 200) ?? "no result"}`;
+      logger.error({ agentId: reqId, totalDuration }, error);
       throw new Error(error);
     }
   }
 
+  const succeeded = results.filter((r) => r.success).length;
+  const failed = results.filter((r) => !r.success && !r.cancelled).length;
+  const cancelled = results.filter((r) => r.cancelled).length;
+
   logger.info(
     {
       totalDuration: Date.now() - startTime,
-      succeeded: results.filter((r) => r.success).length,
-      failed: results.filter((r) => !r.success).length,
+      succeeded,
+      failed,
+      cancelled,
     },
     "Swarm fan-out complete"
   );
@@ -224,6 +401,8 @@ export interface ConsolidateOptions {
   temperature?: number;
   responseMimeType?: "application/json" | "text/plain";
   reasoningEffort?: "low" | "medium" | "high";
+  /** Optional preference context injected before agent results */
+  preferenceContext?: string;
 }
 
 export async function consolidateResults(
@@ -252,7 +431,10 @@ export async function consolidateResults(
     return `## Agent: ${r.agentId}\n\n${truncated}`;
   }).join("\n\n---\n\n");
 
-  const fullPrompt = `${prompt}\n\n---\n\n# Agent Results\n\n${agentSections}`;
+  const prefSection = options?.preferenceContext
+    ? `\n\n## User Preferences\n${options.preferenceContext}\n`
+    : "";
+  const fullPrompt = `${prompt}${prefSection}\n\n---\n\n# Agent Results\n\n${agentSections}`;
 
   logger.info(
     { agentCount: successful.length, promptLength: fullPrompt.length },

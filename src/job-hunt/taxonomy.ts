@@ -42,11 +42,72 @@ export const ROLE_CATEGORIES: Record<string, RoleCategory> = {
   },
   "engineering-management": {
     titles: [
+      "Engineering Manager", "Staff Engineering Manager",
+      "Director of Engineering", "VP of Engineering",
+      "Engineering Lead", "Technical Lead Manager",
       "Engineering Manager - Data/ML", "Director of Data Science",
       "Head of Analytics", "VP Data", "Data Science Manager",
     ],
-    searchTerms: ["Engineering Manager ML", "Director Data Science"],
-    weight: 0.70,
+    searchTerms: [
+      "Engineering Manager", "Staff Engineering Manager",
+      "Director of Engineering", "Technical Lead Manager",
+    ],
+    weight: 0.85,
+  },
+  "staff-engineer": {
+    titles: [
+      "Staff Software Engineer", "Staff Engineer", "Staff ML Engineer",
+      "Staff Data Engineer", "Senior Staff Engineer",
+    ],
+    searchTerms: ["Staff Software Engineer", "Staff Engineer", "Staff ML Engineer"],
+    weight: 1.0,
+  },
+  "principal-engineer": {
+    titles: [
+      "Principal Software Engineer", "Principal Engineer",
+      "Principal ML Engineer", "Principal Data Engineer",
+      "Distinguished Engineer", "Fellow",
+    ],
+    searchTerms: ["Principal Software Engineer", "Principal Engineer", "Principal ML Engineer"],
+    weight: 1.0,
+  },
+  "analytics-engineer": {
+    titles: [
+      "Senior Analytics Engineer", "Staff Analytics Engineer", "Lead Analytics Engineer",
+      "Analytics Engineer II", "Analytics Engineer III", "Analytics Engineer IV",
+      "Senior Analytics Engineer II", "Principal Analytics Engineer",
+    ],
+    searchTerms: ["Senior Analytics Engineer", "Staff Analytics Engineer"],
+    weight: 1.0,
+  },
+  "ai-engineer": {
+    titles: [
+      "Senior AI Engineer", "Staff AI Engineer", "Principal AI Engineer",
+      "Senior Artificial Intelligence Engineer", "AI Platform Engineer",
+      "Senior AI Platform Engineer", "Senior AI Software Engineer",
+      "AI Infrastructure Engineer", "Senior AI Infrastructure Engineer",
+      "Generative AI Engineer", "Senior GenAI Engineer",
+    ],
+    searchTerms: ["Senior AI Engineer", "AI Platform Engineer", "Senior AI Software Engineer"],
+    weight: 1.0,
+  },
+  "analytics-manager": {
+    titles: [
+      "Senior Analytics Manager", "Analytics Manager", "Manager Analytics",
+      "Manager of Analytics", "Analytics Lead", "Head of Analytics",
+      "Director of Analytics", "VP of Analytics",
+    ],
+    searchTerms: ["Senior Analytics Manager", "Analytics Manager"],
+    weight: 0.85,
+  },
+  "data-science-manager": {
+    titles: [
+      "Data Science Manager", "Manager of Data Science", "Senior Data Science Manager",
+      "Lead Data Scientist", "Head of Data Science",
+      "Director of Data Science", "ML Manager",
+    ],
+    searchTerms: ["Data Science Manager", "Senior Data Science Manager"],
+    weight: 0.85,
   },
   "product-technical": {
     titles: [
@@ -78,14 +139,20 @@ export function matchTitleToCategory(title: string): { category: string; weight:
     }
   }
   // Fuzzy: check for common keywords
-  if (/\b(ml|machine learning|ai)\b/i.test(title) && /\bengineer/i.test(title)) {
-    return { category: "ml-engineer", weight: 0.85 };
+  if (/\b(ml|machine learning|ai|artificial intelligence|genai|gen ai)\b/i.test(title) && /\bengineer/i.test(title)) {
+    return { category: "ai-engineer", weight: 0.85 };
+  }
+  if (/\banalytics?\s+engineer/i.test(title)) {
+    return { category: "analytics-engineer", weight: 0.90 };
   }
   if (/\bdata\s+(platform|infrastructure)\b/i.test(title)) {
     return { category: "data-platform", weight: 0.80 };
   }
-  if (/\bdata\s+scien/i.test(title) && /\b(senior|staff|principal|lead)\b/i.test(title)) {
+  if (/\bdata\s+scien/i.test(title) && /\b(senior|staff|principal|lead|manager|head)\b/i.test(title)) {
     return { category: "data-science", weight: 0.80 };
+  }
+  if (/\b(analytics?|data)\s*(manager|lead|director|head)\b/i.test(title)) {
+    return { category: "analytics-manager", weight: 0.80 };
   }
   return null;
 }
