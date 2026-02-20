@@ -74,11 +74,11 @@ export type GeminiCLIResult = OpenCodeCLIResult;
 // QUOTA DETECTION
 // ============================================
 
-function isQuotaError(text: string): boolean {
+export function isQuotaError(text: string): boolean {
   return /exhausted.*quota|quota.*reset|\b429\b.*rate|rate.limit|capacity.*exhausted/i.test(text);
 }
 
-function isAuthError(text: string): boolean {
+export function isAuthError(text: string): boolean {
   return /\b401\b.*error|\b403\b.*forbidden|unauthorized|invalid.*credential|auth.*fail/i.test(text);
 }
 
@@ -170,6 +170,7 @@ export async function executeOpenCodeCLI(
     const child: ChildProcess = spawn("opencode", args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: effectiveCwd,
+      detached: true, // own process group so SIGTERM kills all children
       env: {
         ...process.env,
       },
@@ -186,18 +187,27 @@ export async function executeOpenCodeCLI(
     let timedOut = false;
     let aborted = false;
 
+    // Kill the entire process group (including opencode's child processes)
+    const killGroup = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal);
+      } catch {
+        child.kill(signal); // fallback if process group kill fails
+      }
+    };
+
     // Timeout handling
     const timeoutId = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5000);
+      killGroup("SIGTERM");
+      setTimeout(() => killGroup("SIGKILL"), 5000);
     }, timeout);
 
     const abortHandler = () => {
       if (aborted) return;
       aborted = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5000);
+      killGroup("SIGTERM");
+      setTimeout(() => killGroup("SIGKILL"), 5000);
     };
 
     if (signal) {

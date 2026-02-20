@@ -17,6 +17,8 @@ supabase.auth.getSession().then(({ data: { session: currentSession } }) => {
 	session.set(currentSession);
 	user.set(currentSession?.user ?? null);
 	loading.set(false);
+}).catch(() => {
+	loading.set(false);
 });
 
 // Listen for auth changes (store subscription for potential cleanup)

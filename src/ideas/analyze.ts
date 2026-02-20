@@ -10,7 +10,6 @@
 import { mkdirSync, existsSync } from "fs";
 import { writeFile, readFile } from "fs/promises";
 import { join } from "path";
-import { executeClaudeCommand } from "../executors/claude.js";
 import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
 import { buildCondensedContext } from "../scheduler/shared-context.js";
 import { chunkMessage } from "../utils/chunker.js";
@@ -187,10 +186,10 @@ Analyze this idea across 4 dimensions:
 Be direct and opinionated. Give a clear recommendation: pursue, defer, or drop.
 ${outputInstructions}`;
 
-  mkdirSync("/tmp/homer-opus", { recursive: true });
-  const result = await executeClaudeCommand(prompt, {
-    cwd: "/tmp/homer-opus",
-    model: "opus",
+  const context = `${condensedContext}\n\n## Architecture\n${architectureMd}`;
+  const result = await executeOpenCodeCLI(prompt, context, {
+    model: "github-copilot/claude-opus-4.6",
+    timeout: 300_000,
   });
 
   if (result.exitCode !== 0) {

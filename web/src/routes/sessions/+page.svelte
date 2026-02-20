@@ -40,16 +40,14 @@
 	let uploadError = $state<string | null>(null);
 
 	// Thread live updates via SSE
-	let threadSubscription = $state<{ abort: () => void } | null>(null);
+	// NOT $state — must not trigger $effect re-runs
+	let threadSubscription: { abort: () => void } | null = null;
 
 	$effect(() => {
-		threadSubscription?.abort();
-		threadSubscription = null;
-
 		const tid = selectedThread?.id;
 		if (!tid) return;
 
-		threadSubscription = api.subscribeToThread(tid, {
+		const sub = api.subscribeToThread(tid, {
 			onMessage: (message) => {
 				if (!selectedThread || selectedThread.id !== tid) return;
 				// Deduplicate by ID
@@ -62,6 +60,8 @@
 				};
 			}
 		});
+		threadSubscription = sub;
+		return () => sub.abort();
 	});
 
 	onDestroy(() => {
