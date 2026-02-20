@@ -440,11 +440,17 @@ export function registerIdeasRoutes(
 
 You are helping explore and develop this idea into an actionable plan.
 
+## Idea File
+**File path:** ${idea.filePath}
+
+Read this file to get the full idea content, context, existing notes, and exploration history.
+You can also update it directly by editing the file — append to the ## Exploration or ## Notes sections as the conversation progresses.
+
 ## Idea Details
 **Title:** ${parsed.title}
-**Content:** ${parsed.content}
-${parsed.context ? `**Context:** ${parsed.context}` : ""}
+**Status:** ${parsed.status}
 ${parsed.link ? `**Link:** ${parsed.link}` : ""}
+${parsed.tags?.length ? `**Tags:** ${parsed.tags.join(", ")}` : ""}
 
 ## Your Role
 
@@ -454,6 +460,8 @@ Have a freeform conversation to understand this idea. Explore:
 - Phases - How might this break down into phases?
 - Resources - What's needed?
 - Risks & Dependencies
+
+As the conversation produces insights, append key points to the ## Exploration section of the idea file so they persist across sessions.
 
 When the user indicates they're ready ("ready", "create plan", "let's do it"),
 generate a structured plan and offer to save it.`;

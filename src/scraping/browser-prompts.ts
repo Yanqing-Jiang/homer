@@ -84,6 +84,8 @@ Do NOT try alternative URLs if the page fails — just return FAILED.`;
 
 const MEDIUM_URL = "https://medium.com/@yanqing_j";
 const LINKEDIN_URL = "https://www.linkedin.com/in/jiangyanqing/recent-activity/all/";
+const LINKEDIN_ALT_URL_1 = "https://www.linkedin.com/in/jiangyanqing/details/recent-activity/posts/";
+const LINKEDIN_ALT_URL_2 = "https://www.linkedin.com/in/jiangyanqing/details/recent-activity/shares/";
 
 export function buildMediumScrapePrompt(): string {
   return `Scrape all published articles from a Medium profile page using agent-browser CLI.
@@ -137,6 +139,10 @@ Step 2: agent-browser open "${LINKEDIN_URL}"
 Step 3: sleep 5
 Step 4: agent-browser snapshot -i
 
+If the initial page has no post cards or redirects, try these alternate public activity URLs:
+- agent-browser open "${LINKEDIN_ALT_URL_1}" && sleep 4 && agent-browser snapshot -i
+- agent-browser open "${LINKEDIN_ALT_URL_2}" && sleep 4 && agent-browser snapshot -i
+
 FIRST: Check if the page shows "Sign in", "Join LinkedIn", or a login modal. If so, return ONLY the text: AUTH_REQUIRED
 
 For each post visible, extract:
@@ -162,7 +168,73 @@ CRITICAL RULES:
 OUTPUT FORMAT - Return ONLY a JSON array, no other text:
 [{"title": "First 10 words as title", "date": "2d", "reactions": 5, "comments": 2, "content": "Full visible post text", "link": "https://..."}]
 
-If login required or blocked, return: []`;
+If login required, return ONLY: AUTH_REQUIRED
+If verification or CAPTCHA appears, return ONLY: BOT_DETECTED
+If page loads but no posts are visible, return ONLY: []`;
+}
+
+export function buildLinkedInPublicFallbackPrompt(maxItems: number = 20): string {
+  return `Find PUBLIC LinkedIn posts authored by Yanqing Jiang using web search (no browser automation).
+
+Goal:
+- Recover data when direct LinkedIn scraping returns AUTH_REQUIRED.
+- Return up to ${maxItems} posts from public LinkedIn URLs indexed on the web.
+
+Search strategy (run multiple queries):
+1) site:linkedin.com/posts "Yanqing Jiang"
+2) site:linkedin.com/feed/update "Yanqing Jiang"
+3) site:linkedin.com "jiangyanqing" "linkedin.com/posts"
+
+For each relevant result, extract:
+- title: First 8-12 words of the post text or snippet
+- date: Date shown in search snippet or page preview if available (otherwise omit)
+- reactions: number if clearly visible, else null
+- comments: number if clearly visible, else null
+- content: short excerpt/summary (40-280 chars)
+- link: canonical linkedin.com post URL
+
+Rules:
+- Include only posts very likely authored by Yanqing Jiang.
+- Do not fabricate engagement metrics.
+- Exclude duplicate URLs.
+- If no reliable results, return []
+
+OUTPUT FORMAT:
+Return ONLY a JSON array:
+[{"title":"...","date":"...","reactions":null,"comments":null,"content":"...","link":"https://www.linkedin.com/..."}]`;
+}
+
+export function buildLinkedInTrendingPrompt(interests: string[], maxItems: number = 25): string {
+  return `Find trending public LinkedIn posts and articles relevant to these interests:
+${interests.map((i) => `- ${i}`).join("\n")}
+
+Use web search to find recent public LinkedIn content (prefer last 14 days, then 30 days if needed).
+
+Search examples:
+- site:linkedin.com/posts "AI" "LinkedIn"
+- site:linkedin.com/posts "TypeScript"
+- site:linkedin.com/posts "automation" "career"
+- site:linkedin.com/posts "quant trading"
+- site:linkedin.com/posts "content creation"
+
+Return up to ${maxItems} high-signal results total. Prioritize posts with strong engagement signals in snippets when available.
+
+For each result output:
+- title: concise post headline or first 8-12 words
+- date: publish/relative date from snippet if available
+- reactions: numeric if visible, else null
+- comments: numeric if visible, else null
+- content: 1-3 sentence summary of the post's core idea (not generic)
+- link: direct LinkedIn post/article URL
+
+Rules:
+- Keep only LinkedIn URLs.
+- Exclude duplicates by URL.
+- Do not invent engagement numbers.
+- If nothing reliable found, return []
+
+OUTPUT FORMAT (JSON only):
+[{"title":"...","date":"...","reactions":123,"comments":14,"content":"...","link":"https://www.linkedin.com/..."}]`;
 }
 
 // ============================================

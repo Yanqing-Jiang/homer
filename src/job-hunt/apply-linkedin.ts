@@ -58,7 +58,7 @@ async function takeScreenshot(label: string, jobId: string): Promise<string | nu
   if (!existsSync(SCREENSHOTS_DIR)) mkdirSync(SCREENSHOTS_DIR, { recursive: true });
   const path = `${SCREENSHOTS_DIR}/${jobId}_${label}_${Date.now()}.png`;
   try {
-    await runBrowser(`screenshot "${path}"`);
+    await runBrowser(["screenshot", path]);
     return existsSync(path) ? path : null;
   } catch {
     return null;
@@ -68,7 +68,7 @@ async function takeScreenshot(label: string, jobId: string): Promise<string | nu
 export async function linkedInEasyApply(
   job: { id: string; url: string; company: string; title: string },
   application: { id: string; resume_version?: string },
-  onStep: (step: ApplicationStep) => void
+  onStep: (step: ApplicationStep) => Promise<void>
 ): Promise<ApplyResult> {
   const steps: ApplicationStep[] = [];
   let stepNum = 0;
@@ -77,12 +77,12 @@ export async function linkedInEasyApply(
   try {
     // 1. Navigate to job page (safe — no shell interpolation)
     stepNum++;
-    await runBrowser("connect 9222");
+    await runBrowser(["connect", "9222"]);
     await safeNavigate(job.url);
     await sleep(5000);
     const navStep: ApplicationStep = { stepNumber: stepNum, stepType: "navigate", stepStatus: "completed", pageUrl: job.url };
     steps.push(navStep);
-    onStep(navStep);
+    await onStep(navStep);
 
     // 2. Click Easy Apply button
     stepNum++;
@@ -94,13 +94,13 @@ export async function linkedInEasyApply(
     if (!clickResult.includes("true")) {
       const errStep: ApplicationStep = { stepNumber: stepNum, stepType: "click", stepStatus: "failed", error: "Easy Apply button not found" };
       steps.push(errStep);
-      onStep(errStep);
+      await onStep(errStep);
       return { success: false, steps, error: "Easy Apply button not found" };
     }
 
     const clickStep: ApplicationStep = { stepNumber: stepNum, stepType: "click", stepStatus: "completed" };
     steps.push(clickStep);
-    onStep(clickStep);
+    await onStep(clickStep);
 
     // 3. Fill form pages (Easy Apply can have multiple pages)
     for (let page = 0; page < 10; page++) {
@@ -118,7 +118,7 @@ export async function linkedInEasyApply(
           screenshotPath: screenshot ?? undefined,
         };
         steps.push(confStep);
-        onStep(confStep);
+        await onStep(confStep);
         return { success: true, steps, confirmationScreenshot: screenshot ?? undefined };
       }
 
@@ -142,7 +142,7 @@ export async function linkedInEasyApply(
             error: "Salary field — requires manual input",
           };
           steps.push(salaryStep);
-          onStep(salaryStep);
+          await onStep(salaryStep);
           return { success: false, steps, escalation: "unknown_field", error: `Salary field: ${field.label}` };
         }
 
@@ -173,7 +173,7 @@ export async function linkedInEasyApply(
 
       // Upload resume via agent-browser file upload
       if (application.resume_version && existsSync(application.resume_version)) {
-        await runBrowser(`upload "input[type=file]" "${application.resume_version}"`);
+        await runBrowser(["upload", "input[type=file]", application.resume_version]);
         await sleep(1000);
         // Dispatch events for React-based forms
         await safeEval(`
@@ -200,7 +200,7 @@ export async function linkedInEasyApply(
         formData: { fieldsCount: fields.length, submitted: submitted.slice(0, 50) },
       };
       steps.push(fillStep);
-      onStep(fillStep);
+      await onStep(fillStep);
 
       await sleep(3000);
     }

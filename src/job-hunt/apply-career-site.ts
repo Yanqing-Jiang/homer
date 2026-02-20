@@ -9,7 +9,7 @@ import { join } from "path";
 import type Database from "better-sqlite3";
 import type { ApplyResult, ApplicationStep } from "./apply-engine.js";
 import { AccountManager, type CareerAccount } from "./account-manager.js";
-import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
+import { executeOpenCodeCLI, isAuthError } from "../executors/opencode-cli.js";
 import { waitForVerificationEmail } from "./gmail-client.js";
 import { logger } from "../utils/logger.js";
 
@@ -149,11 +149,21 @@ interface GeminiApplyResult {
 }
 
 function parseGeminiResult(output: string, jobId?: string): GeminiApplyResult {
-  // Try to find JSON in code fences first
-  const fenced = output.match(/```json\s*([\s\S]*?)```/);
+  // Match the LAST JSON code fence (agent may emit multiple — final one is the result)
+  const allFenced = [...output.matchAll(/```json\s*([\s\S]*?)```/g)];
+  const fenced = allFenced.length > 0 ? allFenced[allFenced.length - 1] : null;
   if (fenced) {
     try {
-      return JSON.parse(fenced[1]!.trim());
+      const parsed = JSON.parse(fenced[1]!.trim());
+      return {
+        success: typeof parsed.success === "boolean" ? parsed.success : false,
+        steps: Array.isArray(parsed.steps) ? parsed.steps : [],
+        credential: parsed.credential ?? null,
+        confirmationScreenshot: parsed.confirmationScreenshot ?? null,
+        error: parsed.error ?? null,
+        needs_email_verification: parsed.needs_email_verification,
+        company_domain: parsed.company_domain,
+      };
     } catch { /* fall through */ }
   }
 
@@ -177,7 +187,8 @@ function parseGeminiResult(output: string, jobId?: string): GeminiApplyResult {
     logger.warn({ error: e }, "Could not write Gemini debug output");
   }
 
-  const hasSubmit = /submit|submitted|application.*(?:sent|complete|received)/i.test(output);
+  // Require definitive confirmation phrases — avoid matching agent planning text ("I will submit")
+  const hasSubmit = /application.*(?:submitted|received|sent|complete)|confirmation.*number|successfully submitted|thank you for applying/i.test(output);
   const hasError = /error|failed|captcha|blocked|timeout/i.test(output);
   const credMatch = output.match(/CREDENTIAL:([^:\n]+):([^:\n]+):([^\n]+)/);
 
@@ -200,7 +211,7 @@ export async function careerSiteApply(
   job: CareerSiteJob,
   application: { id: string; resume_version?: string; cover_letter?: string },
   db: Database.Database,
-  onStep: (step: ApplicationStep) => void
+  onStep: (step: ApplicationStep) => Promise<void>
 ): Promise<ApplyResult> {
   const steps: ApplicationStep[] = [];
   let stepNum = 0;
@@ -232,15 +243,15 @@ export async function careerSiteApply(
       stepStatus: "completed",
     };
     steps.push(acctStep);
-    onStep(acctStep);
+    await onStep(acctStep);
 
     // 3. Decrypt password if we have an account
     const accountPassword = account ? accountMgr.getDecryptedPassword(account.id) : null;
 
-    // 4. Determine resume path
+    // 4. Determine resume path — always use PDF (career sites cannot upload .txt)
     const resumePath = application.resume_version && existsSync(application.resume_version)
       ? application.resume_version
-      : "/Users/yj/job-hunt/resumes/base-resume.txt";
+      : "/Users/yj/job-hunt/resumes/base-resume.pdf";
 
     // 5. Build prompt and run Gemini agent
     stepNum++;
@@ -261,30 +272,29 @@ export async function careerSiteApply(
 
     logger.info({ jobId: job.id, company: job.company }, "Starting Gemini career-site agent");
 
-    let result = await executeOpenCodeCLI(prompt, "", {
+    const agentOptions = {
       model: "google/gemini-3-flash-preview",
       researchOnly: false,
       timeout: CAREER_APPLY_TIMEOUT,
       cwd: "/Users/yj/job-hunt",
-    });
+    } as const;
 
-    // Retry once on transient auth errors (token expiry, network blip)
-    if (result.exitCode === 3 && result.output.startsWith("Auth error:")) {
-      logger.warn({ jobId: job.id }, "Gemini auth error — retrying after 15s");
-      await new Promise(r => setTimeout(r, 15_000));
-      result = await executeOpenCodeCLI(prompt, "", {
-        model: "google/gemini-3-flash-preview",
-        researchOnly: false,
-        timeout: CAREER_APPLY_TIMEOUT,
-        cwd: "/Users/yj/job-hunt",
-      });
+    let result = await executeOpenCodeCLI(prompt, "", agentOptions);
+
+    // Exponential backoff retry on auth errors (token expiry, network blip)
+    const authBackoffs = [5_000, 15_000, 45_000];
+    for (let attempt = 0; attempt < authBackoffs.length && (result.exitCode === 3 || isAuthError(result.output)); attempt++) {
+      const wait = authBackoffs[attempt]!;
+      logger.warn({ jobId: job.id, attempt }, `Auth error — retrying in ${wait}ms`);
+      await new Promise(r => setTimeout(r, wait));
+      result = await executeOpenCodeCLI(prompt, "", agentOptions);
     }
 
     if (result.exitCode !== 0) {
       agentStep.stepStatus = "failed";
       agentStep.error = result.output?.slice(0, 500) || "Gemini agent failed";
       steps.push(agentStep);
-      onStep(agentStep);
+      await onStep(agentStep);
       return {
         success: false,
         steps,
@@ -293,7 +303,7 @@ export async function careerSiteApply(
     }
 
     steps.push(agentStep);
-    onStep(agentStep);
+    await onStep(agentStep);
 
     // 5. Parse Gemini output
     let geminiResult = parseGeminiResult(result.output, job.id);
@@ -307,7 +317,7 @@ export async function careerSiteApply(
         stepStatus: "completed",
       };
       steps.push(verifyStep);
-      onStep(verifyStep);
+      await onStep(verifyStep);
 
       logger.info({ domain: geminiResult.company_domain }, "Waiting for verification email");
       const verifyUrl = await waitForVerificationEmail(geminiResult.company_domain, 300_000);
@@ -349,7 +359,7 @@ Complete the form and submit. Return the same JSON format as before.`;
             stepStatus: "completed",
           };
           steps.push(credStep);
-          onStep(credStep);
+          await onStep(credStep);
           logger.info({ company: cred.company }, "Stored new career site credentials");
         } catch (err) {
           logger.warn({ error: err, company: cred.company }, "Failed to store credential");
@@ -366,7 +376,7 @@ Complete the form and submit. Return the same JSON format as before.`;
         stepStatus: geminiResult.success ? "completed" : "failed",
       };
       steps.push(s);
-      onStep(s);
+      await onStep(s);
     }
 
     // 8. Check for CAPTCHA or MFA in error

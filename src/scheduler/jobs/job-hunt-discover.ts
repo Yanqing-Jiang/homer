@@ -57,7 +57,7 @@ export async function runJobHuntDiscover(db: Database.Database): Promise<{
       logger.info({ urlCount: allUrls.length }, "Job hunt discovery starting");
 
       // 2. Connect to browser
-      const connected = await runBrowser("connect 9222");
+      const connected = await runBrowser(["connect", "9222"]);
       if (!connected) {
         return { success: false, output: "", error: "Could not connect to browser on port 9222" };
       }
@@ -234,7 +234,7 @@ async function extractJobList(searchUrl: string): Promise<RawJob[]> {
 
   // Scroll to load more results
   for (let i = 0; i < 3; i++) {
-    await runBrowser("scroll down 800");
+    await runBrowser(["scroll", "down", "800"]);
     await sleep(2000);
   }
 

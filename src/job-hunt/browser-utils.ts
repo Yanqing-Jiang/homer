@@ -60,13 +60,13 @@ export async function safeEval(script: string, timeout = 15000): Promise<string>
 
 /**
  * Run a simple agent-browser command (connect, screenshot, scroll — no user data).
+ * Accepts pre-tokenized args array to prevent whitespace-splitting issues with quoted paths.
  */
-export async function runBrowser(cmd: string, timeout = 15000): Promise<string> {
-  const parts = cmd.trim().split(/\s+/);
+export async function runBrowser(args: string[], timeout = 15000): Promise<string> {
   try {
-    return await execFileAsync("agent-browser", parts, timeout);
+    return await execFileAsync("agent-browser", args, timeout);
   } catch (error: any) {
-    logger.warn({ cmd, error: error?.message }, "agent-browser command failed");
+    logger.warn({ args, error: error?.message }, "agent-browser command failed");
     return "";
   }
 }

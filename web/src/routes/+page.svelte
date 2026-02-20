@@ -265,16 +265,11 @@
 	let autoLoadAttempted = $state(false);
 
 	// Cleanup on component destroy to prevent memory leaks
+	// Note: pollInterval and threadSubscription are cleaned up by $effect return functions
 	onDestroy(() => {
 		if (currentAbort) {
 			currentAbort.abort();
 			currentAbort = null;
-		}
-		threadSubscription?.abort();
-		threadSubscription = null;
-		if (pollInterval) {
-			clearInterval(pollInterval);
-			pollInterval = null;
 		}
 	});
 
@@ -357,40 +352,23 @@
 	});
 
 	// Background polling for session list (red dot updates)
-	let pollInterval = $state<ReturnType<typeof setInterval> | null>(null);
-
 	$effect(() => {
-		// Clean up any existing interval
-		if (pollInterval) {
-			clearInterval(pollInterval);
-			pollInterval = null;
-		}
-
 		if (!auth.loading && auth.isAuthorized) {
-			pollInterval = setInterval(() => {
+			const interval = setInterval(() => {
 				if (!document.hidden) loadSessions();
 			}, 15000);
+			return () => clearInterval(interval);
 		}
-
-		return () => {
-			if (pollInterval) {
-				clearInterval(pollInterval);
-				pollInterval = null;
-			}
-		};
 	});
 
 	// Thread live updates via SSE — subscribe when threadId changes
-	let threadSubscription = $state<{ abort: () => void } | null>(null);
+	// NOT $state — internal bookkeeping only, must not trigger $effect re-runs
+	let threadSubscription: { abort: () => void } | null = null;
 
 	$effect(() => {
-		// Clean up previous subscription
-		threadSubscription?.abort();
-		threadSubscription = null;
-
 		if (!threadId || !auth.isAuthorized) return;
 
-		threadSubscription = api.subscribeToThread(threadId, {
+		const sub = api.subscribeToThread(threadId, {
 			onMessage: (message) => {
 				// Deduplicate by message ID
 				if (message.id && knownMessageIds.has(message.id)) return;
@@ -405,6 +383,8 @@
 				}];
 			}
 		});
+		threadSubscription = sub;
+		return () => sub.abort();
 	});
 
 	async function loadSessions() {

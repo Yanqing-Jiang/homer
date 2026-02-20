@@ -142,10 +142,10 @@ export class ApplyEngine {
     app.cover_letter = coverPath;
 
     const result = method === "linkedin_easy"
-      ? await linkedInEasyApply(job, app, (step) => this.recordStep(app.id, step))
-      : await careerSiteApply(job, app, this.db, (step) => this.recordStep(app.id, step));
+      ? await linkedInEasyApply(job, app, async (step) => this.recordStep(app.id, step))
+      : await careerSiteApply(job, app, this.db, async (step) => this.recordStep(app.id, step));
 
-    // Update application status
+    // Update application status based on outcome
     if (result.success) {
       this.db.prepare(`
         UPDATE applications SET status = 'application_submitted',
@@ -161,19 +161,20 @@ export class ApplyEngine {
       try {
         trackApplicationSubmitted(this.db, jobId, `${job.company} — ${job.title}`);
       } catch { /* outcome tracking best-effort */ }
-    } else if (!result.escalation) {
-      this.db.prepare("UPDATE applications SET status = 'failed', notes = ?, updated_at = datetime('now') WHERE id = ?")
-        .run(result.error ?? null, app.id);
-    }
+    } else if (result.escalation) {
+      // Persist escalation status so it's not left as 'applying' forever
+      this.db.prepare("UPDATE applications SET status = 'escalated', notes = ?, updated_at = datetime('now') WHERE id = ?")
+        .run(`Escalated: ${result.escalation}`, app.id);
 
-    // Escalate to Telegram if needed
-    if (result.escalation) {
       await this.escalateToTelegram(result.escalation, {
         jobId,
         company: job.company,
         title: job.title,
         error: result.error,
       });
+    } else {
+      this.db.prepare("UPDATE applications SET status = 'failed', notes = ?, updated_at = datetime('now') WHERE id = ?")
+        .run(result.error ?? null, app.id);
     }
 
     return result;
@@ -247,7 +248,7 @@ export async function processApprovalQueue(
            jp.application_type, jp.work_arrangement, jp.match_score, jp.match_analysis, jp.url
     FROM approval_queue aq
     JOIN job_postings jp ON aq.job_id = jp.id
-    WHERE aq.decision = 'pending'
+    WHERE aq.decision IN ('pending', 'pending_retry')
     ORDER BY aq.match_score DESC
     LIMIT 5
   `).all() as Array<{
@@ -265,9 +266,9 @@ export async function processApprovalQueue(
 
   for (const job of pending) {
     try {
-      // Mark as approved (auto)
+      // Mark as in_progress to prevent double-processing (not 'approved' yet — set after result)
       db.prepare(`
-        UPDATE approval_queue SET decision = 'approved', decided_at = datetime('now')
+        UPDATE approval_queue SET decision = 'in_progress', decided_at = datetime('now')
         WHERE id = ?
       `).run(job.queue_id);
 
@@ -279,11 +280,15 @@ export async function processApprovalQueue(
       // Apply
       const result = await engine.applyToJob(job.job_id, method as "linkedin_easy" | "career_site");
 
+      // Set final queue decision based on outcome (allows retry on failure)
       if (result.success) {
+        db.prepare("UPDATE approval_queue SET decision = 'approved' WHERE id = ?").run(job.queue_id);
         stats.applied++;
       } else if (result.escalation) {
+        db.prepare("UPDATE approval_queue SET decision = 'escalated' WHERE id = ?").run(job.queue_id);
         stats.skipped++; // escalated, not a failure
       } else {
+        db.prepare("UPDATE approval_queue SET decision = 'pending_retry' WHERE id = ?").run(job.queue_id);
         stats.failed++;
       }
 

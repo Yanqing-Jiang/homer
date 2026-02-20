@@ -68,7 +68,7 @@
 	let dashboard = $state<TradingDashboard | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
-	let pollInterval = $state<ReturnType<typeof setInterval> | null>(null);
+	let pollInterval: ReturnType<typeof setInterval> | null = null;
 	let togglingStrategy = $state<string | null>(null);
 	let startingService = $state(false);
 	let stoppingService = $state(false);
