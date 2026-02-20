@@ -366,7 +366,7 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       // Update message to show analysis in progress
       await ctx.editMessageText(
         `🔬 <b>Analyzing: ${escapeHtml(idea.title)}</b>\n` +
-        `Running multi-model analysis (codex + flash + kimi)...\n` +
+        `Running multi-model analysis (opencode opus + 2x flash)...\n` +
         `Results in 1-5 minutes.`,
         { parse_mode: "HTML" }
       );
@@ -406,7 +406,7 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
           },
           notify
         ).then(() => {
-          appendIdeaNote(ideaId, "Analysis complete").catch(() => {});
+          appendIdeaNote(ideaId, "Analysis complete").catch(() => { });
         }).catch(async (err) => {
           const msg = err instanceof Error ? err.message : String(err);
           logger.error({ ideaId, error: msg }, "Idea analysis failed");

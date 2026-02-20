@@ -255,42 +255,6 @@
 		}
 	}
 
-	let chattingAboutIdea = $state(false);
-
-	async function chatAboutIdea(idea: api.Idea) {
-		if (chattingAboutIdea) return;
-		chattingAboutIdea = true;
-
-		try {
-			// Create a new session for this idea
-			const session = await api.createSession(`Idea: ${idea.title}`);
-
-			// Create a thread
-			const thread = await api.createThread(session.id, { provider: 'claude' });
-
-			// Build the message content — point Claude at the file for full context
-			const fileRef = idea.filePath ? `\n\nIdea file: ${idea.filePath}` : '';
-			const messageContent = idea.filePath
-				? `I'd like to discuss this idea:\n\n**${idea.title}**${fileRef}\n\nRead the idea file above for full content, context, and exploration notes.`
-				: `I'd like to discuss this idea:\n\n**${idea.title}**\n\n${idea.content}${idea.context ? `\n\nContext: ${idea.context}` : ''}`;
-
-			// Store session info + pending message for navigation
-			sessionStorage.setItem('resume_session', JSON.stringify({
-				sessionId: session.id,
-				threadId: thread.id
-			}));
-			sessionStorage.setItem('pending_message', messageContent);
-
-			// Navigate immediately — message will auto-send on main page
-			closeIdea();
-			await goto('/');
-		} catch (e) {
-			console.error('Failed to create chat about idea:', e);
-			toast.error(`Failed to start chat: ${e instanceof Error ? e.message : 'Unknown error'}`);
-		} finally {
-			chattingAboutIdea = false;
-		}
-	}
 
 	async function createIdea() {
 		if (!newIdea.title.trim() || !newIdea.content.trim()) return;
@@ -678,11 +642,11 @@
 
 				<div class="modal-footer">
 					<button class="secondary-btn" onclick={closeIdea}>Close</button>
-					<button class="primary-btn" onclick={() => selectedIdea && chatAboutIdea(selectedIdea)} disabled={chattingAboutIdea}>
+					<button class="primary-btn" onclick={() => selectedIdea && startExploration(selectedIdea)} disabled={startingExploration}>
 						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
 							<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
 						</svg>
-						{chattingAboutIdea ? 'Creating chat...' : 'Chat About This'}
+						{startingExploration ? 'Opening...' : (selectedIdea?.linkedExplorationThreadId ? 'Resume Talk' : 'Talk About This')}
 					</button>
 				</div>
 			{/if}

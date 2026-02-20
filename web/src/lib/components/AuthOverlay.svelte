@@ -9,6 +9,9 @@
 		error = null;
 		try {
 			await signInWithGoogle();
+			// signInWithOAuth resolves after initiating redirect.
+			// If we're still here after a delay, the redirect didn't happen (popup blocked, etc.)
+			setTimeout(() => { signingIn = false; }, 3000);
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Sign in failed';
 			signingIn = false;
