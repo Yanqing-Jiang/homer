@@ -1,17 +1,22 @@
 /**
- * HOMER Improvements — LLM-driven codebase analysis + executable plan generation.
+ * HOMER Improvements — Dual-model codebase analysis + executable plan generation.
  *
- * Reads ACTUAL source code (~80K chars), checks build health, queries failure history.
- * LLM decides what to improve, rates risk, writes implementation plan.
- * Risk ≤ 7: output triggers isPlanRequiringApproval() → Telegram → executePlan()
- * Risk > 7: saved as idea file for human review
+ * Runs Gemini 3.1 Pro (opencode build agent) + Codex (gpt-5.3-codex xhigh) in parallel.
+ * Each writes a .md analysis file to ~/homer/output/{gemini,codex}/.
+ * Gemini Flash consolidates both into a single improvement idea.
+ *
+ * Prompt priority: critical issues/fixes → impactful optimizations → Yanqing's goals.
+ * Archived ideas (feedback.md) are injected to avoid repeat suggestions.
+ * Output: 1 idea/plan per day. Risk ≤ 7 → executable plan. Risk > 7 → idea file.
  */
 
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { execSync } from "child_process";
 import { z } from "zod";
+import { executeOpenCodeCLI } from "../../executors/opencode-cli.js";
 import { executeCodexCLI } from "../../executors/codex-cli.js";
+import { executeGeminiAPI } from "../../executors/gemini.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { buildSchedulerContext } from "../shared-context.js";
 import { loadIdeasFromDir, saveIdeaFile, type ParsedIdea } from "../../ideas/parser.js";
@@ -20,6 +25,8 @@ import type Database from "better-sqlite3";
 import { trackImprovement } from "../../outcomes/hooks.js";
 
 const HOMER_DIR = "/Users/yj/homer";
+const GEMINI_OUTPUT_DIR = "/Users/yj/homer/output/gemini";
+const CODEX_OUTPUT_DIR = "/Users/yj/homer/output/codex";
 const MAX_SOURCE_CHARS = 80_000;
 
 // Priority files to read — core modules that improvements would target
@@ -104,6 +111,121 @@ function getRecentFailures(db: Database.Database): string {
   }
 }
 
+/** Extract archived idea titles from feedback.md to avoid repeating them */
+function getArchivedTitles(): string[] {
+  const feedbackPath = "/Users/yj/memory/feedback.md";
+  if (!existsSync(feedbackPath)) return [];
+  try {
+    const content = readFileSync(feedbackPath, "utf-8");
+    const archived: string[] = [];
+    for (const line of content.split("\n")) {
+      // Match: ### [DATE] Archive - TITLE
+      const m = line.match(/^###\s+\[.+?\]\s+Archive\s+-\s+(.+)/);
+      if (m?.[1]) archived.push(m[1].trim());
+    }
+    return archived;
+  } catch {
+    return [];
+  }
+}
+
+function buildSharedPrompt(params: {
+  buildHealth: { passes: boolean; output: string };
+  recentFailures: string;
+  sourceContext: string;
+  fileListing: string;
+  schedulerContext: string;
+  existingTitles: string[];
+  archivedTitles: string[];
+  outputPath: string;
+  agentLabel: string;
+}): string {
+  const {
+    buildHealth, recentFailures, sourceContext, fileListing,
+    schedulerContext, existingTitles, archivedTitles, outputPath, agentLabel,
+  } = params;
+
+  return `You are ${agentLabel}, analyzing the Homer AI assistant codebase to propose exactly ONE improvement.
+
+## CRITICAL RULES — READ FIRST
+1. DO NOT modify any files in the codebase. This is analysis only.
+2. You MUST write your full analysis and recommendation to: ${outputPath}
+3. Do not suggest anything from the "Already Archived" list below — Yanqing explicitly rejected those.
+4. Suggest exactly 1 improvement. Make it count.
+
+## Priority Order (address the highest-priority issue found)
+1. **Critical issues / build failures** — if the build is broken or a job keeps crashing, fix that first
+2. **Reliability gaps** — recurring failures, missing error handling, race conditions
+3. **High-impact optimizations** — things that directly benefit Yanqing's daily workflow (job hunt, memory, ideas)
+4. **Code quality** — dead code, missing abstractions, technical debt worth addressing now
+
+## Current Build Status
+Build ${buildHealth.passes ? "PASSES ✓" : "FAILS ✗"}
+${buildHealth.output}
+
+## Recent Job Failures (last 7 days)
+${recentFailures}
+
+## Yanqing's Current Priorities
+${schedulerContext.slice(0, 15000)}
+
+## Already Archived (DO NOT suggest these — Yanqing rejected them)
+${archivedTitles.slice(0, 40).map(t => "- " + t).join("\n") || "(none)"}
+
+## Existing Ideas (avoid duplicates)
+${existingTitles.slice(0, 50).map(t => "- " + t).join("\n")}
+
+## Source Code (actual files)
+${sourceContext}
+
+## Complete File Listing
+${fileListing}
+
+## Your Task
+
+Analyze the code above and identify the single most impactful improvement. Consider:
+- What is actively broken or causing failures right now?
+- What would save Yanqing the most time or frustration?
+- What technical debt is silently causing problems?
+
+## Output File Format
+
+Write the following to ${outputPath} (create any missing directories):
+
+\`\`\`markdown
+# Homer Improvement Analysis — ${agentLabel}
+
+## Recommended Improvement
+**Title:** <short descriptive title>
+**Category:** reliability|performance|feature|code-quality|build-fix
+**Risk:** <1-10> — <honest explanation>
+**Files Affected:** <comma-separated list>
+**Estimated Effort:** <N> minutes
+
+## Why This Matters
+<2-3 sentences connecting to a real problem or Yanqing's goals>
+
+## Implementation Plan
+<Step-by-step, specific enough for another LLM to execute. Include exact file paths, function names, and the key code changes needed.>
+
+## JSON Block (for consolidation)
+\`\`\`json
+{
+  "title": "<title>",
+  "description": "<2-3 sentence description>",
+  "implementation_plan": "<step-by-step details>",
+  "files_affected": ["src/path/to/file.ts"],
+  "risk_score": <1-10>,
+  "risk_explanation": "<honest risk assessment>",
+  "estimated_effort_minutes": <number>,
+  "category": "reliability|performance|feature|code-quality|build-fix"
+}
+\`\`\`
+\`\`\`
+
+After writing the file, respond with a 2-sentence summary of your recommendation.`;
+}
+
 export async function runHomerImprovements(db?: Database.Database): Promise<{
   success: boolean;
   output: string;
@@ -126,6 +248,7 @@ export async function runHomerImprovements(db?: Database.Database): Promise<{
 
     const existingIdeas = loadIdeasFromDir();
     const existingTitles = existingIdeas.map(i => i.title.toLowerCase());
+    const archivedTitles = getArchivedTitles();
 
     let schedulerContext: string;
     try {
@@ -134,45 +257,83 @@ export async function runHomerImprovements(db?: Database.Database): Promise<{
       schedulerContext = "Context unavailable";
     }
 
-    const prompt = `Analyze the Homer codebase and suggest exactly 1 improvement.
+    // Timestamped output file paths — include seconds to avoid stale-file race if job reruns
+    const ts = new Date().toISOString().slice(0, 19).replace("T", "-").replace(/:/g, "");
+    const geminiOutputPath = `${GEMINI_OUTPUT_DIR}/homer-improvements-${ts}.md`;
+    const codexOutputPath = `${CODEX_OUTPUT_DIR}/homer-improvements-${ts}.md`;
 
-## Current Build Status
-Build ${buildHealth.passes ? "PASSES" : "FAILS"}
-${buildHealth.output}
+    mkdirSync(GEMINI_OUTPUT_DIR, { recursive: true });
+    mkdirSync(CODEX_OUTPUT_DIR, { recursive: true });
 
-## Recent Failures (last 7 days)
-${recentFailures}
+    const sharedParams = {
+      buildHealth, recentFailures, sourceContext, fileListing,
+      schedulerContext, existingTitles, archivedTitles,
+    };
 
-## Source Code (actual files)
-${sourceContext}
+    const geminiPrompt = buildSharedPrompt({
+      ...sharedParams,
+      outputPath: geminiOutputPath,
+      agentLabel: "Gemini 3.1 Pro (architectural analysis)",
+    });
 
-## Complete File Listing
-${fileListing}
+    const codexPrompt = buildSharedPrompt({
+      ...sharedParams,
+      outputPath: codexOutputPath,
+      agentLabel: "Codex (deep code analysis)",
+    });
 
-## Yanqing's Current Priorities
-${schedulerContext.slice(0, 15000)}
+    logger.info("Running homer-improvements: Gemini 3.1 Pro + Codex in parallel");
 
-## Existing Ideas (avoid duplicates)
-${existingTitles.slice(0, 50).map(t => "- " + t).join("\n")}
+    // Fan-out: run both agents in parallel
+    const [geminiResult, codexResult] = await Promise.allSettled([
+      executeOpenCodeCLI(geminiPrompt, "", {
+        model: "google-aistudio/gemini-3.1-pro-preview",
+        researchOnly: false,
+        agent: "build",
+        cwd: HOMER_DIR,
+        timeout: 900_000, // 15 min
+      }),
+      executeCodexCLI(codexPrompt, {
+        cwd: HOMER_DIR,
+        model: "gpt-5.3-codex",
+        reasoningEffort: "xhigh",
+        timeout: 1_200_000, // 20 min
+      }),
+    ]);
+
+    // Read whichever .md files were actually written
+    const outputs: Array<{ agent: string; content: string }> = [];
+
+    if (existsSync(geminiOutputPath)) {
+      outputs.push({ agent: "Gemini 3.1 Pro", content: readFileSync(geminiOutputPath, "utf-8") });
+      logger.info({ path: geminiOutputPath }, "Gemini output written");
+    } else {
+      const err = geminiResult.status === "rejected" ? geminiResult.reason : "file not written";
+      logger.warn({ error: String(err) }, "Gemini 3.1 Pro did not produce output file");
+    }
+
+    if (existsSync(codexOutputPath)) {
+      outputs.push({ agent: "Codex", content: readFileSync(codexOutputPath, "utf-8") });
+      logger.info({ path: codexOutputPath }, "Codex output written");
+    } else {
+      const err = codexResult.status === "rejected" ? codexResult.reason : "file not written";
+      logger.warn({ error: String(err) }, "Codex did not produce output file");
+    }
+
+    if (outputs.length === 0) {
+      return { success: false, output: "", error: "Both agents failed to produce output files" };
+    }
+
+    // Consolidate via Gemini Flash API
+    const consolidationPrompt = `You are consolidating two codebase improvement analyses into a single best recommendation.
+
+${outputs.map(o => `## ${o.agent} Analysis\n\n${o.content.slice(0, 20000)}`).join("\n\n---\n\n")}
 
 ## Your Task
 
-YOU decide what matters most based on:
-- Build health (if broken, fix that first)
-- Recent failure patterns (if something keeps failing, fix it)
-- Code quality issues in the actual source
-- Missing capabilities for Yanqing's goals
-- Dead code, error handling gaps, performance issues
+Review both analyses above. Pick the single most impactful improvement, or synthesize the best elements if they complement each other.
 
-For your suggestion, provide:
-1. **What** to change (specific files and functions)
-2. **Why** it matters (connect to a real problem or goal)
-3. **How** to implement it (specific enough that another LLM could execute it)
-4. **Risk assessment** — your honest judgment on a 1-10 scale. Consider: how many files change, does it touch core scheduler/state, could it break existing jobs, is it easily reversible?
-
-## Output Format
-
-Return ONLY a JSON object:
+Return ONLY a JSON object (no markdown, no explanation):
 {
   "title": "Short descriptive title",
   "description": "2-3 sentence description connecting to real impact",
@@ -182,28 +343,24 @@ Return ONLY a JSON object:
   "risk_explanation": "Why this risk level — be honest",
   "estimated_effort_minutes": 5-60,
   "category": "reliability|performance|feature|code-quality|build-fix"
-}
+}`;
 
-One improvement only. Make it good.`;
-
-    const fullPrompt = `## Context\n${schedulerContext.slice(0, 30000)}\n\n${prompt}`;
-    const result = await executeCodexCLI(fullPrompt, {
-      cwd: HOMER_DIR,
-      model: "gpt-5.3-codex",
-      reasoningEffort: "xhigh",
-      timeout: 1_200_000,
+    const consolidation = await executeGeminiAPI(consolidationPrompt, {
+      model: "gemini-2.0-flash",
+      temperature: 0.2,
+      maxTokens: 4096,
     });
 
-    if (result.exitCode !== 0) {
-      return { success: false, output: "", error: `Codex CLI error: ${result.output}` };
+    if (!consolidation.output) {
+      return { success: false, output: "", error: "Consolidation API returned empty response" };
     }
 
     let improvement: z.infer<typeof ImprovementSchema>;
     try {
-      improvement = parseSwarmJSON(result.output, ImprovementSchema);
+      improvement = parseSwarmJSON(consolidation.output, ImprovementSchema);
     } catch (parseErr) {
       const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-      logger.error({ error: msg }, "Failed to parse homer improvement");
+      logger.error({ error: msg, raw: consolidation.output.slice(0, 500) }, "Failed to parse consolidated improvement");
       return { success: false, output: "", error: `Parse failed: ${msg}` };
     }
 
@@ -220,9 +377,8 @@ One improvement only. Make it good.`;
       return { success: true, output: `Suggested "${improvement.title}" but it's a duplicate of an existing idea` };
     }
 
-    // Route based on LLM risk score
+    // Route based on risk score
     if (improvement.risk_score <= 7) {
-      // Output triggers isPlanRequiringApproval() in index.ts
       const planText = `## Implementation Plan
 
 ### ${improvement.title}
@@ -247,6 +403,12 @@ ${improvement.files_affected.map(f => `- \`${f}\``).join("\n")}
         "Generated executable improvement plan"
       );
 
+      // Track outcome for executable plans too
+      const planId = `homer_plan_${new Date().toISOString().slice(5, 10).replace("-", "")}_${improvement.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30)}`;
+      try {
+        if (db) trackImprovement(db, planId, improvement.title);
+      } catch { /* best-effort */ }
+
       return { success: true, output: planText };
     }
 
@@ -266,19 +428,18 @@ ${improvement.files_affected.map(f => `- \`${f}\``).join("\n")}
       status: "draft",
       source: "homer-analysis",
       content: improvement.description,
-      context: `${improvement.implementation_plan}\n\nRisk: ${improvement.risk_score}/10 — ${improvement.risk_explanation}`,
+      context: `${improvement.implementation_plan}\n\nRisk: ${improvement.risk_score}/10 — ${improvement.risk_explanation}\n\nAnalysis files:\n- ${geminiOutputPath}\n- ${codexOutputPath}`,
       tags: ["homer-improvement", `risk-${improvement.risk_score}`],
       timestamp,
     };
 
     saveIdeaFile(parsed);
 
-    // Track outcome for this improvement proposal
     try {
       if (db) trackImprovement(db, id, improvement.title);
     } catch { /* outcome tracking best-effort */ }
 
-    const output = `Generated improvement "${improvement.title}" (risk ${improvement.risk_score}/10 — saved as idea for review)`;
+    const output = `Generated improvement "${improvement.title}" (risk ${improvement.risk_score}/10 — saved as idea)`;
     logger.info({ id, title: improvement.title, risk: improvement.risk_score }, "Wrote high-risk homer improvement as idea");
 
     return { success: true, output };

@@ -5,24 +5,29 @@
  *
  * Schedule: Monday + Thursday 6am (0 6 * * 1,4)
  *
- * P0 fixes applied from 3-agent swarm review (2026-02-17):
- * - Medium RSS as primary source (browser fallback)
- * - Imperative prompts with CRITICAL RULES + sleep commands
- * - AUTH_REQUIRED / BOT_DETECTED distinct return values
- * - DB-based dedup instead of markdown title matching
- * - cleanAgentOutput pre-processing before JSON parsing
- * - YAML-safe escaping + slug collision handling
- * - db parameter required, upsert metrics
+ * P0 fixes applied from 5-agent swarm review (2026-02-20):
+ * - Medium RSS as primary source (browser fallback moved into Phase 2 parallel block)
+ * - LinkedIn timeout reduced 300s → 90s; browser prompts: sleep 3→1, scrolls 20→10
+ * - Explicit exitCode 4 (timeout) check before detectAuthOrBot — no silent laundering
+ * - Telegram alert on AUTH_REQUIRED / BOT_DETECTED
+ * - Deep-fetch: LinkedIn "see more" expansion + Medium trending article full-text fetch
+ * - Heuristic scoring for trending idea selection (replaces positional first-4)
+ * - ingestTrendingIdeas() failure logged to results (was silently swallowed)
+ * - writeRunSummaryMarkdown() moved to finally block — always runs
+ * - Post-scrape pattern analysis: Gemini Flash extracts content patterns → patterns.md
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { createHash } from "crypto";
 import type Database from "better-sqlite3";
 import { executeOpenCodeCLI } from "../../executors/opencode-cli.js";
+import { executeGeminiAPI } from "../../executors/gemini.js";
 import {
   SCRAPE_OPTIONS,
+  DEEP_FETCH_OPTIONS,
   buildMediumScrapePrompt,
   buildLinkedInScrapePrompt,
+  buildArticleDeepFetchPrompt,
 } from "../../scraping/browser-prompts.js";
 import { cleanAgentOutput } from "../../scraping/clean-output.js";
 import type { ParsedIdea } from "../../ideas/parser.js";
@@ -49,17 +54,19 @@ const MEDIUM_TAG_RSS_BASE = "https://medium.com/feed/tag";
 
 const MEDIUM_TRENDING_TAGS: Array<{ tag: string; topic: string }> = [
   { tag: "artificial-intelligence", topic: "AI/ML" },
-  { tag: "machine-learning", topic: "AI/ML" },
+  { tag: "llm", topic: "LLMs" },
   { tag: "typescript", topic: "TypeScript" },
+  { tag: "agents", topic: "AI agents" },
+  { tag: "algorithmic-trading", topic: "quant trading" },
   { tag: "productivity", topic: "personal automation" },
-  { tag: "career", topic: "career development" },
-  { tag: "trading", topic: "quant trading" },
   { tag: "writing", topic: "content creation" },
 ];
 
 const MAX_MEDIUM_TAG_ITEMS = 10;
 const MAX_TRENDING_IDEAS_PER_PLATFORM = 4;
+const MAX_DEEP_FETCH_ARTICLES = 5; // top N trending articles to deep-fetch (Medium trending only)
 const ENABLE_TRENDING_IDEA_PIPELINE = process.env.CONTENT_SCRAPER_IDEA_INGEST !== "0";
+const PATTERNS_FILE = "/Users/yj/memory/patterns.md";
 
 // ============================================
 // TYPES
@@ -482,14 +489,294 @@ function detectNewPosts(db: Database.Database, posts: ScrapedPost[], platform: s
 
 function detectAuthOrBot(output: string): "AUTH_REQUIRED" | "BOT_DETECTED" | null {
   const trimmed = output.trim();
-  if (trimmed === "AUTH_REQUIRED" || trimmed.includes("AUTH_REQUIRED")) return "AUTH_REQUIRED";
-  if (trimmed === "BOT_DETECTED" || trimmed.includes("BOT_DETECTED")) return "BOT_DETECTED";
+  // Exact match or sentinel as first line (agent returned only the sentinel)
+  if (trimmed === "AUTH_REQUIRED" || trimmed.startsWith("AUTH_REQUIRED\n")) return "AUTH_REQUIRED";
+  if (trimmed === "BOT_DETECTED" || trimmed.startsWith("BOT_DETECTED\n")) return "BOT_DETECTED";
+  // Short response containing the sentinel — avoids false-positives on long scraped content
+  if (trimmed.length < 300 && trimmed.includes("AUTH_REQUIRED")) return "AUTH_REQUIRED";
+  if (trimmed.length < 300 && trimmed.includes("BOT_DETECTED")) return "BOT_DETECTED";
   return null;
 }
 
 // ============================================
-// LINKEDIN FALLBACK + TRENDING
+// TELEGRAM ALERT (best-effort)
 // ============================================
+
+async function sendScraperAlert(message: string): Promise<void> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return;
+  try {
+    const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text: `🔴 Content Scraper: ${message}` }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!resp.ok) {
+      logger.warn({ status: resp.status }, "Telegram alert failed");
+    }
+  } catch {
+    // best-effort — never crash the scraper for a notification failure
+  }
+}
+
+// ============================================
+// TRENDING IDEA SCORING
+// ============================================
+
+/**
+ * Heuristic relevance scorer for trending posts.
+ * Biases toward Yanqing's interests: AI agents, quant, TypeScript, building tools.
+ * Penalizes generic clickbait.
+ */
+function scoreTrendingPost(post: ScrapedPost): number {
+  const text = `${post.title} ${post.content ?? ""}`.toLowerCase();
+  let score = 5; // base
+
+  // Positive signals
+  if (/\bagent\b|\bagentic\b|\bai agent/.test(text)) score += 3;
+  if (/\bquant\b|\balgorithm\b|\bbacktest\b|\btrading\b/.test(text)) score += 2;
+  if (/\btypescript\b|\bnode\.js\b|\bdeno\b/.test(text)) score += 1;
+  if (/\bbuilding\b|\bopen.source\b|\barchitect/.test(text)) score += 1;
+  if (/\bllm\b|\blarge language\b|\bgpt\b|\bclaude\b/.test(text)) score += 1;
+  if ((post.claps ?? 0) > 500) score += 2;
+  else if ((post.claps ?? 0) > 100) score += 1;
+
+  // Negative signals (clickbait / off-topic)
+  if (/chatgpt tips|\d+ tools|\d+ ways|you should never|beginner guide|mindset/.test(text)) score -= 3;
+  if (/marketing|social media manager|seo tips|influencer|personal brand/.test(text)) score -= 2;
+  if (/motivat|inspir|hustle|grind/.test(text)) score -= 1;
+
+  return Math.max(0, score);
+}
+
+// ============================================
+// DEEP FETCH (article full text)
+// ============================================
+
+/**
+ * Deep-fetch full article body for top trending candidates.
+ * Medium RSS teasers are 1-sentence previews — this gets the real content.
+ * Runs serially (CONCURRENCY=1) to avoid Chrome navigation race conditions.
+ */
+async function deepFetchTrendingArticles(posts: ScrapedPost[]): Promise<ScrapedPost[]> {
+  const CONCURRENCY = 1; // serial to avoid Chrome navigation race conditions
+  const enriched = [...posts];
+
+  for (let i = 0; i < enriched.length; i += CONCURRENCY) {
+    const batch = enriched.slice(i, i + CONCURRENCY);
+    await Promise.allSettled(
+      batch.map(async (post, batchIdx) => {
+        const idx = i + batchIdx;
+        if (!post.link) return;
+        try {
+          const result = await executeOpenCodeCLI(
+            buildArticleDeepFetchPrompt(post.link),
+            "",
+            DEEP_FETCH_OPTIONS,
+          );
+          if (result.exitCode === 0 && result.output) {
+            const body = result.output.trim();
+            if (body && body !== "PAYWALL" && body !== "FAILED" && body.length > 100) {
+              enriched[idx] = { ...post, content: body.slice(0, 20_000) };
+              logger.debug({ url: post.link, chars: body.length }, "Deep-fetched article body");
+            }
+          }
+        } catch (err) {
+          logger.warn({ url: post.link, error: String(err) }, "Article deep-fetch failed");
+        }
+      }),
+    );
+  }
+
+  return enriched;
+}
+
+// ============================================
+// POST-SCRAPE PATTERN ANALYSIS
+// ============================================
+
+/**
+ * Analyze scraped content with Gemini Flash and extract content patterns.
+ * Appends discovered patterns to ~/memory/patterns.md.
+ */
+type ViralityPlatform = "medium" | "linkedin" | "x";
+
+interface ViralityPattern {
+  platform: ViralityPlatform;
+  hookType: string;
+  structure: string;
+  emotionalTrigger: string;
+  engagementSignal: string;
+  pattern: string;
+  evidence: string;
+}
+
+function stripCodeFence(text: string): string {
+  const t = text.trim();
+  const m = t.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return (m?.[1] ?? t).trim();
+}
+
+function escCell(v: string): string {
+  return v.replace(/\|/g, "/").replace(/\s+/g, " ").trim();
+}
+
+/** Ensure patterns.md has the required platform H2 sections + table headers. */
+function ensurePatternSchema(md: string): string {
+  let out = md.trim() || "# Content Virality Patterns\n\nAuto-maintained.\n";
+  const TABLE_HEADER = "| hook_type | structure | emotional_trigger | engagement_signal | pattern |\n|---|---|---|---|---|";
+  for (const platform of ["medium", "linkedin", "x"] as const) {
+    if (!new RegExp(`^##\\s+${platform}\\b`, "im").test(out)) {
+      out += `\n\n## ${platform}\n${TABLE_HEADER}\n`;
+    }
+  }
+  if (!/^##\s+cross-platform/im.test(out)) {
+    out += `\n\n## cross-platform\n`;
+  }
+  return out.endsWith("\n") ? out : `${out}\n`;
+}
+
+/** Upsert new rows into the platform's table section, deduplicating by row content. */
+function upsertRows(md: string, platform: ViralityPlatform, rows: ViralityPattern[]): { markdown: string; added: number } {
+  if (rows.length === 0) return { markdown: md, added: 0 };
+
+  const re = new RegExp(`(^##\\s+${platform}\\b[\\s\\S]*?)(?=^##\\s+|\\z)`, "im");
+  const match = md.match(re);
+  if (!match) return { markdown: md, added: 0 };
+
+  const section = match[1] ?? "";
+  const existing = new Set(
+    section
+      .split("\n")
+      .filter(l => l.startsWith("|") && !l.includes("---") && !/hook_type/i.test(l))
+      .map(l => l.toLowerCase().replace(/\s+/g, " ").trim()),
+  );
+
+  const newLines: string[] = [];
+  for (const row of rows) {
+    const line = `| ${escCell(row.hookType)} | ${escCell(row.structure)} | ${escCell(row.emotionalTrigger)} | ${escCell(row.engagementSignal)} | ${escCell(row.pattern)} |`;
+    const key = line.toLowerCase().replace(/\s+/g, " ").trim();
+    if (!existing.has(key)) {
+      existing.add(key);
+      newLines.push(line);
+    }
+  }
+
+  if (newLines.length === 0) return { markdown: md, added: 0 };
+  const updated = `${section.trimEnd()}\n${newLines.join("\n")}\n`;
+  return { markdown: md.replace(section, updated), added: newLines.length };
+}
+
+function buildViralityPrompt(digest: string): string {
+  return `You are extracting PLATFORM-SPECIFIC virality patterns from scraped content.
+
+INPUT:
+${digest.slice(0, 45_000)}
+
+TASK:
+Extract 2-4 patterns per platform (medium, linkedin, x) when evidence exists.
+Each pattern must include:
+- platform: "medium" | "linkedin" | "x"
+- hookType: opening angle (e.g., contrarian claim, personal failure, prediction)
+- structure: content flow/template in arrow notation
+- emotionalTrigger: dominant emotion(s) driving engagement
+- engagementSignal: what engagement behavior this pattern tends to trigger
+- pattern: concise reusable pattern statement (1-2 sentences)
+- evidence: short quote/snippet/title from the input
+
+RULES:
+- Platform-specific: do not collapse into "general" patterns.
+- Evidence-backed only; if weak evidence, skip.
+- No generic filler ("AI is growing", "people like stories").
+- Prefer patterns useful for drafting future posts.
+- Focus on: AI agents, quant trading, TypeScript, content creation, career in tech.
+
+OUTPUT:
+Return ONLY a valid JSON array, no markdown, no commentary.
+Example shape:
+[{"platform":"medium","hookType":"...","structure":"...","emotionalTrigger":"...","engagementSignal":"...","pattern":"...","evidence":"..."}]`;
+}
+
+async function analyzeAndUpdatePatterns(
+  ownPosts: ScrapedPost[],
+  linkedinPosts: ScrapedPost[],
+  trendingPosts: ScrapedPost[],
+): Promise<{ message: string; patternsAdded: number }> {
+  if (ownPosts.length === 0 && linkedinPosts.length === 0 && trendingPosts.length === 0) {
+    return { message: "patterns: no content to analyze", patternsAdded: 0 };
+  }
+
+  const pack = (platform: string, posts: ScrapedPost[]) =>
+    posts.slice(0, 15).map(p => `[${platform}] "${p.title}" — ${(p.content ?? "").slice(0, 700)}`).join("\n\n");
+
+  const digest = [
+    ownPosts.length > 0 ? `## medium\n${pack("medium", ownPosts)}` : "",
+    linkedinPosts.length > 0 ? `## linkedin\n${pack("linkedin", linkedinPosts)}` : "",
+    trendingPosts.length > 0 ? `## medium (trending)\n${pack("medium", trendingPosts.slice(0, 10))}` : "",
+  ].filter(Boolean).join("\n\n");
+
+  const prompt = buildViralityPrompt(digest);
+
+  try {
+    const result = await executeGeminiAPI(prompt, {
+      model: "gemini-3-flash-preview",
+      maxTokens: 1400,
+    });
+
+    if (result.exitCode !== 0 || !result.output?.trim()) {
+      return { message: "patterns: no new patterns found", patternsAdded: 0 };
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stripCodeFence(result.output));
+    } catch {
+      return { message: "patterns: model output not valid JSON", patternsAdded: 0 };
+    }
+
+    const rows = (Array.isArray(parsed) ? parsed : [])
+      .map((r): ViralityPattern | null => {
+        if (!r || typeof r !== "object") return null;
+        const x = r as Record<string, unknown>;
+        const platform = x.platform;
+        if (platform !== "medium" && platform !== "linkedin" && platform !== "x") return null;
+        const row: ViralityPattern = {
+          platform,
+          hookType: String(x.hookType ?? "").trim(),
+          structure: String(x.structure ?? "").trim(),
+          emotionalTrigger: String(x.emotionalTrigger ?? "").trim(),
+          engagementSignal: String(x.engagementSignal ?? "").trim(),
+          pattern: String(x.pattern ?? "").trim(),
+          evidence: String(x.evidence ?? "").trim(),
+        };
+        if (!row.hookType || !row.structure || !row.pattern) return null;
+        return row;
+      })
+      .filter((x): x is ViralityPattern => x !== null);
+
+    if (rows.length === 0) return { message: "patterns: no valid patterns extracted", patternsAdded: 0 };
+
+    let md = existsSync(PATTERNS_FILE) ? readFileSync(PATTERNS_FILE, "utf-8") : "";
+    md = ensurePatternSchema(md);
+
+    let added = 0;
+    for (const platform of ["medium", "linkedin", "x"] as const) {
+      const platformRows = rows.filter(r => r.platform === platform);
+      const updated = upsertRows(md, platform, platformRows);
+      md = updated.markdown;
+      added += updated.added;
+    }
+
+    if (added > 0) writeFileSync(PATTERNS_FILE, md, "utf-8");
+    logger.info({ count: added }, "Upserted new virality patterns to patterns.md");
+    return { message: `patterns: ${added} new`, patternsAdded: added };
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Pattern analysis failed");
+    return { message: `patterns: analysis failed — ${String(err).slice(0, 100)}`, patternsAdded: 0 };
+  }
+}
 
 // ============================================
 // TRENDING -> IDEAS (OPTIONAL)
@@ -532,8 +819,26 @@ function buildTrendingIdea(post: ScrapedPost, platform: "medium" | "linkedin", t
 function ingestTrendingIdeas(posts: ScrapedPost[], platform: "medium" | "linkedin"): SmartSaveResult[] {
   const now = new Date();
   const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
-  const selected = dedupePosts(posts).slice(0, MAX_TRENDING_IDEAS_PER_PLATFORM);
+
+  // Score and select top candidates (heuristic scorer, tag-diverse)
+  const deduped = dedupePosts(posts);
+  const scored = deduped
+    .map(p => ({ post: p, score: scoreTrendingPost(p) }))
+    .sort((a, b) => b.score - a.score);
+
+  // Pick top N with tag diversity (max 2 per topic)
+  const topicCounts = new Map<string, number>();
+  const selected: ScrapedPost[] = [];
+  for (const { post } of scored) {
+    if (selected.length >= MAX_TRENDING_IDEAS_PER_PLATFORM) break;
+    const topic = post.topic ?? "general";
+    const count = topicCounts.get(topic) ?? 0;
+    if (count >= 2) continue;
+    topicCounts.set(topic, count + 1);
+    selected.push(post);
+  }
   const results: SmartSaveResult[] = [];
+  let errorCount = 0;
 
   for (const post of selected) {
     try {
@@ -541,8 +846,14 @@ function ingestTrendingIdeas(posts: ScrapedPost[], platform: "medium" | "linkedi
       const saveResult = smartSaveIdea(parsed);
       results.push(saveResult);
     } catch (err) {
+      errorCount++;
       logger.warn({ error: String(err), title: post.title, platform }, "Failed to ingest trending idea");
     }
+  }
+
+  // Attach error count to first result for surfacing in run output
+  if (errorCount > 0) {
+    results.push({ action: "error", id: `${platform}-ingest-errors`, title: `${errorCount} idea(s) failed to ingest` } as unknown as SmartSaveResult);
   }
 
   return results;
@@ -595,177 +906,235 @@ export async function runContentScraper(db: Database.Database): Promise<{
   const results: string[] = [];
   const runStartedAt = new Date();
   const scrapeTime = runStartedAt.toISOString();
-  const scrapeOpts = { ...SCRAPE_OPTIONS, browserOnly: true, timeout: 900_000 };
+  const scrapeOpts = { ...SCRAPE_OPTIONS, browserOnly: true };
 
+  // Track scraped content for post-scrape analysis
+  let ownMediumPosts: ScrapedPost[] = [];
+  let ownLinkedInPosts: ScrapedPost[] = [];
   let mediumTrendingPosts: ScrapedPost[] = [];
+  let scrapeSucceeded = false;
 
-  // --- Medium scrape (RSS primary, browser fallback) ---
   try {
-    logger.info("Starting Medium scrape (RSS primary)");
+    // =========================================================
+    // PHASE 1 + 2: All sources in parallel
+    //   - Medium RSS (fast, ~2s)
+    //   - Medium RSS fallback browser scrape (only if RSS empty)
+    //   - Medium trending tag RSS (fast, ~2s for 7 tags parallel)
+    //   - LinkedIn browser CDP (agent-browser, up to 90s)
+    // =========================================================
 
-    // Try RSS first
-    let posts = await fetchMediumRSS();
+    logger.info("Starting Medium RSS scrape");
+    const rssPostsRaw = await fetchMediumRSS();
+    logger.info({ count: rssPostsRaw.length }, "Medium RSS complete");
 
-    // Fall back to browser if RSS returns nothing
-    if (posts.length === 0) {
-      logger.info("RSS returned empty, falling back to browser scrape");
-      const mediumResult = await executeOpenCodeCLI(
-        buildMediumScrapePrompt(),
-        "",
-        scrapeOpts,
-      );
+    // Phase 2: parallel — trending + LinkedIn + optional Medium browser fallback
+    const [mediumFallbackResult, mediumTrendingResult, linkedinResult] = await Promise.allSettled([
+      // Medium browser fallback (only if RSS was empty)
+      rssPostsRaw.length > 0
+        ? Promise.resolve(null)
+        : (async () => {
+            logger.info("Medium RSS empty — launching browser fallback in parallel");
+            return executeOpenCodeCLI(buildMediumScrapePrompt(), "", { ...scrapeOpts, timeout: 120_000 });
+          })(),
+      // Medium trending: 7 tag RSS feeds all parallel
+      fetchMediumTrendingByTags(),
+      // LinkedIn: agent-browser CDP, 90s timeout
+      (async () => {
+        logger.info("Starting LinkedIn scrape");
+        return executeOpenCodeCLI(buildLinkedInScrapePrompt(), "", { ...scrapeOpts, timeout: 90_000 });
+      })(),
+    ]);
 
-      if (mediumResult.exitCode === 0 && mediumResult.output) {
-        const authStatus = detectAuthOrBot(mediumResult.output);
-        if (authStatus) {
-          results.push(`Medium: browser scrape blocked — ${authStatus}`);
-          logger.warn({ status: authStatus }, "Medium browser scrape blocked");
-        } else {
-          posts = parseScrapedJSON(mediumResult.output);
-        }
-      } else {
-        results.push(`Medium: browser scrape failed — exit code ${mediumResult.exitCode}`);
-        logger.error(
-          { exitCode: mediumResult.exitCode, output: mediumResult.output?.slice(0, 300) },
-          "Medium browser scrape failed",
-        );
-      }
-    }
-
-    posts = dedupePosts(posts);
-
-    if (posts.length > 0) {
-      const newPosts = detectNewPosts(db, posts, "medium");
-
-      // Write full corpus file
-      writeFileSync(MEDIUM_FILE, buildMarkdownCorpus(posts, "medium"));
-
-      // Write individual post files
-      const written = writeIndividualPosts(posts, MEDIUM_DIR, "medium");
-
-      // Record metrics
-      const metrics = recordMetrics(db, posts, "medium", scrapeTime);
-
-      results.push(`Medium: ${posts.length} posts scraped, ${newPosts.length} new, ${written} files updated, ${metrics} metrics recorded`);
-      logger.info({ total: posts.length, new: newPosts.length }, "Medium scrape complete");
-    } else if (!results.some((r) => r.startsWith("Medium:"))) {
-      results.push("Medium: no posts found from RSS or browser scrape");
-      logger.warn("Medium scrape returned no posts from any source");
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    results.push(`Medium: error — ${msg}`);
-    logger.error({ error: msg }, "Medium scrape error");
-  }
-
-  // --- Medium trending + LinkedIn own posts in PARALLEL (both independent) ---
-  // LinkedIn trending web search dropped — Google doesn't index LinkedIn reliably (always returns 0)
-  const [mediumTrendingResult, linkedinResult] = await Promise.allSettled([
-    // Medium trending: tag RSS (instant ~1s per tag, all 7 parallel)
-    fetchMediumTrendingByTags(),
-    // LinkedIn own posts: agent-browser CDP via opencode flash (up to 5min)
-    (async () => {
-      logger.info("Starting LinkedIn scrape");
-      return executeOpenCodeCLI(
-        buildLinkedInScrapePrompt(),
-        "",
-        { ...scrapeOpts, timeout: 300_000 }, // 5 min — agent-browser CDP
-      );
-    })(),
-  ]);
-
-  // Process Medium trending result
-  if (mediumTrendingResult.status === "fulfilled") {
-    mediumTrendingPosts = mediumTrendingResult.value;
-    if (mediumTrendingPosts.length > 0) {
-      writeFileSync(
-        MEDIUM_TRENDING_FILE,
-        buildMarkdownCorpus(mediumTrendingPosts, "medium", {
-          title: "Medium Trending Content",
-          sourceUrl: "https://medium.com/tag",
-          subtitle: `Interest tags: ${MEDIUM_TRENDING_TAGS.map((t) => t.tag).join(", ")}`,
-        }),
-      );
-      const written = writeIndividualPosts(mediumTrendingPosts, MEDIUM_TRENDING_DIR, "medium");
-      results.push(`Medium trending: ${mediumTrendingPosts.length} posts scraped from ${MEDIUM_TRENDING_TAGS.length} tags, ${written} files updated`);
-    } else {
-      results.push("Medium trending: no posts found from tag RSS feeds");
-    }
-  } else {
-    results.push(`Medium trending: error — ${mediumTrendingResult.reason}`);
-    logger.error({ error: String(mediumTrendingResult.reason) }, "Medium trending scrape error");
-  }
-
-  // Process LinkedIn own posts result
-  try {
-    let linkedinPosts: ScrapedPost[] = [];
-    let linkedInSource = "browser";
-
-    if (linkedinResult.status === "fulfilled") {
-      const r = linkedinResult.value;
-      if (r.exitCode === 0 && r.output) {
-        const authStatus = detectAuthOrBot(r.output);
-        if (authStatus) {
-          logger.warn({ status: authStatus }, "LinkedIn browser scrape blocked");
-          // Skip public fallback — also returns 0 consistently and wastes 3min
-          results.push(`LinkedIn: blocked — ${authStatus}`);
-        } else {
-          linkedinPosts = parseScrapedJSON(r.output);
-        }
-      } else {
-        results.push(`LinkedIn: scrape failed — exit code ${r.exitCode}`);
-        logger.error({ exitCode: r.exitCode, output: r.output?.slice(0, 300) }, "LinkedIn scrape failed");
-      }
-    } else {
-      results.push(`LinkedIn: error — ${linkedinResult.reason}`);
-      logger.error({ error: String(linkedinResult.reason) }, "LinkedIn scrape error");
-    }
-
-    linkedinPosts = dedupePosts(linkedinPosts);
-
-    if (linkedinPosts.length > 0) {
-      const newPosts = detectNewPosts(db, linkedinPosts, "linkedin");
-      writeFileSync(LINKEDIN_FILE, buildMarkdownCorpus(linkedinPosts, "linkedin"));
-      const written = writeIndividualPosts(linkedinPosts, LINKEDIN_DIR, "linkedin");
-      const metrics = recordMetrics(db, linkedinPosts, "linkedin", scrapeTime);
-      results.push(`LinkedIn: ${linkedinPosts.length} posts scraped (${linkedInSource}), ${newPosts.length} new, ${written} files updated, ${metrics} metrics recorded`);
-      logger.info({ total: linkedinPosts.length, new: newPosts.length, source: linkedInSource }, "LinkedIn scrape complete");
-    } else if (!results.some((r) => r.startsWith("LinkedIn:"))) {
-      results.push("LinkedIn: no posts parsed from scrape output");
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    results.push(`LinkedIn: error — ${msg}`);
-    logger.error({ error: msg }, "LinkedIn scrape error");
-  }
-
-  // --- Optional: trending -> ideas pipeline (Medium only — LinkedIn trending dropped) ---
-  if (ENABLE_TRENDING_IDEA_PIPELINE) {
+    // =========================================================
+    // Process Medium own posts (RSS + optional browser fallback)
+    // =========================================================
     try {
-      const ideaResults = ingestTrendingIdeas(mediumTrendingPosts, "medium");
-      const created = ideaResults.filter((r) => r.action === "created").length;
-      const enhanced = ideaResults.filter((r) => r.action === "enhanced").length;
-      const skipped = ideaResults.filter((r) => r.action === "skipped").length;
-      results.push(`Trending ideas: ${created} created, ${enhanced} enhanced, ${skipped} skipped`);
+      let mediumPosts = rssPostsRaw;
+
+      if (mediumPosts.length === 0 && mediumFallbackResult.status === "fulfilled" && mediumFallbackResult.value) {
+        const r = mediumFallbackResult.value;
+        if (r.exitCode === 4) {
+          results.push("Medium: browser fallback TIMEOUT — no posts");
+        } else if (r.exitCode === 0 && r.output) {
+          const authStatus = detectAuthOrBot(r.output);
+          if (authStatus) {
+            results.push(`Medium: browser scrape blocked — ${authStatus}`);
+            logger.warn({ status: authStatus }, "Medium browser scrape blocked");
+            writeFileSync(MEDIUM_FILE, `# Medium Posts — ${new Date().toISOString().slice(0, 10)}\n\nStatus: ${authStatus}\nLast attempted: ${new Date().toISOString()}\n`);
+            void sendScraperAlert(`Medium browser ${authStatus} — session may need refresh`);
+          } else {
+            mediumPosts = parseScrapedJSON(r.output);
+          }
+        } else if (r.exitCode !== 0) {
+          results.push(`Medium: browser scrape failed — exit code ${r.exitCode}`);
+        }
+      } else if (mediumFallbackResult.status === "rejected") {
+        results.push(`Medium: browser fallback error — ${mediumFallbackResult.reason}`);
+      }
+
+      mediumPosts = dedupePosts(mediumPosts);
+
+      if (mediumPosts.length > 0) {
+        ownMediumPosts = mediumPosts;
+        const newPosts = detectNewPosts(db, mediumPosts, "medium");
+        writeFileSync(MEDIUM_FILE, buildMarkdownCorpus(mediumPosts, "medium"));
+        const written = writeIndividualPosts(mediumPosts, MEDIUM_DIR, "medium");
+        const metrics = recordMetrics(db, mediumPosts, "medium", scrapeTime);
+        results.push(`Medium: ${mediumPosts.length} posts scraped, ${newPosts.length} new, ${written} files updated, ${metrics} metrics recorded`);
+        scrapeSucceeded = true;
+        logger.info({ total: mediumPosts.length, new: newPosts.length }, "Medium scrape complete");
+      } else if (!results.some((r) => r.startsWith("Medium:"))) {
+        results.push("Medium: no posts found from RSS or browser");
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      results.push(`Trending ideas: error — ${msg}`);
-      logger.error({ error: msg }, "Trending idea ingestion failed");
+      results.push(`Medium: error — ${msg}`);
+      logger.error({ error: msg }, "Medium processing error");
     }
-  } else {
-    results.push("Trending ideas: skipped (CONTENT_SCRAPER_IDEA_INGEST=0)");
-  }
 
-  // --- Per-run markdown summary artifact ---
-  const summaryPath = writeRunSummaryMarkdown(runStartedAt, results);
-  if (summaryPath) {
-    results.push(`Run summary: ${summaryPath}`);
-  } else {
-    results.push("Run summary: failed to write markdown artifact");
+    // =========================================================
+    // Process Medium trending (deep-fetch top articles for full body)
+    // =========================================================
+    try {
+      if (mediumTrendingResult.status === "fulfilled") {
+        let trendingPosts = mediumTrendingResult.value;
+        if (trendingPosts.length > 0) {
+          // Score and deep-fetch top 5 trending articles for full body content
+          const scored = trendingPosts
+            .map(p => ({ post: p, score: scoreTrendingPost(p) }))
+            .sort((a, b) => b.score - a.score);
+          const topCandidates = scored.slice(0, MAX_DEEP_FETCH_ARTICLES).map(s => s.post);
+          const rest = scored.slice(MAX_DEEP_FETCH_ARTICLES).map(s => s.post);
+
+          logger.info({ count: topCandidates.length }, "Deep-fetching top trending articles");
+          const enriched = await deepFetchTrendingArticles(topCandidates);
+          trendingPosts = [...enriched, ...rest];
+          mediumTrendingPosts = trendingPosts;
+
+          writeFileSync(
+            MEDIUM_TRENDING_FILE,
+            buildMarkdownCorpus(trendingPosts, "medium", {
+              title: "Medium Trending Content",
+              sourceUrl: "https://medium.com/tag",
+              subtitle: `Tags: ${MEDIUM_TRENDING_TAGS.map((t) => t.tag).join(", ")}`,
+            }),
+          );
+          const written = writeIndividualPosts(trendingPosts, MEDIUM_TRENDING_DIR, "medium");
+          results.push(`Medium trending: ${trendingPosts.length} posts from ${MEDIUM_TRENDING_TAGS.length} tags, ${topCandidates.length} deep-fetched, ${written} files updated`);
+        } else {
+          results.push("Medium trending: no posts found from tag RSS feeds");
+        }
+      } else {
+        results.push(`Medium trending: error — ${mediumTrendingResult.reason}`);
+        logger.error({ error: String(mediumTrendingResult.reason) }, "Medium trending error");
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      results.push(`Medium trending: error — ${msg}`);
+    }
+
+    // =========================================================
+    // Process LinkedIn posts
+    // =========================================================
+    try {
+      let linkedinPosts: ScrapedPost[] = [];
+
+      if (linkedinResult.status === "fulfilled") {
+        const r = linkedinResult.value;
+        // Explicit timeout check — exitCode 4 = infrastructure failure, not empty result
+        if (r.exitCode === 4) {
+          results.push(`LinkedIn: TIMEOUT after ${r.duration}ms — agent-browser may be stalled`);
+          logger.error({ duration: r.duration }, "LinkedIn scrape timed out");
+        } else if (r.exitCode === 0 && r.output) {
+          const authStatus = detectAuthOrBot(r.output);
+          if (authStatus) {
+            results.push(`LinkedIn: blocked — ${authStatus}`);
+            logger.warn({ status: authStatus }, "LinkedIn auth wall");
+            // Write tombstone so stale file doesn't appear current
+            writeFileSync(LINKEDIN_FILE, `# LinkedIn Posts — ${new Date().toISOString().slice(0, 10)}\n\nStatus: ${authStatus}\nLast attempted: ${new Date().toISOString()}\n`);
+            void sendScraperAlert(`LinkedIn ${authStatus} — session may need refresh`);
+          } else {
+            linkedinPosts = parseScrapedJSON(r.output);
+          }
+        } else if (r.exitCode !== 0) {
+          results.push(`LinkedIn: scrape failed — exit code ${r.exitCode}`);
+          logger.error({ exitCode: r.exitCode, output: r.output?.slice(0, 300) }, "LinkedIn scrape failed");
+        }
+      } else {
+        results.push(`LinkedIn: error — ${linkedinResult.reason}`);
+        logger.error({ error: String(linkedinResult.reason) }, "LinkedIn scrape error");
+      }
+
+      linkedinPosts = dedupePosts(linkedinPosts);
+
+      if (linkedinPosts.length > 0) {
+        ownLinkedInPosts = linkedinPosts;
+        const newPosts = detectNewPosts(db, linkedinPosts, "linkedin");
+        writeFileSync(LINKEDIN_FILE, buildMarkdownCorpus(linkedinPosts, "linkedin"));
+        const written = writeIndividualPosts(linkedinPosts, LINKEDIN_DIR, "linkedin");
+        const metrics = recordMetrics(db, linkedinPosts, "linkedin", scrapeTime);
+        results.push(`LinkedIn: ${linkedinPosts.length} posts scraped (browser), ${newPosts.length} new, ${written} files updated, ${metrics} metrics recorded`);
+        scrapeSucceeded = true;
+        logger.info({ total: linkedinPosts.length, new: newPosts.length }, "LinkedIn scrape complete");
+      } else if (!results.some((r) => r.startsWith("LinkedIn:"))) {
+        results.push("LinkedIn: no posts parsed from scrape output");
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      results.push(`LinkedIn: error — ${msg}`);
+      logger.error({ error: msg }, "LinkedIn processing error");
+    }
+
+    // =========================================================
+    // PHASE 3a: Trending → ideas pipeline
+    // =========================================================
+    if (ENABLE_TRENDING_IDEA_PIPELINE && mediumTrendingPosts.length > 0) {
+      try {
+        const ideaResults = ingestTrendingIdeas(mediumTrendingPosts, "medium");
+        const created = ideaResults.filter((r) => r.action === "created").length;
+        const enhanced = ideaResults.filter((r) => r.action === "enhanced").length;
+        const skipped = ideaResults.filter((r) => r.action === "skipped").length;
+        results.push(`Trending ideas: ${created} created, ${enhanced} enhanced, ${skipped} skipped`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        results.push(`Trending ideas: ERROR — ${msg}`);
+        logger.error({ error: msg }, "Trending idea ingestion failed");
+      }
+    } else if (!ENABLE_TRENDING_IDEA_PIPELINE) {
+      results.push("Trending ideas: skipped (CONTENT_SCRAPER_IDEA_INGEST=0)");
+    }
+
+    // =========================================================
+    // PHASE 3b: Post-scrape pattern analysis → patterns.md
+    // =========================================================
+    try {
+      const patternResult = await analyzeAndUpdatePatterns(
+        ownMediumPosts,
+        ownLinkedInPosts,
+        mediumTrendingPosts,
+      );
+      results.push(patternResult.message);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      results.push(`patterns: error — ${msg}`);
+    }
+
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    results.push(`FATAL ERROR: ${msg}`);
+    logger.error({ error: msg }, "Content scraper fatal error");
+  } finally {
+    // =========================================================
+    // PHASE 4: Run summary — ALWAYS written (finally block)
+    // =========================================================
+    const summaryPath = writeRunSummaryMarkdown(runStartedAt, results);
+    if (summaryPath) {
+      results.push(`Run summary: ${summaryPath}`);
+    } else {
+      results.push("Run summary: failed to write markdown artifact");
+    }
   }
 
   const output = results.join("\n");
-  const success = results.some((r) => r.includes("scraped"));
-
-  return { success, output, error: success ? undefined : output };
+  return { success: scrapeSucceeded, output, error: scrapeSucceeded ? undefined : output };
 }

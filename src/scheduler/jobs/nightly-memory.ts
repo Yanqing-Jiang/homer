@@ -9,7 +9,7 @@
  * not the .md file (which is stripped by session-summaries at 22:00).
  */
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "fs";
 import { z } from "zod";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { executeClaudeCommand } from "../../executors/claude.js";
@@ -140,8 +140,74 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
       }
     }
 
-    if (!rawLog || rawLog.length < 100) {
-      return { success: true, output: `No substantial daily log for ${yesterday}, skipping` };
+    if (!rawLog) rawLog = "";
+
+    // Read yesterday's explicit feedback to include in analysis
+    let feedbackLog = "";
+    try {
+      const feedbackPath = `${MEMORY_PATH}/feedback.md`;
+      if (existsSync(feedbackPath)) {
+        const lines = readFileSync(feedbackPath, "utf-8").split("\n");
+        const yesterdayFeedback: string[] = [];
+        const keepLines: string[] = [];
+        let inYesterday = false;
+        let lineDateStr = "";
+        
+        // Only keep lines from today/yesterday in the active file, move rest to archive
+        const keepThreshold = new Date();
+        keepThreshold.setDate(keepThreshold.getDate() - 3);
+        const y = keepThreshold.getFullYear();
+        const m = String(keepThreshold.getMonth() + 1).padStart(2, "0");
+        const d = String(keepThreshold.getDate()).padStart(2, "0");
+        const keepThresholdStr = `${y}-${m}-${d}`;
+        
+        const archiveLines: string[] = [];
+
+        for (const line of lines) {
+          if (line.startsWith("### [")) {
+            lineDateStr = line.substring(5, 15); // Extract YYYY-MM-DD
+            inYesterday = line.includes(`[${yesterday}`);
+            
+            if (inYesterday) yesterdayFeedback.push(line);
+            
+            if (lineDateStr >= keepThresholdStr) keepLines.push(line);
+            else archiveLines.push(line);
+          } else if (inYesterday) {
+            yesterdayFeedback.push(line);
+            if (lineDateStr >= keepThresholdStr) keepLines.push(line);
+            else archiveLines.push(line);
+          } else {
+             // Not yesterday, check if we keep it
+             if (lineDateStr >= keepThresholdStr) keepLines.push(line);
+             else if (lineDateStr) archiveLines.push(line); // Has a date but is old
+             else keepLines.push(line); // No date (header/padding), keep it
+          }
+        }
+        
+        if (yesterdayFeedback.length > 0) {
+          feedbackLog = `\n\n## Explicit User Feedback from Telegram/UI (${yesterday})\n\n` + yesterdayFeedback.join("\n");
+          rawLog += feedbackLog;
+          logger.info({ date: yesterday, feedbackLines: yesterdayFeedback.length }, "Appended yesterday's explicit feedback to daily log for analysis");
+        }
+
+        // Rotate old feedback
+        if (archiveLines.length > 0) {
+            writeFileSync(feedbackPath, keepLines.join("\n"), "utf-8");
+            try {
+              if (!existsSync("/Users/yj/archive")) mkdirSync("/Users/yj/archive", { recursive: true });
+              appendFileSync("/Users/yj/archive/feedback-archive.md", "\n" + archiveLines.join("\n"), "utf-8");
+            } catch (err) {
+              logger.warn({ error: err }, "Failed to write to feedback archive");
+            }
+            logger.info({ archivedLines: archiveLines.length }, "Rotated feedback.md to archive");
+        }
+      }
+    } catch (err) {
+      logger.warn({ error: err }, "Failed to read feedback log");
+    }
+
+    if (rawLog.length < 100) {
+      return { success: true, output: `No substantial daily log or feedback for ${yesterday}, skipping` };
     }
 
     // Load permanent memory files
@@ -177,7 +243,7 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
 
 A "promotable fact" is information worth persisting in permanent memory. Focus on:
 - Outcomes and decisions (NOT process steps)
-- New preferences expressed
+- New preferences expressed (PAY SPECIAL ATTENTION to the Explicit User Feedback section. If Yanqing archived something with specific notes or instructions, extract that as a new rule or preference to remember).
 - Career milestones or changes
 - Tool configurations or subscriptions changed
 - Life events or context changes
@@ -219,7 +285,7 @@ ${permanentContext}
 
 ## Daily Log (${yesterday})
 
-${rawLog.slice(0, 80000)}
+${rawLog.length > 80000 ? rawLog.slice(0, 80000) + "\n\n... (log truncated) ...\n\n" + feedbackLog : rawLog}
 
 ## Output Format
 
