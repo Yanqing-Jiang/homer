@@ -3,6 +3,7 @@ import { logger } from "../../utils/logger.js";
 import { readFile, writeFile, appendFile } from "fs/promises";
 import { existsSync } from "fs";
 import type { StateManager } from "../../state/manager.js";
+import { updatePreferences, type PreferenceSignal } from "../../preferences/engine.js";
 import { trackIdeaProgress, trackIdeaArchived } from "../../outcomes/hooks.js";
 import {
   loadIdeasFromDir,
@@ -99,7 +100,13 @@ function rebuildIdeasFile(ideas: ParsedIdea[]): string {
  */
 async function logFeedback(action: string, target: string, notes?: string): Promise<void> {
   const now = new Date();
-  const timestamp = now.toISOString().slice(0, 16).replace("T", " ");
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  const hours = String(now.getHours()).padStart(2, "0");
+  const mins = String(now.getMinutes()).padStart(2, "0");
+  const timestamp = `${year}-${month}-${day} ${hours}:${mins}`;
+  
 
   let entry = `\n### [${timestamp}] ${action.charAt(0).toUpperCase() + action.slice(1)} - ${target}\n`;
   entry += `Decision: ${action}\n`;
@@ -122,6 +129,31 @@ function findIdea(ideas: ParsedIdea[], id: string): ParsedIdea | undefined {
 /**
  * Archive an idea (no reason required)
  */
+
+/**
+ * Helper to send preference signals from an idea's properties
+ */
+function sendPreferenceSignals(idea: ParsedIdea, delta: number) {
+  if (!stateManagerRef) return;
+  const signals: PreferenceSignal[] = [];
+  const tags = idea.tags || [];
+  const source = idea.source || "unknown";
+
+  for (const tag of tags) {
+    if (tag) signals.push({ dimension: `topic:${tag}`, delta });
+  }
+  if (source) signals.push({ dimension: `source:${source}`, delta });
+
+  if (signals.length > 0) {
+    try {
+      updatePreferences(stateManagerRef.getDb(), signals);
+      logger.info({ ideaId: idea.id, delta, tags, source }, "Sent real-time preference signals");
+    } catch (err) {
+      logger.warn({ error: err }, "Failed to update preferences from bot handler");
+    }
+  }
+}
+
 async function archiveIdea(
   ideaId: string,
   reason: string = "Archived"
@@ -141,6 +173,7 @@ async function archiveIdea(
         if (stateManagerRef) {
           trackIdeaArchived(stateManagerRef.getDb(), ideaId, dirIdea.title);
         }
+        sendPreferenceSignals(dirIdea, -0.1);
       } catch { /* outcome tracking best-effort */ }
       return { success: true, message: `Archived: ${dirIdea.title}`, idea: dirIdea };
     }
@@ -165,6 +198,7 @@ async function archiveIdea(
 
   await logDenyHistory(idea.title, idea.source, reason, idea.link);
   await logFeedback("archive", idea.title, reason);
+  sendPreferenceSignals(idea, -0.1);
 
   return { success: true, message: `Archived: ${idea.title}`, idea };
 }
@@ -185,6 +219,7 @@ async function addIdeaInstructions(
     const updated = await appendIdeaNote(ideaId, `User instructions: ${instructions}`);
     if (updated) {
       await logFeedback("instruction", dirIdea.title, instructions);
+      sendPreferenceSignals(dirIdea, 0.1);
       return { success: true, message: `Instructions saved for ${dirIdea.title}`, title: dirIdea.title };
     }
   }
@@ -202,7 +237,14 @@ async function addIdeaInstructions(
     return { success: false, message: `Idea not found: ${ideaId}` };
   }
 
-  const timestamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+  sendPreferenceSignals(idea, 0.1);
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  const hours = String(now.getHours()).padStart(2, "0");
+  const mins = String(now.getMinutes()).padStart(2, "0");
+  const timestamp = `${year}-${month}-${day} ${hours}:${mins}`;
   const note = `User instructions (${timestamp}): ${instructions}`;
   idea.notes = idea.notes ? `${idea.notes}; ${note}` : note;
 
@@ -222,7 +264,11 @@ async function logDenyHistory(
   link?: string
 ): Promise<void> {
   const now = new Date();
-  const date = now.toISOString().split("T")[0];
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  // const timestamp = `${year}-${month}-${day} ${hours}:${mins}`;
+  const date = `${year}-${month}-${day}`;
 
   let entry = `\n### [${date}] ${title}\n`;
   entry += `- **Source:** ${source}\n`;
@@ -265,9 +311,18 @@ export async function getDenyPatterns(): Promise<string[]> {
  * Callback handlers use startsWith matching, so truncation is safe.
  */
 export function createIdeaKeyboard(ideaId: string): InlineKeyboard {
-  // Longest payload: "a:i:" + id + ":archive" = 12 + id.length
-  const maxIdLen = 64 - "a:i:".length - ":archive".length; // 52
-  const id = ideaId.length > maxIdLen ? ideaId.slice(0, maxIdLen) : ideaId;
+  // Longest payload: "a:i:" + id + ":archive" = 12 + id.length bytes
+  const maxIdBytes = 64 - "a:i:".length - ":archive".length; // 52
+  
+  // Truncate by bytes to prevent Telegram API crashes, ensure collision safety
+  let id = ideaId;
+  if (Buffer.byteLength(id, 'utf8') > maxIdBytes) {
+    const buf = Buffer.from(id, 'utf8');
+    id = buf.subarray(0, maxIdBytes).toString('utf8');
+    // In case of multibyte character split, remove the last potentially corrupted char
+    id = id.replace(/\uFFFD/g, ''); 
+  }
+  
   return new InlineKeyboard()
     .text("💬 Talk", `a:i:${id}:talk`)
     .text("🗂 Archive", `a:i:${id}:archive`);
@@ -381,6 +436,7 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
         if (stateManagerRef) {
           trackIdeaProgress(stateManagerRef.getDb(), ideaId, idea.title);
         }
+      sendPreferenceSignals(idea, 0.15);
       } catch { /* outcome tracking best-effort */ }
 
       // Build notify callback using bot.api (ctx expires after handler returns)
@@ -507,7 +563,13 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
           if (!plan) {
             await ctx.reply(`❌ Plan not found: ${escapeHtml(pending.id)}`, { parse_mode: "HTML" });
           } else {
-            const timestamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+            const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  const hours = String(now.getHours()).padStart(2, "0");
+  const mins = String(now.getMinutes()).padStart(2, "0");
+  const timestamp = `${year}-${month}-${day} ${hours}:${mins}`;
             const updated = `${plan}\n\n## User Instructions (${timestamp})\n${instructions}\n`;
             stateManager.savePendingPlan(pending.id, updated);
             await logFeedback("instruction", `Plan ${pending.id}`, instructions);
@@ -685,6 +747,7 @@ export function registerPlanApprovalHandlers(bot: Bot, stateManager: StateManage
     );
 
     logger.info({ jobId }, "Plan approved by user");
+    await logFeedback("approve", `Plan ${jobId}`);
 
     // Fire-and-forget plan execution
     import("../../scheduler/plan-executor.js").then(({ executePlan }) => {
@@ -724,6 +787,7 @@ export function registerPlanApprovalHandlers(bot: Bot, stateManager: StateManage
 
     await ctx.reply(`🗑️ Plan rejected and discarded: ${jobId}`);
     logger.info({ jobId }, "Plan rejected by user");
+    await logFeedback("reject", `Plan ${jobId}`);
   });
 
   // /plans - List pending plans
@@ -807,6 +871,7 @@ export function registerPlanApprovalCallbacks(bot: Bot, stateManager: StateManag
 
     await ctx.answerCallbackQuery("Plan approved — executing!");
     logger.info({ jobId }, "Plan approved via inline button");
+    await logFeedback("approve", `Plan ${jobId}`);
 
     // Fire-and-forget plan execution — clear plan only after launch succeeds
     const chatId = ctx.chat?.id;
@@ -850,6 +915,7 @@ export function registerPlanApprovalCallbacks(bot: Bot, stateManager: StateManag
     );
     await ctx.answerCallbackQuery("Plan rejected");
     logger.info({ jobId }, "Plan rejected via inline button");
+    await logFeedback("reject", `Plan ${jobId}`);
   });
 
   bot.callbackQuery(/^a:p:([^:]+):note$/, async (ctx) => {
