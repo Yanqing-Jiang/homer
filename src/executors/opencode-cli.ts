@@ -42,6 +42,8 @@ export interface OpenCodeCLIOptions {
   researchOnly?: boolean;
   browserOnly?: boolean;
   cwd?: string;
+  /** OpenCode agent mode: "build" (default) or "plan" */
+  agent?: string;
   /** Called with cumulative text as response streams in */
   onPartial?: (text: string) => void;
   // Legacy options accepted for backward compatibility (ignored by OpenCode)
@@ -139,6 +141,7 @@ export async function executeOpenCodeCLI(
     researchOnly = true,
     browserOnly = false,
     cwd,
+    agent,
   } = options;
 
   // Normalize model name: callers may pass "gemini-3-flash-preview" without provider prefix
@@ -161,6 +164,7 @@ export async function executeOpenCodeCLI(
       fullMessage,
       "-m", model,
       "--format", "json",
+      ...(agent ? ["--agent", agent] : []),
     ];
 
     // Sandbox browserOnly agents to /tmp to prevent file writes to home directory
@@ -353,10 +357,10 @@ export async function executeOpenCodeCLI(
         return;
       }
 
-      if (code !== 0 && code !== null) {
+      if (code !== 0 || code === null) {
         resolve({
-          output: stderrOutput || `OpenCode CLI exited with code ${code}`,
-          exitCode: code,
+          output: stderrOutput || `OpenCode CLI exited with code ${code ?? "null (signal kill)"}`,
+          exitCode: code ?? 1,
           duration,
           executor: "opencode",
           sessionId,

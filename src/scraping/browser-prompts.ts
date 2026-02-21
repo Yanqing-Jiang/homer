@@ -136,34 +136,35 @@ ${AGENT_BROWSER_TOOLS}
 
 Step 1: agent-browser connect 9222
 Step 2: agent-browser open "${LINKEDIN_URL}"
-Step 3: sleep 5
+Step 3: sleep 2
 Step 4: agent-browser snapshot -i
 
 If the initial page has no post cards or redirects, try these alternate public activity URLs:
-- agent-browser open "${LINKEDIN_ALT_URL_1}" && sleep 4 && agent-browser snapshot -i
-- agent-browser open "${LINKEDIN_ALT_URL_2}" && sleep 4 && agent-browser snapshot -i
+- agent-browser open "${LINKEDIN_ALT_URL_1}" && sleep 2 && agent-browser snapshot -i
+- agent-browser open "${LINKEDIN_ALT_URL_2}" && sleep 2 && agent-browser snapshot -i
 
 FIRST: Check if the page shows "Sign in", "Join LinkedIn", or a login modal. If so, return ONLY the text: AUTH_REQUIRED
 
-For each post visible, extract:
-- **Content**: the full post text visible in the feed
+For each post visible:
+- **Content**: the FULL post text. If a post is truncated with "...see more", click the "see more" link using agent-browser click @ref, wait 1s, then snapshot again to get the full text.
 - **Date**: relative date exactly as shown (e.g. "2d", "1w", "1mo")
 - **Reactions**: count of reactions/likes (number only, MUST be visible)
 - **Comments**: count of comments (number only, MUST be visible)
 - **Links**: any external URLs in the post
 
 Step 5: agent-browser scroll down
-Step 6: sleep 3
+Step 6: sleep 1
 Step 7: agent-browser snapshot -i
-Step 8: Extract any NEW posts not already in your list (compare by first 10 words of content)
-Step 9: Repeat Steps 5-8 until no new posts appear in two consecutive scrolls
+Step 8: For any new posts with truncated text, click "see more" and capture the full text
+Step 9: Extract any NEW posts not already in your list (compare by first 10 words of content)
+Step 10: Repeat Steps 5-9 until no new posts appear in two consecutive scrolls
 
 CRITICAL RULES:
 - Reaction/comment counts MUST come from actual numbers shown in the snapshot. If not visible, use null.
 - Do NOT fabricate or estimate engagement numbers.
+- Click "see more" to get FULL post text — truncated posts lose value.
 - If a "Verification Required" or CAPTCHA appears, return ONLY the text: BOT_DETECTED
-- LinkedIn truncates posts with "...see more". Extract only the visible text, do NOT click "see more".
-- Stop scrolling after 2 consecutive scrolls with no new content, or after 20 scrolls total.
+- Stop scrolling after 2 consecutive scrolls with no new content, or after 10 scrolls total.
 
 OUTPUT FORMAT - Return ONLY a JSON array, no other text:
 [{"title": "First 10 words as title", "date": "2d", "reactions": 5, "comments": 2, "content": "Full visible post text", "link": "https://..."}]
@@ -202,6 +203,88 @@ Rules:
 OUTPUT FORMAT:
 Return ONLY a JSON array:
 [{"title":"...","date":"...","reactions":null,"comments":null,"content":"...","link":"https://www.linkedin.com/..."}]`;
+}
+
+// Medium partner publication domains — session cookies are medium.com-scoped
+// and may not apply here; apply body-first logic before returning PAYWALL.
+const MEDIUM_PARTNER_HOSTS = [
+  "towardsdatascience.com",
+  "betterprogramming.pub",
+  "uxdesign.cc",
+  "levelup.gitconnected.com",
+  "itnext.io",
+  "javascript.plainenglish.io",
+  "blog.devgenius.io",
+];
+
+function safeHostname(rawUrl: string): string {
+  try { return new URL(rawUrl).hostname.toLowerCase(); } catch { return ""; }
+}
+
+function isMediumPartnerHost(host: string): boolean {
+  if (!host || host === "medium.com" || host.endsWith(".medium.com")) return false;
+  return MEDIUM_PARTNER_HOSTS.some((d) => host === d || host.endsWith(`.${d}`));
+}
+
+/**
+ * Deep-fetch a single article URL and return its full body text.
+ * Used for Medium trending articles (RSS only has teasers).
+ *
+ * Key fix: BODY-FIRST detection — Medium always shows "Member-only story" badge
+ * even when the article is unlocked for logged-in members. Only return PAYWALL
+ * if NO article body paragraphs exist after scrolling.
+ */
+export function buildArticleDeepFetchPrompt(url: string): string {
+  const host = safeHostname(url);
+  const partner = isMediumPartnerHost(host);
+
+  const partnerNote = partner
+    ? `PARTNER-DOMAIN NOTE (host: "${host}"):
+- Medium session cookie (medium.com-scoped) may not apply to this domain.
+- Do NOT return PAYWALL just because "Member-only story" badge is visible.
+- If no article body found after scrolling, retry with canonical Medium URL:
+  open "https://medium.com/m/global-identity?redirectUrl=${encodeURIComponent(url)}"
+  Then: sleep 4 → snapshot → scroll down → sleep 2 → snapshot.
+  Re-apply BODY-FIRST DECISION LOGIC after retry.`
+    : `If redirected to a partner publication domain, still apply body-first logic before deciding PAYWALL.`;
+
+  return `Fetch the full text of this article using agent-browser CLI.
+
+You MUST execute these commands in order and actually RUN them:
+
+${AGENT_BROWSER_TOOLS}
+
+Step 1: agent-browser connect 9222
+Step 2: agent-browser open "${url}"
+Step 3: sleep 5
+Step 4: agent-browser snapshot
+Step 5: agent-browser scroll down
+Step 6: sleep 2
+Step 7: agent-browser snapshot
+Step 8: agent-browser scroll down
+Step 9: sleep 2
+Step 10: agent-browser snapshot
+
+BODY-FIRST DECISION LOGIC (apply after all 3 snapshots):
+1. Determine if article body exists: look for multiple paragraphs of article prose
+   (not nav, sidebar, footer, author bio, comments, or cookie banners).
+2. If article body paragraphs exist → extract the full text and return it. DO NOT return PAYWALL.
+3. Seeing "Member-only story" label is NOT a reason to return PAYWALL — Medium always
+   shows this badge for member content. If paragraphs exist below the badge, this is ACCESS GRANTED.
+4. Return ONLY "PAYWALL" if ALL snapshots show a login wall or metered interstitial
+   AND NO article body paragraphs are present anywhere in the snapshots.
+5. Return ONLY "FAILED" if the page fails to load or shows a hard error state.
+
+${partnerNote}
+
+Extraction scope (when body exists):
+- Include: headings, paragraphs, list items from article body
+- Exclude: nav, header, recommendations, comments, cookie banners, signup prompts, author cards
+
+OUTPUT:
+- Return ONLY plain article text (no JSON, no markdown wrappers)
+- Or return exactly: PAYWALL
+- Or return exactly: FAILED`;
 }
 
 export function buildLinkedInTrendingPrompt(interests: string[], maxItems: number = 25): string {
@@ -250,5 +333,5 @@ export const SCRAPE_OPTIONS: OpenCodeCLIOptions = {
 export const DEEP_FETCH_OPTIONS: OpenCodeCLIOptions = {
   model: "google/gemini-3-flash-preview",
   browserOnly: true,
-  timeout: 120_000,
+  timeout: 120_000, // 2 min — sleep 5+2+2=9s + 3 snapshots + scroll + render time
 };
