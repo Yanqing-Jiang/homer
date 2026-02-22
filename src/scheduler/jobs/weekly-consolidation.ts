@@ -1,5 +1,5 @@
 /**
- * Weekly Memory Consolidation — Gemini Flash API handler (thinking: high)
+ * Weekly Memory Consolidation — Gemini Flash API handler (Gemini Flash)
  *
  * Reads the past 7 days of daily logs + permanent memory files,
  * sends to Gemini 3 Flash with deep thinking for cross-day analysis, then:
@@ -142,7 +142,7 @@ export async function runWeeklyConsolidation(daysBack = 7): Promise<{
   const startDate = dates[0];
   const endDate = dates[dates.length - 1];
 
-  logger.info({ startDate, endDate, days: daysBack }, "Starting weekly memory consolidation via Gemini Flash API (thinking: high)");
+  logger.info({ startDate, endDate, days: daysBack }, "Starting weekly memory consolidation via Gemini Flash API (Gemini Flash)");
 
   // Build dynamic system prompt — no hardcoded bio
   let systemPrompt: string;
@@ -227,7 +227,7 @@ export async function runWeeklyConsolidation(daysBack = 7): Promise<{
   }
 
   const inputSizeKB = Math.round(fullInput.length / 1024);
-  logger.info({ logsFound, inputSizeKB, totalRawSizeKB: Math.round(totalSize / 1024) }, "Sending to Gemini Flash API (thinking: high)");
+  logger.info({ logsFound, inputSizeKB, totalRawSizeKB: Math.round(totalSize / 1024) }, "Sending to Gemini Flash API (Gemini Flash)");
 
   try {
     const result = await executeGeminiAPI(fullInput, {
@@ -235,7 +235,6 @@ export async function runWeeklyConsolidation(daysBack = 7): Promise<{
       systemPrompt,
       temperature: 0.3,
       timeout: 300000, // 5 min
-      reasoningEffort: "high",
       useGrounding: false,
     });
 
@@ -274,7 +273,7 @@ export async function runWeeklyConsolidation(daysBack = 7): Promise<{
     // Append weekly summary to today's daily log
     const todayDate = getTodayDateString();
     const todayLogPath = `${DAILY_LOG_DIR}/${todayDate}.md`;
-    const summaryBlock = `\n\n---\n\n## Weekly Consolidation (${startDate} → ${endDate})\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via Gemini 3 Flash (thinking: high)*\n\n${weeklySummary}\n`;
+    const summaryBlock = `\n\n---\n\n## Weekly Consolidation (${startDate} → ${endDate})\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via Gemini 3 Flash (Gemini Flash)*\n\n${weeklySummary}\n`;
 
     if (existsSync(todayLogPath)) {
       await appendFile(todayLogPath, summaryBlock);

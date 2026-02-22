@@ -13,9 +13,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import util from "util";
-// Note: https and spawnSync were used for Telegram notifications (now disabled)
-// import https from "https";
-// import { spawnSync } from "child_process";
+import { spawnSync } from "child_process";
 
 const LOG_DIR = process.env.HOMER_LOG_DIR ?? path.join(os.homedir(), "Library", "Logs", "homer");
 const FATAL_LOG = path.join(LOG_DIR, "fatal.log");
@@ -25,6 +23,13 @@ const FATAL_LOG = path.join(LOG_DIR, "fatal.log");
 
 const EXIT_TIMEOUT_MS = 2000;
 const SHUTDOWN_TIMEOUT_MS = 8000;
+
+// SMS constants — read from env directly (no config import, this runs before init)
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID ?? "";
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN ?? "";
+const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER ?? "";
+const YANQING_PHONE = "+12709789240";
+const SMS_MAX_LENGTH = 300;
 
 let exiting = false;
 const shutdownTasks: Array<() => Promise<void> | void> = [];
@@ -66,12 +71,31 @@ function formatError(err: unknown): string {
 }
 
 /**
- * Send Telegram message synchronously using curl
- * DISABLED - notifications turned off
+ * Send SMS synchronously via curl → Twilio API.
+ * Used in fatal handlers where async is unreliable.
  */
-function sendTelegramSync(_message: string): void {
-  // Notifications disabled
-  return;
+function sendSmsSyncViaCurl(message: string): void {
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER) return;
+
+  try {
+    const prefix = "[HOMER ALERT] ";
+    const maxBody = SMS_MAX_LENGTH - prefix.length;
+    const clean = message.replace(/[\u{1F000}-\u{1FFFF}]|[\u{2600}-\u{27BF}]|[\u{FE00}-\u{FEFF}]/gu, "").trim();
+    const body = prefix + (clean.length > maxBody ? clean.slice(0, maxBody - 3) + "..." : clean);
+
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
+    const auth = `${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`;
+
+    spawnSync("curl", [
+      "-s", "-X", "POST", url,
+      "-u", auth,
+      "-d", `To=${encodeURIComponent(YANQING_PHONE)}`,
+      "-d", `From=${encodeURIComponent(TWILIO_PHONE_NUMBER)}`,
+      "-d", `Body=${encodeURIComponent(body)}`,
+    ], { timeout: 5000 });
+  } catch {
+    // best-effort — we're already in a fatal path
+  }
 }
 
 /**
@@ -100,7 +124,7 @@ async function fatalExit(kind: string, err: unknown): Promise<void> {
   const msg = `Homer fatal: ${kind} | ${context}\n${detail}`;
 
   logLine("ERROR", msg);
-  sendTelegramSync(msg);
+  sendSmsSyncViaCurl(msg);
 
   process.exitCode = 1;
   setTimeout(() => process.exit(1), EXIT_TIMEOUT_MS).unref();

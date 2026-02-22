@@ -32,6 +32,7 @@ import {
 import { cleanAgentOutput } from "../../scraping/clean-output.js";
 import type { ParsedIdea } from "../../ideas/parser.js";
 import { smartSaveIdea, type SmartSaveResult } from "../../ideas/smart-save.js";
+import { insertScrape } from "../../scraping/scrape-store.js";
 import { logger } from "../../utils/logger.js";
 
 // ============================================
@@ -65,7 +66,9 @@ const MEDIUM_TRENDING_TAGS: Array<{ tag: string; topic: string }> = [
 const MAX_MEDIUM_TAG_ITEMS = 10;
 const MAX_TRENDING_IDEAS_PER_PLATFORM = 4;
 const MAX_DEEP_FETCH_ARTICLES = 5; // top N trending articles to deep-fetch (Medium trending only)
-const ENABLE_TRENDING_IDEA_PIPELINE = process.env.CONTENT_SCRAPER_IDEA_INGEST !== "0";
+// Disabled: Medium trending articles were low-signal clickbait polluting the ideas pipeline.
+// Scraping + patterns continue; idea creation skipped. Re-enable with CONTENT_SCRAPER_IDEA_INGEST=1.
+const ENABLE_TRENDING_IDEA_PIPELINE = process.env.CONTENT_SCRAPER_IDEA_INGEST === "1";
 const PATTERNS_FILE = "/Users/yj/memory/patterns.md";
 
 // ============================================
@@ -1010,6 +1013,29 @@ export async function runContentScraper(db: Database.Database): Promise<{
           const enriched = await deepFetchTrendingArticles(topCandidates);
           trendingPosts = [...enriched, ...rest];
           mediumTrendingPosts = trendingPosts;
+
+          // Write trending posts to scrapes table for synthesizer
+          let trendingScrapes = 0;
+          for (const post of trendingPosts) {
+            const key = `med_${slugify(post.title).slice(0, 30)}_${contentHash(post.content).slice(0, 8)}`;
+            const inserted = insertScrape(db, {
+              id: key,
+              source: "medium-trending",
+              url: post.link,
+              title: post.title,
+              author: post.author,
+              raw_content: post.content,
+              metadata: JSON.stringify({
+                topic: post.topic,
+                claps: post.claps,
+                score: scoreTrendingPost(post),
+              }),
+            });
+            if (inserted) trendingScrapes++;
+          }
+          if (trendingScrapes > 0) {
+            logger.info({ count: trendingScrapes }, "Wrote trending posts to scrapes table");
+          }
 
           writeFileSync(
             MEDIUM_TRENDING_FILE,

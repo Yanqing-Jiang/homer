@@ -19,6 +19,7 @@ import { registerCommandRoutes } from "./api/commands.js";
 import { registerRunRoutes } from "./api/runs.js";
 import { registerTradingRoutes } from "./api/trading.js";
 import { registerThreadEventRoutes } from "./api/thread-events.js";
+import { registerWebhookRoutes } from "./api/webhooks.js";
 import type { CLIRunManager } from "../executors/cli-runner.js";
 import type { Bot } from "grammy";
 
@@ -93,6 +94,9 @@ export function createRoutes(
 
   // Register thread-level SSE for real-time message updates
   registerThreadEventRoutes(server, stateManager);
+
+  // Register webhook routes (ElevenLabs call-complete, Twilio inbound SMS)
+  registerWebhookRoutes(server, stateManager, botRef, config.telegram.allowedChatId);
 
   // Health check counter for periodic integrity checks
   let healthCheckCounter = 0;

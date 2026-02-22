@@ -84,8 +84,8 @@ export async function authMiddleware(
   request: AuthenticatedRequest,
   reply: FastifyReply
 ): Promise<void> {
-  // Skip auth for health checks
-  if (request.url === "/health" || request.url === "/health/auth") {
+  // Skip auth for health checks and webhooks (webhooks validate their own signatures)
+  if (request.url === "/health" || request.url === "/health/auth" || request.url.startsWith("/webhooks/")) {
     return;
   }
 

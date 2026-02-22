@@ -127,6 +127,27 @@ export class CronManager extends EventEmitter {
   }
 
   /**
+   * Disable a job at runtime (stops its cron task, marks config as disabled)
+   */
+  disableJob(jobId: string): boolean {
+    const job = this.jobs.get(jobId);
+    if (!job) return false;
+
+    job.config.enabled = false;
+    job.nextRun = null;
+
+    const task = this.tasks.get(jobId);
+    if (task) {
+      task.stop();
+      this.tasks.delete(jobId);
+    }
+
+    this.emit("job:updated", job);
+    logger.info({ jobId, name: job.config.name }, "Job disabled at runtime");
+    return true;
+  }
+
+  /**
    * Get a registered job by ID
    */
   getJob(jobId: string): RegisteredJob | undefined {

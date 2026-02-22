@@ -16,9 +16,10 @@ const GEMINI_CONFIG = {
     // Future models
     flash3: "gemini-3-flash-preview",
     pro3: "gemini-3-pro-preview",
+    pro31: "gemini-3.1-pro-preview",
   },
   defaultModel: "gemini-3-flash-preview",
-  fallbackModel: "gemini-3-pro-preview",
+  fallbackModel: "gemini-3.1-pro-preview",
 } as const;
 
 type GeminiModel = keyof typeof GEMINI_CONFIG.models | string;
@@ -85,6 +86,20 @@ function resolveModel(model?: GeminiModel): string {
  * Execute a query using the native Google Generative AI SDK.
  * Supports Search Grounding.
  */
+const RETRY_CONFIG = {
+  maxRetries: 2,
+  baseDelayMs: 3_000, // 3s, 6s
+  retryablePatterns: ["fetch failed", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "socket hang up", "network", "EAI_AGAIN"],
+} as const;
+
+function isTransientNetworkError(message: string): boolean {
+  return RETRY_CONFIG.retryablePatterns.some((p) => message.toLowerCase().includes(p.toLowerCase()));
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function executeGeminiAPI(
   query: string,
   options: GeminiAPIOptions = {}
@@ -202,8 +217,26 @@ export async function executeGeminiAPI(
     const duration = Date.now() - startTime;
     const message = error instanceof Error ? error.message : String(error);
 
-    // Check if it's a model-specific API error and try fallback
-    const isModelError = message.includes("models/") || message.includes("not found") || message.includes("deprecated");
+    // Retry transient network errors with exponential backoff
+    const retryCount = (options as any)._retryCount ?? 0;
+    if (isTransientNetworkError(message) && retryCount < RETRY_CONFIG.maxRetries) {
+      const delayMs = RETRY_CONFIG.baseDelayMs * Math.pow(2, retryCount);
+      logger.warn(
+        { model: modelName, error: message, retry: retryCount + 1, maxRetries: RETRY_CONFIG.maxRetries, delayMs },
+        "Transient network error — retrying"
+      );
+      await sleep(delayMs);
+      return executeGeminiAPI(query, {
+        ...options,
+        _retryCount: retryCount + 1,
+      } as any);
+    }
+
+    // Model-specific errors (not found, deprecated) — try fallback model
+    // Exclude network errors that happen to contain "models/" in the URL
+    const isModelError =
+      !isTransientNetworkError(message) &&
+      (message.includes("not found") || message.includes("deprecated") || message.includes("is not supported"));
     if (isModelError && modelName !== GEMINI_CONFIG.fallbackModel) {
       logger.warn({ model: modelName, error: message }, "Primary model failed, trying fallback");
       return executeGeminiAPI(query, {
@@ -212,7 +245,7 @@ export async function executeGeminiAPI(
       });
     }
 
-    logger.error({ error: message, model: modelName, duration }, "Native Gemini API request failed");
+    logger.error({ error: message, model: modelName, duration, retryCount }, "Native Gemini API request failed");
 
     return {
       output: `Error: ${message}`,
@@ -240,7 +273,7 @@ export async function researchWithGemini(
     : `Research the following topic thoroughly: ${topic}`;
 
   const result = await executeGeminiAPI(query, {
-    model: "flash",
+    model: "flash3",
     useGrounding: true, // Force grounding for research
     systemPrompt: `You are an expert researcher. Provide comprehensive, accurate information with:
 - Key facts and insights
@@ -270,7 +303,7 @@ export async function summarizeWithGemini(
   const result = await executeGeminiAPI(
     `${instruction || defaultInstruction}\n\n---\n\n${content}`,
     {
-      model: "flash",
+      model: "flash3",
       useGrounding: false, // Don't need search for summarization
       systemPrompt: "You are an expert at analyzing and summarizing content. Extract key insights concisely.",
       temperature: 0.2,
@@ -297,7 +330,7 @@ export async function planWithGemini(
   const result = await executeGeminiAPI(
     `Given this context:\n\n${context}\n\n---\n\nCreate a plan to achieve this goal: ${goal}\n\nReturn as JSON:\n{\n  "plan": "overview of approach",\n  "tasks": [\n    {"task": "description", "priority": "high|medium|low", "risk": "low|medium|high"}\n  ]\n}`,
     {
-      model: "pro3",
+      model: "pro31",
       useGrounding: false,
       systemPrompt: "You are a strategic planner. Create actionable, risk-aware plans. Return valid JSON only.",
       temperature: 0.3,

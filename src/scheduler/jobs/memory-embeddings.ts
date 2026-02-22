@@ -1,9 +1,10 @@
 /**
  * Memory Embeddings — generate embeddings for all new/changed memory chunks
  *
- * Runs daily at 02:30, after nightly-memory has promoted facts.
- * Generates Gemini embedding-001 vectors (768d MRL) for all chunks
- * in memory_fts that don't have embeddings yet.
+ * Runs twice daily at 12:10 and 00:10 (triggered by memory-reindex),
+ * plus after nightly-memory at ~02:05. Generates Gemini embedding-001
+ * vectors (768d MRL) for all chunks in memory_fts that don't have
+ * embeddings yet.
  *
  * This enables hybrid search (FTS5 + vector similarity via RRF).
  */

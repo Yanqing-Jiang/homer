@@ -346,7 +346,7 @@ Return ONLY a JSON object (no markdown, no explanation):
 }`;
 
     const consolidation = await executeGeminiAPI(consolidationPrompt, {
-      model: "gemini-2.0-flash",
+      model: "flash3",
       temperature: 0.2,
       maxTokens: 4096,
     });

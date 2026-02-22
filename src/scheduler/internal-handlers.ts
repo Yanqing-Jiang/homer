@@ -9,11 +9,32 @@ import { dedupeIdeasDir } from "../ideas/dedup.js";
 import { runSessionSummary } from "./jobs/session-summaries.js";
 import { runWeeklyConsolidation } from "./jobs/weekly-consolidation.js";
 import { runWeeklyMemoryCleanup } from "./jobs/memory-cleanup.js";
+import { logger } from "../utils/logger.js";
 
 interface InternalJobContext {
   stateManager: StateManager;
   bot: Bot;
   chatId: number;
+}
+
+// Handlers safe to retry (idempotent, no user-facing side effects)
+const RETRYABLE_HANDLERS = new Set([
+  "ideas_explore", "nightly_memory", "session_harvester", "memory_embeddings", "memory_reindex",
+  "learning_engine", "homer_improvements", "session_summaries", "weekly_consolidation",
+  "memory_cleanup", "planning_reminder", "content_scraper", "outcome_tracker",
+  "preference_updater", "idea_dedup", "memory_git_commit", "nightly_code_push", "db_backup",
+  "idea_synthesizer",
+]);
+
+const TRANSIENT_PATTERNS = [
+  "fetch failed", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND",
+  "rate limit", "429", "503", "timeout", "socket hang up", "network", "EPIPE",
+];
+
+function isTransientError(error?: string): boolean {
+  if (!error) return false;
+  const lower = error.toLowerCase();
+  return TRANSIENT_PATTERNS.some(p => lower.includes(p.toLowerCase()));
 }
 
 function buildResult(
@@ -49,17 +70,11 @@ function isJobHuntPaused(ctx: InternalJobContext): boolean {
   }
 }
 
-export async function executeInternalJob(
+async function runHandler(
   job: RegisteredJob,
-  ctx: InternalJobContext
+  ctx: InternalJobContext,
+  startedAt: Date
 ): Promise<JobExecutionResult> {
-  const startedAt = new Date();
-
-  // Check global pause for job_hunt handlers
-  if (job.config.handler?.startsWith("job_hunt_") && isJobHuntPaused(ctx)) {
-    return buildResult(job, startedAt, true, "Skipped — job hunt is paused");
-  }
-
   try {
     switch (job.config.handler) {
       case "ideas_review": {
@@ -79,8 +94,14 @@ export async function executeInternalJob(
           },
         });
         const session = await supervisor.run(false);
-        const summary = `Night supervisor completed. Jobs: ${session.jobsCompleted} ok, ${session.jobsFailed} failed.`;
-        return buildResult(job, startedAt, true, summary);
+        const durationMin = (session.totalDuration / 1000 / 60).toFixed(1);
+        const findingsSnippet = session.findings.length > 0
+          ? "\n" + session.findings.slice(0, 10).join("\n")
+          : "";
+        const summary = `Night supervisor completed in ${durationMin}m. Jobs: ${session.jobsCompleted} ok, ${session.jobsFailed} failed.${findingsSnippet}`;
+        const success = !(session.jobsCompleted === 0 && session.jobsFailed > 0);
+        const error = !success ? `All ${session.jobsFailed} jobs failed` : undefined;
+        return buildResult(job, startedAt, success, summary, error);
       }
       case "overnight_review": {
         const count = await presentOvernightSummaries(ctx.bot, ctx.stateManager, ctx.chatId);
@@ -149,6 +170,11 @@ export async function executeInternalJob(
       case "memory_embeddings": {
         const { runMemoryEmbeddings } = await import("./jobs/memory-embeddings.js");
         const result = await runMemoryEmbeddings();
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "memory_reindex": {
+        const { runMemoryReindex } = await import("./jobs/memory-reindex.js");
+        const result = await runMemoryReindex();
         return buildResult(job, startedAt, result.success, result.output, result.error);
       }
       case "planning_reminder": {
@@ -250,6 +276,11 @@ export async function executeInternalJob(
         const result = await runContentScraper(ctx.stateManager.getDb());
         return buildResult(job, startedAt, result.success, result.output, result.error);
       }
+      case "idea_synthesizer": {
+        const { runIdeaSynthesizer } = await import("./jobs/idea-synthesizer.js");
+        const result = await runIdeaSynthesizer(ctx.stateManager.getDb());
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
       default: {
         return buildResult(job, startedAt, false, "", `Unknown internal handler: ${job.config.handler}`);
       }
@@ -258,4 +289,37 @@ export async function executeInternalJob(
     const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
     return buildResult(job, startedAt, false, "", message);
   }
+}
+
+export async function executeInternalJob(
+  job: RegisteredJob,
+  ctx: InternalJobContext
+): Promise<JobExecutionResult> {
+  const startedAt = new Date();
+
+  // Check global pause for job_hunt handlers
+  if (job.config.handler?.startsWith("job_hunt_") && isJobHuntPaused(ctx)) {
+    return buildResult(job, startedAt, true, "Skipped — job hunt is paused");
+  }
+
+  const result = await runHandler(job, ctx, startedAt);
+
+  // Retry once for retryable handlers on transient errors
+  const handler = job.config.handler ?? "";
+  if (!result.success && RETRYABLE_HANDLERS.has(handler) && isTransientError(result.error)) {
+    logger.warn({ jobId: job.config.id, error: result.error }, "Transient error detected, retrying in 10s");
+    await new Promise(resolve => setTimeout(resolve, 10_000));
+
+    const retryStartedAt = new Date();
+    const retryResult = await runHandler(job, ctx, retryStartedAt);
+
+    if (retryResult.success) {
+      logger.info({ jobId: job.config.id }, "Retry succeeded");
+    } else {
+      logger.error({ jobId: job.config.id, error: retryResult.error }, "Retry also failed");
+    }
+    return retryResult;
+  }
+
+  return result;
 }

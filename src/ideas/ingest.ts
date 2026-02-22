@@ -7,6 +7,7 @@ import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { buildBookmarkScrapePrompt, buildTweetReadPrompt, SCRAPE_OPTIONS, DEEP_FETCH_OPTIONS } from "../scraping/browser-prompts.js";
 import { cleanAgentOutput } from "../scraping/clean-output.js";
+import { insertScrape } from "../scraping/scrape-store.js";
 
 const MEMORY_PATH = process.env.MEMORY_PATH ?? "/Users/yj/memory";
 const IDEAS_FILE = join(MEMORY_PATH, "ideas.md");
@@ -301,7 +302,14 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
         if (idea.link) {
           const threadContent = await deepFetchUrl(idea.link, idea.title);
           if (threadContent) {
-            idea.content = `**@${idea.link.split("/")[3] ?? ""}**: ${threadContent}`;
+            const author = idea.link.split("/")[3] ?? "";
+            idea.content = `**@${author}**: ${threadContent}`;
+            // Fix title if it was empty from bookmark list (X Articles, long threads)
+            if (idea.title === "X: " || idea.title === "X:" || !idea.title.replace(/^X:\s*/, "").trim()) {
+              const firstLine = threadContent.split("\n")[0]?.trim() ?? "";
+              const titleText = firstLine.slice(0, 80).replace(/[#*_~`]/g, "").trim();
+              idea.title = titleText ? `X: ${titleText}${firstLine.length > 80 ? "..." : ""}` : `X: @${author} thread`;
+            }
             result.enriched++;
           }
         }
@@ -318,7 +326,21 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
     }
 
     for (const idea of newIdeas) {
-      saveIdeaFile(idea);
+      // Write to scrapes table for provenance tracking
+      insertScrape(db, {
+        id: idea.id,
+        source: "x-bookmark",
+        url: idea.link,
+        title: idea.title,
+        author: idea.content.match(/@(\w+)/)?.[1] ?? undefined,
+        raw_content: idea.content,
+        metadata: JSON.stringify({ tags: idea.tags }),
+      });
+
+      // Legacy idea creation — will be replaced by synthesizer
+      if (process.env.LEGACY_INGEST !== "0") {
+        saveIdeaFile(idea);
+      }
       existingIds.add(idea.id);
       existingTitles.add(idea.title.toLowerCase());
       result.ingested++;
@@ -385,6 +407,15 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
               result.enriched++;
             }
           }
+
+          // Write to scrapes table
+          insertScrape(db, {
+            id: idea.id,
+            source: "legacy-ideas-md",
+            url: idea.link,
+            title: idea.title,
+            raw_content: idea.content || "",
+          });
 
           saveIdeaFile(idea);
           existingIds.add(idea.id);

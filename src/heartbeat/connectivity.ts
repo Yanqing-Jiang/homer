@@ -179,6 +179,11 @@ Report findings and any fixes applied.`;
         // Alert after 2 consecutive failures
         if (failures === 2 && this.alertOnFailure) {
           await this.sendAlert(endpoint.name, status);
+          // Emergency SMS backup
+          try {
+            const { sendEmergencySms } = await import("../telephony/emergency-sms.js");
+            await sendEmergencySms(`Connectivity: ${endpoint.name} unreachable (2 failures). Error: ${status.error || "Unknown"}`);
+          } catch { /* best-effort */ }
         }
 
         // Trigger Claude Code investigation after 3 consecutive failures

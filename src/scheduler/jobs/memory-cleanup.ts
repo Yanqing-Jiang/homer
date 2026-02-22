@@ -277,8 +277,7 @@ export async function runWeeklyMemoryCleanup(): Promise<{
         systemPrompt: agentContext,
         temperature: 0.2,
         timeout: 180000, // 3 min per file
-        reasoningEffort: "high",
-        useGrounding: false, // No web search needed for editing memory files
+        useGrounding: false,
       });
 
       if (result.exitCode !== 0) {
