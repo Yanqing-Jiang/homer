@@ -23,6 +23,7 @@ const modules = [
   "dist/scheduler/jobs/homer-improvements.js",
   "dist/scheduler/jobs/session-harvester.js",
   "dist/scheduler/jobs/memory-embeddings.js",
+  "dist/scheduler/jobs/memory-reindex.js",
   "dist/cli-sessions/importer.js",
   "dist/cli-sessions/parsers.js",
   "dist/cli-sessions/summarizer.js",
@@ -30,6 +31,15 @@ const modules = [
   "dist/scheduler/jobs/preference-updater.js",
   "dist/preferences/engine.js",
   "dist/outcomes/hooks.js",
+  "dist/telephony/constants.js",
+  "dist/telephony/emergency-sms.js",
+  "dist/telephony/call-summary.js",
+  "dist/telephony/sms-inbound.js",
+  "dist/web/api/webhooks.js",
+  "dist/bot/handlers/call-followup.js",
+  "dist/bot/handlers/sms-reply.js",
+  "dist/scraping/scrape-store.js",
+  "dist/scheduler/jobs/idea-synthesizer.js",
 ];
 
 let failed = 0;

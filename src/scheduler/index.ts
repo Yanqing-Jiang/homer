@@ -207,12 +207,40 @@ export class Scheduler {
     }
   }
 
+  /**
+   * Circuit breaker: auto-disable jobs after 5 consecutive failures
+   */
+  private async checkCircuitBreaker(jobId: string, jobName: string): Promise<void> {
+    const job = this.cronManager.getJob(jobId);
+    if (!job || job.consecutiveFailures < 5) return;
+
+    this.cronManager.disableJob(jobId);
+    logger.warn({ jobId, consecutiveFailures: job.consecutiveFailures }, "Circuit breaker: job auto-disabled after 5 consecutive failures");
+
+    try {
+      await this.bot.api.sendMessage(
+        this.chatId,
+        `⚠️ <b>${escapeHtml(jobName)}</b> auto-disabled after 5 consecutive failures. Re-enable manually.`,
+        { parse_mode: "HTML" }
+      );
+    } catch { /* notification best-effort */ }
+
+    // Emergency SMS as backup notification
+    try {
+      const { sendEmergencySms } = await import("../telephony/emergency-sms.js");
+      await sendEmergencySms(`Job "${jobName}" auto-disabled after 5 consecutive failures`);
+    } catch { /* best-effort */ }
+  }
+
   // Dependency triggers — extracted to constant
   private static readonly DEPENDENCY_TRIGGERS: Record<string, string[]> = {
-    "idea-ingest": ["ideas-explore"],
-    "ideas-explore": ["idea-dedup"],
+    "idea-ingest": ["idea-synthesizer"],
+    "ideas-explore": ["idea-synthesizer"],
+    "content-scraper": ["idea-synthesizer"],
+    "idea-synthesizer": ["idea-dedup"],
     "job-hunt-discover": ["job-hunt-daily-approval"],
-    "session-harvester": ["session-summaries"],
+    "session-harvester": ["memory-reindex"],
+    "memory-reindex": ["memory-embeddings"],
     "nightly-memory": ["memory-embeddings", "memory-git-commit"],
     "outcome-tracker": ["preference-updater"],
   };
@@ -283,6 +311,7 @@ export class Scheduler {
               result.output, result.error, result.exitCode
             );
             this.cronManager.updateJobState(job.config.id, false);
+            await this.checkCircuitBreaker(job.config.id, job.config.name);
             await notifyJobResult(this.bot, this.chatId, result, job);
             return;
           }
@@ -313,6 +342,7 @@ export class Scheduler {
             result.output, result.error, result.exitCode
           );
           this.cronManager.updateJobState(job.config.id, false);
+          await this.checkCircuitBreaker(job.config.id, job.config.name);
 
           const diagnosis = takeoverResult.decision.diagnosis;
           const reportMsg = takeoverResult.decision.reportMessage;
@@ -337,6 +367,7 @@ export class Scheduler {
             result.output, result.error, result.exitCode
           );
           this.cronManager.updateJobState(job.config.id, false);
+          await this.checkCircuitBreaker(job.config.id, job.config.name);
           await notifyJobResult(this.bot, this.chatId, result, job);
           return;
         }
@@ -348,6 +379,10 @@ export class Scheduler {
         result.output, result.error, result.exitCode
       );
       this.cronManager.updateJobState(job.config.id, result.success);
+
+      if (!result.success) {
+        await this.checkCircuitBreaker(job.config.id, job.config.name);
+      }
 
       if (result.success) {
         this.fireDependencyTriggers(job.config.id);
@@ -447,6 +482,7 @@ export class Scheduler {
 
       // Update failure state
       this.cronManager.updateJobState(job.config.id, false);
+      await this.checkCircuitBreaker(job.config.id, job.config.name);
 
       // Record failure (need to get runId from most recent incomplete run)
       const errorMessage = error instanceof Error ? error.message : "Unknown error";

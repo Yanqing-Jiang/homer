@@ -66,6 +66,7 @@ const HANDLER_SOURCE_MAP: Record<string, string> = {
   learning_engine: "src/scheduler/jobs/learning-engine.ts",
   session_summaries: "src/scheduler/jobs/session-summaries.ts",
   memory_embeddings: "src/scheduler/jobs/memory-embeddings.ts",
+  memory_reindex: "src/scheduler/jobs/memory-reindex.ts",
   weekly_consolidation: "src/scheduler/jobs/weekly-consolidation.ts",
   memory_cleanup: "src/scheduler/jobs/memory-cleanup.ts",
   planning_reminder: "src/scheduler/jobs/planning-reminder.ts",
@@ -73,6 +74,17 @@ const HANDLER_SOURCE_MAP: Record<string, string> = {
   job_hunt_weekly_report: "src/scheduler/jobs/job-hunt-report.ts",
   job_hunt_email_monitor: "src/scheduler/jobs/job-hunt-email-monitor.ts",
   job_hunt_followup: "src/scheduler/jobs/job-hunt-followup.ts",
+  night_supervisor: "src/night/supervisor.ts",
+  idea_ingest: "src/ideas/ingest.ts",
+  idea_dedup: "src/ideas/dedup.ts",
+  ideas_review: "src/bot/handlers/approval.ts",
+  overnight_review: "src/bot/handlers/overnight.ts",
+  outcome_tracker: "src/scheduler/jobs/outcome-tracker.ts",
+  preference_updater: "src/scheduler/jobs/preference-updater.ts",
+  memory_git_commit: "src/scheduler/jobs/memory-git-commit.ts",
+  nightly_code_push: "src/scheduler/jobs/nightly-code-push.ts",
+  db_backup: "src/scheduler/jobs/db-backup.ts",
+  content_scraper: "src/scheduler/jobs/content-scraper.ts",
 };
 
 // ============================================

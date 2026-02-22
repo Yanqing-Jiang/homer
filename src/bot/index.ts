@@ -17,6 +17,10 @@ import { handleYouTubeUrl, initializeYouTubeHandler } from "./handlers/youtube.j
 import { registerJobApprovalHandlers } from "./handlers/job-approval.js";
 import { registerJobCommands, setJobScheduler } from "./handlers/job-commands.js";
 import { registerOutcomeHandlers } from "./handlers/outcome.js";
+import { handleCallRequest } from "./handlers/phone-call.js";
+import { handleSmsRequest } from "./handlers/sms.js";
+import { registerCallFollowupHandlers } from "./handlers/call-followup.js";
+import { registerSmsReplyHandlers } from "./handlers/sms-reply.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { StateManager } from "../state/manager.js";
 import { sendThinkingIndicator, editWithResponse, TelegramDraftStream } from "./streaming.js";
@@ -138,6 +142,10 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
 
   // Register outcome check callbacks
   registerOutcomeHandlers(bot);
+
+  // Register call follow-up and SMS reply inline button callbacks
+  registerCallFollowupHandlers(bot);
+  registerSmsReplyHandlers(bot);
 
   // Initialize YouTube URL handler
   initializeYouTubeHandler(stateManager);
@@ -815,11 +823,11 @@ ${checksStr}`;
 
         try {
           const ttsText = truncateForTTS(spokenText);
-          // Use Eleven v3 with Jonathan Livingston voice for quality spoken output
+          // Use DG Instant Clone voice for spoken output
           const ttsVoiceConfig: VoiceConfig = {
             ...voiceConfig,
-            elevenLabsVoiceId: "PIGsltMj3gFMR34aFDI3",
-            elevenLabsModel: "eleven_v3",
+            elevenLabsVoiceId: "TqZYQPtYO1r4L4de7HwG",
+            elevenLabsModel: "eleven_turbo_v2",
           };
           const ttsOptions: SynthesisOptions = { format: "ogg_opus" };
           const synthesis = await synthesizeSpeech(ttsText, ttsVoiceConfig, ttsOptions);
@@ -861,6 +869,22 @@ ${checksStr}`;
       if (wasYouTubeUrl) return;
     } catch (error) {
       logger.warn({ error }, "YouTube URL handling failed, falling back to normal flow");
+    }
+
+    // Check for phone call requests (e.g., "call 2709789240 and introduce yourself")
+    try {
+      const wasCallRequest = await handleCallRequest(ctx, text);
+      if (wasCallRequest) return;
+    } catch (error) {
+      logger.warn({ error }, "Phone call handling failed, falling back to normal flow");
+    }
+
+    // Check for SMS requests (e.g., "text 2709789240 hey what's up")
+    try {
+      const wasSmsRequest = await handleSmsRequest(ctx, text);
+      if (wasSmsRequest) return;
+    } catch (error) {
+      logger.warn({ error }, "SMS handling failed, falling back to normal flow");
     }
 
     // Check for overnight work requests (e.g., "work on xyz tonight")

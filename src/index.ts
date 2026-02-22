@@ -97,6 +97,10 @@ async function main(): Promise<void> {
   const recoveredCount = stateManager.recoverStaleJobs(30_000); // 30 seconds
   if (recoveredCount > 0) {
     logger.warn({ count: recoveredCount }, "Recovered stale jobs");
+    try {
+      const { sendEmergencySms } = await import("./telephony/emergency-sms.js");
+      await sendEmergencySms(`Homer restarted, recovered ${recoveredCount} stale jobs`);
+    } catch { /* best-effort */ }
   }
 
   // Clear stale scheduled_job_state is_running flags from crashed runs

@@ -313,41 +313,61 @@ export async function getDenyPatterns(): Promise<string[]> {
 export function createIdeaKeyboard(ideaId: string): InlineKeyboard {
   // Longest payload: "a:i:" + id + ":archive" = 12 + id.length bytes
   const maxIdBytes = 64 - "a:i:".length - ":archive".length; // 52
-  
+
   // Truncate by bytes to prevent Telegram API crashes, ensure collision safety
   let id = ideaId;
   if (Buffer.byteLength(id, 'utf8') > maxIdBytes) {
     const buf = Buffer.from(id, 'utf8');
     id = buf.subarray(0, maxIdBytes).toString('utf8');
     // In case of multibyte character split, remove the last potentially corrupted char
-    id = id.replace(/\uFFFD/g, ''); 
+    id = id.replace(/\uFFFD/g, '');
   }
-  
+
   return new InlineKeyboard()
     .text("💬 Talk", `a:i:${id}:talk`)
+    .text("💤 Snooze", `a:i:${id}:snooze`)
     .text("🗂 Archive", `a:i:${id}:archive`);
 }
 
 /**
  * Format idea for Telegram message with intent summary
  */
+/**
+ * Extract confidence score from synthesizer context field.
+ * Returns undefined for ideas without confidence metadata.
+ */
+function extractConfidence(idea: ParsedIdea): number | undefined {
+  if (!idea.context) return undefined;
+  const match = idea.context.match(/Confidence:\s*([\d.]+)/);
+  return match ? parseFloat(match[1]!) : undefined;
+}
+
+/**
+ * Get a visual confidence indicator (1-3 bars)
+ */
+function confidenceIndicator(score: number | undefined): string {
+  if (score === undefined) return "";
+  if (score >= 0.7) return " 🟢";
+  if (score >= 0.5) return " 🟡";
+  return " 🔴";
+}
+
 export function formatIdeaForTelegram(idea: ParsedIdea, index: number): string {
-  const emoji = ["1️⃣", "2️⃣", "3️⃣"][index] || "▪️";
+  const emoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"][index] || "▪️";
   const title = escapeHtml(idea.title);
   const source = escapeHtml(idea.source);
-  const tagsStr = idea.tags?.length ? ` · ${idea.tags.map(t => escapeHtml(t)).join(", ")}` : "";
+  const tagsStr = idea.tags?.length ? ` · ${idea.tags.filter(t => t !== "synthesized").map(t => escapeHtml(t)).join(", ")}` : "";
   const id = escapeHtml(idea.id);
+  const confidence = extractConfidence(idea);
+  const indicator = confidenceIndicator(confidence);
 
-  // Build summary from content + context, targeting 500-800 chars
+  // Build summary from content (skip context — it's metadata now)
   let summary = idea.content || "";
-  if (idea.context && summary.length < 500) {
-    summary += "\n\n" + idea.context;
-  }
   summary = summary.slice(0, 800);
   if (summary.length === 800) summary = summary.slice(0, summary.lastIndexOf(" ")) + "...";
   const summaryHtml = escapeHtml(summary);
 
-  let msg = `<b>${emoji} ${title}</b>\n`;
+  let msg = `<b>${emoji} ${title}</b>${indicator}\n`;
   msg += `${source}${tagsStr}\n\n`;
   msg += `${summaryHtml}\n`;
   if (idea.link) {
@@ -394,6 +414,35 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
     } catch (error) {
       logger.error({ error, ideaId }, "Failed to archive idea");
       await ctx.answerCallbackQuery("Error processing archive");
+    }
+  });
+
+  // Handle snooze button — weak positive signal, re-draft for tomorrow
+  bot.callbackQuery(/^a:i:([^:]+):snooze$/, async (ctx) => {
+    const ideaId = ctx.match?.[1];
+    if (!ideaId) {
+      await ctx.answerCallbackQuery("Invalid request");
+      return;
+    }
+    logger.info({ ideaId }, "Snooze button clicked");
+
+    try {
+      // Move back to draft — it'll show up again in a future review
+      const dirIdeas = loadIdeasFromDir();
+      const idea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
+
+      if (idea) {
+        await updateIdeaField(ideaId, "status", "draft");
+        await appendIdeaNote(ideaId, "Snoozed — will resurface later");
+        await logFeedback("snooze", idea.title);
+        sendPreferenceSignals(idea, 0.05); // weak positive signal
+        await ctx.editMessageText(`💤 <b>Snoozed: ${escapeHtml(idea.title)}</b>`, { parse_mode: "HTML" });
+      } else {
+        await ctx.editMessageText(`❌ Idea not found: ${escapeHtml(ideaId)}`, { parse_mode: "HTML" });
+      }
+    } catch (error) {
+      logger.error({ error, ideaId }, "Failed to snooze idea");
+      await ctx.answerCallbackQuery("Error processing snooze");
     }
   });
 
@@ -608,6 +657,21 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
  * Sends all ideas simultaneously as separate messages with Talk+Archive buttons.
  * Returns the number of ideas sent.
  */
+/**
+ * Score an idea for ranking in morning review.
+ * Combines confidence (from synthesizer), freshness, and source diversity.
+ */
+function scoreIdeaForReview(idea: ParsedIdea): number {
+  const confidence = extractConfidence(idea) ?? 0.5; // default for non-synthesized ideas
+
+  // Freshness: ideas from last 24h get a boost
+  const ageMs = Date.now() - new Date(idea.timestamp).getTime();
+  const ageHours = ageMs / (1000 * 60 * 60);
+  const freshness = ageHours < 24 ? 1.0 : ageHours < 48 ? 0.8 : 0.6;
+
+  return confidence * 0.6 + freshness * 0.4;
+}
+
 export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLimit: number = 3): Promise<number> {
   // Check remaining daily quota
   let remaining = dailyLimit;
@@ -632,25 +696,56 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
     legacyDrafts = legacyIdeas.filter(i => i.status === "draft" && !existingIds.has(i.id));
   }
 
-  const allDrafts = [...dirDrafts, ...legacyDrafts]
-    .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
-    .slice(0, remaining);
+  const allDrafts = [...dirDrafts, ...legacyDrafts];
 
   if (allDrafts.length === 0) {
+    return 0;
+  }
+
+  // Ranked selection: score and sort, then pick with diversity constraint
+  const scored = allDrafts.map(idea => ({
+    idea,
+    score: scoreIdeaForReview(idea),
+    primaryTag: idea.tags?.[0] ?? idea.source,
+  })).sort((a, b) => b.score - a.score);
+
+  // Pick top ideas with tag diversity (no 2 ideas with same primary tag)
+  const selected: ParsedIdea[] = [];
+  const usedTags = new Set<string>();
+
+  // First pass: pick highest-scored with diversity
+  for (const entry of scored) {
+    if (selected.length >= remaining) break;
+    if (usedTags.has(entry.primaryTag)) continue;
+    selected.push(entry.idea);
+    usedTags.add(entry.primaryTag);
+  }
+
+  // Second pass: fill remaining slots from top-scored (allow tag overlap)
+  if (selected.length < remaining) {
+    const selectedIds = new Set(selected.map(s => s.id));
+    for (const entry of scored) {
+      if (selected.length >= remaining) break;
+      if (selectedIds.has(entry.idea.id)) continue;
+      selected.push(entry.idea);
+    }
+  }
+
+  if (selected.length === 0) {
     return 0;
   }
 
   // Send header
   await bot.api.sendMessage(
     chatId,
-    `📋 <b>Ideas for Review</b> (${allDrafts.length})`,
+    `📋 <b>Ideas for Review</b> (${selected.length})`,
     { parse_mode: "HTML" }
   );
 
   // Send each idea with buttons, mark as "review"
   let sent = 0;
-  for (let i = 0; i < allDrafts.length; i++) {
-    const idea = allDrafts[i]!;
+  for (let i = 0; i < selected.length; i++) {
+    const idea = selected[i]!;
     const message = formatIdeaForTelegram(idea, i);
     const keyboard = createIdeaKeyboard(idea.id);
 
@@ -674,13 +769,13 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
     }
 
     // Small delay to avoid rate limiting
-    if (i < allDrafts.length - 1) {
+    if (i < selected.length - 1) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
 
   // Write legacy file once if any legacy ideas were updated
-  const updatedLegacy = allDrafts.filter(i => i.status === "review" && legacyDrafts.some(l => l.id === i.id));
+  const updatedLegacy = selected.filter(i => i.status === "review" && legacyDrafts.some(l => l.id === i.id));
   if (updatedLegacy.length > 0 && existsSync(IDEAS_FILE)) {
     const content = await readFile(IDEAS_FILE, "utf-8");
     const legacyIdeas = parseIdeasMd(content);
@@ -695,7 +790,7 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
     stateManagerRef.incrementIdeaReviewCount(sent);
   }
 
-  logger.info({ count: sent, ids: allDrafts.filter(i => i.status === "review").map(i => i.id) }, "Sent batch ideas for review");
+  logger.info({ count: sent, ids: selected.filter(i => i.status === "review").map(i => i.id) }, "Sent ranked ideas for review");
   return sent;
 }
 
