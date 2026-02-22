@@ -46,6 +46,7 @@ const configSchema = z.object({
     elevenLabsApiKey: z.string().default(""),
     elevenLabsVoiceId: z.string().default("21m00Tcm4TlvDq8ikWAM"),
     elevenLabsModel: z.string().default("eleven_multilingual_v2"),
+    elevenLabsWebhookSecret: z.string().default(""),
   }),
   search: z.object({
     supabaseUrl: z.string().default(""),
@@ -53,6 +54,12 @@ const configSchema = z.object({
     embeddingModel: z.string().default("text-embedding-3-small"),
     chunkSize: z.number().int().positive().default(512),
     chunkOverlap: z.number().int().nonnegative().default(50),
+  }),
+  twilio: z.object({
+    accountSid: z.string().default(""),
+    authToken: z.string().default(""),
+    phoneNumber: z.string().default(""),
+    apiKeySid: z.string().default(""),
   }),
   logLevel: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
 });
@@ -99,6 +106,7 @@ function loadConfig(): Config {
       elevenLabsApiKey: process.env.ELEVEN_LABS_API_KEY ?? "",
       elevenLabsVoiceId: process.env.ELEVEN_LABS_VOICE_ID ?? "21m00Tcm4TlvDq8ikWAM",
       elevenLabsModel: process.env.ELEVEN_LABS_MODEL ?? "eleven_multilingual_v2",
+      elevenLabsWebhookSecret: process.env.ELEVENLABS_WEBHOOK_SECRET ?? "",
     },
     search: {
       supabaseUrl: process.env.SUPABASE_URL ?? "",
@@ -106,6 +114,12 @@ function loadConfig(): Config {
       embeddingModel: process.env.EMBEDDING_MODEL ?? "text-embedding-3-small",
       chunkSize: parseInt(process.env.CHUNK_SIZE ?? "512", 10),
       chunkOverlap: parseInt(process.env.CHUNK_OVERLAP ?? "50", 10),
+    },
+    twilio: {
+      accountSid: process.env.TWILIO_ACCOUNT_SID ?? "",
+      authToken: process.env.TWILIO_AUTH_TOKEN ?? "",
+      phoneNumber: process.env.TWILIO_PHONE_NUMBER ?? "",
+      apiKeySid: process.env.TWILIO_API_KEY_SID ?? "",
     },
     logLevel: process.env.LOG_LEVEL ?? "info",
   };

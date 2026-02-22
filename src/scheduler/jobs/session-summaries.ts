@@ -20,8 +20,16 @@ import { buildSchedulerContext, extractCurrentGoals } from "../shared-context.js
 const DAILY_LOG_DIR = "/Users/yj/memory/daily";
 const MAX_INPUT_CHARS = 900_000;
 
-function getTodayDateString(): string {
+/**
+ * Returns the "logical today" date string. If it's before 6 AM, we consider
+ * it still "yesterday" — this handles the 00:30 cron running after midnight
+ * but needing to summarize the previous day.
+ */
+function getLogicalTodayDateString(): string {
   const now = new Date();
+  if (now.getHours() < 6) {
+    now.setDate(now.getDate() - 1);
+  }
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, "0");
   const d = String(now.getDate()).padStart(2, "0");
@@ -71,7 +79,7 @@ function loadSessionSummaries(db: ReturnType<StateManager["getDb"]>, date: strin
 function formatSessionsForPrompt(sessions: SessionSummaryRow[]): string {
   if (sessions.length === 0) return "";
 
-  let text = "## CLI Sessions (Pre-Summarized)\n\n";
+  let text = "## Sessions (Pre-Summarized)\n\n";
   for (const s of sessions) {
     const time = s.started_at ? new Date(s.started_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }) : "?";
     text += `### [${time}] ${s.agent}: ${s.title}\n`;
@@ -89,7 +97,7 @@ async function buildUserPrompt(sessionCount: number): Promise<string> {
   return `You've been with Yanqing all day. What happened that matters for where he's headed?
 
 Below you'll find TWO sources of data:
-1. **CLI Sessions** — pre-summarized bullet points from all CLI tools (Claude Code, Codex, Gemini, Kimi, OpenCode)
+1. **Sessions** — pre-summarized bullet points from all channels (CLI tools, Telegram, Web UI)
 2. **Daily Log** — daemon outputs, scheduled job results, and personal notes
 
 Pay close attention to:
@@ -155,7 +163,7 @@ export async function runSessionSummary(
   output: string;
   error?: string;
 }> {
-  const date = dateOverride ?? getTodayDateString();
+  const date = dateOverride ?? getLogicalTodayDateString();
   const logPath = `${DAILY_LOG_DIR}/${date}.md`;
 
   const sm = stateManager ?? new StateManager(DB_PATH);
@@ -229,7 +237,6 @@ export async function runSessionSummary(
       systemPrompt,
       temperature: 0.3,
       timeout: 180000,
-      reasoningEffort: "high",
       useGrounding: false,
     });
 

@@ -4,7 +4,7 @@ import type { SynthesisResult, SynthesisOptions, VoiceConfig, AudioFormat } from
 /**
  * Default ElevenLabs voice ID (Rachel - conversational)
  */
-const DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM";
+const DEFAULT_VOICE_ID = "TqZYQPtYO1r4L4de7HwG";
 
 /**
  * ElevenLabs output format mapping
