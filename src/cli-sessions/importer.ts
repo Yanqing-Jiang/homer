@@ -11,10 +11,11 @@ import {
   scanKimiSessions,
   scanClaudeSessions,
   scanOpencodeSessions,
+  scanThreadSessions,
 } from "./parsers.js";
 import { summarizeSession, generateTitle, buildRawExcerpt, getLogDate } from "./summarizer.js";
 
-export type AgentType = "codex" | "gemini" | "kimi" | "claude" | "opencode" | "all";
+export type AgentType = "codex" | "gemini" | "kimi" | "claude" | "opencode" | "telegram" | "web" | "all";
 
 interface ImportOptions {
   sinceDays?: number;
@@ -76,10 +77,11 @@ function isSubAgent(session: ParsedSession, db: Database.Database): boolean {
     }
   }
 
-  // 4. bypassPermissions mode (set by automated runs)
-  // This is heuristic — parsed sessions don't carry permission metadata directly,
-  // but OpenCode sessions from `opencode run` always have deny-all permissions
-  // which manifests as very short sessions with structured prompts
+  // 4. Thread-specific: skip threads where user never sent a message (pure bot notifications)
+  if (session.agent === "telegram" || session.agent === "web") {
+    const hasUserMessage = session.messages.some((m) => m.role === "user");
+    if (!hasUserMessage) return true;
+  }
 
   return false;
 }
@@ -135,8 +137,19 @@ export class CLISessionImporter {
       sessionFiles.push(...opencodeFiles.map((path) => ({ agent: "opencode", path })));
     }
 
-    stats.scanned = sessionFiles.length;
-    logger.info({ count: stats.scanned }, "Found session files to process");
+    // Scan thread sessions (Telegram + Web UI) — these come pre-parsed, not as files
+    let threadSessions: ParsedSession[] = [];
+    if (agent === "all" || agent === "telegram" || agent === "web") {
+      threadSessions = scanThreadSessions(this.db, sinceDays);
+      if (agent === "telegram") {
+        threadSessions = threadSessions.filter((s) => s.agent === "telegram");
+      } else if (agent === "web") {
+        threadSessions = threadSessions.filter((s) => s.agent === "web");
+      }
+    }
+
+    stats.scanned = sessionFiles.length + threadSessions.length;
+    logger.info({ fileCount: sessionFiles.length, threadCount: threadSessions.length }, "Found sessions to process");
 
     // Process each session file
     for (const { agent: sessionAgent, path } of sessionFiles) {
@@ -206,7 +219,55 @@ export class CLISessionImporter {
       }
     }
 
-    logger.info(stats, "CLI session import completed");
+    // Process thread sessions (Telegram + Web UI) — already parsed
+    for (const session of threadSessions) {
+      try {
+        // Dedup via content hash
+        if (this.isAlreadyImported(session.contentHash)) {
+          stats.skipped++;
+          logger.debug({ sessionId: session.sessionId }, "Thread session already imported (duplicate)");
+          continue;
+        }
+
+        // Sub-agent check (cross-ref with scheduled_job_runs, skip bot-only threads)
+        const subAgent = isSubAgent(session, this.db);
+        if (subAgent) {
+          stats.subAgents++;
+          if (!dryRun) this.recordSkipped(session);
+          continue;
+        }
+
+        if (dryRun) {
+          stats.imported++;
+          logger.info({ sessionId: session.sessionId, agent: session.agent, messages: session.messageCount }, "Would import thread session");
+          continue;
+        }
+
+        // Import: summarize → INSERT session_summaries
+        await this.importSession(session);
+        stats.imported++;
+
+        // Update watermark for this thread
+        const threadMeta = session as ParsedSession & { _lastMsgId?: string; _threadId?: string; _newCount?: number };
+        if (threadMeta._threadId && threadMeta._lastMsgId) {
+          this.updateThreadWatermark(
+            threadMeta._threadId,
+            threadMeta._lastMsgId,
+            threadMeta._newCount || session.messageCount
+          );
+        }
+
+        logger.info(
+          { sessionId: session.sessionId, agent: session.agent, messages: session.messageCount },
+          "Imported thread session to session_summaries"
+        );
+      } catch (error) {
+        stats.errors++;
+        logger.error({ error, sessionId: session.sessionId }, "Error processing thread session");
+      }
+    }
+
+    logger.info(stats, "Session import completed");
     return stats;
   }
 
@@ -322,6 +383,24 @@ export class CLISessionImporter {
         title,
         session.model || null
       );
+  }
+
+  /**
+   * Update thread import watermark after successful import
+   */
+  private updateThreadWatermark(threadId: string, lastMsgId: string, newCount: number): void {
+    try {
+      this.db.prepare(`
+        INSERT INTO thread_import_watermark (thread_id, last_imported_message_id, last_imported_at, total_imported)
+        VALUES (?, ?, datetime('now'), ?)
+        ON CONFLICT(thread_id) DO UPDATE SET
+          last_imported_message_id = excluded.last_imported_message_id,
+          last_imported_at = excluded.last_imported_at,
+          total_imported = total_imported + excluded.total_imported
+      `).run(threadId, lastMsgId, newCount);
+    } catch (error) {
+      logger.warn({ error, threadId }, "Failed to update thread watermark");
+    }
   }
 
   /**

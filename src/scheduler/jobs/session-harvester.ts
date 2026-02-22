@@ -1,11 +1,13 @@
 /**
  * Session Harvester — batch import all CLI sessions into session_summaries
  *
- * Runs daily at 21:30. Scans all CLIs (Claude, Codex, Gemini, Kimi, OpenCode),
- * parses conversations, filters sub-agents, summarizes (Gemini Flash),
- * and INSERTs directly into session_summaries SQLite table with FTS5 indexing.
+ * Runs twice daily at 12:00 PM and 12:00 AM. Scans all CLIs (Claude, Codex,
+ * Gemini, Kimi, OpenCode), parses conversations, filters sub-agents, summarizes
+ * (Gemini Flash), and INSERTs directly into session_summaries SQLite table with
+ * FTS5 indexing.
  *
  * Sessions are immediately searchable via memory_search after this job completes.
+ * Triggers memory-reindex → memory-embeddings chain after each run.
  */
 
 import Database from "better-sqlite3";

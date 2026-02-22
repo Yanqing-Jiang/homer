@@ -698,9 +698,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ? await indexer.hybridSearch(query, maxResults, context)
           : indexer.search(query, maxResults, context);
 
-        // Also search session_summaries_fts and failure_takeover_fts
+        // Also search session_summaries_fts, failure_takeover_fts, and thread_messages_fts
         let sessionResults: Array<{ id: string; title: string; summary: string; project: string; agent: string; started_at: string; rank: number }> = [];
         let takeoverResults: Array<{ id: number; job_id: string; diagnosis: string; fix_description: string | null; decision: string; retry_success: number | null; created_at: string; rank: number }> = [];
+        let threadResults: Array<{ id: string; thread_id: string; role: string; created_at: string; content: string; rank: number }> = [];
+        let scrapeResults: Array<{ id: string; source: string; title: string; url: string | null; scraped_at: string; rank: number }> = [];
         try {
           const sm = getSharedStateManager();
           const escapedTerms = query
@@ -738,6 +740,41 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               logger.debug({ error: err }, "Failure takeover FTS search failed (table may not exist)");
             }
           }
+
+          // Also search thread_messages_fts for Telegram/Web conversations
+          if (escapedTerms) {
+            try {
+              threadResults = sm.getDb().prepare(`
+                SELECT tm.id, tm.thread_id, tm.role, tm.created_at,
+                       snippet(thread_messages_fts, 0, '>>>', '<<<', '...', 50) as content,
+                       bm25(thread_messages_fts) as rank
+                FROM thread_messages_fts fts
+                JOIN thread_messages tm ON fts.rowid = tm.rowid
+                WHERE thread_messages_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+              `).all(escapedTerms, maxResults) as typeof threadResults;
+            } catch (err) {
+              logger.debug({ error: err }, "Thread messages FTS search failed (table may not exist)");
+            }
+          }
+
+          // Also search scrapes_fts for scraped content
+          if (escapedTerms) {
+            try {
+              scrapeResults = sm.getDb().prepare(`
+                SELECT s.id, s.source, s.title, s.url, s.scraped_at,
+                       bm25(scrapes_fts) as rank
+                FROM scrapes_fts fts
+                JOIN scrapes s ON fts.rowid = s.rowid
+                WHERE scrapes_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+              `).all(escapedTerms, maxResults) as typeof scrapeResults;
+            } catch (err) {
+              logger.debug({ error: err }, "Scrapes FTS search failed (table may not exist)");
+            }
+          }
         } catch (err) {
           // session_summaries_fts may not exist yet — gracefully degrade
           logger.debug({ error: err }, "Session summaries FTS search failed (table may not exist yet)");
@@ -756,6 +793,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             startedAt: r.started_at,
             rank: r.rank,
           })),
+          threads: threadResults.map((r) => ({
+            type: "thread" as const,
+            id: r.id,
+            threadId: r.thread_id,
+            role: r.role,
+            content: r.content,
+            createdAt: r.created_at,
+            rank: r.rank,
+          })),
           takeovers: takeoverResults.map((r) => ({
             type: "takeover" as const,
             id: r.id,
@@ -765,6 +811,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             decision: r.decision,
             retrySuccess: r.retry_success,
             createdAt: r.created_at,
+            rank: r.rank,
+          })),
+          scrapes: scrapeResults.map((r) => ({
+            type: "scrape" as const,
+            id: r.id,
+            source: r.source,
+            title: r.title,
+            url: r.url,
+            scrapedAt: r.scraped_at,
             rank: r.rank,
           })),
         };
@@ -1628,6 +1683,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const title = (s.title || "untitled").slice(0, 60);
             sections.push(`- [${date}] ${proj}: ${title} (${s.message_count} msgs)`);
           }
+        }
+
+        // 1b. Recent Telegram/Web conversations
+        try {
+          const recentThreads = sm.getDb().prepare(`
+            SELECT t.id, t.title, t.chat_session_id, t.provider, t.last_message_at,
+                   (SELECT COUNT(*) FROM thread_messages WHERE thread_id = t.id) as msg_count
+            FROM threads t
+            WHERE t.last_message_at > datetime('now', ?)
+              AND t.status = 'active'
+            ORDER BY t.last_message_at DESC LIMIT 5
+          `).all(`-${lookbackDays} days`) as Array<{
+            id: string; title: string; chat_session_id: string;
+            provider: string; last_message_at: string; msg_count: number;
+          }>;
+
+          if (recentThreads.length > 0) {
+            sections.push("\n## Recent Conversations");
+            for (const t of recentThreads) {
+              const label = t.chat_session_id === "tg:system" ? "TG" : "Web";
+              const date = t.last_message_at.slice(5, 10);
+              const title = (t.title || "untitled").slice(0, 60);
+              sections.push(`- [${label}] [${date}] ${title} (${t.msg_count} msgs)`);
+            }
+          }
+        } catch {
+          // threads table may not exist
         }
 
         // 2. Active plans

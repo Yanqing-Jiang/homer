@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync, existsSync } from "fs";
 import { join } from "path";
 import { createHash } from "crypto";
+import Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
 import { SONNET_MODEL } from "../models.js";
 
@@ -13,7 +14,7 @@ export interface ParsedMessage {
 
 export interface ParsedSession {
   sessionId: string;
-  agent: "codex" | "gemini" | "kimi" | "claude" | "opencode";
+  agent: "codex" | "gemini" | "kimi" | "claude" | "opencode" | "telegram" | "web";
   nativeFilePath: string;
   messages: ParsedMessage[];
   model?: string;
@@ -705,4 +706,154 @@ export function parseOpencodeSession(filePath: string): ParsedSession | null {
     logger.error({ error, filePath }, "Failed to parse OpenCode session");
     return null;
   }
+}
+
+// --- Thread (Telegram + Web UI) Support ---
+
+interface ThreadRow {
+  id: string;
+  chat_session_id: string;
+  title: string | null;
+  provider: string;
+  model: string | null;
+  last_message_at: string;
+}
+
+interface ThreadMessageRow {
+  id: string;
+  role: string;
+  content: string;
+  created_at: string;
+  metadata: string | null;
+}
+
+/**
+ * Scan homer.db threads table for Telegram / Web UI conversations
+ * with new messages since last watermark. Returns ParsedSession[] ready
+ * for the same summarize → INSERT pipeline used by CLI sessions.
+ */
+export function scanThreadSessions(
+  db: Database.Database,
+  sinceDays: number = 7,
+  maxBackfillMessages: number = 50
+): ParsedSession[] {
+  const sessions: ParsedSession[] = [];
+
+  try {
+    // Get threads with recent activity
+    const threads = db.prepare(`
+      SELECT id, chat_session_id, title, provider, model, last_message_at
+      FROM threads
+      WHERE last_message_at > datetime('now', ?)
+        AND status = 'active'
+      ORDER BY last_message_at DESC
+    `).all(`-${sinceDays} days`) as ThreadRow[];
+
+    for (const thread of threads) {
+      try {
+        // Check watermark for this thread
+        const watermark = db.prepare(
+          `SELECT last_imported_message_id, total_imported FROM thread_import_watermark WHERE thread_id = ?`
+        ).get(thread.id) as { last_imported_message_id: string; total_imported: number } | undefined;
+
+        // Query new messages since watermark
+        let newMessages: ThreadMessageRow[];
+        if (watermark) {
+          // Get the created_at of the watermark message for comparison
+          const watermarkMsg = db.prepare(
+            `SELECT created_at FROM thread_messages WHERE id = ?`
+          ).get(watermark.last_imported_message_id) as { created_at: string } | undefined;
+
+          if (watermarkMsg) {
+            newMessages = db.prepare(`
+              SELECT id, role, content, created_at, metadata
+              FROM thread_messages
+              WHERE thread_id = ? AND created_at > ?
+              ORDER BY created_at ASC
+            `).all(thread.id, watermarkMsg.created_at) as ThreadMessageRow[];
+          } else {
+            // Watermark message was deleted — re-import recent messages
+            newMessages = db.prepare(`
+              SELECT id, role, content, created_at, metadata
+              FROM thread_messages
+              WHERE thread_id = ?
+              ORDER BY created_at DESC LIMIT ?
+            `).all(thread.id, maxBackfillMessages) as ThreadMessageRow[];
+            newMessages.reverse();
+          }
+        } else {
+          // No watermark — first import, cap at maxBackfillMessages
+          newMessages = db.prepare(`
+            SELECT id, role, content, created_at, metadata
+            FROM thread_messages
+            WHERE thread_id = ?
+            ORDER BY created_at DESC LIMIT ?
+          `).all(thread.id, maxBackfillMessages) as ThreadMessageRow[];
+          newMessages.reverse();
+        }
+
+        // Skip threads with < 2 new user/assistant messages (avoid noise)
+        const substantiveMessages = newMessages.filter(
+          (m) => m.role === "user" || m.role === "assistant"
+        );
+        if (substantiveMessages.length < 2) continue;
+
+        // Determine agent type: tg:system = telegram, else web
+        const agent: "telegram" | "web" =
+          thread.chat_session_id === "tg:system" ? "telegram" : "web";
+
+        // Build ParsedSession messages
+        const messages: ParsedMessage[] = substantiveMessages.map((m) => ({
+          role: m.role as "user" | "assistant",
+          content: m.content,
+          timestamp: m.created_at,
+        }));
+
+        // Content hash based on new messages only
+        const normalizedContent = messages
+          .map((m) => `${m.role}:${m.content.trim().toLowerCase()}`)
+          .join("\n");
+        const contentHash = createHash("sha256")
+          .update(normalizedContent)
+          .digest("hex");
+
+        const firstTimestamp = newMessages[0]?.created_at || "";
+        const lastTimestamp = newMessages[newMessages.length - 1]?.created_at || "";
+        const lastMsgId = newMessages[newMessages.length - 1]?.id || "";
+
+        // Extract model from thread or assistant message metadata
+        let model = thread.model || thread.provider || "unknown";
+        if (!thread.model) {
+          const assistantMsg = newMessages.find((m) => m.role === "assistant" && m.metadata);
+          if (assistantMsg?.metadata) {
+            try {
+              const meta = JSON.parse(assistantMsg.metadata);
+              if (meta.model) model = meta.model;
+            } catch { /* ignore */ }
+          }
+        }
+
+        sessions.push({
+          sessionId: `${thread.id}:${firstTimestamp}`,
+          agent,
+          nativeFilePath: `thread:${thread.id}`,
+          messages,
+          model,
+          project: thread.title || `${agent} conversation`,
+          startedAt: firstTimestamp || undefined,
+          endedAt: lastTimestamp || undefined,
+          messageCount: messages.length,
+          contentHash,
+          // Stash last message ID for watermark update (accessed via casting)
+          ...(lastMsgId ? { _lastMsgId: lastMsgId, _threadId: thread.id, _newCount: substantiveMessages.length } : {}),
+        });
+      } catch (error) {
+        logger.error({ error, threadId: thread.id }, "Failed to scan thread");
+      }
+    }
+  } catch (error) {
+    logger.error({ error }, "Failed to scan thread sessions");
+  }
+
+  return sessions;
 }

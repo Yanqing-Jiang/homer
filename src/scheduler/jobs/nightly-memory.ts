@@ -19,8 +19,6 @@ import { getRecentJobOutputs } from "../job-outputs.js";
 import { logger } from "../../utils/logger.js";
 import { OPUS_COPILOT_MODEL } from "../../models.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
-import { loadIdeasFromDir, type ParsedIdea } from "../../ideas/parser.js";
-import { smartSaveIdea, type SmartSaveResult } from "../../ideas/smart-save.js";
 import type { StateManager } from "../../state/manager.js";
 import { trackPromotion } from "../../outcomes/hooks.js";
 
@@ -47,15 +45,8 @@ const PromotionSchema = z.object({
 
 const PromotionsArraySchema = z.array(PromotionSchema);
 
-const MinedIdeaSchema = z.object({
-  title: z.string().min(5),
-  content: z.string().min(20),
-  context: z.string(),
-});
-
 const NightlyOutputSchema = z.object({
   promotions: PromotionsArraySchema,
-  ideas: z.array(MinedIdeaSchema).default([]),
 });
 
 // ============================================
@@ -232,14 +223,10 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
     // Cross-job intelligence
     const recentActivity = getRecentJobOutputs(stateManager.getDb());
 
-    // Build existing idea titles for dedup
-    const existingIdeas = loadIdeasFromDir();
-    const existingTitles = existingIdeas.slice(0, 100).map((i) => i.title).join(", ");
+    // Single Opus 4.6 call — fact extraction only (idea mining moved to idea-synthesizer)
+    const unifiedPrompt = `You are a memory processing engine for Yanqing's personal AI assistant. Analyze yesterday's daily log, cross-reference against permanent memory files, and extract promotable facts.
 
-    // Single Opus 4.6 call — replaces 3-agent swarm + consolidation
-    const unifiedPrompt = `You are a memory processing engine for Yanqing's personal AI assistant. Analyze yesterday's daily log, cross-reference against permanent memory files, and produce two outputs:
-
-## Task 1: Extract Promotable Facts (3-8 max)
+## Extract Promotable Facts (3-8 max)
 
 A "promotable fact" is information worth persisting in permanent memory. Focus on:
 - Outcomes and decisions (NOT process steps)
@@ -257,16 +244,6 @@ For each fact, classify which file it belongs to:
 - tools: tool configs, subscriptions, API keys, service settings
 
 And specify which SECTION within that file. Use EXISTING section names from the permanent files below when possible. Only genuinely NEW information — skip anything already well-captured.
-
-## Task 2: Extract Actionable Ideas (0-3 max)
-
-An "idea" is forward-looking — what SHOULD happen next, what could be built:
-1. Problems encountered that could be automated
-2. Tools/repos mentioned that deserve deeper exploration
-3. Patterns or insights suggesting a new project or feature
-4. Career opportunities mentioned or implied
-
-Deduplicate against existing idea titles: ${existingTitles.slice(0, 2000)}
 
 ## Context
 
@@ -290,9 +267,9 @@ ${rawLog.length > 80000 ? rawLog.slice(0, 80000) + "\n\n... (log truncated) ...\
 ## Output Format
 
 Return ONLY a valid JSON object (no markdown, no preamble):
-{"promotions": [{"content": "fact to promote", "file": "me"|"work"|"life"|"preferences"|"tools", "section": "Section Name"}], "ideas": [{"title": "Idea Title", "content": "what and why", "context": "how this connects to Yanqing's goals"}]}
+{"promotions": [{"content": "fact to promote", "file": "me"|"work"|"life"|"preferences"|"tools", "section": "Section Name"}]}
 
-If nothing to promote/no ideas, use empty arrays.`;
+If nothing to promote, use an empty array.`;
 
     logger.info({ promptLength: unifiedPrompt.length, date: yesterday }, "Running nightly memory via Claude Opus 4.6");
 
@@ -327,16 +304,14 @@ If nothing to promote/no ideas, use empty arrays.`;
       consolidated = fallback.output;
     }
 
-    // Parse and validate — try new combined schema first, fall back to promotions-only
+    // Parse and validate
     let promotions: z.infer<typeof PromotionsArraySchema>;
-    let minedIdeas: z.infer<typeof MinedIdeaSchema>[] = [];
 
     try {
       const nightlyOutput = parseSwarmJSON(consolidated, NightlyOutputSchema);
       promotions = nightlyOutput.promotions ?? [];
-      minedIdeas = nightlyOutput.ideas ?? [];
     } catch {
-      // Fall back to legacy promotions-only format
+      // Fall back to promotions-only array format
       try {
         promotions = parseSwarmJSON(consolidated, PromotionsArraySchema);
       } catch (parseErr) {
@@ -376,40 +351,6 @@ If nothing to promote/no ideas, use empty arrays.`;
       }
     }
 
-    // Write mined ideas via smart-save (dedup-at-write)
-    const ideaSaveResults: SmartSaveResult[] = [];
-    const now = new Date();
-    const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
-
-    for (const idea of minedIdeas) {
-      const slug = idea.title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-|-$/g, "")
-        .slice(0, 40);
-      const id = `nightly_${now.toISOString().slice(5, 10).replace("-", "")}_${slug}`;
-
-      const parsed: ParsedIdea = {
-        id,
-        title: idea.title,
-        status: "draft",
-        source: "nightly-mining",
-        content: idea.content,
-        context: idea.context,
-        tags: ["nightly-mining", "auto-extracted"],
-        timestamp,
-      };
-
-      try {
-        const result = smartSaveIdea(parsed);
-        ideaSaveResults.push(result);
-        logger.info({ id, title: idea.title, action: result.action }, "Nightly idea processed");
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.warn({ error: msg, title: idea.title }, "Failed to write mined idea");
-      }
-    }
-
     // Reindex FTS5
     try {
       const indexer = getMemoryIndexer();
@@ -423,18 +364,12 @@ If nothing to promote/no ideas, use empty arrays.`;
     if (writtenPromos > 0 || promotions.length > 0) {
       parts.push(`Promoted ${writtenPromos}/${promotions.length} facts`);
     }
-    const ideaCreated = ideaSaveResults.filter((r) => r.action === "created").length;
-    const ideaEnhanced = ideaSaveResults.filter((r) => r.action === "enhanced").length;
-    const ideaSkipped = ideaSaveResults.filter((r) => r.action === "skipped").length;
-    if (ideaCreated > 0) parts.push(`${ideaCreated} new ideas`);
-    if (ideaEnhanced > 0) parts.push(`${ideaEnhanced} ideas enhanced`);
-    if (ideaSkipped > 0) parts.push(`${ideaSkipped} ideas skipped`);
     if (writeErrors.length > 0) {
       parts.push(`errors: ${writeErrors.join("; ")}`);
     }
     const output = parts.length > 0
       ? `${parts.join(", ")} from ${yesterday}'s log`
-      : `No new facts or ideas from ${yesterday}'s daily log`;
+      : `No new facts from ${yesterday}'s daily log`;
 
     return { success: true, output };
   } catch (error) {
