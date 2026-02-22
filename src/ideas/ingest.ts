@@ -417,7 +417,10 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
             raw_content: idea.content || "",
           });
 
-          saveIdeaFile(idea);
+          // Legacy idea file creation — will be replaced by synthesizer
+          if (process.env.LEGACY_INGEST !== "0") {
+            saveIdeaFile(idea);
+          }
           existingIds.add(idea.id);
           existingTitles.add(idea.title.toLowerCase());
           result.ingested++;
