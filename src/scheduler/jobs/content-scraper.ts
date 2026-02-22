@@ -30,8 +30,6 @@ import {
   buildArticleDeepFetchPrompt,
 } from "../../scraping/browser-prompts.js";
 import { cleanAgentOutput } from "../../scraping/clean-output.js";
-import type { ParsedIdea } from "../../ideas/parser.js";
-import { smartSaveIdea, type SmartSaveResult } from "../../ideas/smart-save.js";
 import { insertScrape } from "../../scraping/scrape-store.js";
 import { logger } from "../../utils/logger.js";
 
@@ -64,11 +62,9 @@ const MEDIUM_TRENDING_TAGS: Array<{ tag: string; topic: string }> = [
 ];
 
 const MAX_MEDIUM_TAG_ITEMS = 10;
-const MAX_TRENDING_IDEAS_PER_PLATFORM = 4;
 const MAX_DEEP_FETCH_ARTICLES = 5; // top N trending articles to deep-fetch (Medium trending only)
 // Disabled: Medium trending articles were low-signal clickbait polluting the ideas pipeline.
 // Scraping + patterns continue; idea creation skipped. Re-enable with CONTENT_SCRAPER_IDEA_INGEST=1.
-const ENABLE_TRENDING_IDEA_PIPELINE = process.env.CONTENT_SCRAPER_IDEA_INGEST === "1";
 const PATTERNS_FILE = "/Users/yj/memory/patterns.md";
 
 // ============================================
@@ -785,83 +781,6 @@ async function analyzeAndUpdatePatterns(
 // TRENDING -> IDEAS (OPTIONAL)
 // ============================================
 
-function buildTrendingIdea(post: ScrapedPost, platform: "medium" | "linkedin", timestamp: string): ParsedIdea {
-  const key = `${platform}:${post.link ?? post.title}:${post.date ?? ""}`;
-  const id = `trend_${platform}_${contentHash(key).slice(0, 12)}`;
-
-  const tags = [
-    "trending",
-    platform,
-    "content-scraper",
-    ...(post.topic ? [slugify(post.topic).slice(0, 30)] : []),
-  ].filter(Boolean);
-
-  const body = [
-    `**Platform:** ${platform}`,
-    post.topic ? `**Topic:** ${post.topic}` : null,
-    post.source ? `**Source:** ${post.source}` : null,
-    post.date ? `**Date:** ${post.date}` : null,
-    post.link ? `**Link:** ${post.link}` : null,
-    "",
-    post.content,
-  ].filter(Boolean).join("\n");
-
-  return {
-    id,
-    title: post.title,
-    status: "draft",
-    source: `${platform}-trending`,
-    content: body,
-    context: "Captured by content-scraper trending pipeline based on Yanqing's stated writing interests.",
-    link: post.link,
-    tags,
-    timestamp,
-  };
-}
-
-function ingestTrendingIdeas(posts: ScrapedPost[], platform: "medium" | "linkedin"): SmartSaveResult[] {
-  const now = new Date();
-  const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
-
-  // Score and select top candidates (heuristic scorer, tag-diverse)
-  const deduped = dedupePosts(posts);
-  const scored = deduped
-    .map(p => ({ post: p, score: scoreTrendingPost(p) }))
-    .sort((a, b) => b.score - a.score);
-
-  // Pick top N with tag diversity (max 2 per topic)
-  const topicCounts = new Map<string, number>();
-  const selected: ScrapedPost[] = [];
-  for (const { post } of scored) {
-    if (selected.length >= MAX_TRENDING_IDEAS_PER_PLATFORM) break;
-    const topic = post.topic ?? "general";
-    const count = topicCounts.get(topic) ?? 0;
-    if (count >= 2) continue;
-    topicCounts.set(topic, count + 1);
-    selected.push(post);
-  }
-  const results: SmartSaveResult[] = [];
-  let errorCount = 0;
-
-  for (const post of selected) {
-    try {
-      const parsed = buildTrendingIdea(post, platform, timestamp);
-      const saveResult = smartSaveIdea(parsed);
-      results.push(saveResult);
-    } catch (err) {
-      errorCount++;
-      logger.warn({ error: String(err), title: post.title, platform }, "Failed to ingest trending idea");
-    }
-  }
-
-  // Attach error count to first result for surfacing in run output
-  if (errorCount > 0) {
-    results.push({ action: "error", id: `${platform}-ingest-errors`, title: `${errorCount} idea(s) failed to ingest` } as unknown as SmartSaveResult);
-  }
-
-  return results;
-}
-
 // ============================================
 // RUN SUMMARY OUTPUT
 // ============================================
@@ -1111,24 +1030,8 @@ export async function runContentScraper(db: Database.Database): Promise<{
       logger.error({ error: msg }, "LinkedIn processing error");
     }
 
-    // =========================================================
-    // PHASE 3a: Trending → ideas pipeline
-    // =========================================================
-    if (ENABLE_TRENDING_IDEA_PIPELINE && mediumTrendingPosts.length > 0) {
-      try {
-        const ideaResults = ingestTrendingIdeas(mediumTrendingPosts, "medium");
-        const created = ideaResults.filter((r) => r.action === "created").length;
-        const enhanced = ideaResults.filter((r) => r.action === "enhanced").length;
-        const skipped = ideaResults.filter((r) => r.action === "skipped").length;
-        results.push(`Trending ideas: ${created} created, ${enhanced} enhanced, ${skipped} skipped`);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        results.push(`Trending ideas: ERROR — ${msg}`);
-        logger.error({ error: msg }, "Trending idea ingestion failed");
-      }
-    } else if (!ENABLE_TRENDING_IDEA_PIPELINE) {
-      results.push("Trending ideas: skipped (CONTENT_SCRAPER_IDEA_INGEST=0)");
-    }
+    // PHASE 3a: Trending idea creation now handled by idea-synthesizer (reads from scrapes table)
+    results.push("Trending ideas: deferred to idea-synthesizer");
 
     // =========================================================
     // PHASE 3b: Post-scrape pattern analysis → patterns.md
