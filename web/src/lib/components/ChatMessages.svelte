@@ -25,7 +25,7 @@
 			</div>
 			<div class="message-content">
 				<div class="message-bubble">
-					Hi! I'm Homer AI. I can help you manage your sessions, ideas, plans, and jobs. What would you like to do?
+					Hi! I'm Azure AI. I can help you manage your sessions, ideas, plans, and jobs. What would you like to do?
 				</div>
 			</div>
 		</div>

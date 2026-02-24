@@ -1,18 +1,15 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomUUID } from "crypto";
-import { unlinkSync, readdirSync } from "fs";
 import type { StateManager } from "../../state/manager.js";
 import { IdeasIndexer } from "../../ideas/indexer.js";
 import {
-  parseIdeaFile,
-  saveIdeaFile,
   getIdeasPaths,
   isIdeasMigrated,
-  appendExploration,
   type ParsedIdea,
 } from "../../ideas/parser.js";
+import * as dao from "../../ideas/dao.js";
 import { join } from "path";
-import { logger } from "../../utils/logger.js";
+import { recordFeedback } from "../../feedback/events.js";
 
 let ideasIndexer: IdeasIndexer | null = null;
 
@@ -36,59 +33,16 @@ interface CreateIdeaBody {
 }
 
 /**
- * Find and update idea file directly (similar to MCP idea_update logic)
- * This searches by ID or partial ID match across all idea files
- */
-function findAndUpdateIdeaFile(
-  ideaId: string,
-  updates: { status?: string; notes?: string }
-): { success: boolean; filePath?: string; error?: string } {
-  const { directory } = getIdeasPaths();
-
-  try {
-    const files = readdirSync(directory).filter((f) => f.endsWith(".md"));
-
-    for (const file of files) {
-      const filePath = join(directory, file);
-      const parsed = parseIdeaFile(filePath);
-
-      if (!parsed) continue;
-
-      // Match by exact ID or partial ID match
-      if (parsed.id === ideaId || parsed.id.includes(ideaId) || file.includes(ideaId)) {
-        // Apply updates
-        if (updates.status) parsed.status = updates.status;
-        if (updates.notes) {
-          parsed.notes = (parsed.notes ? parsed.notes + "; " : "") + updates.notes;
-        }
-
-        // Save the updated file
-        saveIdeaFile(parsed);
-
-        logger.info({ ideaId, filePath, status: parsed.status }, "Updated idea file directly");
-        return { success: true, filePath };
-      }
-    }
-
-    return { success: false, error: `Idea file not found for ID: ${ideaId}` };
-  } catch (error) {
-    const errMsg = error instanceof Error ? error.message : String(error);
-    logger.error({ ideaId, error: errMsg }, "Failed to find/update idea file");
-    return { success: false, error: errMsg };
-  }
-}
-
-/**
  * Register ideas API routes
  */
 export function registerIdeasRoutes(
   server: FastifyInstance,
   stateManager: StateManager
 ): void {
-  // Initialize ideas indexer
-  ideasIndexer = new IdeasIndexer(stateManager.db);
+  const db = stateManager.db;
 
-  // Initial index on startup
+  // Initialize ideas indexer (backward compat — chokidar watcher kept for now)
+  ideasIndexer = new IdeasIndexer(db);
   if (isIdeasMigrated()) {
     ideasIndexer.reindex();
     ideasIndexer.startWatching();
@@ -98,65 +52,64 @@ export function registerIdeasRoutes(
   server.get("/api/ideas", async (request: FastifyRequest) => {
     const query = request.query as { status?: string; limit?: string };
 
-    if (!ideasIndexer) {
-      return { ideas: [], migrated: false };
-    }
-
-    // Check if migrated
-    if (!isIdeasMigrated()) {
-      return { ideas: [], migrated: false, message: "Ideas not migrated. Run migration script first." };
-    }
-
-    const ideas = ideasIndexer.list({
+    const ideas = dao.getAllIdeas(db, {
       status: query.status,
       limit: query.limit ? parseInt(query.limit, 10) : undefined,
     });
 
-    // Enrich with full content from files
-    const enrichedIdeas = ideas.map((idea) => {
-      const parsed = idea.filePath ? parseIdeaFile(idea.filePath) : null;
-      return {
-        ...idea,
-        content: parsed?.content || "",
-        context: parsed?.context || null,
-        notes: parsed?.notes || null,
-        link: parsed?.link || null,
-        tags: idea.tags ? JSON.parse(idea.tags) : [],
-      };
-    });
-
-    return { ideas: enrichedIdeas, migrated: true };
+    return {
+      ideas: ideas.map((idea) => ({
+        id: idea.id,
+        title: idea.title,
+        status: idea.status,
+        source: idea.source,
+        tags: idea.tags ?? [],
+        content: idea.content || "",
+        context: idea.context || null,
+        notes: idea.notes || null,
+        link: idea.link || null,
+        filePath: idea.filePath || null,
+        contentHash: idea.contentHash || null,
+        createdAt: idea.timestamp || null,
+        linkedThreadId: idea.linkedExplorationThreadId || null,
+        linkedExplorationThreadId: idea.linkedExplorationThreadId || null,
+        linkedPlanId: idea.linkedPlanId || null,
+        exploration: idea.exploration || null,
+      })),
+      migrated: true,
+    };
   });
 
   // Get single idea
   server.get("/api/ideas/:id", async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = request.params as { id: string };
 
-    if (!ideasIndexer) {
-      reply.status(503);
-      return { error: "Ideas indexer not initialized" };
-    }
-
-    const idea = ideasIndexer.get(id);
+    const idea = dao.getIdea(db, id);
     if (!idea) {
       reply.status(404);
       return { error: "Idea not found" };
     }
 
-    // Get full content from file
-    const parsed = idea.filePath ? parseIdeaFile(idea.filePath) : null;
-    const linkedThreads = idea.linkedThreadId
-      ? stateManager.getThread(idea.linkedThreadId)
+    const linkedThread = idea.linkedExplorationThreadId
+      ? stateManager.getThread(idea.linkedExplorationThreadId)
       : null;
 
     return {
-      ...idea,
-      content: parsed?.content || "",
-      context: parsed?.context || null,
-      notes: parsed?.notes || null,
-      link: parsed?.link || null,
-      tags: idea.tags ? JSON.parse(idea.tags) : [],
-      thread: linkedThreads,
+      id: idea.id,
+      title: idea.title,
+      status: idea.status,
+      source: idea.source,
+      tags: idea.tags ?? [],
+      content: idea.content || "",
+      context: idea.context || null,
+      notes: idea.notes || null,
+      link: idea.link || null,
+      filePath: idea.filePath || null,
+      contentHash: idea.contentHash || null,
+      createdAt: idea.timestamp || null,
+      linkedThreadId: idea.linkedExplorationThreadId || null,
+      linkedPlanId: idea.linkedPlanId || null,
+      thread: linkedThread,
     };
   });
 
@@ -165,125 +118,85 @@ export function registerIdeasRoutes(
     const { id } = request.params as { id: string };
     const body = request.body as UpdateIdeaBody;
 
-    if (!ideasIndexer) {
-      reply.status(503);
-      return { error: "Ideas indexer not initialized" };
-    }
-
-    const idea = ideasIndexer.get(id);
-    if (!idea) {
+    const existing = dao.getIdea(db, id);
+    if (!existing) {
       reply.status(404);
       return { error: "Idea not found" };
     }
 
-    // For status-only updates, use Gemini CLI with MCP tool
-    const isStatusOnlyUpdate = body.status !== undefined &&
-      body.title === undefined &&
-      body.notes === undefined &&
-      body.content === undefined &&
-      body.context === undefined &&
-      body.tags === undefined &&
-      body.link === undefined;
+    const updated = dao.updateIdea(db, existing.id, {
+      status: body.status,
+      title: body.title,
+      notes: body.notes !== undefined
+        ? (existing.notes ? `${existing.notes}; ${body.notes}` : body.notes)
+        : undefined,
+      content: body.content,
+      context: body.context,
+      tags: body.tags,
+      link: body.link,
+    });
 
-    if (isStatusOnlyUpdate) {
-      // Use direct file update (searches all idea files by ID)
-      const result = findAndUpdateIdeaFile(id, { status: body.status });
-
-      if (!result.success) {
-        // Fallback: update just the index if file update fails
-        logger.warn({ id, error: result.error }, "File update failed, falling back to index-only update");
-        ideasIndexer.updateStatus(id, body.status!);
-      } else if (result.filePath) {
-        // Trigger reindex to pick up file changes
-        ideasIndexer.updateIdea(result.filePath);
-      }
-
-      return ideasIndexer.get(id);
-    }
-
-    // For other updates, use direct file manipulation
-    // First try direct path, then search by ID
-    let parsed = idea.filePath ? parseIdeaFile(idea.filePath) : null;
-
-    if (!parsed) {
-      // Try finding the file by ID search (handles path mismatches)
-      const { directory } = getIdeasPaths();
-      const files = readdirSync(directory).filter((f) => f.endsWith(".md"));
-
-      for (const file of files) {
-        const filePath = join(directory, file);
-        const candidate = parseIdeaFile(filePath);
-        if (candidate && (candidate.id === id || candidate.id.includes(id) || file.includes(id))) {
-          parsed = candidate;
-          // Update the index with correct path
-          idea.filePath = filePath;
-          break;
-        }
-      }
-    }
-
-    if (!parsed) {
+    if (!updated) {
       reply.status(500);
-      return { error: "Could not read idea file" };
+      return { error: "Failed to update idea" };
     }
 
-    // Apply updates
-    if (body.status !== undefined) {
-      parsed.status = body.status;
-    }
-    if (body.title !== undefined) {
-      parsed.title = body.title;
-    }
-    if (body.notes !== undefined) {
-      parsed.notes = body.notes;
-    }
-    if (body.content !== undefined) {
-      parsed.content = body.content;
-    }
-    if (body.context !== undefined) {
-      parsed.context = body.context;
-    }
-    if (body.tags !== undefined) {
-      parsed.tags = body.tags;
-    }
-    if (body.link !== undefined) {
-      parsed.link = body.link;
+    // Record feedback on status change
+    if (body.status && body.status !== existing.status) {
+      const statusDeltaMap: Record<string, number> = {
+        archived: -0.1,
+        planning: 0.15,
+        execution: 0.2,
+      };
+      try {
+        recordFeedback(db, {
+          contentType: "idea",
+          contentId: existing.id,
+          action: "status_change",
+          source: "web_ui",
+          delta: statusDeltaMap[body.status] ?? 0,
+          metadata: { from: existing.status, to: body.status },
+        });
+      } catch { /* best-effort */ }
     }
 
-    // Save and reindex (use corrected filePath if we found it)
-    const savedPath = saveIdeaFile(parsed);
-    ideasIndexer.updateIdea(savedPath);
-
-    return ideasIndexer.get(id);
+    return {
+      id: updated.id,
+      title: updated.title,
+      status: updated.status,
+      source: updated.source,
+      tags: updated.tags ?? [],
+      content: updated.content || "",
+      context: updated.context || null,
+      notes: updated.notes || null,
+      link: updated.link || null,
+      createdAt: updated.timestamp || null,
+      linkedThreadId: updated.linkedExplorationThreadId || null,
+      linkedExplorationThreadId: updated.linkedExplorationThreadId || null,
+      linkedPlanId: updated.linkedPlanId || null,
+      exploration: updated.exploration || null,
+    };
   });
 
   // Delete idea
   server.delete("/api/ideas/:id", async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = request.params as { id: string };
 
-    if (!ideasIndexer) {
-      reply.status(503);
-      return { error: "Ideas indexer not initialized" };
-    }
-
-    const idea = ideasIndexer.get(id);
-    if (!idea) {
+    const deleted = dao.deleteIdea(db, id);
+    if (!deleted) {
       reply.status(404);
       return { error: "Idea not found" };
     }
 
-    // Delete the file
-    if (idea.filePath) {
-      try {
-        unlinkSync(idea.filePath);
-      } catch (e) {
-        reply.status(500);
-        return { error: "Failed to delete idea file" };
-      }
-    }
-
-    // Remove from index
-    ideasIndexer.removeIdea(id);
+    try {
+      recordFeedback(db, {
+        contentType: "idea",
+        contentId: id,
+        action: "delete",
+        source: "web_ui",
+        delta: -0.15,
+      });
+    } catch { /* best-effort */ }
 
     return { deleted: true, id };
   });
@@ -297,7 +210,6 @@ export function registerIdeasRoutes(
       return { error: "title and content are required" };
     }
 
-    // Generate ID based on timestamp
     const now = new Date();
     const id = `idea_${now.toISOString().replace(/[-:T]/g, "").slice(0, 12)}`;
 
@@ -313,40 +225,31 @@ export function registerIdeasRoutes(
       timestamp: now.toISOString(),
     };
 
-    const filePath = saveIdeaFile(idea);
-
-    if (ideasIndexer) {
-      ideasIndexer.updateIdea(filePath);
-    }
+    const saved = dao.createIdea(db, idea);
 
     reply.status(201);
-    return { id, filePath };
+    return { id: saved.id, filePath: saved.filePath };
   });
 
   // Research idea (create linked thread)
   server.post("/api/ideas/:id/research", async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = request.params as { id: string };
 
-    if (!ideasIndexer) {
-      reply.status(503);
-      return { error: "Ideas indexer not initialized" };
-    }
-
-    const idea = ideasIndexer.get(id);
+    const idea = dao.getIdea(db, id);
     if (!idea) {
       reply.status(404);
       return { error: "Idea not found" };
     }
 
     // Check if already has linked thread
-    if (idea.linkedThreadId) {
+    if (idea.linkedExplorationThreadId) {
       return {
-        threadId: idea.linkedThreadId,
+        threadId: idea.linkedExplorationThreadId,
         message: "Idea already has a linked thread",
       };
     }
 
-    // Create a session and thread for researching this idea
+    // Create a session and thread
     const sessionId = randomUUID();
     stateManager.createChatSession({
       id: sessionId,
@@ -361,21 +264,27 @@ export function registerIdeasRoutes(
       provider: "claude",
     });
 
-    // Link thread to idea
     stateManager.createThreadLink({
       threadId,
       linkType: "idea",
-      linkId: id,
+      linkId: idea.id,
     });
-    ideasIndexer.linkThread(id, threadId);
 
-    // Update idea status to researching
-    const parsed = idea.filePath ? parseIdeaFile(idea.filePath) : null;
-    if (parsed) {
-      parsed.status = "researching";
-      saveIdeaFile(parsed);
-      ideasIndexer.updateIdea(idea.filePath!);
-    }
+    // Update idea
+    dao.updateIdea(db, idea.id, {
+      status: "researching",
+      linkedExplorationThreadId: threadId,
+    });
+
+    try {
+      recordFeedback(db, {
+        contentType: "idea",
+        contentId: idea.id,
+        action: "research",
+        source: "web_ui",
+        delta: 0.15,
+      });
+    } catch { /* best-effort */ }
 
     return {
       sessionId,
@@ -384,43 +293,29 @@ export function registerIdeasRoutes(
     };
   });
 
-  // Explore idea (create exploration thread with context)
+  // Explore idea
   server.post("/api/ideas/:id/explore", async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = request.params as { id: string };
 
-    if (!ideasIndexer) {
-      reply.status(503);
-      return { error: "Ideas indexer not initialized" };
-    }
-
-    const idea = ideasIndexer.get(id);
+    const idea = dao.getIdea(db, id);
     if (!idea) {
       reply.status(404);
       return { error: "Idea not found" };
     }
 
-    // Get full idea content
-    const parsed = idea.filePath ? parseIdeaFile(idea.filePath) : null;
-    if (!parsed) {
-      reply.status(500);
-      return { error: "Could not read idea file" };
-    }
-
     // Check if already has linked exploration thread - allow resuming
-    if (parsed.linkedExplorationThreadId) {
-      // Check if thread still exists
-      const existingThread = stateManager.getThread(parsed.linkedExplorationThreadId);
+    if (idea.linkedExplorationThreadId) {
+      const existingThread = stateManager.getThread(idea.linkedExplorationThreadId);
       if (existingThread) {
         return {
           sessionId: existingThread.chatSessionId,
-          threadId: parsed.linkedExplorationThreadId,
+          threadId: idea.linkedExplorationThreadId,
           message: "Resuming existing exploration thread",
           resumed: true,
         };
       }
     }
 
-    // Create a session and thread for exploring this idea
     const sessionId = randomUUID();
     stateManager.createChatSession({
       id: sessionId,
@@ -435,22 +330,21 @@ export function registerIdeasRoutes(
       provider: "claude",
     });
 
-    // Build exploration system message
     const systemMessage = `# Exploration Context
 
 You are helping explore and develop this idea into an actionable plan.
 
-## Idea File
-**File path:** ${idea.filePath}
-
-Read this file to get the full idea content, context, existing notes, and exploration history.
-You can also update it directly by editing the file — append to the ## Exploration or ## Notes sections as the conversation progresses.
-
 ## Idea Details
-**Title:** ${parsed.title}
-**Status:** ${parsed.status}
-${parsed.link ? `**Link:** ${parsed.link}` : ""}
-${parsed.tags?.length ? `**Tags:** ${parsed.tags.join(", ")}` : ""}
+**Title:** ${idea.title}
+**Status:** ${idea.status}
+${idea.link ? `**Link:** ${idea.link}` : ""}
+${idea.tags?.length ? `**Tags:** ${idea.tags.join(", ")}` : ""}
+
+## Content
+${idea.content}
+${idea.context ? `\n## Context\n${idea.context}` : ""}
+${idea.notes ? `\n## Notes\n${idea.notes}` : ""}
+${idea.exploration ? `\n## Previous Exploration\n${idea.exploration}` : ""}
 
 ## Your Role
 
@@ -461,12 +355,9 @@ Have a freeform conversation to understand this idea. Explore:
 - Resources - What's needed?
 - Risks & Dependencies
 
-As the conversation produces insights, append key points to the ## Exploration section of the idea file so they persist across sessions.
-
 When the user indicates they're ready ("ready", "create plan", "let's do it"),
 generate a structured plan and offer to save it.`;
 
-    // Add system message to thread
     stateManager.createThreadMessage({
       id: randomUUID(),
       threadId,
@@ -474,18 +365,26 @@ generate a structured plan and offer to save it.`;
       content: systemMessage,
     });
 
-    // Link thread to idea
     stateManager.createThreadLink({
       threadId,
       linkType: "idea",
-      linkId: id,
+      linkId: idea.id,
     });
 
-    // Update idea with exploration thread link
-    parsed.linkedExplorationThreadId = threadId;
-    parsed.status = "exploring";
-    saveIdeaFile(parsed);
-    ideasIndexer.updateIdea(idea.filePath!);
+    dao.updateIdea(db, idea.id, {
+      status: "exploring",
+      linkedExplorationThreadId: threadId,
+    });
+
+    try {
+      recordFeedback(db, {
+        contentType: "idea",
+        contentId: idea.id,
+        action: "explore",
+        source: "web_ui",
+        delta: 0.15,
+      });
+    } catch { /* best-effort */ }
 
     return {
       sessionId,
@@ -510,35 +409,20 @@ generate a structured plan and offer to save it.`;
     const { id } = request.params as { id: string };
     const body = request.body as CreatePlanBody;
 
-    if (!ideasIndexer) {
-      reply.status(503);
-      return { error: "Ideas indexer not initialized" };
-    }
-
-    const idea = ideasIndexer.get(id);
+    const idea = dao.getIdea(db, id);
     if (!idea) {
       reply.status(404);
       return { error: "Idea not found" };
     }
 
-    // Get full idea content
-    const parsed = idea.filePath ? parseIdeaFile(idea.filePath) : null;
-    if (!parsed) {
-      reply.status(500);
-      return { error: "Could not read idea file" };
-    }
+    const planTitle = body.title || idea.title;
+    const planDescription = body.description || idea.content;
 
-    // Use provided title or idea title
-    const planTitle = body.title || parsed.title;
-    const planDescription = body.description || parsed.content;
-
-    // Create slug from title
     const slug = planTitle
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-|-$/g, "");
 
-    // Build plan file content
     const now = new Date().toISOString().split("T")[0];
     const MEMORY_PATH = process.env.MEMORY_PATH ?? "/Users/yj/memory";
     const PLANS_DIR = join(MEMORY_PATH, "plans");
@@ -549,7 +433,7 @@ generate a structured plan and offer to save it.`;
 **Status:** planning
 **Created:** ${now}
 **Updated:** ${now}
-**Source Idea:** ${parsed.id}
+**Source Idea:** ${idea.id}
 `;
 
     if (body.phases && body.phases.length > 0) {
@@ -558,7 +442,6 @@ generate a structured plan and offer to save it.`;
 
     planContent += `\n## Description\n\n${planDescription}\n`;
 
-    // Add phases with tasks
     if (body.phases && body.phases.length > 0) {
       for (let i = 0; i < body.phases.length; i++) {
         const phase = body.phases[i];
@@ -573,37 +456,38 @@ generate a structured plan and offer to save it.`;
         }
       }
     } else {
-      // Default phases if none provided
       planContent += `\n## Phase 1: Planning\n\n- [ ] Define detailed requirements\n- [ ] Identify resources needed\n`;
       planContent += `\n## Phase 2: Execution\n\n- [ ] Implement core functionality\n- [ ] Test and validate\n`;
       planContent += `\n## Phase 3: Review\n\n- [ ] Review outcomes\n- [ ] Document learnings\n`;
     }
 
-    // Ensure plans directory exists
     const { mkdirSync, existsSync, writeFileSync } = await import("fs");
     if (!existsSync(PLANS_DIR)) {
       mkdirSync(PLANS_DIR, { recursive: true });
     }
-
-    // Write plan file
     writeFileSync(planPath, planContent, "utf-8");
 
-    // Append exploration summary to idea if provided
-    if (body.explorationSummary && idea.filePath) {
-      appendExploration(idea.filePath, `**Plan Created:** ${slug}\n\n${body.explorationSummary}`);
+    // Append exploration summary
+    if (body.explorationSummary) {
+      dao.appendExplorationNotes(db, idea.id, `**Plan Created:** ${slug}\n\n${body.explorationSummary}`);
     }
 
     // Update idea status and link to plan
-    const updatedParsed = parseIdeaFile(idea.filePath!);
-    if (updatedParsed) {
-      updatedParsed.status = "planning";
-      updatedParsed.linkedPlanId = slug;
-      saveIdeaFile(updatedParsed);
-    }
+    dao.updateIdea(db, idea.id, {
+      status: "planning",
+      linkedPlanId: slug,
+    });
 
-    // Update index
-    ideasIndexer.linkPlan(id, slug);
-    ideasIndexer.updateIdea(idea.filePath!);
+    try {
+      recordFeedback(db, {
+        contentType: "idea",
+        contentId: idea.id,
+        action: "plan_create",
+        source: "web_ui",
+        delta: 0.2,
+        metadata: { planId: slug },
+      });
+    } catch { /* best-effort */ }
 
     reply.status(201);
     return {

@@ -6,12 +6,17 @@ import type { StateManager } from "../../state/manager.js";
 import { updatePreferences, type PreferenceSignal } from "../../preferences/engine.js";
 import { trackIdeaProgress, trackIdeaArchived } from "../../outcomes/hooks.js";
 import {
+  recordFeedback,
+  createReviewSession,
+  completeReviewSession,
+  recordImpression,
+} from "../../feedback/events.js";
+import {
   loadIdeasFromDir,
   parseIdeasMd,
-  updateIdeaField,
-  appendIdeaNote,
   type ParsedIdea,
 } from "../../ideas/parser.js";
+import * as dao from "../../ideas/dao.js";
 
 const MEMORY_BASE = "/Users/yj/memory";
 const IDEAS_FILE = `${MEMORY_BASE}/ideas.md`;
@@ -37,6 +42,13 @@ interface PendingInstruction {
 }
 const pendingInstructionRequests = new Map<number, PendingInstruction>();
 
+// Track impressions for feedback event linking (ideaId -> impression data)
+interface ImpressionRecord {
+  impressionId: number;
+  displayedAt: number;
+}
+const pendingImpressions = new Map<string, ImpressionRecord>();
+
 let stateManagerRef: StateManager | null = null;
 
 // Cleanup stale entries every 5 minutes (entries older than 1 hour)
@@ -52,6 +64,13 @@ setInterval(() => {
     if (pending.createdAt < staleThreshold) {
       pendingInstructionRequests.delete(msgId);
       logger.info({ type: pending.type, id: pending.id, msgId }, "Cleaned up stale instruction request");
+    }
+  }
+  // Expire impression records older than 24 hours
+  const impressionStaleThreshold = Date.now() - 86400000; // 24 hours
+  for (const [ideaId, record] of pendingImpressions.entries()) {
+    if (record.displayedAt < impressionStaleThreshold) {
+      pendingImpressions.delete(ideaId);
     }
   }
 }, 300000); // Every 5 minutes
@@ -158,24 +177,21 @@ async function archiveIdea(
   ideaId: string,
   reason: string = "Archived"
 ): Promise<{ success: boolean; message: string; idea?: ParsedIdea }> {
-  // Try file-based system first
-  const dirIdeas = loadIdeasFromDir();
-  const dirIdea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
+  const db = stateManagerRef?.getDb();
 
-  if (dirIdea) {
-    const updated = await updateIdeaField(ideaId, "status", "archived");
-    if (updated) {
-      await appendIdeaNote(ideaId, reason);
-      await logDenyHistory(dirIdea.title, dirIdea.source, reason, dirIdea.link);
-      await logFeedback("archive", dirIdea.title, reason);
-      // Track outcome for archived idea
+  // DB-backed path (primary)
+  if (db) {
+    const idea = dao.getIdea(db, ideaId);
+    if (idea) {
+      dao.updateIdea(db, idea.id, { status: "archived" });
+      dao.appendNote(db, idea.id, reason);
+      await logDenyHistory(idea.title, idea.source, reason, idea.link);
+      await logFeedback("archive", idea.title, reason);
       try {
-        if (stateManagerRef) {
-          trackIdeaArchived(stateManagerRef.getDb(), ideaId, dirIdea.title);
-        }
-        sendPreferenceSignals(dirIdea, -0.1);
+        trackIdeaArchived(db, idea.id, idea.title);
+        sendPreferenceSignals(idea, -0.1);
       } catch { /* outcome tracking best-effort */ }
-      return { success: true, message: `Archived: ${dirIdea.title}`, idea: dirIdea };
+      return { success: true, message: `Archived: ${idea.title}`, idea };
     }
   }
 
@@ -211,16 +227,27 @@ async function addIdeaInstructions(
   ideaId: string,
   instructions: string
 ): Promise<{ success: boolean; message: string; title?: string }> {
-  // Try file-based system first
-  const dirIdeas = loadIdeasFromDir();
-  const dirIdea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
+  const db = stateManagerRef?.getDb();
 
-  if (dirIdea) {
-    const updated = await appendIdeaNote(ideaId, `User instructions: ${instructions}`);
-    if (updated) {
-      await logFeedback("instruction", dirIdea.title, instructions);
-      sendPreferenceSignals(dirIdea, 0.1);
-      return { success: true, message: `Instructions saved for ${dirIdea.title}`, title: dirIdea.title };
+  // DB-backed path (primary)
+  if (db) {
+    const idea = dao.getIdea(db, ideaId);
+    if (idea) {
+      dao.appendNote(db, idea.id, `User instructions: ${instructions}`);
+      await logFeedback("instruction", idea.title, instructions);
+      sendPreferenceSignals(idea, 0.1);
+      try {
+        recordFeedback(db, {
+          contentType: "idea",
+          contentId: ideaId,
+          action: "instruction",
+          source: "telegram",
+          impressionId: pendingImpressions.get(ideaId)?.impressionId,
+          delta: 0.1,
+          metadata: { instructions },
+        });
+      } catch { /* best-effort */ }
+      return { success: true, message: `Instructions saved for ${idea.title}`, title: idea.title };
     }
   }
 
@@ -408,6 +435,24 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
 
       if (result.success) {
         await ctx.editMessageText(`🗂 <b>${escapeHtml(result.message)}</b>`, { parse_mode: "HTML" });
+
+        // Record feedback event
+        const db = stateManagerRef?.getDb();
+        if (db) {
+          try {
+            recordFeedback(db, {
+              contentType: "idea",
+              contentId: ideaId,
+              action: "archive",
+              source: "telegram",
+              impressionId: pendingImpressions.get(ideaId)?.impressionId,
+              delta: -0.1,
+              responseTimeMs: pendingImpressions.has(ideaId)
+                ? Date.now() - pendingImpressions.get(ideaId)!.displayedAt
+                : undefined,
+            });
+          } catch { /* best-effort */ }
+        }
       } else {
         await ctx.editMessageText(`❌ ${escapeHtml(result.message)}`, { parse_mode: "HTML" });
       }
@@ -428,14 +473,27 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
 
     try {
       // Move back to draft — it'll show up again in a future review
-      const dirIdeas = loadIdeasFromDir();
-      const idea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
+      const db = stateManagerRef?.getDb();
+      const idea = db ? dao.getIdea(db, ideaId) : null;
 
-      if (idea) {
-        await updateIdeaField(ideaId, "status", "draft");
-        await appendIdeaNote(ideaId, "Snoozed — will resurface later");
+      if (idea && db) {
+        dao.updateIdea(db, idea.id, { status: "draft" });
+        dao.appendNote(db, idea.id, "Snoozed — will resurface later");
         await logFeedback("snooze", idea.title);
         sendPreferenceSignals(idea, 0.05); // weak positive signal
+        try {
+          recordFeedback(db, {
+            contentType: "idea",
+            contentId: ideaId,
+            action: "snooze",
+            source: "telegram",
+            impressionId: pendingImpressions.get(ideaId)?.impressionId,
+            delta: 0.05,
+            responseTimeMs: pendingImpressions.has(ideaId)
+              ? Date.now() - pendingImpressions.get(ideaId)!.displayedAt
+              : undefined,
+          });
+        } catch { /* best-effort */ }
         await ctx.editMessageText(`💤 <b>Snoozed: ${escapeHtml(idea.title)}</b>`, { parse_mode: "HTML" });
       } else {
         await ctx.editMessageText(`❌ Idea not found: ${escapeHtml(ideaId)}`, { parse_mode: "HTML" });
@@ -459,10 +517,10 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       await ctx.answerCallbackQuery("Starting analysis...");
 
       // Load idea
-      const dirIdeas = loadIdeasFromDir();
-      const idea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
+      const db = stateManagerRef?.getDb();
+      const idea = db ? dao.getIdea(db, ideaId) : null;
 
-      if (!idea) {
+      if (!idea || !db) {
         await ctx.editMessageText(`❌ Idea not found: ${escapeHtml(ideaId)}`, { parse_mode: "HTML" });
         return;
       }
@@ -476,8 +534,8 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       );
 
       // Update status + append note
-      await updateIdeaField(ideaId, "status", "discussion");
-      await appendIdeaNote(ideaId, "Multi-model analysis started");
+      dao.updateIdea(db, idea.id, { status: "discussion" });
+      dao.appendNote(db, idea.id, "Multi-model analysis started");
       await logFeedback("talk", idea.title);
 
       // Track outcome for this idea entering discussion
@@ -487,6 +545,21 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
         }
       sendPreferenceSignals(idea, 0.15);
       } catch { /* outcome tracking best-effort */ }
+
+      // Record feedback event
+      try {
+        recordFeedback(db, {
+          contentType: "idea",
+          contentId: ideaId,
+          action: "talk",
+          source: "telegram",
+          impressionId: pendingImpressions.get(ideaId)?.impressionId,
+          delta: 0.15,
+          responseTimeMs: pendingImpressions.has(ideaId)
+            ? Date.now() - pendingImpressions.get(ideaId)!.displayedAt
+            : undefined,
+        });
+      } catch { /* best-effort */ }
 
       // Build notify callback using bot.api (ctx expires after handler returns)
       const chatId = ctx.chat?.id;
@@ -511,7 +584,7 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
           },
           notify
         ).then(() => {
-          appendIdeaNote(ideaId, "Analysis complete").catch(() => { });
+          try { if (db) dao.appendNote(db, idea.id, "Analysis complete"); } catch { /* best-effort */ }
         }).catch(async (err) => {
           const msg = err instanceof Error ? err.message : String(err);
           logger.error({ ideaId, error: msg }, "Idea analysis failed");
@@ -536,14 +609,14 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
     logger.info({ ideaId }, "Add instructions clicked");
 
     try {
-      // Look up idea from both systems
-      const dirIdeas = loadIdeasFromDir();
-      let idea = dirIdeas.find(i => i.id === ideaId || i.id.startsWith(ideaId));
+      // Look up idea from DB, fallback to legacy
+      const db = stateManagerRef?.getDb();
+      let idea = db ? dao.getIdea(db, ideaId) : null;
 
       if (!idea && existsSync(IDEAS_FILE)) {
         const content = await readFile(IDEAS_FILE, "utf-8");
         const legacyIdeas = parseIdeasMd(content);
-        idea = findIdea(legacyIdeas, ideaId);
+        idea = findIdea(legacyIdeas, ideaId) ?? null;
       }
 
       if (!idea) {
@@ -684,9 +757,11 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
     }
   }
 
-  // Load drafts from BOTH systems, dedup by ID
-  const dirIdeas = loadIdeasFromDir();
-  const dirDrafts = dirIdeas.filter(i => i.status === "draft");
+  // Load drafts — DB primary, legacy fallback
+  const db = stateManagerRef?.getDb();
+  const dirDrafts = db
+    ? dao.getAllIdeas(db, { status: "draft" })
+    : loadIdeasFromDir().filter(i => i.status === "draft");
 
   let legacyDrafts: ParsedIdea[] = [];
   if (existsSync(IDEAS_FILE)) {
@@ -735,6 +810,16 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
     return 0;
   }
 
+  // Create review session for feedback tracking
+  let reviewSessionId: string | undefined;
+  if (db) {
+    try {
+      reviewSessionId = createReviewSession(db, "idea_review", selected.length);
+    } catch (err) {
+      logger.warn({ error: err }, "Failed to create review session");
+    }
+  }
+
   // Send header
   await bot.api.sendMessage(
     chatId,
@@ -756,13 +841,35 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
       });
       sent++;
 
+      // Record impression for feedback linking
+      if (db && reviewSessionId) {
+        try {
+          const impressionId = recordImpression(db, {
+            sessionId: reviewSessionId,
+            contentType: "idea",
+            contentId: idea.id,
+            position: i,
+            scoreAtDisplay: scored.find(s => s.idea.id === idea.id)?.score,
+            metadata: { primaryTag: scored.find(s => s.idea.id === idea.id)?.primaryTag },
+          });
+          pendingImpressions.set(idea.id, {
+            impressionId,
+            displayedAt: Date.now(),
+          });
+        } catch (err) {
+          logger.warn({ error: err, ideaId: idea.id }, "Failed to record impression");
+        }
+      }
+
       // Mark as review only after successful send
-      const isFileBased = dirDrafts.some(d => d.id === idea.id);
-      if (isFileBased) {
-        await updateIdeaField(idea.id, "status", "review");
+      if (db) {
+        dao.updateIdea(db, idea.id, { status: "review" });
       } else {
-        // Legacy system — update in memory and write once after loop
-        idea.status = "review";
+        const isFileBased = dirDrafts.some(d => d.id === idea.id);
+        if (!isFileBased) {
+          // Legacy system — update in memory and write once after loop
+          idea.status = "review";
+        }
       }
     } catch (error) {
       logger.error({ error, ideaId: idea.id }, "Failed to send idea for review");
@@ -784,6 +891,11 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
       if (found) found.status = "review";
     }
     await writeFile(IDEAS_FILE, rebuildIdeasFile(legacyIdeas), "utf-8");
+  }
+
+  // Complete review session
+  if (db && reviewSessionId) {
+    try { completeReviewSession(db, reviewSessionId); } catch { /* best-effort */ }
   }
 
   if (stateManagerRef && sent > 0) {
@@ -843,6 +955,16 @@ export function registerPlanApprovalHandlers(bot: Bot, stateManager: StateManage
 
     logger.info({ jobId }, "Plan approved by user");
     await logFeedback("approve", `Plan ${jobId}`);
+    try {
+      const db = stateManager.getDb();
+      recordFeedback(db, {
+        contentType: "plan",
+        contentId: jobId,
+        action: "approve",
+        source: "telegram",
+        delta: 0.15,
+      });
+    } catch { /* best-effort */ }
 
     // Fire-and-forget plan execution
     import("../../scheduler/plan-executor.js").then(({ executePlan }) => {
@@ -883,6 +1005,16 @@ export function registerPlanApprovalHandlers(bot: Bot, stateManager: StateManage
     await ctx.reply(`🗑️ Plan rejected and discarded: ${jobId}`);
     logger.info({ jobId }, "Plan rejected by user");
     await logFeedback("reject", `Plan ${jobId}`);
+    try {
+      const db = stateManager.getDb();
+      recordFeedback(db, {
+        contentType: "plan",
+        contentId: jobId,
+        action: "reject",
+        source: "telegram",
+        delta: -0.1,
+      });
+    } catch { /* best-effort */ }
   });
 
   // /plans - List pending plans
@@ -967,6 +1099,16 @@ export function registerPlanApprovalCallbacks(bot: Bot, stateManager: StateManag
     await ctx.answerCallbackQuery("Plan approved — executing!");
     logger.info({ jobId }, "Plan approved via inline button");
     await logFeedback("approve", `Plan ${jobId}`);
+    try {
+      const db = stateManager.getDb();
+      recordFeedback(db, {
+        contentType: "plan",
+        contentId: jobId,
+        action: "approve",
+        source: "telegram",
+        delta: 0.15,
+      });
+    } catch { /* best-effort */ }
 
     // Fire-and-forget plan execution — clear plan only after launch succeeds
     const chatId = ctx.chat?.id;
@@ -1011,6 +1153,16 @@ export function registerPlanApprovalCallbacks(bot: Bot, stateManager: StateManag
     await ctx.answerCallbackQuery("Plan rejected");
     logger.info({ jobId }, "Plan rejected via inline button");
     await logFeedback("reject", `Plan ${jobId}`);
+    try {
+      const db = stateManager.getDb();
+      recordFeedback(db, {
+        contentType: "plan",
+        contentId: jobId,
+        action: "reject",
+        source: "telegram",
+        delta: -0.1,
+      });
+    } catch { /* best-effort */ }
   });
 
   bot.callbackQuery(/^a:p:([^:]+):note$/, async (ctx) => {

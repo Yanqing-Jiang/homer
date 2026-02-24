@@ -238,10 +238,12 @@ export class Scheduler {
     "ideas-explore": ["idea-synthesizer"],
     "content-scraper": ["idea-synthesizer"],
     "idea-synthesizer": ["idea-dedup"],
+    "idea-dedup": ["memory-embeddings"],
     "job-hunt-discover": ["job-hunt-daily-approval"],
     "session-harvester": ["memory-reindex"],
     "memory-reindex": ["memory-embeddings"],
     "nightly-memory": ["memory-embeddings", "memory-git-commit"],
+    "night-supervisor": ["memory-embeddings"],
     "outcome-tracker": ["preference-updater"],
   };
 
@@ -282,6 +284,7 @@ export class Scheduler {
             stateManager: this.stateManager,
             bot: this.bot,
             chatId: this.chatId,
+            jobRunId: runId,
           })
         : await executeScheduledJob(job, onProgress, takeoverEnabled ? { skipDiagnosis: true } : undefined);
 

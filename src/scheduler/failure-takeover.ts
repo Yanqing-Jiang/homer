@@ -439,6 +439,7 @@ export async function runFailureTakeover(params: {
             stateManager,
             bot,
             chatId,
+            jobRunId: runId,
           });
         } else {
           retryResult = await executeScheduledJob(job, undefined, {

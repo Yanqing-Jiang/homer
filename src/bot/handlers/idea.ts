@@ -7,13 +7,18 @@ import {
   getIdeasPaths,
   type ParsedIdea,
 } from "../../ideas/parser.js";
+import * as dao from "../../ideas/dao.js";
 import { join } from "path";
 import { readdirSync, unlinkSync } from "fs";
+import type { StateManager } from "../../state/manager.js";
 
 /**
  * Register /idea command and its subcommands
  */
-export function registerIdeaCommands(bot: Bot, _stateManager: unknown): void {
+let stateManagerRef: StateManager | null = null;
+
+export function registerIdeaCommands(bot: Bot, stateManager: unknown): void {
+  stateManagerRef = stateManager as StateManager;
   bot.command("idea", async (ctx) => {
     const input = ctx.match?.trim() || "";
     const parts = input.split(/\s+/);
@@ -73,7 +78,8 @@ async function handleAdd(ctx: any, titleInput: string): Promise<void> {
   const title = titleInput.trim();
 
   // Check for duplicates by title similarity
-  const existing = loadIdeasFromDir();
+  const db = getDb();
+  const existing = db ? dao.getAllIdeas(db) : loadIdeasFromDir();
   const lowerTitle = title.toLowerCase();
   const dupe = existing.find((i) =>
     i.title.toLowerCase() === lowerTitle ||
@@ -105,7 +111,11 @@ async function handleAdd(ctx: any, titleInput: string): Promise<void> {
     timestamp: now.toISOString(),
   };
 
-  saveIdeaFile(idea);
+  if (db) {
+    dao.createIdea(db, idea);
+  } else {
+    saveIdeaFile(idea);
+  }
 
   const keyboard = new InlineKeyboard()
     .text("Archive", `a:i:${id}:archive`)
@@ -123,8 +133,11 @@ async function handleAdd(ctx: any, titleInput: string): Promise<void> {
 }
 
 async function handleList(ctx: any, statusFilter?: string): Promise<void> {
-  const ideas = loadIdeasFromDir();
+  const db = getDb();
   const filter = statusFilter?.toLowerCase() || "draft";
+  const ideas = (filter === "all")
+    ? (db ? dao.getAllIdeas(db) : loadIdeasFromDir())
+    : (db ? dao.getAllIdeas(db, { status: filter }) : loadIdeasFromDir());
 
   const validStatuses = ["draft", "review", "planning", "execution", "archived", "all"];
   if (!validStatuses.includes(filter)) {
@@ -235,6 +248,8 @@ async function handleUpdate(ctx: any, idInput?: string, field?: string, value?: 
     return;
   }
 
+  const db = getDb();
+
   switch (field.toLowerCase()) {
     case "status": {
       const validStatuses = ["draft", "review", "planning", "execution", "archived"];
@@ -242,21 +257,34 @@ async function handleUpdate(ctx: any, idInput?: string, field?: string, value?: 
         await ctx.reply(`Invalid status. Use: ${validStatuses.join(", ")}`);
         return;
       }
-      idea.status = value;
+      if (db) {
+        dao.updateIdea(db, idea.id, { status: value });
+      } else {
+        idea.status = value;
+        saveIdeaFile(idea);
+      }
       break;
     }
     case "title":
-      idea.title = value;
+      if (db) {
+        dao.updateIdea(db, idea.id, { title: value });
+      } else {
+        idea.title = value;
+        saveIdeaFile(idea);
+      }
       break;
     case "note": {
-      const timestamp = new Date().toISOString().slice(0, 16).replace("T", " ");
-      const note = `[${timestamp}] ${value}`;
-      idea.notes = idea.notes ? `${idea.notes}\n${note}` : note;
+      if (db) {
+        dao.appendNote(db, idea.id, value);
+      } else {
+        const timestamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+        const note = `[${timestamp}] ${value}`;
+        idea.notes = idea.notes ? `${idea.notes}\n${note}` : note;
+        saveIdeaFile(idea);
+      }
       break;
     }
   }
-
-  saveIdeaFile(idea);
 
   await ctx.reply(
     `Updated *${idea.title}*\n` +
@@ -284,8 +312,13 @@ async function handleArchive(ctx: any, idInput?: string): Promise<void> {
     return;
   }
 
-  idea.status = "archived";
-  saveIdeaFile(idea);
+  const db = getDb();
+  if (db) {
+    dao.updateIdea(db, idea.id, { status: "archived" });
+  } else {
+    idea.status = "archived";
+    saveIdeaFile(idea);
+  }
 
   await ctx.reply(
     `Archived: *${idea.title}*\n` +
@@ -325,13 +358,41 @@ async function handleSearch(ctx: any, query: string): Promise<void> {
     return;
   }
 
-  const ideas = loadIdeasFromDir();
-  const lower = query.toLowerCase();
-  const matches = ideas.filter((i) =>
-    i.title.toLowerCase().includes(lower) ||
-    i.content?.toLowerCase().includes(lower) ||
-    i.tags?.some((t) => t.toLowerCase().includes(lower))
-  );
+  const db = getDb();
+
+  // Try FTS first, fallback to string match
+  let matches: ParsedIdea[];
+  if (db) {
+    const ftsResults = dao.searchIdeas(db, query, 10);
+    if (ftsResults.length > 0) {
+      matches = ftsResults.map(r => ({
+        id: r.id,
+        title: r.title,
+        status: r.status,
+        source: r.source ?? "",
+        content: r.content,
+        tags: [],
+        timestamp: r.created_at ?? "",
+      }));
+    } else {
+      // FTS found nothing, try substring match in DB
+      const all = dao.getAllIdeas(db);
+      const lower = query.toLowerCase();
+      matches = all.filter((i) =>
+        i.title.toLowerCase().includes(lower) ||
+        i.content?.toLowerCase().includes(lower) ||
+        i.tags?.some((t) => t.toLowerCase().includes(lower))
+      );
+    }
+  } else {
+    const ideas = loadIdeasFromDir();
+    const lower = query.toLowerCase();
+    matches = ideas.filter((i) =>
+      i.title.toLowerCase().includes(lower) ||
+      i.content?.toLowerCase().includes(lower) ||
+      i.tags?.some((t) => t.toLowerCase().includes(lower))
+    );
+  }
 
   if (matches.length === 0) {
     await ctx.reply(`No ideas matching: *${query}*`, { parse_mode: "Markdown" });
@@ -367,8 +428,13 @@ export function registerIdeaCallbacks(bot: Bot): void {
       return;
     }
 
-    idea.status = "review";
-    saveIdeaFile(idea);
+    const db = getDb();
+    if (db) {
+      dao.updateIdea(db, idea.id, { status: "review" });
+    } else {
+      idea.status = "review";
+      saveIdeaFile(idea);
+    }
 
     await ctx.answerCallbackQuery({ text: "Moved to review" });
     await ctx.editMessageText(
@@ -383,13 +449,18 @@ export function registerIdeaCallbacks(bot: Bot): void {
   bot.callbackQuery(/^idea:delete:(.+)$/, async (ctx) => {
     const ideaId = ctx.match![1]!;
     const idea = findIdeaById(ideaId);
-    if (!idea || !idea.filePath) {
+    if (!idea) {
       await ctx.answerCallbackQuery({ text: "Idea not found" });
       return;
     }
 
     try {
-      unlinkSync(idea.filePath);
+      const db = getDb();
+      if (db) {
+        dao.deleteIdea(db, idea.id);
+      } else if (idea.filePath) {
+        unlinkSync(idea.filePath);
+      }
       await ctx.answerCallbackQuery({ text: "Deleted" });
       await ctx.editMessageText(`Deleted: ${idea.title}`);
       logger.info({ id: ideaId, title: idea.title }, "Idea deleted via /idea command");
@@ -408,7 +479,21 @@ export function registerIdeaCallbacks(bot: Bot): void {
 
 // --- Helpers ---
 
+function getDb() {
+  return stateManagerRef ? (stateManagerRef as any).getDb() : null;
+}
+
 function findIdeaById(idInput: string): ParsedIdea | null {
+  const db = getDb();
+
+  // DB is source of truth — if available, only use DB lookup
+  if (db) {
+    const normalized = idInput.startsWith("idea_") ? idInput : `idea_${idInput}`;
+    return dao.getIdea(db, normalized) ?? dao.getIdea(db, idInput);
+  }
+
+  // File scan ONLY when DB is unavailable (offline mode)
+  logger.warn("findIdeaById: DB unavailable, falling back to file scan");
   const { directory } = getIdeasPaths();
   const normalized = idInput.startsWith("idea_") ? idInput : `idea_${idInput}`;
 
@@ -418,7 +503,6 @@ function findIdeaById(idInput: string): ParsedIdea | null {
     const idea = parseIdeaFile(filePath);
     if (!idea) continue;
 
-    // Match by exact ID, partial ID, or filename
     if (
       idea.id === normalized ||
       idea.id === idInput ||

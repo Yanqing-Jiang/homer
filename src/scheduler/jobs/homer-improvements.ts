@@ -23,6 +23,7 @@ import { loadIdeasFromDir, saveIdeaFile, type ParsedIdea } from "../../ideas/par
 import { logger } from "../../utils/logger.js";
 import type Database from "better-sqlite3";
 import { trackImprovement } from "../../outcomes/hooks.js";
+import { storeJobArtifact } from "./artifact-store.js";
 
 const HOMER_DIR = "/Users/yj/homer";
 const GEMINI_OUTPUT_DIR = "/Users/yj/homer/output/gemini";
@@ -226,7 +227,7 @@ Write the following to ${outputPath} (create any missing directories):
 After writing the file, respond with a 2-sentence summary of your recommendation.`;
 }
 
-export async function runHomerImprovements(db?: Database.Database): Promise<{
+export async function runHomerImprovements(db?: Database.Database, jobRunId?: number): Promise<{
   success: boolean;
   output: string;
   error?: string;
@@ -353,6 +354,12 @@ Return ONLY a JSON object (no markdown, no explanation):
 
     if (!consolidation.output) {
       return { success: false, output: "", error: "Consolidation API returned empty response" };
+    }
+
+    // Store consolidation artifact
+    if (db && jobRunId) {
+      storeJobArtifact(db, jobRunId, "homer-improvements", "consolidation", "json",
+        consolidation.output, { inputTokens: consolidation.inputTokens, outputTokens: consolidation.outputTokens });
     }
 
     let improvement: z.infer<typeof ImprovementSchema>;
