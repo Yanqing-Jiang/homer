@@ -12,6 +12,7 @@ import { executeGeminiWithFallback } from "../executors/opencode-cli.js";
 import { extractTranscript } from "./transcript.js";
 import { logger } from "../utils/logger.js";
 import type { YouTubeSummaryMetadata } from "../overnight/types.js";
+import type Database from "better-sqlite3";
 
 const MEMORY_PATH = process.env.MEMORY_PATH ?? "/Users/yj/memory";
 const SUMMARIES_DIR = `${process.env.HOME}/homer/data/youtube-summaries`;
@@ -158,6 +159,160 @@ export function summaryFileExists(videoId: string): string | null {
   return match ? join(SUMMARIES_DIR, match) : null;
 }
 
+/**
+ * Check if a video exists in the youtube_videos DB table.
+ * Returns true if found (with or without summary).
+ */
+export function videoExistsInDb(db: Database.Database, videoId: string): boolean {
+  try {
+    const row = db.prepare("SELECT 1 FROM youtube_videos WHERE video_id = ?").get(videoId);
+    return !!row;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if a summary exists — DB first, then file fallback.
+ */
+export function summaryExists(videoId: string, db?: Database.Database): boolean {
+  if (db && videoExistsInDb(db, videoId)) return true;
+  return !!summaryFileExists(videoId);
+}
+
+/**
+ * Insert or update a video summary in the youtube_videos table.
+ */
+function upsertYouTubeVideo(
+  db: Database.Database,
+  videoId: string,
+  videoUrl: string,
+  parsed: Record<string, unknown>,
+  transcriptText: string,
+  transcriptMethod: string,
+): void {
+  try {
+    const videoTitle = String(parsed.videoTitle ?? "");
+    const channelName = String(parsed.channelName ?? "");
+    const relevanceScore = Number(parsed.relevanceScore ?? 0);
+    const summary = formatSummaryMarkdown(parsed);
+
+    db.prepare(`
+      INSERT INTO youtube_videos (video_id, url, title, channel_name, transcript, summary, relevance_score, metadata, transcript_method)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(video_id) DO UPDATE SET
+        title = excluded.title,
+        channel_name = excluded.channel_name,
+        transcript = excluded.transcript,
+        summary = excluded.summary,
+        relevance_score = excluded.relevance_score,
+        metadata = excluded.metadata,
+        transcript_method = excluded.transcript_method,
+        processed_at = datetime('now')
+    `).run(
+      videoId,
+      videoUrl,
+      videoTitle,
+      channelName,
+      transcriptText,
+      summary,
+      relevanceScore,
+      JSON.stringify({
+        keyTakeaways: parsed.keyTakeaways,
+        actionableSuggestions: parsed.actionableSuggestions,
+        homerImprovements: parsed.homerImprovements,
+      }),
+      transcriptMethod,
+    );
+
+    logger.info({ videoId, relevanceScore }, "YouTube video upserted to DB");
+  } catch (error) {
+    logger.warn({ videoId, error }, "Failed to upsert YouTube video to DB (non-fatal)");
+  }
+}
+
+/**
+ * Format parsed summary fields into a single markdown string for DB storage.
+ */
+function formatSummaryMarkdown(parsed: Record<string, unknown>): string {
+  const parts: string[] = [];
+  if (parsed.summary) parts.push(`## Summary\n${String(parsed.summary)}`);
+  if (Array.isArray(parsed.keyTakeaways)) {
+    parts.push(`## Key Takeaways\n${parsed.keyTakeaways.map((t: unknown) => `- ${String(t)}`).join("\n")}`);
+  }
+  if (parsed.projectConnections) parts.push(`## Project Connections\n${String(parsed.projectConnections)}`);
+  if (parsed.homerImprovements) parts.push(`## Homer Improvements\n${String(parsed.homerImprovements)}`);
+  if (parsed.careerRelevance) parts.push(`## Career & Life Relevance\n${String(parsed.careerRelevance)}`);
+  if (Array.isArray(parsed.actionableSuggestions)) {
+    parts.push(`## Actionable Suggestions\n${parsed.actionableSuggestions.map((s: unknown) => `- ${String(s)}`).join("\n")}`);
+  }
+  if (parsed.relevanceScore != null) {
+    parts.push(`## Relevance\n**Score:** ${parsed.relevanceScore}/10 — ${String(parsed.relevanceReason ?? "")}`);
+  }
+  return parts.join("\n\n");
+}
+
+/**
+ * Mark a video as reviewed — updates DB and/or file.
+ */
+export function markSummaryReviewedV2(videoId: string, db?: Database.Database): void {
+  // DB update
+  if (db) {
+    try {
+      db.prepare("UPDATE youtube_videos SET reviewed_at = datetime('now') WHERE video_id = ?").run(videoId);
+    } catch (error) {
+      logger.warn({ videoId, error }, "Failed to mark video reviewed in DB");
+    }
+  }
+
+  // File update (mirror)
+  markSummaryReviewed(videoId);
+}
+
+/**
+ * Read a YouTube summary from DB. Returns parsed fields or null.
+ */
+export function getYouTubeVideoFromDb(db: Database.Database, videoId: string): {
+  videoId: string;
+  url: string;
+  title: string;
+  channelName: string;
+  summary: string;
+  relevanceScore: number;
+  metadata: string;
+  reviewedAt: string | null;
+} | null {
+  try {
+    const row = db.prepare(
+      "SELECT video_id, url, title, channel_name, summary, relevance_score, metadata, reviewed_at FROM youtube_videos WHERE video_id = ?"
+    ).get(videoId) as {
+      video_id: string;
+      url: string;
+      title: string;
+      channel_name: string;
+      summary: string;
+      relevance_score: number;
+      metadata: string;
+      reviewed_at: string | null;
+    } | undefined;
+
+    if (!row) return null;
+
+    return {
+      videoId: row.video_id,
+      url: row.url,
+      title: row.title,
+      channelName: row.channel_name,
+      summary: row.summary ?? "",
+      relevanceScore: row.relevance_score ?? 0,
+      metadata: row.metadata ?? "{}",
+      reviewedAt: row.reviewed_at,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function writeSummaryFile(
   videoId: string,
   videoUrl: string,
@@ -246,15 +401,20 @@ export interface SummarizeResult {
 }
 
 /**
- * Full pipeline for a single video: extract transcript → Gemini summarize → write file.
+ * Full pipeline for a single video: extract transcript → Gemini summarize → write to DB + file.
  * Caller is responsible for semaphore acquire/release.
  */
 export async function summarizeYouTubeVideo(
-  metadata: YouTubeSummaryMetadata
+  metadata: YouTubeSummaryMetadata,
+  db?: Database.Database,
 ): Promise<SummarizeResult> {
   const { videoId, videoUrl } = metadata;
 
-  // Check if already summarized
+  // Check if already summarized (DB first, then file)
+  if (db && videoExistsInDb(db, videoId)) {
+    logger.info({ videoId }, "Video already in DB, skipping");
+    return { success: true, summaryPath: summaryFileExists(videoId) ?? undefined };
+  }
   const existing = summaryFileExists(videoId);
   if (existing) {
     logger.info({ videoId, path: existing }, "Video already summarized, skipping");
@@ -308,7 +468,12 @@ export async function summarizeYouTubeVideo(
     metadata.channelName = String(parsed.channelName ?? metadata.channelName ?? "");
     metadata.relevanceScore = Number(parsed.relevanceScore ?? 0);
 
-    // Write summary file
+    // Write to DB (source of truth)
+    if (db) {
+      upsertYouTubeVideo(db, videoId, videoUrl, parsed, transcriptText, transcriptMethod);
+    }
+
+    // Write summary file (mirror)
     const summaryPath = writeSummaryFile(videoId, videoUrl, parsed);
 
     return { success: true, summaryPath, parsed };

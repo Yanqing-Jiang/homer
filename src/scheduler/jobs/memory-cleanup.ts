@@ -11,16 +11,16 @@
  * Safety: backup before write, 10% sanity floor (catches API errors), per-file isolation.
  */
 
-import { readFile, writeFile, mkdir, readdir, unlink } from "fs/promises";
+import { readFile, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import { executeGeminiAPI } from "../../executors/gemini.js";
 import { logger } from "../../utils/logger.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
 import { buildSchedulerContext } from "../shared-context.js";
+import { StateManager } from "../../state/manager.js";
 
 const MEMORY_DIR = "/Users/yj/memory";
-const BACKUP_DIR = `${MEMORY_DIR}/backups`;
-const BACKUP_RETENTION_DAYS = 28;
+const DB_PATH = "/Users/yj/homer/data/homer.db";
 
 const FILES_TO_CLEAN = [
   { name: "preferences.md", path: `${MEMORY_DIR}/preferences.md` },
@@ -160,39 +160,16 @@ ${fileContent}`;
 }
 
 /**
- * Create a backup of a file before cleaning.
+ * Snapshot a file to memory_file_snapshots before cleaning.
  */
-async function backupFile(filePath: string, fileName: string, date: string): Promise<string> {
-  await mkdir(BACKUP_DIR, { recursive: true });
-  const baseName = fileName.replace(".md", "");
-  const backupPath = `${BACKUP_DIR}/${baseName}.${date}.bak.md`;
-  const content = await readFile(filePath, "utf-8");
-  await writeFile(backupPath, content, "utf-8");
-  return backupPath;
-}
-
-/**
- * Prune backups older than BACKUP_RETENTION_DAYS.
- */
-async function pruneOldBackups(): Promise<number> {
-  if (!existsSync(BACKUP_DIR)) return 0;
-
-  const files = await readdir(BACKUP_DIR);
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - BACKUP_RETENTION_DAYS);
-  const cutoffStr = cutoff.toISOString().slice(0, 10); // YYYY-MM-DD
-
-  let pruned = 0;
-  for (const file of files) {
-    if (!file.endsWith(".bak.md")) continue;
-    // Extract date from filename: name.YYYY-MM-DD.bak.md
-    const dateMatch = file.match(/\.(\d{4}-\d{2}-\d{2})\.bak\.md$/);
-    if (dateMatch && dateMatch[1]! < cutoffStr) {
-      await unlink(`${BACKUP_DIR}/${file}`);
-      pruned++;
-    }
+function snapshotFileToDb(sm: StateManager, fileName: string, content: string): void {
+  try {
+    sm.snapshotMemoryFile(fileName, content, "pre-cleanup");
+    logger.debug({ fileName }, "Snapshotted memory file to DB before cleanup");
+  } catch (error) {
+    logger.warn({ error, fileName }, "Failed to snapshot memory file to DB");
+    throw error;
   }
-  return pruned;
 }
 
 interface FileResult {
@@ -204,13 +181,18 @@ interface FileResult {
   error?: string;
 }
 
-export async function runWeeklyMemoryCleanup(): Promise<{
+export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promise<{
   success: boolean;
   output: string;
   error?: string;
 }> {
   const date = getTodayDateString();
   logger.info({ date }, "Starting weekly memory cleanup");
+
+  const sm = stateManager ?? new StateManager(DB_PATH);
+  const ownedSm = !stateManager;
+
+  try {
 
   // Pre-read all file contents for cross-reference
   const allFileContents = new Map<string, string>();
@@ -250,9 +232,9 @@ export async function runWeeklyMemoryCleanup(): Promise<{
 
     const originalLines = fileContent.split("\n").length;
 
-    // 1. Backup
+    // 1. Snapshot to DB (replaces .bak.md files)
     try {
-      await backupFile(file.path, file.name, date);
+      snapshotFileToDb(sm, file.name, fileContent);
     } catch (backupErr) {
       const msg = backupErr instanceof Error ? backupErr.message : String(backupErr);
       results.push({
@@ -261,7 +243,7 @@ export async function runWeeklyMemoryCleanup(): Promise<{
         originalLines,
         cleanedLines: 0,
         changelog: "",
-        error: `Backup failed: ${msg}`,
+        error: `Snapshot failed: ${msg}`,
       });
       continue;
     }
@@ -366,17 +348,6 @@ export async function runWeeklyMemoryCleanup(): Promise<{
     logger.warn({ error: indexErr }, "Failed to reindex memory files after cleanup");
   }
 
-  // Prune old backups
-  let backupsPruned = 0;
-  try {
-    backupsPruned = await pruneOldBackups();
-    if (backupsPruned > 0) {
-      logger.info({ pruned: backupsPruned }, "Pruned old backups");
-    }
-  } catch (pruneErr) {
-    logger.warn({ error: pruneErr }, "Failed to prune old backups");
-  }
-
   // Build summary output
   const successCount = results.filter((r) => r.success).length;
   const totalFiles = results.length;
@@ -397,10 +368,6 @@ export async function runWeeklyMemoryCleanup(): Promise<{
     }
   }
 
-  if (backupsPruned > 0) {
-    lines.push("", `Pruned ${backupsPruned} backups older than ${BACKUP_RETENTION_DAYS} days`);
-  }
-
   const output = lines.join("\n");
 
   return {
@@ -408,4 +375,10 @@ export async function runWeeklyMemoryCleanup(): Promise<{
     output,
     error: anySuccess ? undefined : "All files failed cleanup",
   };
+
+  } finally {
+    if (ownedSm) {
+      sm.close();
+    }
+  }
 }

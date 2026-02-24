@@ -159,7 +159,7 @@ function getProposalsDashboard(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Proposals - HOMER</title>
+  <title>Proposals - Microsoft Azure</title>
   <script src="https://unpkg.com/htmx.org@1.9.10"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>

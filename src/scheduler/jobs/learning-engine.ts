@@ -18,6 +18,8 @@ import { executeOpenCodeCLI } from "../../executors/opencode-cli.js";
 import type Database from "better-sqlite3";
 import { buildCondensedContext, extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
 import { getRecentJobOutputs } from "../job-outputs.js";
+import { StateManager } from "../../state/manager.js";
+import { storeJobArtifact } from "./artifact-store.js";
 import type { ParsedIdea } from "../../ideas/parser.js";
 import { smartSaveIdea, type SmartSaveResult } from "../../ideas/smart-save.js";
 import { logger } from "../../utils/logger.js";
@@ -90,7 +92,7 @@ async function getRecentTopics(): Promise<string> {
 // MAIN
 // ============================================
 
-export async function runLearningEngine(db?: Database.Database): Promise<{
+export async function runLearningEngine(db?: Database.Database, jobRunId?: number): Promise<{
   success: boolean;
   output: string;
   error?: string;
@@ -193,9 +195,30 @@ If no patterns or ideas found, use empty arrays.`;
       return { success: false, output: "", error: `Learning engine parse failed: ${msg}` };
     }
 
+    // Store consolidated output as artifact
+    if (db && jobRunId) {
+      storeJobArtifact(db, jobRunId, "learning-engine", "consolidated-output", "json",
+        JSON.stringify(output), { patternsCount: output.patterns.length, ideasCount: output.contentIdeas.length });
+    }
+
     // Post-consolidation: overwrite patterns.md (consolidation already merges existing)
     let patternsWritten = 0;
     if (output.patterns.length > 0) {
+      // Snapshot patterns.md before overwriting
+      if (existsSync(PATTERNS_PATH)) {
+        try {
+          const snapSm = new StateManager("/Users/yj/homer/data/homer.db");
+          try {
+            const existing = readFileSync(PATTERNS_PATH, "utf-8");
+            snapSm.snapshotMemoryFile("patterns.md", existing, "pre-learning-engine");
+          } finally {
+            snapSm.close();
+          }
+        } catch (snapErr) {
+          logger.warn({ error: snapErr }, "Failed to snapshot patterns.md before overwrite");
+        }
+      }
+
       const today = new Date().toISOString().slice(0, 10);
       const header = `# Content Patterns\n\nAuto-maintained by learning engine. Last updated: ${today}\n\n`;
       const patternLines = output.patterns.map((p) => {
@@ -232,7 +255,7 @@ If no patterns or ideas found, use empty arrays.`;
       };
 
       try {
-        const result = smartSaveIdea(parsed);
+        const result = smartSaveIdea(parsed, db);
         ideaSaveResults.push(result);
         logger.info({ id, title: idea.title, platform: idea.platform, action: result.action }, "Learning engine idea processed");
       } catch (err) {

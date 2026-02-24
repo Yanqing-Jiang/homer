@@ -1,7 +1,8 @@
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
 import { join } from "path";
 import type Database from "better-sqlite3";
-import { parseIdeasMd, saveIdeaFile, loadIdeasFromDir, type ParsedIdea } from "./parser.js";
+import { parseIdeasMd, type ParsedIdea } from "./parser.js";
+import * as dao from "./dao.js";
 import { logger } from "../utils/logger.js";
 import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
@@ -277,8 +278,8 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
     errors: [],
   };
 
-  // Load existing ideas
-  const existingIdeas = loadIdeasFromDir();
+  // Load existing ideas from DB (fallback to files)
+  const existingIdeas = dao.getAllIdeas(db);
   const existingIds = new Set(existingIdeas.map((i) => i.id));
   const existingTitles = new Set(existingIdeas.map((i) => i.title.toLowerCase()));
 
@@ -337,9 +338,9 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
         metadata: JSON.stringify({ tags: idea.tags }),
       });
 
-      // Legacy idea creation — will be replaced by synthesizer
+      // Save idea to DB (+ mirror file)
       if (process.env.LEGACY_INGEST !== "0") {
-        saveIdeaFile(idea);
+        dao.createIdea(db, idea);
       }
       existingIds.add(idea.id);
       existingTitles.add(idea.title.toLowerCase());
@@ -417,9 +418,9 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
             raw_content: idea.content || "",
           });
 
-          // Legacy idea file creation — will be replaced by synthesizer
+          // Save idea to DB (+ mirror file)
           if (process.env.LEGACY_INGEST !== "0") {
-            saveIdeaFile(idea);
+            dao.createIdea(db, idea);
           }
           existingIds.add(idea.id);
           existingTitles.add(idea.title.toLowerCase());

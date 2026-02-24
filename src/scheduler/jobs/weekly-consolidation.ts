@@ -133,7 +133,9 @@ async function readFileIfExists(path: string): Promise<string | null> {
   return readFile(path, "utf-8");
 }
 
-export async function runWeeklyConsolidation(daysBack = 7): Promise<{
+const DB_PATH = "/Users/yj/homer/data/homer.db";
+
+export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateManager): Promise<{
   success: boolean;
   output: string;
   error?: string;
@@ -167,33 +169,35 @@ export async function runWeeklyConsolidation(daysBack = 7): Promise<{
     logger.warn("Could not open StateManager for archive fallback, continuing without it");
   }
 
-  for (const date of dates) {
-    const logPath = `${DAILY_LOG_DIR}/${date}.md`;
-    const content = await readFileIfExists(logPath);
-    if (content) {
-      logsFound++;
-      totalSize += content.length;
-      // Prefer existing daily summary (much smaller, higher signal)
-      const summaryMatch = content.match(/## Daily Summary[\s\S]*/);
-      if (summaryMatch) {
-        dailyLogs.push(`# ${date}\n\n${summaryMatch[0]}`);
-      } else {
-        dailyLogs.push(`# ${date}\n\n${content}`);
-      }
-    } else if (archiveSm) {
-      // Fallback: check SQLite archive for stripped/deleted dates
-      const archive = archiveSm.getDailyLogArchive(date);
-      if (archive) {
+  try {
+    for (const date of dates) {
+      const logPath = `${DAILY_LOG_DIR}/${date}.md`;
+      const content = await readFileIfExists(logPath);
+      if (content) {
         logsFound++;
-        archiveFallbacks++;
-        const text = archive.summaryContent ?? archive.rawContent;
-        totalSize += text.length;
-        dailyLogs.push(`# ${date}\n\n${text}`);
+        totalSize += content.length;
+        // Prefer existing daily summary (much smaller, higher signal)
+        const summaryMatch = content.match(/## Daily Summary[\s\S]*/);
+        if (summaryMatch) {
+          dailyLogs.push(`# ${date}\n\n${summaryMatch[0]}`);
+        } else {
+          dailyLogs.push(`# ${date}\n\n${content}`);
+        }
+      } else if (archiveSm) {
+        // Fallback: check SQLite archive for stripped/deleted dates
+        const archive = archiveSm.getDailyLogArchive(date);
+        if (archive) {
+          logsFound++;
+          archiveFallbacks++;
+          const text = archive.summaryContent ?? archive.rawContent;
+          totalSize += text.length;
+          dailyLogs.push(`# ${date}\n\n${text}`);
+        }
       }
     }
+  } finally {
+    archiveSm?.close();
   }
-
-  archiveSm?.close();
 
   if (logsFound === 0) {
     return { success: true, output: `No daily logs found for ${startDate} to ${endDate}, skipping` };
@@ -279,6 +283,27 @@ export async function runWeeklyConsolidation(daysBack = 7): Promise<{
       await appendFile(todayLogPath, summaryBlock);
     } else {
       await appendFile(todayLogPath, `# ${todayDate}\n${summaryBlock}`);
+    }
+
+    // Snapshot target files before promotion writes
+    if (promotions.length > 0) {
+      const sm = stateManager ?? new StateManager(DB_PATH);
+      const ownedSm = !stateManager;
+      try {
+        const targetFiles = new Set(promotions.map((p: { file: string }) => p.file));
+        for (const fileName of targetFiles) {
+          const filePath = `${MEMORY_DIR}/${fileName}`;
+          if (!existsSync(filePath)) continue;
+          try {
+            const content = await readFile(filePath, "utf-8");
+            sm.snapshotMemoryFile(fileName, content, "pre-weekly-consolidation");
+          } catch (snapErr) {
+            logger.warn({ error: snapErr, file: fileName }, "Failed to snapshot before promotion");
+          }
+        }
+      } finally {
+        if (ownedSm) sm.close();
+      }
     }
 
     // Apply promotions

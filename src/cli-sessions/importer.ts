@@ -13,6 +13,7 @@ import {
   scanOpencodeSessions,
   scanThreadSessions,
 } from "./parsers.js";
+import { statSync } from "fs";
 import { summarizeSession, generateTitle, buildRawExcerpt, getLogDate } from "./summarizer.js";
 
 export type AgentType = "codex" | "gemini" | "kimi" | "claude" | "opencode" | "telegram" | "web" | "all";
@@ -323,7 +324,7 @@ export class CLISessionImporter {
   }
 
   /**
-   * Import a single session: summarize → INSERT session_summaries → record in cli_session_index
+   * Import a single session: summarize → INSERT session_summaries → record in cli_session_index → archive transcript
    */
   private async importSession(session: ParsedSession): Promise<void> {
     const id = randomUUID();
@@ -383,6 +384,75 @@ export class CLISessionImporter {
         title,
         session.model || null
       );
+
+    // Archive full transcript to session_transcripts (Phase 2)
+    this.storeFullTranscript(session);
+  }
+
+  /**
+   * Store full session transcript (archive fidelity) in session_transcripts table.
+   * For Claude sessions, re-parses with archiveFidelity=true to get untruncated messages.
+   * For other agents, uses the already-full messages.
+   */
+  private storeFullTranscript(session: ParsedSession): void {
+    try {
+      // Check if transcript table exists and transcript not already stored
+      const hasTable = this.db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_transcripts'"
+      ).get();
+      if (!hasTable) return;
+
+      const existing = this.db.prepare(
+        "SELECT 1 FROM session_transcripts WHERE content_hash = ?"
+      ).get(session.contentHash);
+      if (existing) return;
+
+      // For Claude sessions, re-parse with archiveFidelity to get full messages
+      let fullMessages = session.messages;
+      if (session.agent === "claude" && session.nativeFilePath && !session.nativeFilePath.startsWith("thread:")) {
+        const fullSession = parseClaudeSession(session.nativeFilePath, { archiveFidelity: true });
+        if (fullSession) {
+          fullMessages = fullSession.messages;
+        }
+      }
+
+      const messagesJson = JSON.stringify(fullMessages);
+      let sourceMtimeMs: number | undefined;
+      try {
+        if (session.nativeFilePath && !session.nativeFilePath.startsWith("thread:")) {
+          sourceMtimeMs = statSync(session.nativeFilePath).mtimeMs;
+        }
+      } catch { /* file might not exist for thread sessions */ }
+
+      this.db.prepare(
+        `INSERT INTO session_transcripts (
+          content_hash, agent, session_id, messages_json, native_file_path,
+          source_mtime_ms, model, project, started_at, ended_at,
+          message_count, uncompressed_size
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(content_hash) DO NOTHING`
+      ).run(
+        session.contentHash,
+        session.agent,
+        session.sessionId,
+        messagesJson,
+        session.nativeFilePath ?? null,
+        sourceMtimeMs ?? null,
+        session.model ?? null,
+        session.project ?? null,
+        session.startedAt ?? null,
+        session.endedAt ?? null,
+        fullMessages.length,
+        Buffer.byteLength(messagesJson, "utf-8")
+      );
+
+      logger.debug(
+        { sessionId: session.sessionId, agent: session.agent, messages: fullMessages.length },
+        "Stored full transcript in session_transcripts"
+      );
+    } catch (error) {
+      logger.warn({ error, sessionId: session.sessionId }, "Failed to store full transcript");
+    }
   }
 
   /**

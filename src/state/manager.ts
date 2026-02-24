@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
 import { threadEvents } from "../events/thread-events.js";
@@ -1496,6 +1496,18 @@ export class StateManager {
   // ============================================
 
   archiveDailyLog(date: string, rawContent: string): void {
+    const incomingSize = Buffer.byteLength(rawContent, "utf-8");
+
+    // Guard: refuse to overwrite a larger raw archive (prevents summary clobbering raw data on rerun)
+    const existing = this.getDailyLogArchive(date);
+    if (existing && existing.rawSizeBytes > incomingSize * 1.5) {
+      logger.warn(
+        { date, existingSize: existing.rawSizeBytes, incomingSize },
+        "Refusing to overwrite larger raw archive — likely a rerun after stripping"
+      );
+      return;
+    }
+
     this._db.prepare(
       `INSERT INTO daily_log_archive (date, raw_content, raw_size_bytes)
        VALUES (?, ?, ?)
@@ -1503,7 +1515,7 @@ export class StateManager {
          raw_content = excluded.raw_content,
          raw_size_bytes = excluded.raw_size_bytes,
          archived_at = CURRENT_TIMESTAMP`
-    ).run(date, rawContent, Buffer.byteLength(rawContent, "utf-8"));
+    ).run(date, rawContent, incomingSize);
   }
 
   markDailyLogStripped(date: string, summaryContent: string): void {
@@ -1535,6 +1547,224 @@ export class StateManager {
       "SELECT date FROM daily_log_archive ORDER BY date DESC"
     ).all() as { date: string }[];
     return rows.map(r => r.date);
+  }
+
+  // ============================================
+  // Session Transcripts (Full Archive)
+  // ============================================
+
+  hasSessionTranscript(contentHash: string): boolean {
+    const row = this._db.prepare(
+      "SELECT 1 FROM session_transcripts WHERE content_hash = ?"
+    ).get(contentHash);
+    return row !== undefined;
+  }
+
+  insertSessionTranscript(transcript: {
+    contentHash: string;
+    agent: string;
+    sessionId: string;
+    messagesJson: string;
+    nativeFilePath?: string;
+    sourceMtimeMs?: number;
+    model?: string;
+    project?: string;
+    startedAt?: string;
+    endedAt?: string;
+    messageCount: number;
+  }): void {
+    const uncompressedSize = Buffer.byteLength(transcript.messagesJson, "utf-8");
+    this._db.prepare(
+      `INSERT INTO session_transcripts (
+        content_hash, agent, session_id, messages_json, native_file_path,
+        source_mtime_ms, model, project, started_at, ended_at,
+        message_count, uncompressed_size
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(content_hash) DO NOTHING`
+    ).run(
+      transcript.contentHash,
+      transcript.agent,
+      transcript.sessionId,
+      transcript.messagesJson,
+      transcript.nativeFilePath ?? null,
+      transcript.sourceMtimeMs ?? null,
+      transcript.model ?? null,
+      transcript.project ?? null,
+      transcript.startedAt ?? null,
+      transcript.endedAt ?? null,
+      transcript.messageCount,
+      uncompressedSize
+    );
+  }
+
+  getSessionTranscript(contentHash: string): SessionTranscript | null {
+    const row = this._db.prepare(
+      `SELECT content_hash as contentHash, agent, session_id as sessionId,
+              messages_json as messagesJson, native_file_path as nativeFilePath,
+              model, project, started_at as startedAt, ended_at as endedAt,
+              message_count as messageCount, uncompressed_size as uncompressedSize,
+              created_at as createdAt
+       FROM session_transcripts WHERE content_hash = ?`
+    ).get(contentHash) as SessionTranscript | undefined;
+    return row ?? null;
+  }
+
+  getSessionTranscriptsForDate(date: string): SessionTranscript[] {
+    const nextDay = new Date(date + "T00:00:00");
+    nextDay.setDate(nextDay.getDate() + 1);
+    const nextDayStr = nextDay.toISOString().slice(0, 10);
+    return this._db.prepare(
+      `SELECT content_hash as contentHash, agent, session_id as sessionId,
+              messages_json as messagesJson, native_file_path as nativeFilePath,
+              model, project, started_at as startedAt, ended_at as endedAt,
+              message_count as messageCount, uncompressed_size as uncompressedSize,
+              created_at as createdAt
+       FROM session_transcripts
+       WHERE (started_at >= ? AND started_at < ?)
+       ORDER BY started_at ASC`
+    ).all(date, nextDayStr) as SessionTranscript[];
+  }
+
+  // ============================================
+  // Memory File Snapshots
+  // ============================================
+
+  snapshotMemoryFile(fileName: string, content: string, reason: string, jobRunId?: number): void {
+    const date = new Date().toISOString().slice(0, 10);
+    const contentHash = createHash("sha256").update(content).digest("hex");
+    const sizeBytes = Buffer.byteLength(content, "utf-8");
+
+    this._db.prepare(
+      `INSERT INTO memory_file_snapshots (file_name, snapshot_date, content, content_hash, size_bytes, reason, job_run_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(file_name, snapshot_date, reason) DO UPDATE SET
+         content = excluded.content,
+         content_hash = excluded.content_hash,
+         size_bytes = excluded.size_bytes,
+         job_run_id = excluded.job_run_id`
+    ).run(fileName, date, content, contentHash, sizeBytes, reason, jobRunId ?? null);
+  }
+
+  getMemorySnapshot(fileName: string, date: string, reason?: string): MemoryFileSnapshot | null {
+    if (reason) {
+      return this._db.prepare(
+        `SELECT id, file_name as fileName, snapshot_date as snapshotDate, content,
+                content_hash as contentHash, size_bytes as sizeBytes, reason,
+                job_run_id as jobRunId, created_at as createdAt
+         FROM memory_file_snapshots
+         WHERE file_name = ? AND snapshot_date = ? AND reason = ?`
+      ).get(fileName, date, reason) as MemoryFileSnapshot | null ?? null;
+    }
+    return this._db.prepare(
+      `SELECT id, file_name as fileName, snapshot_date as snapshotDate, content,
+              content_hash as contentHash, size_bytes as sizeBytes, reason,
+              job_run_id as jobRunId, created_at as createdAt
+       FROM memory_file_snapshots
+       WHERE file_name = ? AND snapshot_date = ?
+       ORDER BY created_at DESC LIMIT 1`
+    ).get(fileName, date) as MemoryFileSnapshot | null ?? null;
+  }
+
+  listMemorySnapshots(fileName?: string, limit: number = 50): MemoryFileSnapshot[] {
+    if (fileName) {
+      return this._db.prepare(
+        `SELECT id, file_name as fileName, snapshot_date as snapshotDate,
+                content_hash as contentHash, size_bytes as sizeBytes, reason,
+                job_run_id as jobRunId, created_at as createdAt
+         FROM memory_file_snapshots
+         WHERE file_name = ?
+         ORDER BY created_at DESC LIMIT ?`
+      ).all(fileName, limit) as MemoryFileSnapshot[];
+    }
+    return this._db.prepare(
+      `SELECT id, file_name as fileName, snapshot_date as snapshotDate,
+              content_hash as contentHash, size_bytes as sizeBytes, reason,
+              job_run_id as jobRunId, created_at as createdAt
+       FROM memory_file_snapshots
+       ORDER BY created_at DESC LIMIT ?`
+    ).all(limit) as MemoryFileSnapshot[];
+  }
+
+  // ============================================
+  // Backup Runs (Audit Trail)
+  // ============================================
+
+  recordBackupRun(run: {
+    backupType: string;
+    backupPath: string;
+    dbSizeBytes: number;
+    backupSizeBytes: number;
+    checksum: string;
+    integrityCheck: string;
+    retentionTier: string;
+  }): number {
+    const result = this._db.prepare(
+      `INSERT INTO backup_runs (backup_type, backup_path, db_size_bytes, backup_size_bytes, checksum, integrity_check, retention_tier)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      run.backupType, run.backupPath, run.dbSizeBytes, run.backupSizeBytes,
+      run.checksum, run.integrityCheck, run.retentionTier
+    );
+    return result.lastInsertRowid as number;
+  }
+
+  getRecentBackupRuns(limit: number = 10): BackupRun[] {
+    return this._db.prepare(
+      `SELECT id, backup_type as backupType, backup_path as backupPath,
+              db_size_bytes as dbSizeBytes, backup_size_bytes as backupSizeBytes,
+              checksum, integrity_check as integrityCheck,
+              retention_tier as retentionTier, created_at as createdAt
+       FROM backup_runs ORDER BY created_at DESC LIMIT ?`
+    ).all(limit) as BackupRun[];
+  }
+
+  // ============================================
+  // Job Artifacts (Decision Trail)
+  // ============================================
+
+  insertJobArtifact(artifact: {
+    jobRunId: number;
+    jobName: string;
+    stage: string;
+    artifactType: string;
+    content: string;
+    metadata?: Record<string, unknown>;
+  }): number {
+    const contentHash = createHash("sha256").update(artifact.content).digest("hex");
+    const sizeBytes = Buffer.byteLength(artifact.content, "utf-8");
+    const metadataJson = artifact.metadata ? JSON.stringify(artifact.metadata) : null;
+
+    const result = this._db.prepare(
+      `INSERT INTO job_artifacts (job_run_id, job_name, stage, artifact_type, content, content_hash, size_bytes, metadata_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      artifact.jobRunId, artifact.jobName, artifact.stage,
+      artifact.artifactType, artifact.content, contentHash,
+      sizeBytes, metadataJson
+    );
+    return result.lastInsertRowid as number;
+  }
+
+  getJobArtifacts(jobRunId: number): JobArtifact[] {
+    return this._db.prepare(
+      `SELECT id, job_run_id as jobRunId, job_name as jobName, stage,
+              artifact_type as artifactType, content, content_hash as contentHash,
+              size_bytes as sizeBytes, metadata_json as metadataJson,
+              created_at as createdAt
+       FROM job_artifacts WHERE job_run_id = ?
+       ORDER BY id ASC`
+    ).all(jobRunId) as JobArtifact[];
+  }
+
+  getRecentJobArtifactsByName(jobName: string, limit: number = 10): JobArtifact[] {
+    return this._db.prepare(
+      `SELECT id, job_run_id as jobRunId, job_name as jobName, stage,
+              artifact_type as artifactType, content_hash as contentHash,
+              size_bytes as sizeBytes, metadata_json as metadataJson,
+              created_at as createdAt
+       FROM job_artifacts WHERE job_name = ?
+       ORDER BY created_at DESC LIMIT ?`
+    ).all(jobName, limit) as JobArtifact[];
   }
 }
 
@@ -1682,5 +1912,57 @@ export interface DailyLogArchive {
   summaryContent: string | null;
   archivedAt: string;
   strippedAt: string | null;
+}
+
+export interface SessionTranscript {
+  contentHash: string;
+  agent: string;
+  sessionId: string;
+  messagesJson: string;
+  nativeFilePath: string | null;
+  model: string | null;
+  project: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  messageCount: number;
+  uncompressedSize: number;
+  createdAt: string;
+}
+
+export interface MemoryFileSnapshot {
+  id: number;
+  fileName: string;
+  snapshotDate: string;
+  content?: string;
+  contentHash: string;
+  sizeBytes: number;
+  reason: string;
+  jobRunId: number | null;
+  createdAt: string;
+}
+
+export interface BackupRun {
+  id: number;
+  backupType: string;
+  backupPath: string;
+  dbSizeBytes: number;
+  backupSizeBytes: number;
+  checksum: string;
+  integrityCheck: string;
+  retentionTier: string;
+  createdAt: string;
+}
+
+export interface JobArtifact {
+  id: number;
+  jobRunId: number;
+  jobName: string;
+  stage: string;
+  artifactType: string;
+  content?: string;
+  contentHash: string;
+  sizeBytes: number;
+  metadataJson: string | null;
+  createdAt: string;
 }
 

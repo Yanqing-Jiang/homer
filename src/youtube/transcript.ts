@@ -13,6 +13,7 @@ import { spawn } from "child_process";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, unlinkSync } from "fs";
 import { join } from "path";
 import { logger } from "../utils/logger.js";
+import type Database from "better-sqlite3";
 
 const VENV_PATH = `${process.env.HOME}/homer/youtube-venv`;
 const EXTRACTION_TIMEOUT = 30000; // 30s per attempt
@@ -90,9 +91,29 @@ ${result.text}
 }
 
 /**
- * Check if a transcript already exists locally.
+ * Check if a transcript already exists — DB first, then file fallback.
  */
-export function getLocalTranscript(videoId: string): TranscriptResult | null {
+export function getLocalTranscript(videoId: string, db?: Database.Database): TranscriptResult | null {
+  // DB check first
+  if (db) {
+    try {
+      const row = db.prepare(
+        "SELECT transcript, transcript_method FROM youtube_videos WHERE video_id = ? AND transcript IS NOT NULL AND length(transcript) > 50"
+      ).get(videoId) as { transcript: string; transcript_method: string } | undefined;
+
+      if (row) {
+        return {
+          text: row.transcript,
+          method: (row.transcript_method ?? "youtube-transcript-api") as TranscriptMethod,
+          charCount: row.transcript.length,
+        };
+      }
+    } catch {
+      // Fall through to file check
+    }
+  }
+
+  // File fallback
   if (!existsSync(TRANSCRIPTS_DIR)) return null;
 
   try {

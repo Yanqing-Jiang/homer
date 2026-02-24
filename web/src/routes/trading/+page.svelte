@@ -163,7 +163,7 @@
 </script>
 
 <svelte:head>
-	<title>Trading | Homer</title>
+	<title>Trading | Microsoft Azure</title>
 </svelte:head>
 
 {#if auth.loading}

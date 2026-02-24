@@ -183,7 +183,7 @@
 </script>
 
 <svelte:head>
-	<title>Jobs | Homer</title>
+	<title>Jobs | Microsoft Azure</title>
 </svelte:head>
 
 {#if auth.loading}

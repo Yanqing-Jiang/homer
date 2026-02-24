@@ -13,7 +13,7 @@ import { z } from "zod";
 import type Database from "better-sqlite3";
 import { executeOpenCodeCLI } from "../../executors/opencode-cli.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
-import { loadIdeasFromDir } from "../../ideas/parser.js";
+import * as ideaDao from "../../ideas/dao.js";
 import { insertScrape } from "../../scraping/scrape-store.js";
 import { extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
 import { logger } from "../../utils/logger.js";
@@ -56,7 +56,7 @@ export async function runIdeasExplore(db?: Database.Database): Promise<{
   }
 
   try {
-    const existingIdeas = loadIdeasFromDir();
+    const existingIdeas = ideaDao.getAllIdeas(db);
     const existingUrls = new Set(existingIdeas.map((i) => i.link).filter(Boolean));
     const denyHistory = loadFileIfExists(DENY_HISTORY);
 

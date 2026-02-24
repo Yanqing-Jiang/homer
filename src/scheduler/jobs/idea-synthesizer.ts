@@ -18,11 +18,13 @@ import type Database from "better-sqlite3";
 import { executeGeminiAPI, type GeminiAPIOptions } from "../../executors/gemini.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { getUnprocessedScrapes, markProcessed, type StoredScrape } from "../../scraping/scrape-store.js";
-import { loadIdeasFromDir, type ParsedIdea } from "../../ideas/parser.js";
+import type { ParsedIdea } from "../../ideas/parser.js";
+import * as ideaDao from "../../ideas/dao.js";
 import { smartSaveIdea, type SmartSaveResult } from "../../ideas/smart-save.js";
 import { formatForPrompt as getPreferenceContext } from "../../preferences/engine.js";
 import { buildCondensedContext } from "../shared-context.js";
 import { logger } from "../../utils/logger.js";
+import { storeJobArtifact } from "./artifact-store.js";
 
 const MEMORY_PATH = "/Users/yj/memory";
 const ME_MD = `${MEMORY_PATH}/me.md`;
@@ -311,7 +313,7 @@ Return ONLY a JSON array:
 // MAIN
 // ============================================
 
-export async function runIdeaSynthesizer(db: Database.Database): Promise<{
+export async function runIdeaSynthesizer(db: Database.Database, jobRunId?: number): Promise<{
   success: boolean;
   output: string;
   error?: string;
@@ -333,7 +335,7 @@ export async function runIdeaSynthesizer(db: Database.Database): Promise<{
         try { return getPreferenceContext(db); }
         catch { return ""; }
       })(),
-      Promise.resolve(loadIdeasFromDir()),
+      Promise.resolve(ideaDao.getAllIdeas(db)),
     ]);
 
     const denyHistory = loadFileIfExists(DENY_HISTORY, 5000);
@@ -360,6 +362,12 @@ export async function runIdeaSynthesizer(db: Database.Database): Promise<{
 
     logger.info({ totalScored: allScored.length, aboveThreshold: allScored.filter(s => s.score >= 5).length }, "Pass 1 complete");
 
+    // Store Pass 1 artifact
+    if (jobRunId && allScored.length > 0) {
+      storeJobArtifact(db, jobRunId, "idea-synthesizer", "pass1-scores", "json",
+        JSON.stringify(allScored), { sourceCount: sourceNames.length, scoredCount: allScored.length });
+    }
+
     if (allScored.length === 0) {
       // Mark all as processed even if scoring produced nothing
       for (const scrape of unprocessed) {
@@ -385,6 +393,12 @@ export async function runIdeaSynthesizer(db: Database.Database): Promise<{
       stats,
     }, "Pass 2 complete");
 
+    // Store Pass 2 artifact
+    if (jobRunId && synthesizedIdeas.length > 0) {
+      storeJobArtifact(db, jobRunId, "idea-synthesizer", "pass2-candidates", "json",
+        JSON.stringify(synthesizedIdeas), { candidateCount: synthesizedIdeas.length, stats });
+    }
+
     if (synthesizedIdeas.length === 0) {
       // Mark all as processed
       for (const scrape of unprocessed) {
@@ -395,6 +409,17 @@ export async function runIdeaSynthesizer(db: Database.Database): Promise<{
 
     // CRITIC PASS: Flash quality check (free, fast)
     const keepTitles = await criticReview(synthesizedIdeas);
+
+    // Store critic artifact
+    if (jobRunId) {
+      const criticData = synthesizedIdeas.map(i => ({
+        title: i.title,
+        kept: keepTitles.has(i.title),
+        confidence: i.confidenceScore,
+      }));
+      storeJobArtifact(db, jobRunId, "idea-synthesizer", "critic-scores", "json",
+        JSON.stringify(criticData), { kept: keepTitles.size, filtered: synthesizedIdeas.length - keepTitles.size });
+    }
 
     // POST-SYNTHESIS: Quality gate + write
     const now = new Date();
@@ -433,7 +458,7 @@ export async function runIdeaSynthesizer(db: Database.Database): Promise<{
         timestamp,
       };
 
-      const result = smartSaveIdea(parsed);
+      const result = smartSaveIdea(parsed, db);
       saveResults.push(result);
 
       // Update provenance in scrapes table
@@ -457,6 +482,13 @@ export async function runIdeaSynthesizer(db: Database.Database): Promise<{
     const created = saveResults.filter(r => r.action === "created").length;
     const enhanced = saveResults.filter(r => r.action === "enhanced").length;
     const skipped = saveResults.filter(r => r.action === "skipped").length;
+
+    // Store final decisions artifact
+    if (jobRunId) {
+      storeJobArtifact(db, jobRunId, "idea-synthesizer", "final-decisions", "json",
+        JSON.stringify(saveResults.map(r => ({ id: r.ideaId, action: r.action }))),
+        { created, enhanced, skipped });
+    }
 
     const parts: string[] = [];
     parts.push(`${unprocessed.length} scrapes processed`);

@@ -321,6 +321,19 @@ If nothing to promote, use an empty array.`;
       }
     }
 
+    // Snapshot target files before promotion writes
+    const snapshotTargets = new Set(promotions.map(p => p.file));
+    for (const target of snapshotTargets) {
+      const filePath = PERMANENT_FILES[target];
+      if (!filePath || !existsSync(filePath)) continue;
+      try {
+        const content = readFileSync(filePath, "utf-8");
+        stateManager.snapshotMemoryFile(`${target}.md`, content, "pre-promotion");
+      } catch (snapErr) {
+        logger.warn({ error: snapErr, file: target }, "Failed to snapshot before promotion");
+      }
+    }
+
     // Write promotions
     let writtenPromos = 0;
     const writeErrors: string[] = [];
