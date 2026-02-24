@@ -20,9 +20,17 @@ import { OvernightTaskStore } from "../../overnight/task-store.js";
 import { MorningPresenter } from "../../overnight/morning-presenter.js";
 import { decodeCallbackData, type OvernightTaskType, type YouTubeSummaryMetadata } from "../../overnight/types.js";
 import type { ApproachLabel } from "../../overnight/types.js";
-import { markSummaryReviewed, summaryFileExists } from "../../youtube/summarizer.js";
+import { markSummaryReviewedV2, summaryFileExists, getYouTubeVideoFromDb } from "../../youtube/summarizer.js";
 import { saveIdeaFile, type ParsedIdea } from "../../ideas/parser.js";
+import * as dao from "../../ideas/dao.js";
 import { readFileSync } from "fs";
+import {
+  recordFeedback,
+  createReviewSession,
+  completeReviewSession,
+  recordImpression,
+} from "../../feedback/events.js";
+import { updatePreferences, type PreferenceSignal } from "../../preferences/engine.js";
 
 // ============================================
 // STATE
@@ -30,6 +38,7 @@ import { readFileSync } from "fs";
 
 let taskStore: OvernightTaskStore | null = null;
 let morningPresenter: MorningPresenter | null = null;
+let overnightStateManager: StateManager | null = null;
 
 // Pending clarifications (chatId -> partial task data)
 interface PendingClarification {
@@ -44,6 +53,13 @@ interface PendingClarification {
 // pending clarification messageId -> data
 const pendingClarifications = new Map<number, PendingClarification>();
 
+// Track impressions for feedback event linking (taskId -> impression data)
+interface ImpressionRecord {
+  impressionId: number;
+  displayedAt: number;
+}
+const pendingImpressions = new Map<string, ImpressionRecord>();
+
 // Cleanup stale clarifications every 5 minutes
 setInterval(() => {
   const staleThreshold = Date.now() - 3600000; // 1 hour
@@ -51,6 +67,13 @@ setInterval(() => {
     if (pending.createdAt < staleThreshold) {
       pendingClarifications.delete(msgId);
       logger.debug({ chatId: pending.chatId }, "Cleaned up stale overnight clarification");
+    }
+  }
+  // Expire impression records older than 24 hours
+  const impressionStaleThreshold = Date.now() - 86400000;
+  for (const [taskId, record] of pendingImpressions.entries()) {
+    if (record.displayedAt < impressionStaleThreshold) {
+      pendingImpressions.delete(taskId);
     }
   }
 }, 300000);
@@ -92,6 +115,7 @@ function splitOvernightTasks(message: string): string[] {
 // ============================================
 
 export function initializeOvernightHandlers(stateManager: StateManager): void {
+  overnightStateManager = stateManager;
   taskStore = new OvernightTaskStore(stateManager.db);
   morningPresenter = new MorningPresenter(taskStore);
   logger.info("Overnight handlers initialized");
@@ -473,6 +497,23 @@ async function handleApprove(ctx: Context, taskId: string): Promise<void> {
 
   taskStore.updateTaskStatus(taskId, "selected");
   await ctx.editMessageText("✅ Approved. Moving to planning.");
+
+  const db = overnightStateManager?.getDb();
+  if (db) {
+    try {
+      recordFeedback(db, {
+        contentType: "overnight",
+        contentId: taskId,
+        action: "approve",
+        source: "telegram",
+        impressionId: pendingImpressions.get(taskId)?.impressionId,
+        delta: 0.15,
+        responseTimeMs: pendingImpressions.has(taskId)
+          ? Date.now() - pendingImpressions.get(taskId)!.displayedAt
+          : undefined,
+      });
+    } catch { /* best-effort */ }
+  }
 }
 
 async function handleArchive(ctx: Context, taskId: string): Promise<void> {
@@ -490,6 +531,23 @@ async function handleArchive(ctx: Context, taskId: string): Promise<void> {
 
   taskStore.updateTaskStatus(taskId, "skipped");
   await ctx.editMessageText("🗂 Archived.");
+
+  const db = overnightStateManager?.getDb();
+  if (db) {
+    try {
+      recordFeedback(db, {
+        contentType: "overnight",
+        contentId: taskId,
+        action: "archive",
+        source: "telegram",
+        impressionId: pendingImpressions.get(taskId)?.impressionId,
+        delta: -0.1,
+        responseTimeMs: pendingImpressions.has(taskId)
+          ? Date.now() - pendingImpressions.get(taskId)!.displayedAt
+          : undefined,
+      });
+    } catch { /* best-effort */ }
+  }
 }
 
 async function handleTalk(ctx: Context, taskId: string): Promise<void> {
@@ -515,6 +573,23 @@ async function handleTalk(ctx: Context, taskId: string): Promise<void> {
     `3) Any constraints or dependencies?`,
     { parse_mode: "Markdown" }
   );
+
+  const db = overnightStateManager?.getDb();
+  if (db) {
+    try {
+      recordFeedback(db, {
+        contentType: "overnight",
+        contentId: taskId,
+        action: "talk",
+        source: "telegram",
+        impressionId: pendingImpressions.get(taskId)?.impressionId,
+        delta: 0.15,
+        responseTimeMs: pendingImpressions.has(taskId)
+          ? Date.now() - pendingImpressions.get(taskId)!.displayedAt
+          : undefined,
+      });
+    } catch { /* best-effort */ }
+  }
 }
 
 // ============================================
@@ -580,6 +655,28 @@ export async function presentMorningChoices(
 
     taskStore.updateTaskStatus(task.id, "presented");
     logger.info({ taskId, chatId, messageId: result.message_id }, "Overnight summary presented");
+
+    // Record review session + impression for feedback linking
+    const db = overnightStateManager?.getDb();
+    if (db) {
+      try {
+        const sessionId = createReviewSession(db, "overnight_review", 1);
+        const impressionId = recordImpression(db, {
+          sessionId,
+          contentType: "overnight",
+          contentId: task.id,
+          position: 0,
+          metadata: { subject: task.subject, type: task.type },
+        });
+        completeReviewSession(db, sessionId);
+        pendingImpressions.set(task.id, {
+          impressionId,
+          displayedAt: Date.now(),
+        });
+      } catch (err) {
+        logger.warn({ error: err, taskId }, "Failed to record overnight impression");
+      }
+    }
   } catch (error) {
     logger.error({ taskId, chatId, error }, "Failed to present overnight summary");
   }
@@ -623,7 +720,6 @@ async function presentYouTubeSummary(
   }
 
   const videoId = metadata?.videoId ?? "";
-  const summaryPath = summaryFileExists(videoId);
 
   let summary = "";
   let careerRelevance = "";
@@ -631,34 +727,72 @@ async function presentYouTubeSummary(
   let relevanceScore = 0;
   let videoTitle = metadata?.videoTitle ?? "Unknown";
 
-  if (summaryPath) {
-    try {
-      const content = readFileSync(summaryPath, "utf-8");
+  // Try DB first
+  const db = overnightStateManager?.getDb();
+  const dbVideo = db ? getYouTubeVideoFromDb(db, videoId) : null;
 
-      // Extract sections from markdown
-      const titleMatch = content.match(/videoTitle:\s*"([^"]+)"/);
-      if (titleMatch) videoTitle = titleMatch[1]!;
+  if (dbVideo) {
+    videoTitle = dbVideo.title || videoTitle;
+    relevanceScore = dbVideo.relevanceScore;
 
-      const scoreMatch = content.match(/relevanceScore:\s*(\d+)/);
-      if (scoreMatch) relevanceScore = parseInt(scoreMatch[1]!, 10);
+    // Parse sections from summary markdown
+    const summaryContent = dbVideo.summary ?? "";
+    const summaryMatch = summaryContent.match(/## Summary\n([\s\S]*?)(?=\n## )/);
+    if (summaryMatch) summary = summaryMatch[1]!.trim();
 
-      const summaryMatch = content.match(/## Summary\n([\s\S]*?)(?=\n## )/);
-      if (summaryMatch) summary = summaryMatch[1]!.trim();
+    const careerMatch = summaryContent.match(/## Career (?:& Life )?Relevance\n([\s\S]*?)(?=\n## )/);
+    if (careerMatch) careerRelevance = careerMatch[1]!.trim();
 
-      const careerMatch = content.match(/## Career (?:& Life )?Relevance\n([\s\S]*?)(?=\n## )/);
-      if (careerMatch) careerRelevance = careerMatch[1]!.trim();
+    const suggestionsMatch = summaryContent.match(/## Actionable Suggestions\n([\s\S]*?)(?=\n## )/);
+    if (suggestionsMatch) {
+      suggestions = suggestionsMatch[1]!
+        .trim()
+        .split("\n")
+        .filter((l) => l.startsWith("- "))
+        .slice(0, 2)
+        .map((l) => l.slice(2));
+    }
 
-      const suggestionsMatch = content.match(/## Actionable Suggestions\n([\s\S]*?)(?=\n## )/);
-      if (suggestionsMatch) {
-        suggestions = suggestionsMatch[1]!
-          .trim()
-          .split("\n")
-          .filter((l) => l.startsWith("- "))
-          .slice(0, 2)
-          .map((l) => l.slice(2));
+    // Also try metadata JSON for actionable suggestions
+    if (suggestions.length === 0) {
+      try {
+        const meta = JSON.parse(dbVideo.metadata);
+        if (Array.isArray(meta.actionableSuggestions)) {
+          suggestions = meta.actionableSuggestions.slice(0, 2).map(String);
+        }
+      } catch { /* ignore */ }
+    }
+  } else {
+    // File fallback
+    const summaryPath = summaryFileExists(videoId);
+    if (summaryPath) {
+      try {
+        const content = readFileSync(summaryPath, "utf-8");
+
+        const titleMatch = content.match(/videoTitle:\s*"([^"]+)"/);
+        if (titleMatch) videoTitle = titleMatch[1]!;
+
+        const scoreMatch = content.match(/relevanceScore:\s*(\d+)/);
+        if (scoreMatch) relevanceScore = parseInt(scoreMatch[1]!, 10);
+
+        const summaryMatch = content.match(/## Summary\n([\s\S]*?)(?=\n## )/);
+        if (summaryMatch) summary = summaryMatch[1]!.trim();
+
+        const careerMatch = content.match(/## Career (?:& Life )?Relevance\n([\s\S]*?)(?=\n## )/);
+        if (careerMatch) careerRelevance = careerMatch[1]!.trim();
+
+        const suggestionsMatch = content.match(/## Actionable Suggestions\n([\s\S]*?)(?=\n## )/);
+        if (suggestionsMatch) {
+          suggestions = suggestionsMatch[1]!
+            .trim()
+            .split("\n")
+            .filter((l) => l.startsWith("- "))
+            .slice(0, 2)
+            .map((l) => l.slice(2));
+        }
+      } catch (error) {
+        logger.warn({ videoId, error }, "Failed to read summary file for presentation");
       }
-    } catch (error) {
-      logger.warn({ videoId, error }, "Failed to read summary file for presentation");
     }
   }
 
@@ -700,6 +834,29 @@ async function presentYouTubeSummary(
 
     taskStore.updateTaskStatus(task.id, "presented");
     logger.info({ taskId: task.id, chatId, videoId, messageId: result.message_id }, "YouTube summary presented");
+
+    // Record review session + impression for feedback linking
+    const db = overnightStateManager?.getDb();
+    if (db) {
+      try {
+        const sessionId = createReviewSession(db, "youtube_review", 1);
+        const impressionId = recordImpression(db, {
+          sessionId,
+          contentType: "youtube",
+          contentId: videoId || task.id,
+          position: 0,
+          scoreAtDisplay: relevanceScore,
+          metadata: { videoTitle, videoId },
+        });
+        completeReviewSession(db, sessionId);
+        pendingImpressions.set(task.id, {
+          impressionId,
+          displayedAt: Date.now(),
+        });
+      } catch (err) {
+        logger.warn({ error: err, taskId: task.id }, "Failed to record YouTube impression");
+      }
+    }
   } catch (error) {
     logger.error({ taskId: task.id, chatId, error }, "Failed to present YouTube summary");
   }
@@ -730,17 +887,23 @@ async function handleYouTubeSave(ctx: Context, taskId: string): Promise<void> {
   const videoUrl = metadata?.videoUrl ?? "";
   const videoTitle = metadata?.videoTitle ?? "YouTube Video";
 
-  // Read summary file content for the idea
-  const summaryPath = summaryFileExists(videoId);
+  // Read summary — DB first, file fallback
+  const saveDb = overnightStateManager?.getDb();
+  const dbVid = saveDb ? getYouTubeVideoFromDb(saveDb, videoId) : null;
   let summaryContent = "";
-  if (summaryPath) {
-    try {
-      const raw = readFileSync(summaryPath, "utf-8");
-      // Strip YAML frontmatter
-      const bodyMatch = raw.match(/---[\s\S]*?---\n([\s\S]*)/);
-      summaryContent = bodyMatch ? bodyMatch[1]!.trim() : raw;
-    } catch {
-      // ignore
+  if (dbVid?.summary) {
+    summaryContent = dbVid.summary;
+  } else {
+    const summaryPath = summaryFileExists(videoId);
+    if (summaryPath) {
+      try {
+        const raw = readFileSync(summaryPath, "utf-8");
+        // Strip YAML frontmatter
+        const bodyMatch = raw.match(/---[\s\S]*?---\n([\s\S]*)/);
+        summaryContent = bodyMatch ? bodyMatch[1]!.trim() : raw;
+      } catch {
+        // ignore
+      }
     }
   }
 
@@ -760,11 +923,40 @@ async function handleYouTubeSave(ctx: Context, taskId: string): Promise<void> {
   };
 
   try {
-    saveIdeaFile(idea);
-    markSummaryReviewed(videoId);
+    const db = overnightStateManager?.getDb();
+    if (db) {
+      dao.createIdea(db, idea);
+    } else {
+      logger.warn({ ideaId: idea.id }, "handleYouTubeSave: DB unavailable, file-only save (invisible to DB)");
+      saveIdeaFile(idea);
+    }
+    markSummaryReviewedV2(videoId, db ?? undefined);
     taskStore.updateTaskStatus(taskId, "selected");
     await ctx.editMessageText(`💡 Saved to ideas: ${videoTitle}`);
     logger.info({ taskId, videoId, ideaId: idea.id }, "YouTube summary saved to ideas");
+
+    // Record feedback event + YouTube preference signals
+    if (db) {
+      try {
+        recordFeedback(db, {
+          contentType: "youtube",
+          contentId: videoId || taskId,
+          action: "save",
+          source: "telegram",
+          impressionId: pendingImpressions.get(taskId)?.impressionId,
+          delta: 0.2,
+          responseTimeMs: pendingImpressions.has(taskId)
+            ? Date.now() - pendingImpressions.get(taskId)!.displayedAt
+            : undefined,
+          metadata: { videoTitle, videoId },
+        });
+        // YouTube preference signals (new: feeds preference model)
+        const signals: PreferenceSignal[] = [
+          { dimension: "source:youtube", delta: 0.1 },
+        ];
+        updatePreferences(db, signals);
+      } catch { /* best-effort */ }
+    }
   } catch (error) {
     logger.error({ taskId, error }, "Failed to save YouTube summary to ideas");
     await ctx.editMessageText("❌ Failed to save to ideas.");
@@ -793,9 +985,32 @@ async function handleYouTubeDismiss(ctx: Context, taskId: string): Promise<void>
   }
 
   const videoId = metadata?.videoId ?? "";
-  markSummaryReviewed(videoId);
+  const db = overnightStateManager?.getDb();
+  markSummaryReviewedV2(videoId, db ?? undefined);
   taskStore.updateTaskStatus(taskId, "skipped");
   await ctx.editMessageText("🗑 Dismissed.");
+
+  // Record feedback event + YouTube preference signals
+  if (db) {
+    try {
+      recordFeedback(db, {
+        contentType: "youtube",
+        contentId: videoId || taskId,
+        action: "dismiss",
+        source: "telegram",
+        impressionId: pendingImpressions.get(taskId)?.impressionId,
+        delta: -0.1,
+        responseTimeMs: pendingImpressions.has(taskId)
+          ? Date.now() - pendingImpressions.get(taskId)!.displayedAt
+          : undefined,
+      });
+      // YouTube preference signals (new: feeds preference model)
+      const signals: PreferenceSignal[] = [
+        { dimension: "source:youtube", delta: -0.05 },
+      ];
+      updatePreferences(db, signals);
+    } catch { /* best-effort */ }
+  }
 }
 
 // ============================================

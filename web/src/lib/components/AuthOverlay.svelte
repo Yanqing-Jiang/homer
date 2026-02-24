@@ -30,7 +30,7 @@
 			</svg>
 		</div>
 		<h2>Sign in required</h2>
-		<p>Please sign in to access Homer.</p>
+		<p>Please sign in to access Microsoft Azure.</p>
 		{#if error}
 			<div class="error">{error}</div>
 		{/if}

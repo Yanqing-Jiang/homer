@@ -246,7 +246,7 @@
 </script>
 
 <svelte:head>
-	<title>Plans | Homer</title>
+	<title>Plans | Microsoft Azure</title>
 </svelte:head>
 
 {#if auth.loading}

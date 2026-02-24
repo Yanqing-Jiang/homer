@@ -8,15 +8,17 @@
 import type { Context } from "grammy";
 import { logger } from "../../utils/logger.js";
 import { OvernightTaskStore } from "../../overnight/task-store.js";
-import { summaryFileExists } from "../../youtube/summarizer.js";
+import { summaryExists } from "../../youtube/summarizer.js";
 import type { StateManager } from "../../state/manager.js";
 import type { YouTubeSummaryMetadata } from "../../overnight/types.js";
+import type Database from "better-sqlite3";
 
 // ============================================
 // STATE
 // ============================================
 
 let taskStore: OvernightTaskStore | null = null;
+let youtubeDb: Database.Database | null = null;
 
 // ============================================
 // INITIALIZATION
@@ -24,6 +26,7 @@ let taskStore: OvernightTaskStore | null = null;
 
 export function initializeYouTubeHandler(stateManager: StateManager): void {
   taskStore = new OvernightTaskStore(stateManager.db);
+  youtubeDb = stateManager.db;
   logger.info("YouTube URL handler initialized");
 }
 
@@ -73,13 +76,13 @@ export async function handleYouTubeUrl(
 
   const videoUrl = normalizeUrl(videoId);
 
-  // Dedup: existing task or summary file
+  // Dedup: existing task, DB, or summary file
   const existingTask = taskStore.findTaskByVideoId(videoId);
   if (existingTask) {
     await ctx.reply(`Already queued (${existingTask.status})`);
     return true;
   }
-  if (summaryFileExists(videoId)) {
+  if (summaryExists(videoId, youtubeDb ?? undefined)) {
     await ctx.reply("Already summarized");
     return true;
   }

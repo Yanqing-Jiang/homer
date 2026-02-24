@@ -9,15 +9,12 @@ import { getMemoryIndexer } from "../memory/indexer.js";
 import { appendDailyLog, createDailyEntry, readDailyLog } from "../memory/daily.js";
 import { StateManager } from "../state/manager.js";
 import { logger } from "../utils/logger.js";
-import { appendFile, readFile, mkdir, readdir, rename } from "fs/promises";
+import { appendFile, readFile, mkdir, rename } from "fs/promises";
 import { existsSync } from "fs";
 import {
-  parseIdeaFile,
-  saveIdeaFile,
-  loadIdeasFromDir,
   type ParsedIdea,
 } from "../ideas/parser.js";
-import { join } from "path";
+import * as ideaDao from "../ideas/dao.js";
 import { savePlanFile, parsePlanFile, loadPlansFromDir, type ParsedPhase } from "../plans/parser.js";
 // Shared StateManager singleton — better-sqlite3 is synchronous, MCP is single-threaded
 let sharedSM: StateManager | null = null;
@@ -703,6 +700,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let takeoverResults: Array<{ id: number; job_id: string; diagnosis: string; fix_description: string | null; decision: string; retry_success: number | null; created_at: string; rank: number }> = [];
         let threadResults: Array<{ id: string; thread_id: string; role: string; created_at: string; content: string; rank: number }> = [];
         let scrapeResults: Array<{ id: string; source: string; title: string; url: string | null; scraped_at: string; rank: number }> = [];
+        let ideaResults: Array<{ id: string; title: string; status: string; source: string; link: string | null; created_at: string; content: string; rank: number }> = [];
+        let youtubeResults: Array<{ video_id: string; title: string; channel_name: string; relevance_score: number; processed_at: string; content: string; rank: number }> = [];
         try {
           const sm = getSharedStateManager();
           const escapedTerms = query
@@ -775,6 +774,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               logger.debug({ error: err }, "Scrapes FTS search failed (table may not exist)");
             }
           }
+
+          // Search ideas_fts for idea content
+          if (escapedTerms) {
+            try {
+              ideaResults = sm.getDb().prepare(`
+                SELECT i.id, i.title, i.status, i.source, i.link, i.created_at,
+                       snippet(ideas_fts, 1, '>>>', '<<<', '...', 50) as content,
+                       bm25(ideas_fts) as rank
+                FROM ideas_fts fts
+                JOIN ideas i ON fts.rowid = i.rowid
+                WHERE ideas_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+              `).all(escapedTerms, maxResults) as typeof ideaResults;
+            } catch (err) {
+              logger.debug({ error: err }, "Ideas FTS search failed (table may not exist)");
+            }
+          }
+
+          // Search youtube_videos_fts for YouTube content
+          if (escapedTerms) {
+            try {
+              youtubeResults = sm.getDb().prepare(`
+                SELECT y.video_id, y.title, y.channel_name, y.relevance_score, y.processed_at,
+                       snippet(youtube_videos_fts, 1, '>>>', '<<<', '...', 50) as content,
+                       bm25(youtube_videos_fts) as rank
+                FROM youtube_videos_fts fts
+                JOIN youtube_videos y ON fts.rowid = y.rowid
+                WHERE youtube_videos_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+              `).all(escapedTerms, maxResults) as typeof youtubeResults;
+            } catch (err) {
+              logger.debug({ error: err }, "YouTube FTS search failed (table may not exist)");
+            }
+          }
         } catch (err) {
           // session_summaries_fts may not exist yet — gracefully degrade
           logger.debug({ error: err }, "Session summaries FTS search failed (table may not exist yet)");
@@ -820,6 +855,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             title: r.title,
             url: r.url,
             scrapedAt: r.scraped_at,
+            rank: r.rank,
+          })),
+          ideas: ideaResults.map((r) => ({
+            type: "idea" as const,
+            id: r.id,
+            title: r.title,
+            status: r.status,
+            source: r.source,
+            link: r.link,
+            content: r.content,
+            createdAt: r.created_at,
+            rank: r.rank,
+          })),
+          youtube: youtubeResults.map((r) => ({
+            type: "youtube" as const,
+            videoId: r.video_id,
+            title: r.title,
+            channelName: r.channel_name,
+            relevanceScore: r.relevance_score,
+            content: r.content,
+            processedAt: r.processed_at,
             rank: r.rank,
           })),
         };
@@ -1046,7 +1102,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const now = new Date();
         const timestamp = now.toISOString().slice(0, 16).replace("T", " ");
-        // Use timestamp-based ID for consistency
         const timestampId = `idea_${now.toISOString().replace(/[-:T]/g, "").slice(0, 12)}`;
 
         const idea: ParsedIdea = {
@@ -1061,13 +1116,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           timestamp,
         };
 
-        const filePath = saveIdeaFile(idea);
+        const sm = getSharedStateManager();
+        const saved = ideaDao.createIdea(sm.getDb(), idea);
 
         return {
           content: [
             {
               type: "text",
-              text: `Added idea: ${title} (ID: ${timestampId}, file: ${filePath})`,
+              text: `Added idea: ${title} (ID: ${timestampId}, file: ${saved.filePath})`,
             },
           ],
         };
@@ -1080,45 +1136,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           notes?: string;
         };
 
-        const IDEAS_DIR = join(MEMORY_BASE, "ideas");
-        const files = await readdir(IDEAS_DIR);
-        let ideaFile: string | null = null;
-
-        for (const file of files) {
-          if (!file.endsWith(".md")) continue;
-          const filePath = join(IDEAS_DIR, file);
-          const parsed = parseIdeaFile(filePath);
-          if (parsed && (parsed.id === id || parsed.id.includes(id) || file.includes(id))) {
-            ideaFile = filePath;
-            break;
-          }
-        }
-
-        if (!ideaFile) {
+        const sm = getSharedStateManager();
+        const existingIdea = ideaDao.getIdea(sm.getDb(), id);
+        if (!existingIdea) {
           return {
             content: [{ type: "text", text: `Idea not found: ${id}` }],
             isError: true,
           };
         }
 
-        const idea = parseIdeaFile(ideaFile);
-        if (!idea) {
-          return {
-            content: [{ type: "text", text: `Could not parse idea file: ${ideaFile}` }],
-            isError: true,
-          };
-        }
+        const updateFields: Partial<Pick<ParsedIdea, "status" | "notes">> = {};
+        if (status) updateFields.status = status;
+        if (notes) updateFields.notes = (existingIdea.notes ? existingIdea.notes + "; " : "") + notes;
 
-        if (status) idea.status = status;
-        if (notes) idea.notes = (idea.notes ? idea.notes + "; " : "") + notes;
-
-        saveIdeaFile(idea);
+        ideaDao.updateIdea(sm.getDb(), existingIdea.id, updateFields);
 
         return {
           content: [
             {
               type: "text",
-              text: `Updated idea: ${idea.title} (status: ${idea.status})`,
+              text: `Updated idea: ${existingIdea.title} (status: ${status ?? existingIdea.status})`,
             },
           ],
         };
@@ -1127,19 +1164,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "idea_list": {
         const { status } = args as { status?: string };
         const filterStatus = status || "draft";
-        const ideas = loadIdeasFromDir();
 
-        const filtered = filterStatus === "all"
-          ? ideas
-          : ideas.filter(i => i.status === filterStatus);
+        const sm = getSharedStateManager();
+        const ideas = filterStatus === "all"
+          ? ideaDao.getAllIdeas(sm.getDb())
+          : ideaDao.getAllIdeas(sm.getDb(), { status: filterStatus });
 
-        if (filtered.length === 0) {
+        if (ideas.length === 0) {
           return {
             content: [{ type: "text", text: `No ideas with status: ${filterStatus}` }],
           };
         }
 
-        const summary = filtered.map(i => ({
+        const summary = ideas.map(i => ({
           id: i.id,
           title: i.title,
           source: i.source,
@@ -1725,10 +1762,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // 3. Pending decisions (ideas in review)
-        const reviewIdeas = loadIdeasFromDir().filter(i => i.status === "review");
+        const reviewIdeas = ideaDao.getAllIdeas(sm.getDb(), { status: "review", limit: 5 });
         if (reviewIdeas.length > 0) {
           sections.push("\n## Pending Decisions");
-          for (const idea of reviewIdeas.slice(0, 5)) {
+          for (const idea of reviewIdeas) {
             sections.push(`- Idea: "${idea.title}" (in review)`);
           }
         }
