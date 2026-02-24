@@ -9,6 +9,7 @@ import { dedupeIdeasDir } from "../ideas/dedup.js";
 import { runSessionSummary } from "./jobs/session-summaries.js";
 import { runWeeklyConsolidation } from "./jobs/weekly-consolidation.js";
 import { runWeeklyMemoryCleanup } from "./jobs/memory-cleanup.js";
+import { runMigrations } from "../state/migrations/index.js";
 import { logger } from "../utils/logger.js";
 
 interface InternalJobContext {
@@ -30,6 +31,7 @@ const RETRYABLE_HANDLERS = new Set([
 const TRANSIENT_PATTERNS = [
   "fetch failed", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND",
   "rate limit", "429", "503", "timeout", "socket hang up", "network", "EPIPE",
+  "SQLITE_BUSY", "database is locked",
 ];
 
 function isTransientError(error?: string): boolean {
@@ -303,6 +305,16 @@ export async function executeInternalJob(
   ctx: InternalJobContext
 ): Promise<JobExecutionResult> {
   const startedAt = new Date();
+
+  // Guard: apply any pending migrations before running job handlers.
+  // Dynamic imports can load new code from disk mid-process, but migrations
+  // only run at daemon startup. This prevents code/schema mismatch.
+  try {
+    runMigrations(ctx.stateManager.getDb());
+  } catch (migErr) {
+    logger.error({ error: migErr, jobId: job.config.id }, "Migration guard failed");
+    return buildResult(job, startedAt, false, "", `Migration failed: ${migErr}`);
+  }
 
   // Check global pause for job_hunt handlers
   if (job.config.handler?.startsWith("job_hunt_") && isJobHuntPaused(ctx)) {
