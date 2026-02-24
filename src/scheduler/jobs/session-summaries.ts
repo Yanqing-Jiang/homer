@@ -246,14 +246,15 @@ export async function runSessionSummary(
 
     const summaryText = result.output.trim();
 
-    // Rewrite .md to summary-only
-    const summaryBlock = `# ${date}\n\n---\n\n## Daily Summary\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via Gemini API (${sessions.length} sessions)*\n\n${summaryText}\n`;
+    // Append summary to daily log (preserve raw content instead of overwriting)
+    const summarySection = `\n\n---\n\n## Daily Summary\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via Gemini API (${sessions.length} sessions)*\n\n${summaryText}\n`;
 
-    // Ensure daily log directory exists
-    if (!existsSync(logPath)) {
-      // Create the file even if there was no daily log — we have session data
+    if (existsSync(logPath)) {
+      const existing = await readFile(logPath, "utf-8");
+      await writeFile(logPath, existing + summarySection, "utf-8");
+    } else {
+      await writeFile(logPath, `# ${date}${summarySection}`, "utf-8");
     }
-    await writeFile(logPath, summaryBlock, "utf-8");
 
     // Record stripped
     try {

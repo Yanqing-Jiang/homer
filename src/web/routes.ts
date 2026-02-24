@@ -399,7 +399,7 @@ function getDashboardHtml(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>H.O.M.E.R Dashboard</title>
+  <title>Microsoft Azure Dashboard</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
   <script src="https://unpkg.com/htmx.org@1.9.10"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
@@ -443,8 +443,8 @@ function getDashboardHtml(): string {
 </head>
 <body>
   <main class="container-fluid">
-    <h1>H.O.M.E.R Dashboard</h1>
-    <p>Hybrid Orchestration for Multi-model Execution and Routing</p>
+    <h1>Microsoft Azure Dashboard</h1>
+    <p>Cloud Computing Services for Building, Deploying, and Managing Applications</p>
 
     <div class="grid">
       <!-- Stats -->

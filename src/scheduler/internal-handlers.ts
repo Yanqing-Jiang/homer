@@ -15,6 +15,7 @@ interface InternalJobContext {
   stateManager: StateManager;
   bot: Bot;
   chatId: number;
+  jobRunId?: number;
 }
 
 // Handlers safe to retry (idempotent, no user-facing side effects)
@@ -23,7 +24,7 @@ const RETRYABLE_HANDLERS = new Set([
   "learning_engine", "homer_improvements", "session_summaries", "weekly_consolidation",
   "memory_cleanup", "planning_reminder", "content_scraper", "outcome_tracker",
   "preference_updater", "idea_dedup", "memory_git_commit", "nightly_code_push", "db_backup",
-  "idea_synthesizer",
+  "idea_synthesizer", "archive_verify",
 ]);
 
 const TRANSIENT_PATTERNS = [
@@ -89,6 +90,7 @@ async function runHandler(
       case "night_supervisor": {
         const supervisor = new NightSupervisor({}, {
           db: ctx.stateManager.getDb(),
+          jobRunId: ctx.jobRunId,
           onOvernightMilestone: async (chatId, milestone, message) => {
             await sendMilestoneNotification(ctx.bot, chatId, milestone, message);
           },
@@ -124,7 +126,7 @@ async function runHandler(
         return buildResult(job, startedAt, true, output);
       }
       case "idea_dedup": {
-        const result = await dedupeIdeasDir();
+        const result = await dedupeIdeasDir(ctx.stateManager.getDb(), ctx.jobRunId);
         const output = result.deleted > 0
           ? `Dedup complete: ${result.deleted} duplicates deleted, ${result.kept} ideas retained`
           : `No duplicates found (${result.kept} ideas checked)`;
@@ -139,7 +141,7 @@ async function runHandler(
         return buildResult(job, startedAt, result.success, result.output, result.error);
       }
       case "memory_cleanup": {
-        const result = await runWeeklyMemoryCleanup();
+        const result = await runWeeklyMemoryCleanup(ctx.stateManager);
         return buildResult(job, startedAt, result.success, result.output, result.error);
       }
       case "ideas_explore": {
@@ -154,12 +156,12 @@ async function runHandler(
       }
       case "homer_improvements": {
         const { runHomerImprovements } = await import("./jobs/homer-improvements.js");
-        const result = await runHomerImprovements(ctx.stateManager.getDb());
+        const result = await runHomerImprovements(ctx.stateManager.getDb(), ctx.jobRunId);
         return buildResult(job, startedAt, result.success, result.output, result.error);
       }
       case "learning_engine": {
         const { runLearningEngine } = await import("./jobs/learning-engine.js");
-        const result = await runLearningEngine(ctx.stateManager.getDb());
+        const result = await runLearningEngine(ctx.stateManager.getDb(), ctx.jobRunId);
         return buildResult(job, startedAt, result.success, result.output, result.error);
       }
       case "session_harvester": {
@@ -278,7 +280,12 @@ async function runHandler(
       }
       case "idea_synthesizer": {
         const { runIdeaSynthesizer } = await import("./jobs/idea-synthesizer.js");
-        const result = await runIdeaSynthesizer(ctx.stateManager.getDb());
+        const result = await runIdeaSynthesizer(ctx.stateManager.getDb(), ctx.jobRunId);
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "archive_verify": {
+        const { runArchiveVerify } = await import("./jobs/archive-verify.js");
+        const result = await runArchiveVerify(ctx.stateManager.getDb());
         return buildResult(job, startedAt, result.success, result.output, result.error);
       }
       default: {

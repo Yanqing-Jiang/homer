@@ -298,7 +298,7 @@
 </script>
 
 <svelte:head>
-	<title>Ideas | Homer</title>
+	<title>Ideas | Microsoft Azure</title>
 </svelte:head>
 
 <svelte:window onkeydown={(e) => {

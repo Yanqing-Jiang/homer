@@ -443,28 +443,61 @@ export function scanClaudeSessions(homeDir: string, sinceDays: number = 7): stri
   return sessionFiles;
 }
 
+export interface ParseClaudeOptions {
+  /** Skip truncation — return all messages at full length */
+  archiveFidelity?: boolean;
+}
+
+/**
+ * Truncate a parsed session's messages for summary use.
+ * Applies message count caps and character limits.
+ */
+export function truncateForSummary(messages: ParsedMessage[]): ParsedMessage[] {
+  const MAX_USER_MESSAGES = 20;
+  const MAX_ASSISTANT_MESSAGES = 10;
+  const MAX_USER_CHARS = 300;
+  const MAX_ASSISTANT_CHARS = 400;
+
+  const result: ParsedMessage[] = [];
+  let userCount = 0;
+  let assistantCount = 0;
+
+  for (const msg of messages) {
+    if (msg.role === "user") {
+      if (userCount >= MAX_USER_MESSAGES) continue;
+      result.push({ ...msg, content: msg.content.slice(0, MAX_USER_CHARS) });
+      userCount++;
+    } else if (msg.role === "assistant") {
+      if (assistantCount >= MAX_ASSISTANT_MESSAGES) continue;
+      result.push({ ...msg, content: msg.content.slice(0, MAX_ASSISTANT_CHARS) });
+      assistantCount++;
+    } else {
+      result.push(msg);
+    }
+  }
+
+  return result;
+}
+
 /**
  * Parse Claude Code session from JSONL transcript
  * Location: ~/.claude/projects/{project_key}/{sessionId}.jsonl
+ *
+ * @param options.archiveFidelity - If true, returns ALL messages at full length (for transcript archival)
  */
-export function parseClaudeSession(filePath: string): ParsedSession | null {
+export function parseClaudeSession(filePath: string, options?: ParseClaudeOptions): ParsedSession | null {
+  const archiveFidelity = options?.archiveFidelity ?? false;
+
   try {
     const content = readFileSync(filePath, "utf-8");
     const lines = content.split("\n").filter((line) => line.trim());
 
-    const messages: ParsedMessage[] = [];
+    const allMessages: ParsedMessage[] = [];
     let sessionId = "";
     let model = "";
     let startTime = "";
     let endTime = "";
     let project = "";
-    let userMsgCount = 0;
-    let assistantMsgCount = 0;
-
-    const MAX_USER_MESSAGES = 20;
-    const MAX_ASSISTANT_MESSAGES = 10;
-    const MAX_USER_CHARS = 300;
-    const MAX_ASSISTANT_CHARS = 400;
 
     for (const line of lines) {
       try {
@@ -482,8 +515,6 @@ export function parseClaudeSession(filePath: string): ParsedSession | null {
         }
 
         if (entry.type === "user" && entry.message) {
-          if (userMsgCount >= MAX_USER_MESSAGES) continue;
-
           let msgContent = "";
           const msgObj = entry.message;
           if (typeof msgObj.content === "string") {
@@ -500,16 +531,13 @@ export function parseClaudeSession(filePath: string): ParsedSession | null {
           }
 
           if (msgContent) {
-            messages.push({
+            allMessages.push({
               role: "user",
-              content: msgContent.slice(0, MAX_USER_CHARS),
+              content: msgContent,
               timestamp: entry.timestamp,
             });
-            userMsgCount++;
           }
         } else if (entry.type === "assistant" && entry.message) {
-          if (assistantMsgCount >= MAX_ASSISTANT_MESSAGES) continue;
-
           let msgContent = "";
           let msgModel = "";
           const msgObj = entry.message;
@@ -530,12 +558,11 @@ export function parseClaudeSession(filePath: string): ParsedSession | null {
           }
 
           if (msgContent) {
-            messages.push({
+            allMessages.push({
               role: "assistant",
-              content: msgContent.slice(0, MAX_ASSISTANT_CHARS),
+              content: msgContent,
               timestamp: entry.timestamp,
             });
-            assistantMsgCount++;
           }
         }
       } catch {
@@ -543,12 +570,16 @@ export function parseClaudeSession(filePath: string): ParsedSession | null {
       }
     }
 
-    if (messages.length === 0) {
+    if (allMessages.length === 0) {
       return null;
     }
 
-    // Generate content hash
-    const normalizedContent = messages
+    // Apply truncation unless archiveFidelity is requested
+    const messages = archiveFidelity ? allMessages : truncateForSummary(allMessages);
+
+    // Generate content hash from truncated messages (compatible with existing session_summaries)
+    const truncatedForHash = archiveFidelity ? truncateForSummary(allMessages) : messages;
+    const normalizedContent = truncatedForHash
       .map((m) => `${m.role}:${m.content.trim().toLowerCase()}`)
       .join("\n");
     const contentHash = createHash("sha256")

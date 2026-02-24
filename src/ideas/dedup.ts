@@ -19,8 +19,11 @@ import { readFileSync, writeFileSync, existsSync, unlinkSync } from "fs";
 import { logger } from "../utils/logger.js";
 import { executeGeminiWithFallback } from "../executors/opencode-cli.js";
 import { loadIdeasFromDir, type ParsedIdea } from "./parser.js";
+import * as dao from "./dao.js";
 import { canonicalizeUrl, extractRepoId } from "./canonical-url.js";
 import { createFingerprint, fingerprintSimilarity } from "./fingerprint.js";
+import { storeJobArtifact } from "../scheduler/jobs/artifact-store.js";
+import type Database from "better-sqlite3";
 
 const MEMORY_BASE = "/Users/yj/memory";
 const DENY_HISTORY_FILE = `${MEMORY_BASE}/deny-history.md`;
@@ -219,8 +222,11 @@ If none found: {"groups":[]}`;
  * Main deduplication function for file-based ideas (~/memory/ideas/)
  * Deletes duplicate files, keeping the "best" version of each idea
  */
-export async function dedupeIdeasDir(): Promise<DedupResult> {
-  const ideas = loadIdeasFromDir();
+export async function dedupeIdeasDir(db?: Database.Database, jobRunId?: number): Promise<DedupResult> {
+  if (!db) {
+    logger.warn("dedupeIdeasDir: DB unavailable, using file-only path (deletions invisible to DB)");
+  }
+  const ideas = db ? dao.getAllIdeas(db) : loadIdeasFromDir();
 
   if (ideas.length === 0) {
     return {
@@ -422,6 +428,32 @@ export async function dedupeIdeasDir(): Promise<DedupResult> {
   }
 
   // =========================================
+  // Store tombstone journal (before deletion, for recovery)
+  // =========================================
+  if (db && jobRunId && idsToDelete.length > 0) {
+    const tombstoneEntries = idsToDelete.map(id => {
+      const idea = idToIdea.get(id);
+      const root = find(id);
+      const keeperIdea = idToIdea.get(
+        [...groups.get(root)!].find(g => !idsToDelete.includes(g.id))?.id ?? root
+      );
+      return {
+        deletedId: id,
+        deletedTitle: idea?.title ?? "unknown",
+        deletedFilePath: idea?.filePath ?? "unknown",
+        deletedContent: idea?.filePath && existsSync(idea.filePath)
+          ? readFileSync(idea.filePath, "utf-8")
+          : null,
+        keeperId: keeperIdea?.id ?? root,
+        keeperTitle: keeperIdea?.title ?? "unknown",
+      };
+    });
+    storeJobArtifact(db, jobRunId, "idea-dedup", "tombstone-journal", "json",
+      JSON.stringify(tombstoneEntries),
+      { deleteCount: idsToDelete.length, urlMatches, repoMatches, semanticMatches, llmMatches });
+  }
+
+  // =========================================
   // Delete duplicate files
   // =========================================
   let deleted = 0;
@@ -430,13 +462,15 @@ export async function dedupeIdeasDir(): Promise<DedupResult> {
     if (!idea?.filePath) continue;
 
     try {
-      if (existsSync(idea.filePath)) {
+      if (db) {
+        dao.deleteIdea(db, id);
+      } else if (existsSync(idea.filePath)) {
         unlinkSync(idea.filePath);
-        logger.info({ id, title: idea.title, filePath: idea.filePath }, "Deleted duplicate");
-        deleted++;
       }
+      logger.info({ id, title: idea.title, filePath: idea.filePath }, "Deleted duplicate");
+      deleted++;
     } catch (error) {
-      logger.error({ id, error }, "Failed to delete duplicate idea file");
+      logger.error({ id, error }, "Failed to delete duplicate idea");
     }
   }
 

@@ -31,7 +31,10 @@ import {
 } from "../../scraping/browser-prompts.js";
 import { cleanAgentOutput } from "../../scraping/clean-output.js";
 import { insertScrape } from "../../scraping/scrape-store.js";
+import { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
+
+const DB_PATH = "/Users/yj/homer/data/homer.db";
 
 // ============================================
 // CONSTANTS
@@ -837,6 +840,28 @@ export async function runContentScraper(db: Database.Database): Promise<{
   let scrapeSucceeded = false;
 
   try {
+    // =========================================================
+    // PHASE 0: Pre-write snapshots of files we're about to overwrite
+    // =========================================================
+    try {
+      const sm = new StateManager(DB_PATH);
+      try {
+        const filesToSnapshot = [MEDIUM_FILE, LINKEDIN_FILE, MEDIUM_TRENDING_FILE, PATTERNS_FILE];
+        for (const filePath of filesToSnapshot) {
+          if (existsSync(filePath)) {
+            const content = readFileSync(filePath, "utf-8");
+            const fileName = filePath.split("/").pop()!;
+            sm.snapshotMemoryFile(fileName, content, "pre-content-scraper");
+          }
+        }
+        logger.info("Pre-scrape snapshots saved");
+      } finally {
+        sm.close();
+      }
+    } catch (err) {
+      logger.warn({ error: String(err) }, "Pre-scrape snapshot failed (non-fatal)");
+    }
+
     // =========================================================
     // PHASE 1 + 2: All sources in parallel
     //   - Medium RSS (fast, ~2s)

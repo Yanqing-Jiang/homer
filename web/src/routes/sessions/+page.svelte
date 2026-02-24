@@ -465,6 +465,22 @@
 		selectedClaudeSession = null;
 	}
 
+	let copiedId = $state<string | null>(null);
+	let copyTimer: ReturnType<typeof setTimeout> | null = null;
+
+	async function copyResumeCommand(sessionId: string) {
+		if (!sessionId) return;
+		const cmd = `claude --resume ${sessionId}`;
+		try {
+			await navigator.clipboard.writeText(cmd);
+			if (copyTimer) clearTimeout(copyTimer);
+			copiedId = sessionId;
+			copyTimer = setTimeout(() => { copiedId = null; copyTimer = null; }, 2000);
+		} catch {
+			error = 'Failed to copy to clipboard';
+		}
+	}
+
 	// Load Claude sessions when tab changes
 	$effect(() => {
 		if (activeTab === 'claude-code' && claudeSessions.length === 0 && !claudeLoading) {
@@ -474,7 +490,7 @@
 </script>
 
 <svelte:head>
-	<title>Sessions | Homer</title>
+	<title>Sessions | Microsoft Azure</title>
 </svelte:head>
 
 {#if auth.loading}
@@ -527,7 +543,7 @@
 	<!-- Tab Toggle -->
 	<div class="tab-toggle">
 		<button class="main-tab" class:active={activeTab === 'homer'} onclick={() => activeTab = 'homer'}>
-			Homer Sessions
+			Azure Sessions
 		</button>
 		<button class="main-tab" class:active={activeTab === 'claude-code'} onclick={() => activeTab = 'claude-code'}>
 			Claude Code
@@ -628,17 +644,41 @@
 			/>
 		{:else}
 			{#each claudeSessions as session}
-				<button class="session-card claude-session" onclick={() => openClaudeSession(session)}>
-					<div class="session-header">
-						<h3 class="session-title">{session.projectName}</h3>
-						<span class="prompt-count">{session.promptCount} prompts</span>
+				<div class="session-card claude-session">
+					<button class="session-card-main" onclick={() => openClaudeSession(session)}>
+						<div class="session-header">
+							<h3 class="session-title">{session.projectName}</h3>
+							<span class="prompt-count">{session.promptCount} prompts</span>
+						</div>
+						<p class="session-preview">{session.firstPrompt}</p>
+						<div class="session-footer">
+							<span class="session-time">{formatRelativeTime(session.formattedEnd)}</span>
+							<span class="session-project" title={session.project}>{session.project}</span>
+						</div>
+					</button>
+					<div class="session-actions">
+						<button
+							class="copy-resume-btn"
+							class:copied={copiedId === session.sessionId}
+							onclick={() => copyResumeCommand(session.sessionId)}
+							title="Copy: claude --resume {session.sessionId}"
+							aria-label="Copy resume command for {session.projectName} session"
+						>
+							{#if copiedId === session.sessionId}
+								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14">
+									<polyline points="20 6 9 17 4 12"/>
+								</svg>
+								Copied!
+							{:else}
+								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+									<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+									<path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+								</svg>
+								Resume
+							{/if}
+						</button>
 					</div>
-					<p class="session-preview">{session.firstPrompt}</p>
-					<div class="session-footer">
-						<span class="session-time">{formatRelativeTime(session.formattedEnd)}</span>
-						<span class="session-project" title={session.project}>{session.project}</span>
-					</div>
-				</button>
+				</div>
 			{/each}
 		{/if}
 	</div>
@@ -675,8 +715,27 @@
 					{/each}
 				</div>
 			</div>
-			<div class="modal-footer">
-				<span class="modal-info">Read-only view - Claude responses not stored in history.jsonl</span>
+			<div class="modal-footer claude-modal-footer">
+				<button
+					class="resume-command"
+					class:copied={copiedId === selectedClaudeSession.sessionId}
+					onclick={() => copyResumeCommand(selectedClaudeSession!.sessionId)}
+					title="Copy: claude --resume {selectedClaudeSession.sessionId}"
+					aria-label="Copy resume command to clipboard"
+				>
+					{#if copiedId === selectedClaudeSession.sessionId}
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14">
+							<polyline points="20 6 9 17 4 12"/>
+						</svg>
+						<span>Copied!</span>
+					{:else}
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+							<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+							<path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+						</svg>
+						<code>claude --resume {selectedClaudeSession.sessionId.slice(0, 8)}...</code>
+					{/if}
+				</button>
 				<button class="secondary-btn" onclick={closeClaudeSession}>Close</button>
 			</div>
 		</div>
@@ -844,10 +903,10 @@
 											bind:value={messageInput}
 											oninput={handleTextareaInput}
 											onkeydown={handleKeydown}
-											placeholder="Message Homer..."
+											placeholder="Message Azure..."
 											rows="1"
 											disabled={sendingMessage || uploadingFiles}
-											aria-label="Message Homer"
+											aria-label="Message Azure"
 										></textarea>
 
 										<!-- Send button -->
@@ -1786,6 +1845,56 @@
 	}
 
 	/* Claude Code specific styles */
+	.claude-session {
+		display: flex;
+		align-items: stretch;
+		padding: 0;
+	}
+
+	.claude-session .session-card-main {
+		flex: 1;
+		background: none;
+		border: none;
+		text-align: left;
+		cursor: pointer;
+		padding: 16px;
+		min-width: 0;
+	}
+
+	.claude-session .session-actions {
+		display: flex;
+		align-items: center;
+		padding: 0 12px;
+		border-left: 1px solid #f0f0f0;
+	}
+
+	.copy-resume-btn {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 6px 10px;
+		background: none;
+		border: 1px solid #e0e0e0;
+		border-radius: 4px;
+		font-size: 12px;
+		color: #666;
+		cursor: pointer;
+		white-space: nowrap;
+		transition: all 0.15s;
+	}
+
+	.copy-resume-btn:hover {
+		background: #f0f0f0;
+		border-color: #0078d4;
+		color: #0078d4;
+	}
+
+	.copy-resume-btn.copied {
+		background: #ecfdf5;
+		border-color: #10b981;
+		color: #065f46;
+	}
+
 	.claude-session .session-preview {
 		font-size: 13px;
 		color: #666;
@@ -1855,6 +1964,53 @@
 		font-size: 12px;
 		color: #666;
 		font-style: italic;
+	}
+
+	.claude-modal-footer {
+		justify-content: space-between;
+		align-items: center;
+	}
+
+	.resume-command {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 6px 12px;
+		background: #1b1b1b;
+		border: 1px solid #333;
+		border-radius: 4px;
+		cursor: pointer;
+		transition: all 0.15s;
+	}
+
+	.resume-command:hover {
+		background: #333;
+		border-color: #555;
+	}
+
+	.resume-command.copied {
+		background: #065f46;
+		border-color: #10b981;
+	}
+
+	.resume-command code {
+		font-size: 13px;
+		color: #e0e0e0;
+		font-family: 'SF Mono', 'Fira Code', monospace;
+	}
+
+	.resume-command span {
+		font-size: 13px;
+		color: #6ee7b7;
+		font-weight: 500;
+	}
+
+	.resume-command svg {
+		color: #e0e0e0;
+	}
+
+	.resume-command.copied svg {
+		color: #6ee7b7;
 	}
 
 	/* Mobile Responsiveness */

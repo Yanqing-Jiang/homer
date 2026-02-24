@@ -24,11 +24,12 @@ import { logger } from "../utils/logger.js";
 import { OvernightTaskStore, PipelineOrchestrator } from "../overnight/index.js";
 import type { OvernightTask, YouTubeSummaryMetadata } from "../overnight/types.js";
 import type Database from "better-sqlite3";
+import { storeJobArtifact } from "../scheduler/jobs/artifact-store.js";
 // dedupeIdeasFile import removed — dedup handled by dedicated idea-dedup cron job
 import {
   summarizeYouTubeVideo,
   geminiSemaphore,
-  summaryFileExists,
+  summaryExists,
   ensureSummariesDir,
 } from "../youtube/summarizer.js";
 
@@ -42,16 +43,19 @@ export class NightSupervisor {
   private jobQueue: JobQueue;
   private isRunning = false;
   private db: Database.Database | null = null;
+  private jobRunId: number | null = null;
   private overnightStore: OvernightTaskStore | null = null;
   private onOvernightMilestone?: (chatId: number, milestone: string, message: string) => Promise<void>;
 
   constructor(config: Partial<NightModeConfig> = {}, options?: {
     db?: Database.Database;
+    jobRunId?: number;
     onOvernightMilestone?: (chatId: number, milestone: string, message: string) => Promise<void>;
   }) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.jobQueue = new JobQueue();
     this.db = options?.db ?? null;
+    this.jobRunId = options?.jobRunId ?? null;
     this.onOvernightMilestone = options?.onOvernightMilestone;
     if (this.db) {
       this.overnightStore = new OvernightTaskStore(this.db);
@@ -115,6 +119,12 @@ export class NightSupervisor {
       // Save the plan
       await this.savePlan(plan);
 
+      // Store plan as artifact for lineage tracking
+      if (this.db && this.jobRunId) {
+        storeJobArtifact(this.db, this.jobRunId, "night-supervisor", "plan", "json",
+          JSON.stringify(plan, null, 2), { jobCount: jobs.length });
+      }
+
       if (dryRun) {
         logger.info({ jobCount: jobs.length }, "Dry run - skipping job execution");
         return this.endSession();
@@ -122,6 +132,17 @@ export class NightSupervisor {
 
       // Phase 3: Execute jobs
       await this.executeJobs();
+
+      // Store execution results as artifact
+      if (this.db && this.jobRunId) {
+        storeJobArtifact(this.db, this.jobRunId, "night-supervisor", "execution-results", "json",
+          JSON.stringify({
+            jobsCompleted: this.session.jobsCompleted,
+            jobsFailed: this.session.jobsFailed,
+            findings: this.session.findings,
+            proposals: this.session.proposals,
+          }, null, 2));
+      }
 
       // Phase 4: Synthesis - optional morning briefing generation
       if (this.config.generateMorningBriefing) {
@@ -323,10 +344,9 @@ export class NightSupervisor {
       return;
     }
 
-    // Process-time dedup: skip if summary file already exists
-    const existing = summaryFileExists(videoId);
-    if (existing) {
-      logger.info({ videoId, taskId: task.id }, "Summary file already exists, marking ready");
+    // Process-time dedup: skip if summary exists in DB or file
+    if (summaryExists(videoId, this.db ?? undefined)) {
+      logger.info({ videoId, taskId: task.id }, "Summary already exists (DB or file), marking ready");
       this.overnightStore.updateTaskStatus(task.id, "ready", {
         completedAt: new Date(),
       });
@@ -344,7 +364,7 @@ export class NightSupervisor {
     try {
       logger.info({ videoId, taskId: task.id }, "Processing YouTube video");
 
-      const result = await summarizeYouTubeVideo(metadata);
+      const result = await summarizeYouTubeVideo(metadata, this.db ?? undefined);
 
       if (result.success) {
         // Update metadata in DB with enriched data
@@ -772,12 +792,19 @@ ${description}
   }
 
   private async saveSessionState(): Promise<void> {
-    const path = join(this.config.outputDir, "state.json");
-    await writeFile(path, JSON.stringify({
+    const stateJson = JSON.stringify({
       session: this.session,
       jobQueue: this.jobQueue.toJSON(),
       lastUpdated: new Date().toISOString(),
-    }, null, 2));
+    }, null, 2);
+
+    const path = join(this.config.outputDir, "state.json");
+    await writeFile(path, stateJson);
+
+    // Store session state as artifact for recovery
+    if (this.db && this.jobRunId) {
+      storeJobArtifact(this.db, this.jobRunId, "night-supervisor", "session-state", "json", stateJson);
+    }
   }
 
   // ----------------------------------------
