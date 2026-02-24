@@ -63,8 +63,10 @@ Write a commit message with:
 Output ONLY the commit message. No preamble, no explanation, no markdown fences.`;
 
     // Unset CLAUDECODE so the daemon can spawn Claude without "nested session" error
+    // Strip GH_TOKEN to avoid leaking credentials to the LLM subprocess
     const env = { ...process.env };
     delete env["CLAUDECODE"];
+    delete env["GH_TOKEN"];
 
     const result = execSync(
       `${CLAUDE_BIN} -p --model sonnet --tools "" --no-session-persistence`,
@@ -114,33 +116,52 @@ export async function runNightlyCodePush(): Promise<{
     }).trim();
 
     if (!status) {
-      return { success: true, output: "No changes to commit" };
+      // Check for unpushed commits from a previous run that committed but failed to push
+      const unpushed = execSync("git rev-list --count origin/main..HEAD", {
+        cwd: PROJECT_DIR,
+        encoding: "utf-8",
+        timeout: 10_000,
+      }).trim();
+      if (unpushed !== "0") {
+        logger.info(`${prefix} No new changes but ${unpushed} unpushed commit(s) found, pushing...`);
+        // Fall through to push logic below
+      } else {
+        return { success: true, output: "No changes to commit" };
+      }
     }
 
-    const lines = status.split("\n").filter(Boolean);
-    const date = new Date().toISOString().slice(0, 10);
+    // Stage and commit if there are working tree changes
+    let commitMsg = "";
+    if (status) {
+      const lines = status.split("\n").filter(Boolean);
+      const date = new Date().toISOString().slice(0, 10);
 
-    logger.info({ fileCount: lines.length }, `${prefix} Staging changes...`);
-    execSync("git add -A", { cwd: PROJECT_DIR, timeout: 30_000 });
+      logger.info({ fileCount: lines.length }, `${prefix} Staging changes...`);
+      execSync("git add -A", { cwd: PROJECT_DIR, timeout: 30_000 });
 
-    // Generate descriptive commit message via Claude Sonnet
-    const commitMsg = await generateCommitMessage(date, lines.length);
+      // Generate descriptive commit message via Claude Sonnet
+      commitMsg = await generateCommitMessage(date, lines.length);
 
-    execSync(`git commit -F -`, {
-      cwd: PROJECT_DIR,
-      timeout: 30_000,
-      input: commitMsg,
-    });
-    logger.info(`${prefix} Committed: ${commitMsg.split("\n")[0]}`);
+      execSync(`git commit -F -`, {
+        cwd: PROJECT_DIR,
+        timeout: 30_000,
+        input: commitMsg,
+      });
+      logger.info(`${prefix} Committed: ${commitMsg.split("\n")[0]}`);
+    }
 
     // Push with retry (using gh CLI for auth — osxkeychain fails in daemon context)
     let pushError: string | undefined;
     for (let attempt = 1; attempt <= PUSH_RETRIES; attempt++) {
       try {
-        const ghToken = execSync(`${GH_BIN} auth token`, {
-          encoding: "utf-8",
-          timeout: 5_000,
-        }).trim();
+        // Try env var first (reliable in launchd), fall back to gh CLI (interactive)
+        let ghToken = process.env.GH_TOKEN ?? "";
+        if (!ghToken) {
+          ghToken = execSync(`${GH_BIN} auth token`, {
+            encoding: "utf-8",
+            timeout: 5_000,
+          }).trim();
+        }
         execSync("git push origin main", {
           cwd: PROJECT_DIR,
           timeout: 60_000,
@@ -163,14 +184,17 @@ export async function runNightlyCodePush(): Promise<{
 
     if (pushError) {
       logger.error(`${prefix} Push failed after ${PUSH_RETRIES} attempts`);
+      const desc = commitMsg ? `Committed locally: ${commitMsg.split("\n")[0]}` : "Unpushed commits remain";
       return {
         success: false,
-        output: `Committed locally: ${commitMsg.split("\n")[0]}`,
+        output: desc,
         error: `Push failed: ${pushError}`,
       };
     }
 
-    const output = `Committed and pushed: ${commitMsg.split("\n")[0]}`;
+    const output = commitMsg
+      ? `Committed and pushed: ${commitMsg.split("\n")[0]}`
+      : "Pushed previously stranded commit(s)";
     logger.info(`${prefix} ${output}`);
     return { success: true, output };
 
