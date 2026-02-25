@@ -1766,6 +1766,133 @@ export class StateManager {
        ORDER BY created_at DESC LIMIT ?`
     ).all(jobName, limit) as JobArtifact[];
   }
+
+  // ============================================
+  // Session Summaries Lifecycle (Migration 039)
+  // ============================================
+
+  /**
+   * Insert a daemon event into session_summaries.
+   * Used by memory_append MCP tool (replaces appendDailyLog).
+   */
+  insertDaemonEvent(title: string, summary: string, project?: string, _source?: string): string {
+    const id = `daemon_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const now = new Date().toISOString();
+    const contentHash = createHash("sha256")
+      .update(title + summary + now)
+      .digest("hex");
+
+    this._db.prepare(
+      `INSERT INTO session_summaries (id, agent, started_at, project, title, summary, content_hash, created_at, status, processed_for_promotion)
+       VALUES (?, 'daemon', ?, ?, ?, ?, ?, ?, 'active', 0)`
+    ).run(id, now, project ?? null, title, summary, contentHash, now);
+
+    return id;
+  }
+
+  /**
+   * Get unprocessed sessions for nightly-memory promotion.
+   * Returns active sessions that haven't been processed yet.
+   */
+  getUnprocessedSessions(dateStart: string, dateEnd: string): SessionSummaryRow[] {
+    return this._db.prepare(
+      `SELECT id, agent, started_at as startedAt, ended_at as endedAt, model, project,
+              title, message_count as messageCount, summary, is_sub_agent as isSubAgent,
+              created_at as createdAt, status
+       FROM session_summaries
+       WHERE status = 'active'
+         AND processed_for_promotion = 0
+         AND COALESCE(started_at, created_at) >= ?
+         AND COALESCE(started_at, created_at) < ?
+       ORDER BY COALESCE(started_at, created_at) ASC`
+    ).all(dateStart, dateEnd) as SessionSummaryRow[];
+  }
+
+  /**
+   * Mark sessions as processed for promotion (after nightly-memory runs).
+   */
+  markSessionsProcessed(ids: string[]): number {
+    if (ids.length === 0) return 0;
+    const placeholders = ids.map(() => "?").join(",");
+    const result = this._db.prepare(
+      `UPDATE session_summaries SET processed_for_promotion = 1 WHERE id IN (${placeholders})`
+    ).run(...ids);
+    return result.changes;
+  }
+
+  /**
+   * Archive sessions (soft-delete with reason tracking).
+   */
+  archiveSessions(ids: string[], reason?: string): number {
+    if (ids.length === 0) return 0;
+    const now = new Date().toISOString();
+    const placeholders = ids.map(() => "?").join(",");
+    const result = this._db.prepare(
+      `UPDATE session_summaries
+       SET status = 'archived', archive_reason = ?, archived_at = ?
+       WHERE id IN (${placeholders}) AND status = 'active'`
+    ).run(reason ?? null, now, ...ids);
+    return result.changes;
+  }
+
+  /**
+   * Unarchive sessions (restore to active).
+   */
+  unarchiveSessions(ids: string[]): number {
+    if (ids.length === 0) return 0;
+    const placeholders = ids.map(() => "?").join(",");
+    const result = this._db.prepare(
+      `UPDATE session_summaries
+       SET status = 'active', archive_reason = NULL, archived_at = NULL
+       WHERE id IN (${placeholders}) AND status = 'archived'`
+    ).run(...ids);
+    return result.changes;
+  }
+
+  /**
+   * Get recent sessions from session_summaries for context building.
+   * Used by shared-context, night/context, weekly-consolidation.
+   */
+  getRecentSessions(days: number, opts?: { activeOnly?: boolean; excludeSubAgents?: boolean }): SessionSummaryRow[] {
+    const activeOnly = opts?.activeOnly ?? true;
+    const excludeSubAgents = opts?.excludeSubAgents ?? false;
+
+    let sql = `
+      SELECT id, agent, started_at as startedAt, ended_at as endedAt, model, project,
+             title, message_count as messageCount, summary, is_sub_agent as isSubAgent,
+             created_at as createdAt, status
+      FROM session_summaries
+      WHERE COALESCE(started_at, created_at) >= date('now', ?)
+    `;
+    const params: (string | number)[] = [`-${days} days`];
+
+    if (activeOnly) {
+      sql += " AND status = 'active'";
+    }
+    if (excludeSubAgents) {
+      sql += " AND is_sub_agent = 0";
+    }
+
+    sql += " ORDER BY COALESCE(started_at, created_at) ASC";
+
+    return this._db.prepare(sql).all(...params) as SessionSummaryRow[];
+  }
+}
+
+// Session summary row (from session_summaries table)
+export interface SessionSummaryRow {
+  id: string;
+  agent: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  model: string | null;
+  project: string | null;
+  title: string | null;
+  messageCount: number;
+  summary: string;
+  isSubAgent: number;
+  createdAt: string;
+  status: string;
 }
 
 // Executor state types
