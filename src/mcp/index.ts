@@ -6,7 +6,8 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { getMemoryIndexer } from "../memory/indexer.js";
-import { appendDailyLog, createDailyEntry, readDailyLog } from "../memory/daily.js";
+import { readDailyLog } from "../memory/daily.js";
+// appendDailyLog removed — memory_append now writes to session_summaries via StateManager
 import { StateManager } from "../state/manager.js";
 import { logger } from "../utils/logger.js";
 import { appendFile, readFile, mkdir, rename } from "fs/promises";
@@ -93,6 +94,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             limit: {
               type: "number",
               description: "Max results to return (default: 10)",
+            },
+            include_archived: {
+              type: "boolean",
+              description: "Include archived sessions in search results (default: false). Archived results rank lower.",
             },
           },
           required: ["query"],
@@ -571,6 +576,42 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: "session_archive",
+        description: "Archive or unarchive session_summaries rows. Archived sessions are excluded from search by default and from nightly-memory processing.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: {
+              type: "string",
+              enum: ["archive", "unarchive"],
+              description: "Action to perform",
+            },
+            ids: {
+              type: "array",
+              items: { type: "string" },
+              description: "Session IDs to archive/unarchive",
+            },
+            reason: {
+              type: "string",
+              description: "Reason for archiving (optional)",
+            },
+            date: {
+              type: "string",
+              description: "Filter by date (YYYY-MM-DD) — archive/unarchive all sessions on this date",
+            },
+            agent: {
+              type: "string",
+              description: "Filter by agent type (optional, combines with date filter)",
+            },
+            dry_run: {
+              type: "boolean",
+              description: "Preview matches without mutating (default: false)",
+            },
+          },
+          required: ["action"],
+        },
+      },
+      {
         name: "outcome_check",
         description: "Manually trigger an outcome check for a specific item. Creates an outcome_check entry for tracking.",
         inputSchema: {
@@ -682,10 +723,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
       case "memory_search": {
-        const { query, context, limit } = args as {
+        const { query, context, limit, include_archived } = args as {
           query: string;
           context?: "work" | "life" | "general";
           limit?: number;
+          include_archived?: boolean;
         };
         const maxResults = limit || 10;
 
@@ -712,15 +754,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             .join(" OR ");
 
           if (escapedTerms) {
-            sessionResults = sm.getDb().prepare(`
-              SELECT s.id, s.title, s.summary, s.project, s.agent, s.started_at,
-                     bm25(session_summaries_fts) as rank
-              FROM session_summaries_fts fts
-              JOIN session_summaries s ON fts.rowid = s.rowid
-              WHERE session_summaries_fts MATCH ?
-              ORDER BY rank
-              LIMIT ?
-            `).all(escapedTerms, maxResults) as typeof sessionResults;
+            if (include_archived) {
+              // Include archived but rank them lower
+              sessionResults = sm.getDb().prepare(`
+                SELECT s.id, s.title, s.summary, s.project, s.agent, s.started_at,
+                       bm25(session_summaries_fts) + CASE WHEN s.status = 'archived' THEN 1000 ELSE 0 END as rank
+                FROM session_summaries_fts fts
+                JOIN session_summaries s ON fts.rowid = s.rowid
+                WHERE session_summaries_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+              `).all(escapedTerms, maxResults) as typeof sessionResults;
+            } else {
+              sessionResults = sm.getDb().prepare(`
+                SELECT s.id, s.title, s.summary, s.project, s.agent, s.started_at,
+                       bm25(session_summaries_fts) as rank
+                FROM session_summaries_fts fts
+                JOIN session_summaries s ON fts.rowid = s.rowid
+                WHERE session_summaries_fts MATCH ?
+                  AND s.status = 'active'
+                ORDER BY rank
+                LIMIT ?
+              `).all(escapedTerms, maxResults) as typeof sessionResults;
+            }
           }
 
           // Also search failure_takeover_fts for past failure diagnoses
@@ -924,19 +980,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: string;
           context?: "work" | "life" | "general";
         };
-        const entry = createDailyEntry(content, context || "general", "conversation");
-        await appendDailyLog(entry);
-
-        // Re-index today's daily file into FTS5 for immediate searchability
-        const today = new Date().toISOString().slice(0, 10);
-        const dailyPath = `/Users/yj/memory/daily/${today}.md`;
-        await indexer.indexFile(dailyPath, context || "general", today);
+        const time = new Date().toTimeString().slice(0, 5);
+        const title = `[${context || "general"}] ${content.slice(0, 80)}`;
+        const sm = getSharedStateManager();
+        sm.insertDaemonEvent(title, content);
+        // FTS5 triggers handle indexing automatically — no MemoryIndexer call needed
 
         return {
           content: [
             {
               type: "text",
-              text: `Appended to daily log at ${entry.time}`,
+              text: `Appended to session_summaries at ${time}`,
             },
           ],
         };
@@ -1700,11 +1754,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const sm = getSharedStateManager();
 
-        // 1. Recent sessions (non-sub-agent)
+        // 1. Recent sessions (non-sub-agent, active only)
         const sessions = sm.getDb().prepare(`
           SELECT title, project, agent, started_at, message_count
           FROM session_summaries
           WHERE is_sub_agent = 0
+            AND status = 'active'
             AND started_at > datetime('now', ?)
           ORDER BY started_at DESC LIMIT 5
         `).all(`-${lookbackDays} days`) as Array<{
@@ -1770,11 +1825,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
-        // 4. Project momentum
+        // 4. Project momentum (active only)
         const momentum = sm.getDb().prepare(`
           SELECT project, COUNT(*) as count
           FROM session_summaries
           WHERE is_sub_agent = 0
+            AND status = 'active'
             AND started_at > datetime('now', ?)
             AND project IS NOT NULL AND project != ''
           GROUP BY project
@@ -2110,6 +2166,92 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
+      }
+
+      case "session_archive": {
+        const { action, ids, reason, date, agent, dry_run } = args as {
+          action: "archive" | "unarchive";
+          ids?: string[];
+          reason?: string;
+          date?: string;
+          agent?: string;
+          dry_run?: boolean;
+        };
+
+        if (!ids?.length && !date) {
+          return {
+            content: [{ type: "text", text: "Must provide either 'ids' or 'date' filter" }],
+            isError: true,
+          };
+        }
+
+        const sm = getSharedStateManager();
+        let targetIds: string[] = ids ?? [];
+
+        // If date filter provided, look up matching session IDs
+        if (date) {
+          let sql = `SELECT id FROM session_summaries WHERE date(COALESCE(started_at, created_at)) = ?`;
+          const params: string[] = [date];
+          if (agent) {
+            sql += ` AND agent = ?`;
+            params.push(agent);
+          }
+          if (action === "archive") {
+            sql += ` AND status = 'active'`;
+          } else {
+            sql += ` AND status = 'archived'`;
+          }
+          const rows = sm.getDb().prepare(sql).all(...params) as Array<{ id: string }>;
+          const dateIds = rows.map(r => r.id);
+          // Combine with explicit ids (if any)
+          targetIds = [...new Set([...targetIds, ...dateIds])];
+        }
+
+        if (targetIds.length === 0) {
+          return {
+            content: [{ type: "text", text: `No matching sessions found for ${action}` }],
+          };
+        }
+
+        // Get sample for response
+        const sampleIds = targetIds.slice(0, 5);
+        const sample = sm.getDb().prepare(
+          `SELECT id, title, agent, started_at FROM session_summaries WHERE id IN (${sampleIds.map(() => "?").join(",")})`
+        ).all(...sampleIds) as Array<{ id: string; title: string; agent: string; started_at: string }>;
+
+        if (dry_run) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                action,
+                matchedCount: targetIds.length,
+                updatedCount: 0,
+                dry_run: true,
+                sample,
+              }, null, 2),
+            }],
+          };
+        }
+
+        let updatedCount: number;
+        if (action === "archive") {
+          updatedCount = sm.archiveSessions(targetIds, reason);
+        } else {
+          updatedCount = sm.unarchiveSessions(targetIds);
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              action,
+              matchedCount: targetIds.length,
+              updatedCount,
+              sample,
+            }, null, 2),
+          }],
+        };
       }
 
       default:
