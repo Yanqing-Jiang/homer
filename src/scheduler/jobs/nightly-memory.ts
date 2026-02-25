@@ -1,29 +1,25 @@
 /**
- * Nightly Memory Processing — Multi-model swarm job
+ * Nightly Memory Processing — Gemini Flash fact extraction
  *
- * Replaces the Claude-based nightly-memory scheduler job.
- * Uses Flash (fact extraction) + Kimi (cross-reference),
- * consolidated via Gemini Flash API.
+ * Reads unprocessed session_summaries from SQLite, extracts promotable facts
+ * via Gemini Flash API (free, pre-summarized input), writes to permanent memory.
  *
- * CRITICAL: Reads yesterday's raw daily log from SQLite archive,
- * not the .md file (which is stripped by session-summaries at 22:00).
+ * Replaces the Opus-based pipeline — input is already summarized by session-harvester,
+ * so a free model is sufficient for fact extraction.
  */
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "fs";
 import { z } from "zod";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
-import { executeClaudeCommand } from "../../executors/claude.js";
-import { executeOpenCodeCLI } from "../../executors/opencode-cli.js";
+import { executeGeminiAPI } from "../../executors/gemini.js";
 import { buildCondensedContext, extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
 import { getRecentJobOutputs } from "../job-outputs.js";
 import { logger } from "../../utils/logger.js";
-import { OPUS_COPILOT_MODEL } from "../../models.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
 import type { StateManager } from "../../state/manager.js";
 import { trackPromotion } from "../../outcomes/hooks.js";
 
 const MEMORY_PATH = "/Users/yj/memory";
-const DAILY_DIR = `${MEMORY_PATH}/daily`;
 
 const PERMANENT_FILES: Record<string, string> = {
   me: `${MEMORY_PATH}/me.md`,
@@ -56,6 +52,14 @@ const NightlyOutputSchema = z.object({
 function getYesterdayDate(): string {
   const d = new Date();
   d.setDate(d.getDate() - 1);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function getTodayDate(): string {
+  const d = new Date();
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
@@ -111,27 +115,12 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
   error?: string;
 }> {
   const yesterday = getYesterdayDate();
+  const today = getTodayDate();
 
   try {
-    // Read from SQLite archive (raw content before session-summaries stripped it)
-    let rawLog: string | null = null;
-
-    const archive = stateManager.getDailyLogArchive(yesterday);
-    if (archive?.rawContent) {
-      rawLog = archive.rawContent;
-      logger.info({ date: yesterday, sizeKB: Math.round(rawLog.length / 1024) }, "Read raw daily log from SQLite archive");
-    }
-
-    // Fallback to .md file
-    if (!rawLog) {
-      const mdPath = `${DAILY_DIR}/${yesterday}.md`;
-      if (existsSync(mdPath)) {
-        rawLog = readFileSync(mdPath, "utf-8");
-        logger.info({ date: yesterday, sizeKB: Math.round(rawLog.length / 1024) }, "Read daily log from .md file (archive not available)");
-      }
-    }
-
-    if (!rawLog) rawLog = "";
+    // Read unprocessed sessions from session_summaries
+    const sessions = stateManager.getUnprocessedSessions(yesterday, today);
+    logger.info({ date: yesterday, sessionCount: sessions.length }, "Loaded unprocessed sessions for nightly memory");
 
     // Read yesterday's explicit feedback to include in analysis
     let feedbackLog = "";
@@ -143,24 +132,23 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
         const keepLines: string[] = [];
         let inYesterday = false;
         let lineDateStr = "";
-        
-        // Only keep lines from today/yesterday in the active file, move rest to archive
+
         const keepThreshold = new Date();
         keepThreshold.setDate(keepThreshold.getDate() - 3);
         const y = keepThreshold.getFullYear();
         const m = String(keepThreshold.getMonth() + 1).padStart(2, "0");
         const d = String(keepThreshold.getDate()).padStart(2, "0");
         const keepThresholdStr = `${y}-${m}-${d}`;
-        
+
         const archiveLines: string[] = [];
 
         for (const line of lines) {
           if (line.startsWith("### [")) {
-            lineDateStr = line.substring(5, 15); // Extract YYYY-MM-DD
+            lineDateStr = line.substring(5, 15);
             inYesterday = line.includes(`[${yesterday}`);
-            
+
             if (inYesterday) yesterdayFeedback.push(line);
-            
+
             if (lineDateStr >= keepThresholdStr) keepLines.push(line);
             else archiveLines.push(line);
           } else if (inYesterday) {
@@ -168,20 +156,17 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
             if (lineDateStr >= keepThresholdStr) keepLines.push(line);
             else archiveLines.push(line);
           } else {
-             // Not yesterday, check if we keep it
              if (lineDateStr >= keepThresholdStr) keepLines.push(line);
-             else if (lineDateStr) archiveLines.push(line); // Has a date but is old
-             else keepLines.push(line); // No date (header/padding), keep it
+             else if (lineDateStr) archiveLines.push(line);
+             else keepLines.push(line);
           }
         }
-        
+
         if (yesterdayFeedback.length > 0) {
           feedbackLog = `\n\n## Explicit User Feedback from Telegram/UI (${yesterday})\n\n` + yesterdayFeedback.join("\n");
-          rawLog += feedbackLog;
-          logger.info({ date: yesterday, feedbackLines: yesterdayFeedback.length }, "Appended yesterday's explicit feedback to daily log for analysis");
+          logger.info({ date: yesterday, feedbackLines: yesterdayFeedback.length }, "Loaded yesterday's explicit feedback");
         }
 
-        // Rotate old feedback
         if (archiveLines.length > 0) {
             writeFileSync(feedbackPath, keepLines.join("\n"), "utf-8");
             try {
@@ -197,9 +182,29 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
       logger.warn({ error: err }, "Failed to read feedback log");
     }
 
-    if (rawLog.length < 100) {
-      return { success: true, output: `No substantial daily log or feedback for ${yesterday}, skipping` };
+    if (sessions.length === 0 && !feedbackLog) {
+      return { success: true, output: `No unprocessed sessions or feedback for ${yesterday}, skipping` };
     }
+
+    // Format sessions as structured blocks grouped by project
+    const byProject = new Map<string, string[]>();
+    for (const s of sessions) {
+      const proj = s.project || "Daemon Events";
+      const ts = s.startedAt ?? s.createdAt;
+      const time = ts.slice(11, 16) || "00:00";
+      const agent = s.agent ?? "unknown";
+      const title = s.title ?? "untitled";
+      const summary = s.summary ?? "";
+
+      if (!byProject.has(proj)) byProject.set(proj, []);
+      byProject.get(proj)!.push(`[${time}] ${agent}: ${title}\n${summary}`);
+    }
+
+    const sessionBlocks: string[] = [];
+    for (const [proj, entries] of byProject) {
+      sessionBlocks.push(`## Project: ${proj}\n${entries.join("\n\n")}`);
+    }
+    const sessionInput = sessionBlocks.join("\n\n") + feedbackLog;
 
     // Load permanent memory files
     const permanentFiles = loadPermanentFiles();
@@ -207,24 +212,15 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
       .map(([key, content]) => `## ${key}.md\n\n${content.slice(0, 6000)}`)
       .join("\n\n---\n\n");
 
-    // Build condensed context for agents that need to know what Yanqing cares about
     const [condensedContext, goals, projects] = await Promise.all([
       buildCondensedContext(),
       extractCurrentGoals(),
       extractActiveProjects(),
     ]);
 
-    // Warn if input appears to be summary-only (degraded quality)
-    if (rawLog.length < 5000 && rawLog.includes("## Daily Summary")) {
-      logger.warn({ date: yesterday, size: rawLog.length },
-        "Daily log appears to be summary-only, not raw. Fact extraction may be degraded.");
-    }
-
-    // Cross-job intelligence
     const recentActivity = getRecentJobOutputs(stateManager.getDb());
 
-    // Single Opus 4.6 call — fact extraction only (idea mining moved to idea-synthesizer)
-    const unifiedPrompt = `You are a memory processing engine for Yanqing's personal AI assistant. Analyze yesterday's daily log, cross-reference against permanent memory files, and extract promotable facts.
+    const unifiedPrompt = `You are a memory processing engine for Yanqing's personal AI assistant. Analyze yesterday's session summaries, cross-reference against permanent memory files, and extract promotable facts.
 
 ## Extract Promotable Facts (3-8 max)
 
@@ -260,9 +256,9 @@ ${recentActivity ? `\n### Recent Job Activity\n${recentActivity}\n` : ""}
 
 ${permanentContext}
 
-## Daily Log (${yesterday})
+## Session Summaries (${yesterday})
 
-${rawLog.length > 80000 ? rawLog.slice(0, 80000) + "\n\n... (log truncated) ...\n\n" + feedbackLog : rawLog}
+${sessionInput.length > 80000 ? sessionInput.slice(0, 80000) + "\n\n... (truncated) ..." : sessionInput}
 
 ## Output Format
 
@@ -271,38 +267,34 @@ Return ONLY a valid JSON object (no markdown, no preamble):
 
 If nothing to promote, use an empty array.`;
 
-    logger.info({ promptLength: unifiedPrompt.length, date: yesterday }, "Running nightly memory via Claude Opus 4.6");
+    logger.info({
+      promptLength: unifiedPrompt.length,
+      date: yesterday,
+      sessionCount: sessions.length,
+    }, "Running nightly memory via Gemini Flash API");
 
-    let consolidated = "";
+    // Use Gemini Flash (free, input is pre-summarized)
+    const result = await executeGeminiAPI(unifiedPrompt, {
+      model: "gemini-3-flash-preview",
+      temperature: 0.2,
+      timeout: 300_000,
+      responseMimeType: "application/json",
+    });
 
-    try {
-      const opusResult = await executeClaudeCommand(unifiedPrompt, {
-        cwd: "/tmp/homer-swarm",
-        model: "opus",
-        timeout: 600_000, // 10 min — Opus is slower but one call replaces 4
-      });
-
-      consolidated = opusResult.output ?? "";
-
-      if (!consolidated || consolidated.length < 50) {
-        throw new Error(`Opus output too short: ${consolidated.length} chars`);
-      }
-    } catch (opusErr) {
-      // Fallback to Opus 4.6 via opencode (free tokens via Copilot)
-      const msg = opusErr instanceof Error ? opusErr.message : String(opusErr);
-      logger.warn({ error: msg }, "Claude CLI Opus failed, falling back to Opus 4.6 via opencode");
-
-      const fallback = await executeOpenCodeCLI(unifiedPrompt, "", {
-        model: OPUS_COPILOT_MODEL,
-        timeout: 600_000,
-        researchOnly: true,
-      });
-
-      if (fallback.exitCode !== 0 || !fallback.output || fallback.output.length < 50) {
-        return { success: false, output: "", error: `Nightly memory failed (both Opus paths): ${fallback.output?.slice(0, 200)}` };
-      }
-      consolidated = fallback.output;
+    if (result.exitCode !== 0 || !result.output) {
+      return { success: false, output: "", error: `Gemini Flash API error: ${(result.output ?? "").slice(0, 200)}` };
     }
+
+    // Valid empty responses (e.g. [] or {"promotions":[]}) are not errors
+    const trimmed = result.output.trim();
+    if (trimmed === "[]" || trimmed === '{"promotions":[]}') {
+      // Mark sessions as processed — they were analyzed, just nothing to promote
+      const sessionIds = sessions.map(s => s.id);
+      if (sessionIds.length > 0) stateManager.markSessionsProcessed(sessionIds);
+      return { success: true, output: `No promotable facts from ${yesterday} (${sessions.length} sessions analyzed)` };
+    }
+
+    const consolidated = result.output;
 
     // Parse and validate
     let promotions: z.infer<typeof PromotionsArraySchema>;
@@ -311,12 +303,12 @@ If nothing to promote, use an empty array.`;
       const nightlyOutput = parseSwarmJSON(consolidated, NightlyOutputSchema);
       promotions = nightlyOutput.promotions ?? [];
     } catch {
-      // Fall back to promotions-only array format
       try {
         promotions = parseSwarmJSON(consolidated, PromotionsArraySchema);
       } catch (parseErr) {
         const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
         logger.error({ error: msg, rawOutput: consolidated.slice(0, 500) }, "Failed to parse nightly memory output");
+        // Leave sessions unprocessed for retry
         return { success: false, output: "", error: `Nightly output parse failed: ${msg}` };
       }
     }
@@ -350,7 +342,6 @@ If nothing to promote, use an empty array.`;
         if (ok) {
           writtenPromos++;
           logger.info({ file: promo.file, section: promo.section, content: promo.content.slice(0, 80) }, "Promoted fact to permanent memory");
-          // Track outcome for this promotion
           try {
             trackPromotion(stateManager.getDb(), promo.content.slice(0, 80), promo.file);
           } catch { /* outcome tracking best-effort */ }
@@ -362,6 +353,17 @@ If nothing to promote, use an empty array.`;
         writeErrors.push(`Write error for ${promo.file}: ${msg}`);
         logger.error({ error: msg, file: promo.file }, "Failed to promote fact");
       }
+    }
+
+    // Mark sessions as processed only if no write errors (allows retry on failure)
+    if (writeErrors.length === 0) {
+      const sessionIds = sessions.map(s => s.id);
+      if (sessionIds.length > 0) {
+        const marked = stateManager.markSessionsProcessed(sessionIds);
+        logger.info({ marked, total: sessionIds.length }, "Marked sessions as processed for promotion");
+      }
+    } else {
+      logger.warn({ writeErrors: writeErrors.length }, "Skipping processed mark — write errors occurred, sessions will be retried");
     }
 
     // Reindex FTS5
@@ -377,12 +379,13 @@ If nothing to promote, use an empty array.`;
     if (writtenPromos > 0 || promotions.length > 0) {
       parts.push(`Promoted ${writtenPromos}/${promotions.length} facts`);
     }
+    parts.push(`${sessions.length} sessions processed`);
     if (writeErrors.length > 0) {
       parts.push(`errors: ${writeErrors.join("; ")}`);
     }
     const output = parts.length > 0
-      ? `${parts.join(", ")} from ${yesterday}'s log`
-      : `No new facts from ${yesterday}'s daily log`;
+      ? `${parts.join(", ")} from ${yesterday}`
+      : `No new facts from ${yesterday}`;
 
     return { success: true, output };
   } catch (error) {

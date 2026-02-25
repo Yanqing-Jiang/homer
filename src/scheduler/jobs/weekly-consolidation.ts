@@ -14,11 +14,11 @@ import { readFile, appendFile } from "fs/promises";
 import { existsSync } from "fs";
 import { executeGeminiAPI } from "../../executors/gemini.js";
 import { logger } from "../../utils/logger.js";
-import { StateManager } from "../../state/manager.js";
+import { StateManager, type SessionSummaryRow } from "../../state/manager.js";
 import { buildSchedulerContext, buildGoalScoreboard } from "../shared-context.js";
 
-const DAILY_LOG_DIR = "/Users/yj/memory/daily";
 const MEMORY_DIR = "/Users/yj/memory";
+const DAILY_LOG_DIR = `${MEMORY_DIR}/daily`;
 const MAX_INPUT_CHARS = 1_800_000; // ~450K tokens, well within 1M context
 
 const PERMANENT_FILES = [
@@ -156,47 +156,50 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
     return { success: false, output: "", error: msg };
   }
 
-  // Collect daily logs (with SQLite archive fallback for stripped/deleted .md files)
+  // Primary: collect from session_summaries (richer than daily .md files)
   const dailyLogs: string[] = [];
   let totalSize = 0;
   let logsFound = 0;
-  let archiveFallbacks = 0;
 
-  let archiveSm: StateManager | null = null;
+  let sessionSm: StateManager | null = null;
   try {
-    archiveSm = new StateManager("/Users/yj/homer/data/homer.db");
-  } catch {
-    logger.warn("Could not open StateManager for archive fallback, continuing without it");
-  }
+    sessionSm = stateManager ?? new StateManager(DB_PATH);
+    const sessions = sessionSm.getRecentSessions(daysBack, { activeOnly: true });
 
-  try {
+    // Group sessions by date
+    const byDate = new Map<string, SessionSummaryRow[]>();
+    for (const s of sessions) {
+      const day = (s.startedAt ?? s.createdAt).slice(0, 10);
+      if (!byDate.has(day)) byDate.set(day, []);
+      byDate.get(day)!.push(s);
+    }
+
     for (const date of dates) {
-      const logPath = `${DAILY_LOG_DIR}/${date}.md`;
-      const content = await readFileIfExists(logPath);
-      if (content) {
+      const daySessions = byDate.get(date);
+      if (daySessions && daySessions.length > 0) {
         logsFound++;
-        totalSize += content.length;
-        // Prefer existing daily summary (much smaller, higher signal)
-        const summaryMatch = content.match(/## Daily Summary[\s\S]*/);
-        if (summaryMatch) {
-          dailyLogs.push(`# ${date}\n\n${summaryMatch[0]}`);
-        } else {
-          dailyLogs.push(`# ${date}\n\n${content}`);
-        }
-      } else if (archiveSm) {
-        // Fallback: check SQLite archive for stripped/deleted dates
-        const archive = archiveSm.getDailyLogArchive(date);
+        const entries = daySessions.map(s => {
+          const ts = s.startedAt ?? s.createdAt;
+          const time = ts.slice(11, 16) || "00:00";
+          return `[${time}] [${s.agent}] ${s.title ?? "untitled"}\n${s.summary ?? ""}`;
+        }).join("\n\n");
+        totalSize += entries.length;
+        dailyLogs.push(`# ${date}\n\n${entries}`);
+      } else {
+        // Fallback: check daily_log_archive for historical data (pre-migration)
+        const archive = sessionSm.getDailyLogArchive(date);
         if (archive) {
           logsFound++;
-          archiveFallbacks++;
           const text = archive.summaryContent ?? archive.rawContent;
           totalSize += text.length;
           dailyLogs.push(`# ${date}\n\n${text}`);
         }
       }
     }
+  } catch (err) {
+    logger.warn({ error: err }, "Failed to load sessions for weekly consolidation");
   } finally {
-    archiveSm?.close();
+    if (!stateManager && sessionSm) sessionSm.close();
   }
 
   if (logsFound === 0) {
