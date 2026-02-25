@@ -1,11 +1,13 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { StateManager } from "../state/manager.js";
 import { QueueManager } from "../queue/manager.js";
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { execSync } from "child_process";
 import { config } from "../config/index.js";
 import type { Scheduler, RegisteredJob } from "../scheduler/index.js";
 import { getClaudeAuthStatus } from "../utils/claude-auth.js";
+import { CronUtils } from "../utils/cron.js";
+import { DEFAULT_JOB_TIMEOUT } from "../scheduler/types.js";
 import { registerSessionRoutes } from "./api/sessions.js";
 import { registerStreamingRoutes } from "./api/streaming.js";
 import { registerIdeasRoutes } from "./api/ideas.js";
@@ -189,6 +191,172 @@ export function createRoutes(
     return {
       status: status.keychainItemFound && status.claudeBinaryExists ? "ok" : "degraded",
       ...status,
+    };
+  });
+
+  // Health check: Scheduler status with stuck/overdue/credential checks
+  server.get("/health/scheduler", async () => {
+    if (!schedulerRef) {
+      return { status: "unhealthy", error: "Scheduler not initialized", jobs: [], summary: {}, credentials: {} };
+    }
+
+    const now = Date.now();
+    const db = stateManager.getDb();
+    const registeredJobs = schedulerRef.getJobs();
+
+    // Build per-job status
+    const jobStatuses: Array<{
+      id: string; name: string; enabled: boolean;
+      isRunning: boolean; runningForMinutes: number | null; stuck: boolean;
+      timeoutMinutes: number;
+      lastRunAt: string | null; lastSuccessAt: string | null;
+      consecutiveFailures: number; nextRunAt: string | null; overdue: boolean;
+    }> = [];
+
+    let stuckCount = 0;
+    let failingCount = 0;
+    let overdueCount = 0;
+    let runningCount = 0;
+    let enabledCount = 0;
+
+    for (const job of registeredJobs) {
+      if (job.config.enabled) enabledCount++;
+
+      const state = stateManager.getScheduledJobState(job.config.id);
+      const timeoutMs = job.config.timeout ?? DEFAULT_JOB_TIMEOUT;
+      const timeoutMinutes = Math.round(timeoutMs / 60000);
+
+      // Check is_running from DB directly (not in the ScheduledJobState interface)
+      const runningRow = db.prepare(
+        "SELECT is_running FROM scheduled_job_state WHERE job_id = ?"
+      ).get(job.config.id) as { is_running: number } | undefined;
+      const isRunning = runningRow?.is_running === 1;
+      if (isRunning) runningCount++;
+
+      // Calculate running duration from latest run's started_at
+      let runningForMinutes: number | null = null;
+      let stuck = false;
+      if (isRunning) {
+        const latestRun = stateManager.getRecentScheduledJobRuns(job.config.id, 1);
+        if (latestRun.length > 0 && latestRun[0]!.startedAt) {
+          const startedAt = new Date(latestRun[0]!.startedAt).getTime();
+          runningForMinutes = Math.round((now - startedAt) / 60000);
+          stuck = (now - startedAt) > timeoutMs;
+        }
+      }
+      if (stuck) stuckCount++;
+
+      // Consecutive failures
+      const consecutiveFailures = state?.consecutiveFailures ?? job.consecutiveFailures;
+      if (consecutiveFailures >= 3 && job.config.enabled) failingCount++;
+
+      // Overdue detection: last success > 2x cron interval ago
+      let overdue = false;
+      if (job.config.enabled && !isRunning) {
+        const lastSuccessAt = state?.lastSuccessAt ?? job.lastSuccess?.toISOString() ?? null;
+        if (lastSuccessAt) {
+          // Compute expected interval from cron (difference between two consecutive runs)
+          const nextTwo = CronUtils.getNextRuns(job.config.cron, 2);
+          if (nextTwo.length === 2) {
+            const intervalMs = nextTwo[1]!.getTime() - nextTwo[0]!.getTime();
+            const lastSuccessTime = new Date(lastSuccessAt).getTime();
+            overdue = (now - lastSuccessTime) > intervalMs * 2;
+          }
+        } else if (state?.lastRunAt) {
+          // Never succeeded but has run — check if it's been too long
+          const nextTwo = CronUtils.getNextRuns(job.config.cron, 2);
+          if (nextTwo.length === 2) {
+            const intervalMs = nextTwo[1]!.getTime() - nextTwo[0]!.getTime();
+            const lastRunTime = new Date(state.lastRunAt).getTime();
+            overdue = (now - lastRunTime) > intervalMs * 2;
+          }
+        }
+      }
+      if (overdue) overdueCount++;
+
+      jobStatuses.push({
+        id: job.config.id,
+        name: job.config.name,
+        enabled: job.config.enabled,
+        isRunning,
+        runningForMinutes,
+        stuck,
+        timeoutMinutes,
+        lastRunAt: state?.lastRunAt ?? job.lastRun?.toISOString() ?? null,
+        lastSuccessAt: state?.lastSuccessAt ?? job.lastSuccess?.toISOString() ?? null,
+        consecutiveFailures,
+        nextRunAt: state?.nextRunAt ?? job.nextRun?.toISOString() ?? null,
+        overdue,
+      });
+    }
+
+    // Credential checks
+    const credentials: Record<string, { status: string; expiresAt?: string; expiresInHours?: number; refreshTokenPresent?: boolean; error?: string }> = {};
+
+    // Gmail OAuth
+    try {
+      const gmailTokenPath = "/Users/yj/job-hunt/gmail/token.json";
+      if (existsSync(gmailTokenPath)) {
+        const tokenData = JSON.parse(readFileSync(gmailTokenPath, "utf-8"));
+        const hasRefreshToken = !!tokenData.refresh_token;
+        const expiry = tokenData.expiry ? new Date(tokenData.expiry) : null;
+        const expiresInHours = expiry ? Math.round((expiry.getTime() - now) / 3600000) : null;
+        credentials.gmail = {
+          status: hasRefreshToken ? "ok" : "warning",
+          expiresAt: expiry?.toISOString(),
+          expiresInHours: expiresInHours ?? undefined,
+          refreshTokenPresent: hasRefreshToken,
+          error: hasRefreshToken ? undefined : "Missing refresh_token",
+        };
+      } else {
+        credentials.gmail = { status: "error", error: "Token file not found" };
+      }
+    } catch (e) {
+      credentials.gmail = { status: "error", error: `Failed to read token: ${e instanceof Error ? e.message : String(e)}` };
+    }
+
+    // GitHub
+    const ghToken = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+    credentials.github = ghToken
+      ? { status: "ok" }
+      : { status: "warning", error: "GH_TOKEN not set" };
+
+    // Claude Code
+    try {
+      const claudeStatus = await getClaudeAuthStatus();
+      credentials.claude = {
+        status: claudeStatus.keychainItemFound && claudeStatus.claudeBinaryExists ? "ok" : "error",
+        error: claudeStatus.keychainCheckError,
+      };
+    } catch (e) {
+      credentials.claude = { status: "error", error: e instanceof Error ? e.message : String(e) };
+    }
+
+    // Determine overall status
+    const hasCredentialErrors = Object.values(credentials).some(c => c.status === "error");
+    const hasCredentialWarnings = Object.values(credentials).some(c => c.status === "warning");
+
+    let status: "healthy" | "degraded" | "unhealthy";
+    if (stuckCount > 0 || hasCredentialErrors) {
+      status = "unhealthy";
+    } else if (overdueCount > 0 || failingCount > 0 || hasCredentialWarnings) {
+      status = "degraded";
+    } else {
+      status = "healthy";
+    }
+
+    return {
+      status,
+      jobs: jobStatuses,
+      summary: {
+        total: registeredJobs.length,
+        enabled: enabledCount,
+        running: runningCount,
+        stuck: stuckCount,
+        failing: failingCount,
+        overdue: overdueCount,
+      },
+      credentials,
     };
   });
 

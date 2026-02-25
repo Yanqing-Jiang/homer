@@ -1,5 +1,6 @@
 import type { Bot } from "grammy";
 import type { RegisteredJob, JobExecutionResult } from "./types.js";
+import { DEFAULT_JOB_TIMEOUT } from "./types.js";
 import type { StateManager } from "../state/manager.js";
 import { sendBatchIdeasForReview } from "../bot/handlers/approval.js";
 import { NightSupervisor } from "../night/supervisor.js";
@@ -11,6 +12,9 @@ import { runWeeklyConsolidation } from "./jobs/weekly-consolidation.js";
 import { runWeeklyMemoryCleanup } from "./jobs/memory-cleanup.js";
 import { runMigrations } from "../state/migrations/index.js";
 import { logger } from "../utils/logger.js";
+import { CronUtils } from "../utils/cron.js";
+import { getClaudeAuthStatus } from "../utils/claude-auth.js";
+import { readFileSync, existsSync } from "fs";
 
 interface InternalJobContext {
   stateManager: StateManager;
@@ -25,7 +29,7 @@ const RETRYABLE_HANDLERS = new Set([
   "learning_engine", "homer_improvements", "session_summaries", "weekly_consolidation",
   "memory_cleanup", "planning_reminder", "content_scraper", "outcome_tracker",
   "preference_updater", "idea_dedup", "memory_git_commit", "nightly_code_push", "db_backup",
-  "idea_synthesizer", "archive_verify",
+  "idea_synthesizer", "archive_verify", "health_check",
 ]);
 
 const TRANSIENT_PATTERNS = [
@@ -71,6 +75,124 @@ function isJobHuntPaused(ctx: InternalJobContext): boolean {
   } catch {
     return false;
   }
+}
+
+async function runHealthCheck(
+  ctx: InternalJobContext
+): Promise<{ success: boolean; output: string; error?: string }> {
+  const now = Date.now();
+  const db = ctx.stateManager.getDb();
+  const issues: string[] = [];
+
+  // Load all job configs from schedule files
+  const { loadAllSchedules, getAllJobs } = await import("./loader.js");
+  const schedules = await loadAllSchedules();
+  const allJobs = getAllJobs(schedules);
+
+  for (const jobConfig of allJobs) {
+    if (!jobConfig.enabled) continue;
+    const timeoutMs = jobConfig.timeout ?? DEFAULT_JOB_TIMEOUT;
+
+    // Check stuck
+    const runningRow = db.prepare(
+      "SELECT is_running FROM scheduled_job_state WHERE job_id = ?"
+    ).get(jobConfig.id) as { is_running: number } | undefined;
+
+    if (runningRow?.is_running === 1) {
+      const latestRun = ctx.stateManager.getRecentScheduledJobRuns(jobConfig.id, 1);
+      if (latestRun.length > 0 && latestRun[0]!.startedAt) {
+        const elapsed = now - new Date(latestRun[0]!.startedAt).getTime();
+        if (elapsed > timeoutMs) {
+          const mins = Math.round(elapsed / 60000);
+          issues.push(`🔴 <b>${jobConfig.id}</b> stuck (running ${mins}m, timeout ${Math.round(timeoutMs / 60000)}m)`);
+        }
+      }
+    }
+
+    // Check consecutive failures
+    const state = ctx.stateManager.getScheduledJobState(jobConfig.id);
+    const failures = state?.consecutiveFailures ?? 0;
+    if (failures >= 3) {
+      issues.push(`🟡 <b>${jobConfig.id}</b> failing (${failures} consecutive failures)`);
+    }
+
+    // Check overdue (skip for running jobs to avoid false positives)
+    if (!runningRow?.is_running) {
+      const lastSuccessAt = state?.lastSuccessAt;
+      if (lastSuccessAt) {
+        const nextTwo = CronUtils.getNextRuns(jobConfig.cron, 2);
+        if (nextTwo.length === 2) {
+          const intervalMs = nextTwo[1]!.getTime() - nextTwo[0]!.getTime();
+          if ((now - new Date(lastSuccessAt).getTime()) > intervalMs * 2) {
+            issues.push(`🟡 <b>${jobConfig.id}</b> overdue (last success: ${lastSuccessAt})`);
+          }
+        }
+      } else if (state?.lastRunAt) {
+        // Never succeeded but has run — check if it's been too long
+        const nextTwo = CronUtils.getNextRuns(jobConfig.cron, 2);
+        if (nextTwo.length === 2) {
+          const intervalMs = nextTwo[1]!.getTime() - nextTwo[0]!.getTime();
+          if ((now - new Date(state.lastRunAt).getTime()) > intervalMs * 2) {
+            issues.push(`🟡 <b>${jobConfig.id}</b> overdue (last run: ${state.lastRunAt}, never succeeded)`);
+          }
+        }
+      }
+    }
+  }
+
+  // Credential checks
+  try {
+    const gmailTokenPath = "/Users/yj/job-hunt/gmail/token.json";
+    if (existsSync(gmailTokenPath)) {
+      const tokenData = JSON.parse(readFileSync(gmailTokenPath, "utf-8"));
+      if (!tokenData.refresh_token) {
+        issues.push("🟡 Gmail: missing refresh_token");
+      }
+    } else {
+      issues.push("🔴 Gmail: token file not found");
+    }
+  } catch {
+    issues.push("🔴 Gmail: failed to read token");
+  }
+
+  const ghToken = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+  if (!ghToken) {
+    issues.push("🟡 GitHub: GH_TOKEN not set");
+  }
+
+  try {
+    const claudeStatus = await getClaudeAuthStatus();
+    if (!claudeStatus.keychainItemFound || !claudeStatus.claudeBinaryExists) {
+      issues.push("🔴 Claude: auth/binary missing");
+    }
+  } catch {
+    issues.push("🔴 Claude: auth check failed");
+  }
+
+  if (issues.length === 0) {
+    return { success: true, output: "All systems healthy" };
+  }
+
+  // Send alert — use bot.api directly so errors propagate (sendNotification swallows them)
+  const hasCritical = issues.some(i => i.startsWith("🔴"));
+  const statusEmoji = hasCritical ? "🚨" : "⚠️";
+  const message = `${statusEmoji} <b>Health Check</b>\n\n${issues.join("\n")}`;
+
+  let alertSent = false;
+  try {
+    await ctx.bot.api.sendMessage(ctx.chatId, message, {
+      parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
+    });
+    alertSent = true;
+  } catch (e) {
+    logger.error({ error: e }, "Failed to send health check notification");
+  }
+
+  return {
+    success: true,
+    output: `${issues.length} issue(s) found${alertSent ? ", alert sent" : ", alert FAILED to send"}`,
+  };
 }
 
 async function runHandler(
@@ -288,6 +410,10 @@ async function runHandler(
       case "archive_verify": {
         const { runArchiveVerify } = await import("./jobs/archive-verify.js");
         const result = await runArchiveVerify(ctx.stateManager.getDb());
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "health_check": {
+        const result = await runHealthCheck(ctx);
         return buildResult(job, startedAt, result.success, result.output, result.error);
       }
       default: {

@@ -14,6 +14,7 @@ import { existsSync } from "fs";
 import type { ContextPack, NightModeConfig } from "./types.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import { logger } from "../utils/logger.js";
+import { StateManager, type SessionSummaryRow } from "../state/manager.js";
 
 // ============================================
 // FILE LOADING HELPERS
@@ -35,14 +36,30 @@ function getTodayDate(): string {
   return new Date().toISOString().split("T")[0] ?? "";
 }
 
-function getRecentDates(days: number): string[] {
-  const dates: string[] = [];
-  for (let i = 0; i < days; i++) {
-    const date = new Date();
-    date.setDate(date.getDate() - i);
-    dates.push(date.toISOString().split("T")[0] ?? "");
+/**
+ * Format session rows into markdown for a given date.
+ */
+function formatSessionsForDate(sessions: SessionSummaryRow[]): string {
+  if (sessions.length === 0) return "";
+  return sessions.map(s => {
+    const ts = s.startedAt ?? s.createdAt;
+    const time = ts.slice(11, 16) || "00:00";
+    return `[${time}] [${s.agent}] ${s.title ?? "untitled"}\n${s.summary ?? ""}`;
+  }).join("\n\n");
+}
+
+/**
+ * Load session_summaries for a date range, grouped by day.
+ */
+function loadSessionsByDate(sm: StateManager, days: number): Map<string, SessionSummaryRow[]> {
+  const sessions = sm.getRecentSessions(days, { activeOnly: true });
+  const byDate = new Map<string, SessionSummaryRow[]>();
+  for (const s of sessions) {
+    const day = (s.startedAt ?? s.createdAt).slice(0, 10);
+    if (!byDate.has(day)) byDate.set(day, []);
+    byDate.get(day)!.push(s);
   }
-  return dates.filter(Boolean);
+  return byDate;
 }
 
 // ============================================
@@ -53,24 +70,34 @@ export async function buildContextPack(
   config: NightModeConfig = DEFAULT_CONFIG
 ): Promise<ContextPack> {
   const { memoryDir, outputDir } = config;
-  const dailyDir = join(memoryDir, "daily");
 
   logger.info("Building context pack for night supervisor");
 
-  // Load today's daily log
-  const today = getTodayDate();
-  const dailyLogPath = join(dailyDir, `${today}.md`);
-  const dailyLog = await safeReadFile(dailyLogPath);
-
-  // Load recent logs (last 3 days)
-  const recentDates = getRecentDates(3);
+  // Load sessions from session_summaries (replaces daily .md file reads)
+  let dailyLog = "";
   const recentLogs: string[] = [];
-  for (const date of recentDates) {
-    if (date === today) continue; // Skip today, already loaded
-    const log = await safeReadFile(join(dailyDir, `${date}.md`));
-    if (log) {
-      recentLogs.push(`## ${date}\n\n${log}`);
+  let sm: StateManager | null = null;
+  try {
+    sm = new StateManager("/Users/yj/homer/data/homer.db");
+    const today = getTodayDate();
+    const sessionsByDate = loadSessionsByDate(sm, 4); // today + 3 days
+
+    // Today's sessions
+    const todaySessions = sessionsByDate.get(today) ?? [];
+    dailyLog = formatSessionsForDate(todaySessions);
+
+    // Recent days (excluding today)
+    for (const [date, sessions] of sessionsByDate) {
+      if (date === today) continue;
+      const formatted = formatSessionsForDate(sessions);
+      if (formatted) {
+        recentLogs.push(`## ${date}\n\n${formatted}`);
+      }
     }
+  } catch (error) {
+    logger.warn({ error }, "Failed to load sessions from DB, falling back to empty");
+  } finally {
+    sm?.close();
   }
 
   // Load permanent memory files
@@ -330,10 +357,21 @@ function truncateIfNeeded(content: string, maxLength: number): string {
 // ============================================
 
 export async function refreshDailyLog(
-  config: NightModeConfig = DEFAULT_CONFIG
+  _config: NightModeConfig = DEFAULT_CONFIG
 ): Promise<string> {
-  const dailyLogPath = join(config.memoryDir, "daily", `${getTodayDate()}.md`);
-  return await safeReadFile(dailyLogPath);
+  // Read today's sessions from session_summaries (replaces daily .md file read)
+  let sm: StateManager | null = null;
+  try {
+    sm = new StateManager("/Users/yj/homer/data/homer.db");
+    const today = getTodayDate();
+    const sessions = sm.getRecentSessions(1, { activeOnly: true });
+    const todaySessions = sessions.filter(s => (s.startedAt ?? s.createdAt).startsWith(today));
+    return formatSessionsForDate(todaySessions);
+  } catch {
+    return "";
+  } finally {
+    sm?.close();
+  }
 }
 
 export async function getLatestIdeas(

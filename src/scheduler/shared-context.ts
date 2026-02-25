@@ -8,15 +8,15 @@
  * Used by session-summaries, weekly-consolidation, and memory-cleanup.
  */
 
-import { readFile, readdir } from "fs/promises";
+import { readFile } from "fs/promises";
 import { existsSync } from "fs";
+import { StateManager, type SessionSummaryRow } from "../state/manager.js";
 
 // Re-export for backward compatibility (function lives in job-outputs.ts)
 export { getRecentJobOutputs } from "./job-outputs.js";
 
 const CLAUDE_MD_PATH = "/Users/yj/.claude/CLAUDE.md";
 const MEMORY_DIR = "/Users/yj/memory";
-const DAILY_DIR = `${MEMORY_DIR}/daily`;
 const ARCHITECTURE_MD_PATH = "/Users/yj/homer/architecture.md";
 
 const CONTEXT_FILES: Array<{ path: string; label: string }> = [
@@ -33,36 +33,50 @@ async function readFileIfExists(path: string): Promise<string | null> {
 }
 
 /**
- * Read the last N days of daily logs (YYYY-MM-DD.md only).
- * Each log is truncated to maxLines lines.
+ * Format session_summaries rows into markdown blocks by date.
+ */
+function formatSessionsAsMarkdown(sessions: SessionSummaryRow[]): Map<string, string> {
+  const byDate = new Map<string, string[]>();
+
+  for (const s of sessions) {
+    const ts = s.startedAt ?? s.createdAt;
+    const day = ts.slice(0, 10);
+    const time = ts.slice(11, 16) || "00:00";
+    const agent = s.agent ?? "unknown";
+    const title = s.title ?? "untitled";
+    const summary = s.summary ?? "";
+
+    if (!byDate.has(day)) byDate.set(day, []);
+    byDate.get(day)!.push(`[${time}] [${agent}] ${title}\n${summary}`);
+  }
+
+  const result = new Map<string, string>();
+  for (const [day, entries] of byDate) {
+    result.set(`${day}.md`, `### ${day}\n${entries.join("\n\n")}`);
+  }
+  return result;
+}
+
+/**
+ * Read the last N days of activity from session_summaries.
+ * Returns a Map<filename, content> matching the old getRecentDailyLogs signature.
  */
 async function getRecentDailyLogs(
   days: number,
-  maxLines: number
+  _maxLines: number
 ): Promise<Map<string, string>> {
-  const logs = new Map<string, string>();
-  if (!existsSync(DAILY_DIR) || days <= 0) return logs;
+  if (days <= 0) return new Map();
 
-  const files = await readdir(DAILY_DIR);
-  const dailyPattern = /^(\d{4}-\d{2}-\d{2})\.md$/;
-  const dailyFiles = files
-    .filter((f) => dailyPattern.test(f))
-    .sort()
-    .reverse()
-    .slice(0, days);
-
-  for (const file of dailyFiles) {
-    const content = await readFile(`${DAILY_DIR}/${file}`, "utf-8");
-    const lines = content.split("\n");
-    const truncated =
-      lines.length > maxLines
-        ? lines.slice(0, maxLines).join("\n") +
-          `\n\n[...truncated, ${lines.length - maxLines} more lines]`
-        : content;
-    logs.set(file, truncated);
+  let sm: StateManager | null = null;
+  try {
+    sm = new StateManager("/Users/yj/homer/data/homer.db");
+    const sessions = sm.getRecentSessions(days, { activeOnly: true });
+    return formatSessionsAsMarkdown(sessions);
+  } catch {
+    return new Map();
+  } finally {
+    sm?.close();
   }
-
-  return logs;
 }
 
 export interface SchedulerContextOptions {

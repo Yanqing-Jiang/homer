@@ -84,8 +84,13 @@ export async function authMiddleware(
   request: AuthenticatedRequest,
   reply: FastifyReply
 ): Promise<void> {
-  // Skip auth for health checks and webhooks (webhooks validate their own signatures)
+  // Skip auth for basic health checks and webhooks (webhooks validate their own signatures)
   if (request.url === "/health" || request.url === "/health/auth" || request.url.startsWith("/webhooks/")) {
+    return;
+  }
+
+  // /health/scheduler exposes job state + credential status — only skip auth when localhost-only
+  if (request.url === "/health/scheduler" && !config.web.exposeExternally) {
     return;
   }
 

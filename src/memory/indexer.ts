@@ -161,25 +161,20 @@ export class MemoryIndexer {
       }
     }
 
-    // Daily log files
-    const dailyLogsDir = "/Users/yj/memory/daily";
-    if (existsSync(dailyLogsDir)) {
-      const files = readdirSync(dailyLogsDir);
-      const datePattern = /^\d{4}-\d{2}-\d{2}.*\.md$/;
-
-      for (const file of files) {
-        if (datePattern.test(file)) {
-          const entryDate = file.replace(".md", "");
-          const filePath = `${dailyLogsDir}/${file}`;
-          try {
-            const indexed = await this.indexFile(filePath, "general", entryDate);
-            if (indexed) stats.indexed++;
-            else stats.skipped++;
-          } catch {
-            stats.errors++;
-          }
-        }
+    // Daily log files — SKIPPED (session data is searchable via session_summaries_fts)
+    // Purge any previously-indexed daily log chunks from memory_fts
+    try {
+      const purged = this.db.prepare(
+        "DELETE FROM memory_fts WHERE file_path LIKE '/Users/yj/memory/daily/%'"
+      ).run();
+      const purgedMeta = this.db.prepare(
+        "DELETE FROM memory_index_meta WHERE file_path LIKE '/Users/yj/memory/daily/%'"
+      ).run();
+      if (purged.changes > 0 || purgedMeta.changes > 0) {
+        logger.info({ ftsChunks: purged.changes, metaFiles: purgedMeta.changes }, "Purged stale daily log entries from memory_fts");
       }
+    } catch (err) {
+      logger.warn({ error: err }, "Failed to purge stale daily log entries");
     }
 
     // Meeting transcripts
@@ -405,7 +400,7 @@ export class MemoryIndexer {
         entry_date: string | null;
       }>;
 
-      // Also get session summary embeddings (no memory_fts row, metadata from session_summaries)
+      // Also get session summary embeddings (active only — exclude archived)
       let sessionEmbeddingRows: typeof embeddingRows = [];
       try {
         sessionEmbeddingRows = this.db.prepare(`
@@ -415,6 +410,7 @@ export class MemoryIndexer {
           FROM memory_embeddings e
           JOIN session_summaries s ON e.file_path = 'session:' || s.id
           WHERE e.file_path LIKE 'session:%'
+            AND s.status = 'active'
         `).all() as typeof embeddingRows;
       } catch {
         // session_summaries table may not exist
