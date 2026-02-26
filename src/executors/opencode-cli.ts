@@ -4,6 +4,7 @@ import * as readline from "readline";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
 import { executeGeminiAPI } from "./gemini.js";
+import { googleAccountManager } from "../utils/google-auth.js";
 
 // ============================================
 // TYPES
@@ -145,13 +146,31 @@ export async function executeOpenCodeCLI(
   } = options;
 
   // Normalize model name: callers may pass "gemini-3-flash-preview" without provider prefix
-  const model = rawModel.includes("/") ? rawModel : `google/${rawModel}`;
+  let model = rawModel.includes("/") ? rawModel : `google/${rawModel}`;
+  
+  // Use aistudio provider for 3.1 Pro because Antigravity gateway is unreliable for it
+  if (model.includes("3.1-pro")) {
+    model = model.replace("google/", "google-aistudio/");
+  }
 
   const prefix = browserOnly ? BROWSER_ONLY_PREFIX : researchOnly ? RESEARCH_ONLY_PREFIX : "";
   const effectivePrompt = prefix + prompt;
   const startTime = Date.now();
 
-  logger.debug({ model, promptLength: effectivePrompt.length, contextLength: context.length, researchOnly }, "Executing OpenCode CLI");
+  // Get active Google account and its valid access token
+  let activeAccount;
+  let accessToken = "";
+  if (!model.includes("google-aistudio")) {
+    try {
+      activeAccount = await googleAccountManager.getActiveAccount();
+      const tokens = await googleAccountManager.refreshAccessToken(activeAccount);
+      accessToken = tokens.accessToken;
+    } catch (err) {
+      logger.warn({ err }, "Failed to get Google OAuth token, continuing without it");
+    }
+  }
+
+  logger.debug({ model, promptLength: effectivePrompt.length, contextLength: context.length, researchOnly, activeEmail: activeAccount?.email }, "Executing OpenCode CLI");
 
   return new Promise((resolve) => {
     // Build the full message: context + prompt combined via stdin if context exists
@@ -171,13 +190,17 @@ export async function executeOpenCodeCLI(
     const effectiveCwd = cwd || (browserOnly ? "/tmp/homer-scrape" : (process.env.HOME || "/Users/yj"));
     if (browserOnly) mkdirSync(effectiveCwd, { recursive: true });
 
+    const env = { ...process.env };
+    if (accessToken) {
+      // Pass the token to OpenCode's native provider
+      env.GOOGLE_ACCESS_TOKEN = accessToken;
+    }
+
     const child: ChildProcess = spawn("opencode", args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: effectiveCwd,
       detached: true, // own process group so SIGTERM kills all children
-      env: {
-        ...process.env,
-      },
+      env,
     });
 
     // State
@@ -419,16 +442,19 @@ export async function executeOpenCodeWithFallback(
   context: string = "",
   options: OpenCodeCLIOptions = {}
 ): Promise<OpenCodeCLIResult> {
-  // OpenCode handles account rotation internally via the auth plugin.
-  // We just retry once on quota/auth errors.
   const result = await executeOpenCodeCLI(prompt, context, options);
 
   if (result.exitCode === 0 || (result.exitCode !== 2 && result.exitCode !== 3)) {
     return result;
   }
 
-  // Retry once on quota/auth error (OpenCode may rotate internally)
-  logger.info({ exitCode: result.exitCode }, "Retrying OpenCode after quota/auth error");
+  // Quota or Auth error - log it and rotate account
+  const account = await googleAccountManager.getActiveAccount();
+  logger.info({ exitCode: result.exitCode, email: account.email }, "OpenCode quota/auth error, rotating account");
+  await googleAccountManager.markRateLimited(account.email, 60 * 60 * 1000); // 1 hour cooldown
+  await googleAccountManager.rotateAccount();
+
+  // Retry once with new account
   const retryResult = await executeOpenCodeCLI(prompt, context, options);
 
   // If retry still quota-exhausted, fall back to direct API key for Gemini models

@@ -99,6 +99,7 @@
 			case 'claude-research': return 'Claude';
 			case 'web-ui': return 'Web';
 			case 'bookmark': return 'Bookmark';
+			case 'youtube-analysis': return 'YouTube';
 			default: return 'Idea';
 		}
 	}
@@ -292,8 +293,35 @@
 			case 'claude-research': return '🤖';
 			case 'web-ui': return '🌐';
 			case 'bookmark': return '🔖';
+			case 'youtube-analysis': return '📺';
 			default: return '💡';
 		}
+	}
+
+	/** Extract Source Files section from context (youtube-analysis ideas). */
+	function parseSourceFiles(context: string | undefined): Array<{label: string, path: string}> | null {
+		if (!context) return null;
+		const marker = '## Source Files\n';
+		if (!context.startsWith(marker)) return null;
+		const body = context.slice(marker.length);
+		const end = body.indexOf('\n## ');
+		const block = end === -1 ? body : body.slice(0, end);
+		const files: Array<{label: string, path: string}> = [];
+		for (const line of block.split('\n')) {
+			const m = line.match(/^- (.+?):\s*`(.+?)`/);
+			if (m) files.push({ label: m[1]!, path: m[2]! });
+		}
+		return files.length > 0 ? files : null;
+	}
+
+	/** Strip the ## Source Files block from context for normal display. */
+	function stripSourceFiles(context: string | undefined): string | undefined {
+		if (!context) return context;
+		const marker = '## Source Files\n';
+		if (!context.startsWith(marker)) return context;
+		const body = context.slice(marker.length);
+		const end = body.indexOf('\n## ');
+		return end === -1 ? undefined : body.slice(end + 1).trim();
 	}
 </script>
 
@@ -563,12 +591,35 @@
 					<!-- Primary: Content -->
 					<div class="idea-reading-area">{selectedIdea.content}</div>
 
+					<!-- Source Files (youtube-analysis ideas) -->
+					{#if selectedIdea.source === 'youtube-analysis' && selectedIdea.context}
+						{@const sourceFiles = parseSourceFiles(selectedIdea.context)}
+						{#if sourceFiles && sourceFiles.length > 0}
+							<div class="idea-secondary-section">
+								<div class="idea-secondary-label">Source Files</div>
+								<div class="source-files-list">
+									{#each sourceFiles as file}
+										<div class="source-file-item">
+											<span class="source-file-label">{file.label}:</span>
+											<code class="source-file-path">{file.path}</code>
+										</div>
+									{/each}
+								</div>
+							</div>
+						{/if}
+					{/if}
+
 					<!-- Secondary: Context -->
 					{#if selectedIdea.context}
-						<div class="idea-secondary-section">
-							<div class="idea-secondary-label">Context</div>
-							<div class="idea-secondary-content">{selectedIdea.context}</div>
-						</div>
+						{@const displayContext = selectedIdea.source === 'youtube-analysis'
+							? stripSourceFiles(selectedIdea.context)
+							: selectedIdea.context}
+						{#if displayContext}
+							<div class="idea-secondary-section">
+								<div class="idea-secondary-label">Context</div>
+								<div class="idea-secondary-content">{displayContext}</div>
+							</div>
+						{/if}
 					{/if}
 
 					<!-- Secondary: Exploration Notes -->
@@ -1258,6 +1309,37 @@
 		line-height: 1.6;
 		white-space: pre-wrap;
 		margin: 0;
+	}
+
+	.source-files-list {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.source-file-item {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
+	.source-file-label {
+		font-size: 12px;
+		color: #888;
+		white-space: nowrap;
+		flex-shrink: 0;
+	}
+
+	.source-file-path {
+		font-family: 'Cascadia Code', 'Consolas', 'SF Mono', monospace;
+		font-size: 12px;
+		color: #0078d4;
+		background: #f0f6ff;
+		padding: 2px 6px;
+		border-radius: 3px;
+		word-break: break-all;
+		user-select: all;
 	}
 
 	.modal-footer {
