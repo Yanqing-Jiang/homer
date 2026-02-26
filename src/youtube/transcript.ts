@@ -90,6 +90,74 @@ ${result.text}
   return filePath;
 }
 
+// ============================================
+// TRANSCRIPT SAMPLING HELPERS (for two-pass pipeline)
+// ============================================
+
+/**
+ * Return the local filesystem path to a cached transcript, or null if not cached.
+ * Scans TRANSCRIPTS_DIR for a file starting with the videoId prefix.
+ */
+export function getLocalTranscriptPath(videoId: string): string | null {
+  if (!existsSync(TRANSCRIPTS_DIR)) return null;
+  try {
+    const files = readdirSync(TRANSCRIPTS_DIR);
+    const match = files.find((f) => f.startsWith(`${videoId}-`));
+    return match ? join(TRANSCRIPTS_DIR, match) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build a ~3K-char sample for Pass 1 classification.
+ * Takes head + middle + tail to give Flash a representative view.
+ */
+export function buildTranscriptSampleForPass1(text: string): string {
+  const TARGET = 3000;
+  if (text.length <= TARGET) return text;
+
+  const chunkSize = Math.floor(TARGET / 3);
+  const head = text.slice(0, chunkSize);
+  const mid = text.slice(Math.floor(text.length / 2) - Math.floor(chunkSize / 2), Math.floor(text.length / 2) + Math.floor(chunkSize / 2));
+  const tail = text.slice(text.length - chunkSize);
+
+  return `${head}\n\n[...middle section...]\n\n${mid}\n\n[...end section...]\n\n${tail}`;
+}
+
+/**
+ * Build transcript material for Pass 2 deep analysis based on strategy from Pass 1.
+ * Strategies:
+ *   "full"      — transcript fits in context, send all
+ *   "chunked"   — send representative segments
+ *   "sampled"   — send head+tail only (very long)
+ */
+export function buildTranscriptForPass2(text: string, strategy: string): string {
+  const len = text.length;
+
+  if (strategy === "full" || len <= 12000) {
+    return text;
+  }
+
+  if (strategy === "chunked" || len <= 50000) {
+    // 4 evenly-spaced segments of ~3K chars each
+    const segSize = 3000;
+    const positions = [0, Math.floor(len * 0.33), Math.floor(len * 0.66), len - segSize];
+    const segments = positions.map((pos) => {
+      const start = Math.max(0, pos);
+      const end = Math.min(len, start + segSize);
+      return text.slice(start, end);
+    });
+    return segments.join("\n\n[...]\n\n");
+  }
+
+  // "sampled" — very long transcript: head + tail (map-reduce happens externally)
+  const chunkSize = 6000;
+  const head = text.slice(0, chunkSize);
+  const tail = text.slice(text.length - chunkSize);
+  return `${head}\n\n[... ${Math.round((len - chunkSize * 2) / 1000)}K chars omitted — map-reduce applied ...]\n\n${tail}`;
+}
+
 /**
  * Check if a transcript already exists — DB first, then file fallback.
  */

@@ -1,22 +1,27 @@
 /**
- * YouTube Video Summarizer
+ * YouTube Video Summarizer — Pipeline v2
  *
- * Uses Gemini Flash with full personal memory context to generate
- * deeply personalized video analysis. Includes concurrency control
- * via semaphore (max 3 parallel Gemini processes).
+ * Two-pass adaptive analysis:
+ *   Pass 1 (Flash)   — classify video, infer intent, plan context retrieval
+ *   Pass 2 (3.1 Pro) — deep adaptive analysis, only expands relevant categories
+ *
+ * Concurrency: Flash classification semaphore (max 4), Pro analysis semaphore (max 2).
  */
 
 import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
-import { executeGeminiWithFallback } from "../executors/opencode-cli.js";
-import { extractTranscript } from "./transcript.js";
+import { executeGeminiAPI } from "../executors/gemini.js";
+import { extractTranscript, buildTranscriptSampleForPass1, buildTranscriptForPass2, getLocalTranscriptPath } from "./transcript.js";
 import { logger } from "../utils/logger.js";
+import { buildCondensedContext } from "../scheduler/shared-context.js";
+import { createIdea, findByCanonicalUrl, searchIdeas } from "../ideas/dao.js";
+import type { ParsedIdea } from "../ideas/parser.js";
+import { randomUUID } from "crypto";
 import type { YouTubeSummaryMetadata } from "../overnight/types.js";
 import type Database from "better-sqlite3";
 
-const MEMORY_PATH = process.env.MEMORY_PATH ?? "/Users/yj/memory";
 const SUMMARIES_DIR = `${process.env.HOME}/homer/data/youtube-summaries`;
-const MAX_TRANSCRIPT_CHARS = 20000;
+const ARCHITECTURE_PATH = "/Users/yj/homer/architecture.md";
 
 // ============================================
 // CONCURRENCY CONTROL
@@ -46,99 +51,81 @@ class Semaphore {
   }
 }
 
-export const geminiSemaphore = new Semaphore(3);
+/** Backward-compat export — callers that acquire before calling summarizeYouTubeVideo */
+export const geminiSemaphore = new Semaphore(4);
+
+/** Separate semaphore for the expensive Pro analysis pass */
+const proSemaphore = new Semaphore(2);
 
 // ============================================
-// MEMORY CONTEXT
+// TYPES
 // ============================================
 
-function loadMemoryContext(): string {
-  const files = ["me.md", "work.md", "life.md", "preferences.md"];
-  const sections: string[] = [];
+/** 8 analysis categories used in Pass 1 weights and Pass 2 expansion */
+export const ANALYSIS_CATEGORIES = [
+  "AI Trends & Agent Strategy",
+  "Technical Deep-Dive / Homer Application",
+  "Automation & Productivity",
+  "Trading / Finance",
+  "Content Creation & Thought Leadership",
+  "Life Strategy / Mental Models",
+  "General Knowledge / Curiosity",
+  "Career / Job Strategy",
+] as const;
 
-  for (const file of files) {
-    const path = join(MEMORY_PATH, file);
-    if (existsSync(path)) {
-      try {
-        const content = readFileSync(path, "utf-8");
-        sections.push(`=== ${file.toUpperCase()} ===\n${content}`);
-      } catch {
-        logger.debug({ file }, "Failed to read memory file");
-      }
-    }
-  }
+export type AnalysisCategory = typeof ANALYSIS_CATEGORIES[number];
 
-  return sections.join("\n\n");
+export interface Pass1Result {
+  videoCategory: AnalysisCategory;
+  intentInference: string;
+  categoryWeights: Record<string, number>;  // category name → 0.0–1.0
+  relevancePreScore: number;                 // 0–10
+  analysisPlan: {
+    focusCategories: string[];
+    transcriptStrategy: "full" | "chunked" | "sampled";
+    contextHints: {
+      shouldCheckHomerArchitecture: boolean;
+      shouldCheckJobActivity: boolean;
+      shouldCheckRecentIdeas: boolean;
+      shouldCheckRecentSessions: boolean;
+      keywords: string[];
+    };
+  };
 }
 
-const HOMER_ARCHITECTURE_PATH = "/Users/yj/homer/architecture.md";
-
-function loadHomerArchitecture(): string {
-  try {
-    if (existsSync(HOMER_ARCHITECTURE_PATH)) {
-      return readFileSync(HOMER_ARCHITECTURE_PATH, "utf-8");
-    }
-  } catch {
-    logger.debug("Failed to read Homer architecture file");
-  }
-  return "";
+export interface IdeaCandidate {
+  title: string;
+  summary: string;
+  firstStep: string;
+  evidence: string;
+  novelty: number;       // 0.0–1.0
+  actionability: number; // 0.0–1.0
+  fit: number;           // 0.0–1.0
+  shouldCreateIdea: boolean;
+  categoryTags: string[];
+  projectTags: string[];
 }
 
-// ============================================
-// GEMINI PROMPT
-// ============================================
-
-function buildSummaryPrompt(memoryContext: string, homerArchitecture: string, transcript: string, transcriptMethod: string): string {
-  const archSection = homerArchitecture
-    ? `\n=== HOMER ARCHITECTURE (detailed internals — use this for Tier 3) ===\n${homerArchitecture.slice(0, 30000)}\n=== END HOMER ARCHITECTURE ===\n`
-    : "";
-
-  return `You are a personal strategic advisor for Yanqing Jiang. You have deep knowledge
-of his career, goals, projects, and life context (provided below). Your job is
-NOT just to summarize this YouTube video — it's to extract maximum actionable
-value for Yanqing specifically.
-
-=== YANQING'S FULL CONTEXT ===
-${memoryContext}
-=== END CONTEXT ===
-${archSection}
-=== VIDEO TRANSCRIPT (extracted via: ${transcriptMethod}) ===
-${transcript.slice(0, MAX_TRANSCRIPT_CHARS)}
-=== END TRANSCRIPT ===
-
-Analyze this video across 4 tiers and respond with JSON:
-
-{
-  "videoTitle": "...",
-  "channelName": "...",
-
-  "summary": "2-3 paragraph summary of the video's main arguments and insights. Include the core thesis and supporting points.",
-  "keyTakeaways": ["3-5 specific takeaways"],
-
-  "projectConnections": "TIER 2 — Which of Yanqing's active projects can directly benefit? Consider: Homer OS (daemon, scheduler, executors, memory system), MAHORAGA trading system (regime filter, leveraged ETFs), hr-breaker (resume optimization), job hunt automation, Analytics Copilot (Chat-to-SQL on Databricks). Be SPECIFIC about HOW to apply the video's ideas.",
-
-  "homerImprovements": "TIER 3 — You have Homer's FULL architecture above (scheduler swarm pattern, memory consolidation pipeline, session harvester, MCP tools, executor routing, overnight jobs, idea pipeline, job hunt system, scraping infrastructure). Based on this video, propose SPECIFIC architectural improvements or new features. Reference actual file paths, modules, and patterns from the architecture docs. Examples: 'Add X pattern to model-swarm.ts fan-out logic', 'The session-harvester could use Y technique for better summarization', 'Apply Z to the idea dedup pipeline in ideas-explore.ts'.",
-
-  "careerRelevance": "TIER 4 — How does this help Yanqing's career and life? Consider: B3/Director promo path at P&G, $250-350K job hunt positioning, AI/analytics thought leadership, LinkedIn/Medium content strategy, relationship with JT and org dynamics, Army-to-tech narrative, side income goals. What deeper meanings or strategic lessons apply?",
-
-  "actionableSuggestions": [
-    "Concrete action items Yanqing should take based on this video",
-    "E.g. 'Apply X technique to your Analytics Copilot pitch to JT'",
-    "E.g. 'Add this trading pattern to MAHORAGA's regime filter'",
-    "E.g. 'Write a LinkedIn post about Y — aligns with your thought leadership'"
-  ],
-
-  "relevanceScore": 7,
-  "relevanceReason": "One sentence on why this score"
-}
-
-IMPORTANT:
-- Be SPECIFIC. Reference actual project names, people (JT, Ravi, Alfredo), and goals.
-- Generic advice like "this could help your career" is useless. Connect dots.
-- For Homer improvements (Tier 3), reference actual modules and file paths from the architecture context.
-- If the video has LOW relevance, say so honestly (score 1-3) with a brief note.
-- If the video is highly relevant, go deep on connections across all 4 tiers.
-- Return ONLY valid JSON, no markdown fences or extra text.`;
+export interface Pass2Result {
+  videoTitle: string;
+  channelName: string;
+  intentHypothesis: string;
+  overallRelevance: number;  // 0–10
+  overallRelevanceReason: string;
+  analysisByCategory: Array<{
+    category: string;
+    weight: number;
+    analysis: string;
+    actionItems: string[];
+  }>;
+  actions: string[];
+  ideaCandidates: IdeaCandidate[];
+  scores: {
+    depth: number;
+    novelty: number;
+    actionability: number;
+  };
+  degraded?: boolean;  // true if fell back from Pro to Flash
 }
 
 // ============================================
@@ -153,16 +140,11 @@ export function ensureSummariesDir(): void {
 
 export function summaryFileExists(videoId: string): string | null {
   if (!existsSync(SUMMARIES_DIR)) return null;
-
   const files = readdirSync(SUMMARIES_DIR);
   const match = files.find((f) => f.startsWith(`${videoId}-`));
   return match ? join(SUMMARIES_DIR, match) : null;
 }
 
-/**
- * Check if a video exists in the youtube_videos DB table.
- * Returns true if found (with or without summary).
- */
 export function videoExistsInDb(db: Database.Database, videoId: string): boolean {
   try {
     const row = db.prepare("SELECT 1 FROM youtube_videos WHERE video_id = ?").get(videoId);
@@ -172,91 +154,12 @@ export function videoExistsInDb(db: Database.Database, videoId: string): boolean
   }
 }
 
-/**
- * Check if a summary exists — DB first, then file fallback.
- */
 export function summaryExists(videoId: string, db?: Database.Database): boolean {
   if (db && videoExistsInDb(db, videoId)) return true;
   return !!summaryFileExists(videoId);
 }
 
-/**
- * Insert or update a video summary in the youtube_videos table.
- */
-function upsertYouTubeVideo(
-  db: Database.Database,
-  videoId: string,
-  videoUrl: string,
-  parsed: Record<string, unknown>,
-  transcriptText: string,
-  transcriptMethod: string,
-): void {
-  try {
-    const videoTitle = String(parsed.videoTitle ?? "");
-    const channelName = String(parsed.channelName ?? "");
-    const relevanceScore = Number(parsed.relevanceScore ?? 0);
-    const summary = formatSummaryMarkdown(parsed);
-
-    db.prepare(`
-      INSERT INTO youtube_videos (video_id, url, title, channel_name, transcript, summary, relevance_score, metadata, transcript_method)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(video_id) DO UPDATE SET
-        title = excluded.title,
-        channel_name = excluded.channel_name,
-        transcript = excluded.transcript,
-        summary = excluded.summary,
-        relevance_score = excluded.relevance_score,
-        metadata = excluded.metadata,
-        transcript_method = excluded.transcript_method,
-        processed_at = datetime('now')
-    `).run(
-      videoId,
-      videoUrl,
-      videoTitle,
-      channelName,
-      transcriptText,
-      summary,
-      relevanceScore,
-      JSON.stringify({
-        keyTakeaways: parsed.keyTakeaways,
-        actionableSuggestions: parsed.actionableSuggestions,
-        homerImprovements: parsed.homerImprovements,
-      }),
-      transcriptMethod,
-    );
-
-    logger.info({ videoId, relevanceScore }, "YouTube video upserted to DB");
-  } catch (error) {
-    logger.warn({ videoId, error }, "Failed to upsert YouTube video to DB (non-fatal)");
-  }
-}
-
-/**
- * Format parsed summary fields into a single markdown string for DB storage.
- */
-function formatSummaryMarkdown(parsed: Record<string, unknown>): string {
-  const parts: string[] = [];
-  if (parsed.summary) parts.push(`## Summary\n${String(parsed.summary)}`);
-  if (Array.isArray(parsed.keyTakeaways)) {
-    parts.push(`## Key Takeaways\n${parsed.keyTakeaways.map((t: unknown) => `- ${String(t)}`).join("\n")}`);
-  }
-  if (parsed.projectConnections) parts.push(`## Project Connections\n${String(parsed.projectConnections)}`);
-  if (parsed.homerImprovements) parts.push(`## Homer Improvements\n${String(parsed.homerImprovements)}`);
-  if (parsed.careerRelevance) parts.push(`## Career & Life Relevance\n${String(parsed.careerRelevance)}`);
-  if (Array.isArray(parsed.actionableSuggestions)) {
-    parts.push(`## Actionable Suggestions\n${parsed.actionableSuggestions.map((s: unknown) => `- ${String(s)}`).join("\n")}`);
-  }
-  if (parsed.relevanceScore != null) {
-    parts.push(`## Relevance\n**Score:** ${parsed.relevanceScore}/10 — ${String(parsed.relevanceReason ?? "")}`);
-  }
-  return parts.join("\n\n");
-}
-
-/**
- * Mark a video as reviewed — updates DB and/or file.
- */
 export function markSummaryReviewedV2(videoId: string, db?: Database.Database): void {
-  // DB update
   if (db) {
     try {
       db.prepare("UPDATE youtube_videos SET reviewed_at = datetime('now') WHERE video_id = ?").run(videoId);
@@ -264,14 +167,9 @@ export function markSummaryReviewedV2(videoId: string, db?: Database.Database): 
       logger.warn({ videoId, error }, "Failed to mark video reviewed in DB");
     }
   }
-
-  // File update (mirror)
   markSummaryReviewed(videoId);
 }
 
-/**
- * Read a YouTube summary from DB. Returns parsed fields or null.
- */
 export function getYouTubeVideoFromDb(db: Database.Database, videoId: string): {
   videoId: string;
   url: string;
@@ -313,73 +211,9 @@ export function getYouTubeVideoFromDb(db: Database.Database, videoId: string): {
   }
 }
 
-function writeSummaryFile(
-  videoId: string,
-  videoUrl: string,
-  parsed: Record<string, unknown>
-): string {
-  ensureSummariesDir();
-
-  const date = new Date().toISOString().split("T")[0];
-  const fileName = `${videoId}-${date}.md`;
-  const filePath = join(SUMMARIES_DIR, fileName);
-
-  const videoTitle = String(parsed.videoTitle ?? "Unknown");
-  const channelName = String(parsed.channelName ?? "Unknown");
-  const relevanceScore = Number(parsed.relevanceScore ?? 0);
-  const summary = String(parsed.summary ?? "");
-  const keyTakeaways = Array.isArray(parsed.keyTakeaways)
-    ? parsed.keyTakeaways.map((t: unknown) => `- ${String(t)}`).join("\n")
-    : "";
-  const careerRelevance = String(parsed.careerRelevance ?? "");
-  const projectConnections = String(parsed.projectConnections ?? "");
-  const actionableSuggestions = Array.isArray(parsed.actionableSuggestions)
-    ? parsed.actionableSuggestions.map((s: unknown) => `- ${String(s)}`).join("\n")
-    : "";
-  const homerImprovements = String(parsed.homerImprovements ?? "");
-  const relevanceReason = String(parsed.relevanceReason ?? "");
-
-  const content = `---
-videoId: ${videoId}
-videoUrl: ${videoUrl}
-videoTitle: "${videoTitle.replace(/"/g, '\\"')}"
-channelName: "${channelName.replace(/"/g, '\\"')}"
-processedAt: ${new Date().toISOString()}
-relevanceScore: ${relevanceScore}
-status: pending_review
----
-
-## Summary
-${summary}
-
-## Key Takeaways
-${keyTakeaways}
-
-## Project Connections
-${projectConnections}
-
-## Homer Improvements
-${homerImprovements}
-
-## Career & Life Relevance
-${careerRelevance}
-
-## Actionable Suggestions
-${actionableSuggestions}
-
-## Relevance
-**Score:** ${relevanceScore}/10 — ${relevanceReason}
-`;
-
-  writeFileSync(filePath, content, "utf-8");
-  logger.info({ filePath, videoId, relevanceScore }, "YouTube summary file written");
-  return filePath;
-}
-
 export function markSummaryReviewed(videoId: string): void {
   const filePath = summaryFileExists(videoId);
   if (!filePath) return;
-
   try {
     let content = readFileSync(filePath, "utf-8");
     content = content.replace("status: pending_review", "status: reviewed");
@@ -387,6 +221,582 @@ export function markSummaryReviewed(videoId: string): void {
   } catch (error) {
     logger.warn({ videoId, error }, "Failed to mark summary as reviewed");
   }
+}
+
+// ============================================
+// PASS 1 — CLASSIFICATION (Flash)
+// ============================================
+
+async function classifyVideoPass1(
+  transcriptSample: string,
+  queueMeta: Pick<YouTubeSummaryMetadata, "queuedAt" | "queueSource" | "queueLocalHour" | "queueLocalDow">,
+  condensedCtx: string
+): Promise<Pass1Result> {
+  const prompt = `You are a video classification agent. Analyze this YouTube video transcript sample and classify it.
+
+## Yanqing's Profile (condensed)
+${condensedCtx}
+
+## Queue Context
+- Queued at: ${queueMeta.queuedAt ?? "unknown"}
+- Source: ${queueMeta.queueSource ?? "unknown"}
+- Local hour: ${queueMeta.queueLocalHour ?? "unknown"}
+- Day of week: ${queueMeta.queueLocalDow ?? "unknown"} (0=Sun)
+
+## Transcript Sample (~3K chars, head+mid+tail)
+${transcriptSample}
+
+## Task
+Classify this video and plan the deep analysis. Return JSON:
+
+{
+  "videoCategory": "<one of: AI Trends & Agent Strategy | Technical Deep-Dive / Homer Application | Automation & Productivity | Trading / Finance | Content Creation & Thought Leadership | Life Strategy / Mental Models | General Knowledge / Curiosity | Career / Job Strategy>",
+  "intentInference": "<1-2 sentences: why did Yanqing queue this? What was he probably hoping to get from it?>",
+  "categoryWeights": {
+    "AI Trends & Agent Strategy": 0.0,
+    "Technical Deep-Dive / Homer Application": 0.0,
+    "Automation & Productivity": 0.0,
+    "Trading / Finance": 0.0,
+    "Content Creation & Thought Leadership": 0.0,
+    "Life Strategy / Mental Models": 0.0,
+    "General Knowledge / Curiosity": 0.0,
+    "Career / Job Strategy": 0.0
+  },
+  "relevancePreScore": 7,
+  "analysisPlan": {
+    "focusCategories": ["<top 2-4 category names by weight>"],
+    "transcriptStrategy": "full",
+    "contextHints": {
+      "shouldCheckHomerArchitecture": false,
+      "shouldCheckJobActivity": false,
+      "shouldCheckRecentIdeas": false,
+      "shouldCheckRecentSessions": false,
+      "keywords": ["<3-5 keywords for FTS context retrieval>"]
+    }
+  }
+}
+
+Rules:
+- categoryWeights must sum to ~1.0
+- transcriptStrategy: "full" if <12K chars likely, "chunked" if 12K-50K, "sampled" if >50K
+- shouldCheckHomerArchitecture: true if video touches system design / AI agents / coding patterns
+- shouldCheckJobActivity: true if career/job-search relevant
+- shouldCheckRecentIdeas: true if video connects to existing ideas/projects
+- shouldCheckRecentSessions: true if connects to recent work context
+- Return ONLY valid JSON, no markdown fences`;
+
+  const result = await executeGeminiAPI(prompt, {
+    model: "gemini-3-flash-preview",
+    responseMimeType: "application/json",
+    maxTokens: 2048,
+    temperature: 0.2,
+  });
+
+  if (result.exitCode !== 0) {
+    throw new Error(`Pass 1 classification failed: ${result.output}`);
+  }
+
+  try {
+    return JSON.parse(result.output) as Pass1Result;
+  } catch {
+    throw new Error(`Pass 1 JSON parse failed: ${result.output.slice(0, 200)}`);
+  }
+}
+
+// ============================================
+// DYNAMIC CONTEXT ASSEMBLY
+// ============================================
+
+async function buildDynamicContextPack(
+  pass1: Pass1Result,
+  db: Database.Database | undefined
+): Promise<string> {
+  const sections: string[] = [];
+
+  // Always: condensed profile + recent momentum snapshot
+  const condensed = await buildCondensedContext();
+  sections.push(`## Profile\n${condensed}`);
+
+  // Always: recent sessions momentum (last 7 days, active)
+  if (db) {
+    try {
+      const recent = db.prepare(`
+        SELECT title, summary, started_at
+        FROM session_summaries
+        WHERE status = 'active'
+          AND is_sub_agent = 0
+          AND started_at >= datetime('now', '-7 days')
+        ORDER BY started_at DESC
+        LIMIT 10
+      `).all() as Array<{ title: string; summary: string; started_at: string }>;
+
+      if (recent.length > 0) {
+        const lines = recent.map((r) => `- [${r.started_at?.slice(0, 10)}] ${r.title}: ${r.summary?.slice(0, 120)}`);
+        sections.push(`## Recent Activity (7 days)\n${lines.join("\n")}`);
+      }
+    } catch {
+      // session_summaries may not exist — non-fatal
+    }
+
+    // Active plans
+    try {
+      const plans = db.prepare(`
+        SELECT title, description FROM plans WHERE status = 'active' LIMIT 5
+      `).all() as Array<{ title: string; description: string }>;
+      if (plans.length > 0) {
+        const lines = plans.map((p) => `- ${p.title}: ${p.description?.slice(0, 100)}`);
+        sections.push(`## Active Plans\n${lines.join("\n")}`);
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  const hints = pass1.analysisPlan.contextHints;
+
+  // Conditional: Homer architecture
+  if (hints.shouldCheckHomerArchitecture && existsSync(ARCHITECTURE_PATH)) {
+    try {
+      const arch = readFileSync(ARCHITECTURE_PATH, "utf-8");
+      sections.push(`## Homer Architecture (excerpts)\n${arch.slice(0, 8000)}`);
+    } catch { /* non-fatal */ }
+  }
+
+  // Conditional: Job activity
+  if (hints.shouldCheckJobActivity && db) {
+    try {
+      const jobs = db.prepare(`
+        SELECT title, company, status, applied_at
+        FROM job_postings
+        WHERE status IN ('applied', 'approved', 'hold')
+        ORDER BY applied_at DESC NULLS LAST
+        LIMIT 10
+      `).all() as Array<{ title: string; company: string; status: string; applied_at: string }>;
+      if (jobs.length > 0) {
+        const lines = jobs.map((j) => `- ${j.title} @ ${j.company} [${j.status}]`);
+        sections.push(`## Recent Job Activity\n${lines.join("\n")}`);
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  // Conditional: Recent ideas by keywords
+  if (hints.shouldCheckRecentIdeas && db && hints.keywords.length > 0) {
+    const keyQuery = hints.keywords.slice(0, 3).join(" OR ");
+    try {
+      const results = searchIdeas(db, keyQuery, 5);
+      if (results.length > 0) {
+        const lines = results.map((r) => `- [${r.status}] ${r.title}: ${r.content?.slice(0, 100)}`);
+        sections.push(`## Related Ideas\n${lines.join("\n")}`);
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  // Conditional: Recent sessions by keywords
+  if (hints.shouldCheckRecentSessions && db && hints.keywords.length > 0) {
+    const keyQuery = hints.keywords.slice(0, 3)
+      .map((k) => k.replace(/[*()":^$]/g, "").trim()).filter(Boolean)
+      .join(" OR ");
+    try {
+      const matches = db.prepare(`
+        SELECT ss.title, ss.summary
+        FROM session_summaries_fts fts
+        JOIN session_summaries ss ON fts.rowid = ss.rowid
+        WHERE session_summaries_fts MATCH ?
+          AND ss.status = 'active'
+        ORDER BY bm25(session_summaries_fts)
+        LIMIT 5
+      `).all(keyQuery) as Array<{ title: string; summary: string }>;
+      if (matches.length > 0) {
+        const lines = matches.map((m) => `- ${m.title}: ${m.summary?.slice(0, 120)}`);
+        sections.push(`## Related Sessions\n${lines.join("\n")}`);
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  return sections.join("\n\n");
+}
+
+// ============================================
+// PASS 2 — DEEP ANALYSIS (3.1 Pro)
+// ============================================
+
+async function analyzeVideoPass2(
+  transcriptMaterial: string,
+  pass1: Pass1Result,
+  contextPack: string
+): Promise<Pass2Result> {
+  const focusList = pass1.analysisPlan.focusCategories.join(", ");
+  const allWeights = Object.entries(pass1.categoryWeights)
+    .sort(([, a], [, b]) => b - a)
+    .map(([cat, w]) => `  "${cat}": ${w.toFixed(2)}`)
+    .join(",\n");
+
+  const prompt = `You are a personal strategic advisor for Yanqing Jiang. Analyze this YouTube video deeply and adaptively — only expand the categories that are actually relevant based on the Pass 1 classification.
+
+## Pass 1 Classification
+- Primary category: ${pass1.videoCategory}
+- Intent: ${pass1.intentInference}
+- Focus categories: ${focusList}
+- Pre-score: ${pass1.relevancePreScore}/10
+- Category weights:
+${allWeights}
+
+## Yanqing's Context
+${contextPack}
+
+## Video Transcript
+${transcriptMaterial}
+
+## Task
+Analyze this video. Return JSON:
+
+{
+  "videoTitle": "<inferred title from transcript>",
+  "channelName": "<channel name if discernible>",
+  "intentHypothesis": "<refined 1-2 sentence hypothesis about why Yanqing watched this and what value he was seeking>",
+  "overallRelevance": 7,
+  "overallRelevanceReason": "<one sentence>",
+  "analysisByCategory": [
+    {
+      "category": "<category name>",
+      "weight": 0.8,
+      "analysis": "<detailed analysis paragraph — only for top 2-4 categories with weight > 0.15>",
+      "actionItems": ["<specific action item>"]
+    }
+  ],
+  "actions": ["<3-5 top concrete next steps Yanqing should take, ranked by importance>"],
+  "ideaCandidates": [
+    {
+      "title": "<idea title>",
+      "summary": "<2-3 sentences describing the idea>",
+      "firstStep": "<concrete first step to act on it>",
+      "evidence": "<specific insight from the video that supports this idea>",
+      "novelty": 0.7,
+      "actionability": 0.8,
+      "fit": 0.75,
+      "shouldCreateIdea": true,
+      "categoryTags": ["ai-agents"],
+      "projectTags": ["homer"]
+    }
+  ],
+  "scores": {
+    "depth": 7,
+    "novelty": 6,
+    "actionability": 8
+  }
+}
+
+Rules:
+- analysisByCategory: ONLY include categories with weight > 0.15. Skip low-relevance ones.
+- If a category has low weight (< 0.15), do NOT force analysis — omit it entirely.
+- ideaCandidates: only include if novelty >= 0.6 AND actionability >= 0.5 AND fit >= 0.5
+- Set shouldCreateIdea=true only for ideas that are genuinely novel and immediately actionable
+- Return ONLY valid JSON, no markdown fences`;
+
+  // Try 3.1 Pro first, fall back to 3 Pro then Flash
+  const models = [
+    "gemini-3.1-pro-preview",
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
+  ];
+
+  let lastError = "";
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i]!;
+    const isDegraded = i > 0;
+
+    try {
+      const result = await executeGeminiAPI(prompt, {
+        model,
+        responseMimeType: "application/json",
+        maxTokens: 8192,
+        temperature: 0.3,
+      });
+
+      if (result.exitCode !== 0) {
+        lastError = result.output;
+        continue;
+      }
+
+      const parsed = JSON.parse(result.output) as Pass2Result;
+      if (isDegraded) parsed.degraded = true;
+
+      logger.info({ model, degraded: isDegraded }, "Pass 2 analysis complete");
+      return parsed;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      logger.warn({ model, error: lastError }, "Pass 2 model attempt failed, trying next");
+    }
+  }
+
+  throw new Error(`All Pass 2 models failed. Last error: ${lastError}`);
+}
+
+// ============================================
+// RENDER SUMMARY MARKDOWN
+// ============================================
+
+function renderSummaryMarkdown(pass2: Pass2Result, pass1: Pass1Result): string {
+  const parts: string[] = [];
+
+  parts.push(`## Summary\n**Primary Category:** ${pass1.videoCategory}  \n**Intent:** ${pass2.intentHypothesis}`);
+
+  for (const cat of pass2.analysisByCategory) {
+    if (!cat.analysis) continue;
+    parts.push(`## ${cat.category} (weight: ${(cat.weight * 100).toFixed(0)}%)\n${cat.analysis}`);
+    if (cat.actionItems?.length) {
+      parts.push(`**Action items:**\n${cat.actionItems.map((a) => `- ${a}`).join("\n")}`);
+    }
+  }
+
+  if (pass2.actions?.length) {
+    parts.push(`## Key Actions\n${pass2.actions.map((a) => `- ${a}`).join("\n")}`);
+  }
+
+  if (pass2.ideaCandidates?.length) {
+    const viableIdeas = pass2.ideaCandidates.filter((c) => c.shouldCreateIdea);
+    if (viableIdeas.length) {
+      const lines = viableIdeas.map(
+        (c) => `- **${c.title}** — ${c.summary.slice(0, 120)}`
+      );
+      parts.push(`## Ideas Generated\n${lines.join("\n")}`);
+    }
+  }
+
+  parts.push(
+    `## Relevance\n**Score:** ${pass2.overallRelevance}/10 — ${pass2.overallRelevanceReason}` +
+    (pass2.degraded ? "\n\n_⚠️ Analyzed with degraded model (Flash fallback)_" : "")
+  );
+
+  return parts.join("\n\n");
+}
+
+// ============================================
+// DATABASE UPSERT (v2)
+// ============================================
+
+function upsertYouTubeVideo(
+  db: Database.Database,
+  videoId: string,
+  videoUrl: string,
+  pass1: Pass1Result,
+  pass2: Pass2Result,
+  transcriptText: string,
+  transcriptMethod: string,
+  processingMs: number,
+  queuedAt?: string,
+  modelPass1?: string,
+  modelPass2?: string,
+): void {
+  try {
+    const summary = renderSummaryMarkdown(pass2, pass1);
+    const topicsText = [
+      pass1.videoCategory,
+      ...pass1.analysisPlan.focusCategories,
+      ...pass1.analysisPlan.contextHints.keywords,
+      ...(pass2.analysisByCategory?.map((c) => c.category) ?? []),
+    ].join(" ");
+
+    db.prepare(`
+      INSERT INTO youtube_videos (
+        video_id, url, title, channel_name, transcript, summary, relevance_score,
+        metadata, transcript_method,
+        pipeline_version, analysis_status,
+        primary_category, primary_topic, intent_primary, intent_confidence,
+        pass1_classification, analysis_json, topics_text,
+        model_pass1, model_pass2, queued_at, processing_ms
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(video_id) DO UPDATE SET
+        title = excluded.title,
+        channel_name = excluded.channel_name,
+        transcript = excluded.transcript,
+        summary = excluded.summary,
+        relevance_score = excluded.relevance_score,
+        metadata = excluded.metadata,
+        transcript_method = excluded.transcript_method,
+        pipeline_version = excluded.pipeline_version,
+        analysis_status = excluded.analysis_status,
+        primary_category = excluded.primary_category,
+        primary_topic = excluded.primary_topic,
+        intent_primary = excluded.intent_primary,
+        intent_confidence = excluded.intent_confidence,
+        pass1_classification = excluded.pass1_classification,
+        analysis_json = excluded.analysis_json,
+        topics_text = excluded.topics_text,
+        model_pass1 = excluded.model_pass1,
+        model_pass2 = excluded.model_pass2,
+        queued_at = excluded.queued_at,
+        processing_ms = excluded.processing_ms,
+        processed_at = datetime('now')
+    `).run(
+      videoId,
+      videoUrl,
+      pass2.videoTitle ?? "",
+      pass2.channelName ?? "",
+      transcriptText,
+      summary,
+      pass2.overallRelevance ?? 0,
+      JSON.stringify({
+        keyTakeaways: pass2.actions,
+        actionableSuggestions: pass2.actions,
+        ideaCandidates: pass2.ideaCandidates,
+        scores: pass2.scores,
+      }),
+      transcriptMethod,
+      "yt_v2",
+      "complete",
+      pass1.videoCategory ?? null,
+      pass1.analysisPlan.focusCategories[0] ?? null,
+      pass2.intentHypothesis?.slice(0, 200) ?? null,
+      pass1.relevancePreScore / 10,
+      JSON.stringify(pass1),
+      JSON.stringify(pass2),
+      topicsText,
+      modelPass1 ?? "gemini-3-flash-preview",
+      modelPass2 ?? "gemini-3.1-pro-preview",
+      queuedAt ?? null,
+      processingMs,
+    );
+
+    logger.info({ videoId, relevance: pass2.overallRelevance }, "YouTube video v2 upserted to DB");
+  } catch (error) {
+    logger.warn({ videoId, error }, "Failed to upsert YouTube video to DB (non-fatal)");
+  }
+}
+
+// ============================================
+// IDEA CREATION BRIDGE (Phase 3)
+// ============================================
+
+async function maybeCreateIdeasFromVideo(
+  db: Database.Database,
+  videoId: string,
+  videoUrl: string,
+  pass1: Pass1Result,
+  pass2: Pass2Result,
+  summaryFilePath: string,
+  transcriptFilePath: string | null
+): Promise<string[]> {
+  if (pass2.overallRelevance < 6) return [];
+
+  const candidates = (pass2.ideaCandidates ?? []).filter(
+    (c) =>
+      c.shouldCreateIdea &&
+      c.novelty >= 0.65 &&
+      c.actionability >= 0.60 &&
+      c.fit >= 0.60
+  );
+
+  if (candidates.length === 0) return [];
+
+  // Max 1 idea per video on initial creation
+  const candidate = candidates[0]!;
+  const createdIds: string[] = [];
+
+  // Dedup: check by canonical URL first
+  const existing = findByCanonicalUrl(db, videoUrl);
+  if (existing) {
+    logger.info({ videoId, ideaId: existing.id }, "Video URL already linked to existing idea, skipping creation");
+    return [];
+  }
+
+  // Dedup: FTS title similarity check
+  const similar = searchIdeas(db, candidate.title, 3);
+  for (const s of similar) {
+    if (s.rank < -1.5) {  // very high similarity score (bm25 is negative)
+      logger.info({ videoId, similarIdeaId: s.id, title: s.title }, "Similar idea already exists, skipping creation");
+      return [];
+    }
+  }
+
+  try {
+    const tags = [
+      "youtube",
+      ...candidate.categoryTags,
+      ...candidate.projectTags,
+    ].filter(Boolean);
+
+    // Build full video summary as context so Talk analysis has rich material.
+    // Include exact file paths so Claude Code / agents can navigate directly.
+    const fullSummary = renderSummaryMarkdown(pass2, pass1);
+    const fileLinks = [
+      `- Summary: \`${summaryFilePath}\``,
+      transcriptFilePath ? `- Transcript: \`${transcriptFilePath}\`` : null,
+      `- DB video_id: \`${videoId}\` in table \`youtube_videos\``,
+    ].filter(Boolean).join("\n");
+    const videoContext = `## Source Files\n${fileLinks}\n\n## Source Video Analysis\n**Title:** ${pass2.videoTitle ?? "Unknown"}\n**URL:** ${videoUrl}\n**Category:** ${pass1.videoCategory}\n\n${fullSummary}`;
+
+    const idea: ParsedIdea = {
+      id: `idea_yt_${randomUUID().slice(0, 8)}`,
+      title: candidate.title,
+      status: "review",
+      source: "youtube-analysis",
+      content: `${candidate.summary}\n\n**First step:** ${candidate.firstStep}\n\n**Evidence from video:** ${candidate.evidence}`,
+      context: videoContext,
+      link: videoUrl,
+      tags,
+      timestamp: new Date().toISOString(),
+    };
+
+    const saved = createIdea(db, idea);
+    createdIds.push(saved.id);
+    logger.info({ videoId, ideaId: saved.id, title: saved.title }, "Idea created from YouTube video");
+
+    // Create knowledge link: youtube → idea (inspired)
+    try {
+      db.prepare(`
+        INSERT OR IGNORE INTO knowledge_links (id, src_type, src_id, dst_type, dst_id, link_type, strength, evidence, created_by)
+        VALUES (?, 'youtube', ?, 'idea', ?, 'inspired', ?, ?, 'youtube_pipeline_v2')
+      `).run(
+        randomUUID(),
+        videoId,
+        saved.id,
+        candidate.novelty,
+        candidate.evidence?.slice(0, 500),
+      );
+    } catch { /* knowledge_links may not exist yet — non-fatal */ }
+  } catch (error) {
+    logger.warn({ videoId, error }, "Failed to create idea from video (non-fatal)");
+  }
+
+  return createdIds;
+}
+
+// ============================================
+// SUMMARY FILE (MIRROR)
+// ============================================
+
+function writeSummaryFile(
+  videoId: string,
+  videoUrl: string,
+  pass1: Pass1Result,
+  pass2: Pass2Result
+): string {
+  ensureSummariesDir();
+
+  const date = new Date().toISOString().split("T")[0];
+  const fileName = `${videoId}-${date}.md`;
+  const filePath = join(SUMMARIES_DIR, fileName);
+
+  const summaryBody = renderSummaryMarkdown(pass2, pass1);
+
+  const content = `---
+videoId: ${videoId}
+videoUrl: ${videoUrl}
+videoTitle: "${(pass2.videoTitle ?? "Unknown").replace(/"/g, '\\"')}"
+channelName: "${(pass2.channelName ?? "Unknown").replace(/"/g, '\\"')}"
+processedAt: ${new Date().toISOString()}
+pipelineVersion: yt_v2
+primaryCategory: "${pass1.videoCategory}"
+relevanceScore: ${pass2.overallRelevance}
+status: pending_review
+---
+
+${summaryBody}
+`;
+
+  writeFileSync(filePath, content, "utf-8");
+  logger.info({ filePath, videoId, relevance: pass2.overallRelevance }, "YouTube v2 summary file written");
+  return filePath;
 }
 
 // ============================================
@@ -398,17 +808,28 @@ export interface SummarizeResult {
   summaryPath?: string;
   parsed?: Record<string, unknown>;
   error?: string;
+  pass1?: Pass1Result;
+  pass2?: Pass2Result;
+  createdIdeaIds?: string[];
 }
 
 /**
- * Full pipeline for a single video: extract transcript → Gemini summarize → write to DB + file.
- * Caller is responsible for semaphore acquire/release.
+ * Full two-pass pipeline for a single video:
+ *   1. Extract transcript
+ *   2. Pass 1: Flash classification
+ *   3. Build dynamic context pack
+ *   4. Pass 2: 3.1 Pro deep analysis
+ *   5. Upsert to DB + write file
+ *   6. Maybe create idea entries
+ *
+ * Caller is responsible for outer semaphore (geminiSemaphore) if needed.
  */
 export async function summarizeYouTubeVideo(
   metadata: YouTubeSummaryMetadata,
   db?: Database.Database,
 ): Promise<SummarizeResult> {
   const { videoId, videoUrl } = metadata;
+  const startTime = Date.now();
 
   // Check if already summarized (DB first, then file)
   if (db && videoExistsInDb(db, videoId)) {
@@ -421,65 +842,102 @@ export async function summarizeYouTubeVideo(
     return { success: true, summaryPath: existing };
   }
 
-  // Extract transcript
+  // Step 1: Extract transcript
   logger.info({ videoId }, "Extracting transcript");
   const transcript = await extractTranscript(videoId);
-
   const transcriptText = transcript?.text ?? "No transcript available.";
   const transcriptMethod = transcript?.method ?? "none";
 
-  // Load memory context + Homer architecture
-  const memoryContext = loadMemoryContext();
-  const homerArchitecture = loadHomerArchitecture();
-
-  // Build prompt
-  const prompt = buildSummaryPrompt(memoryContext, homerArchitecture, transcriptText, transcriptMethod);
-
-  // Call Gemini
   try {
-    const hardTimeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("Gemini hard timeout after 90s")), 90000)
-    );
+    // Step 2: Pass 1 — Flash classification
+    logger.info({ videoId }, "Pass 1: classifying with Flash");
+    const transcriptSample = buildTranscriptSampleForPass1(transcriptText);
+    const condensedCtx = await buildCondensedContext();
 
-    const geminiCall = executeGeminiWithFallback(prompt, "", {
-      model: "gemini-3-flash-preview",
-      sandbox: true,
-      timeout: 60000,
-    });
-
-    const result = await Promise.race([geminiCall, hardTimeout]);
-
-    if (result.exitCode !== 0) {
-      return { success: false, error: `Gemini exited with code ${result.exitCode}` };
+    let pass1: Pass1Result;
+    await geminiSemaphore.acquire();
+    try {
+      pass1 = await classifyVideoPass1(
+        transcriptSample,
+        {
+          queuedAt: metadata.queuedAt,
+          queueSource: metadata.queueSource,
+          queueLocalHour: metadata.queueLocalHour,
+          queueLocalDow: metadata.queueLocalDow,
+        },
+        condensedCtx
+      );
+    } finally {
+      geminiSemaphore.release();
     }
 
-    // Parse JSON from output
-    const jsonMatch = result.output.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      return { success: false, error: "No JSON found in Gemini output" };
+    logger.info({ videoId, category: pass1.videoCategory, preScore: pass1.relevancePreScore }, "Pass 1 complete");
+
+    // Step 3: Build dynamic context
+    const contextPack = await buildDynamicContextPack(pass1, db);
+
+    // Step 4: Pass 2 — 3.1 Pro deep analysis
+    logger.info({ videoId, strategy: pass1.analysisPlan.transcriptStrategy }, "Pass 2: deep analysis with 3.1 Pro");
+    const transcriptMaterial = buildTranscriptForPass2(transcriptText, pass1.analysisPlan.transcriptStrategy);
+
+    let pass2: Pass2Result;
+    await proSemaphore.acquire();
+    try {
+      pass2 = await analyzeVideoPass2(transcriptMaterial, pass1, contextPack);
+    } finally {
+      proSemaphore.release();
     }
 
-    const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+    logger.info({ videoId, relevance: pass2.overallRelevance, degraded: pass2.degraded }, "Pass 2 complete");
 
-    // Update metadata
-    metadata.transcript = transcriptText.slice(0, 1000); // store preview only
-    metadata.transcriptMethod = transcriptMethod;
-    metadata.videoTitle = String(parsed.videoTitle ?? metadata.videoTitle ?? "");
-    metadata.channelName = String(parsed.channelName ?? metadata.channelName ?? "");
-    metadata.relevanceScore = Number(parsed.relevanceScore ?? 0);
+    // Update metadata with enriched fields
+    metadata.videoTitle = pass2.videoTitle ?? metadata.videoTitle ?? "";
+    metadata.channelName = pass2.channelName ?? metadata.channelName ?? "";
+    metadata.relevanceScore = pass2.overallRelevance;
+    metadata.primaryCategory = pass1.videoCategory;
+    metadata.intentPrimary = pass2.intentHypothesis?.slice(0, 200);
+    metadata.pass1Classification = pass1 as unknown as Record<string, unknown>;
+    metadata.transcript = transcriptText.slice(0, 1000);
+    metadata.transcriptMethod = transcriptMethod as YouTubeSummaryMetadata["transcriptMethod"];
 
-    // Write to DB (source of truth)
+    const processingMs = Date.now() - startTime;
+
+    // Step 5: Upsert to DB
     if (db) {
-      upsertYouTubeVideo(db, videoId, videoUrl, parsed, transcriptText, transcriptMethod);
+      upsertYouTubeVideo(
+        db, videoId, videoUrl,
+        pass1, pass2,
+        transcriptText, transcriptMethod,
+        processingMs,
+        metadata.queuedAt,
+        "gemini-3-flash-preview",
+        pass2.degraded ? "gemini-3-flash-preview" : "gemini-3.1-pro-preview",
+      );
     }
 
-    // Write summary file (mirror)
-    const summaryPath = writeSummaryFile(videoId, videoUrl, parsed);
+    // Write summary file mirror
+    const summaryPath = writeSummaryFile(videoId, videoUrl, pass1, pass2);
 
-    return { success: true, summaryPath, parsed };
+    // Resolve transcript file path (written by extractTranscript → saveTranscriptLocally)
+    const transcriptPath = getLocalTranscriptPath(videoId);
+
+    // Step 6: Maybe create ideas (gated)
+    let createdIdeaIds: string[] = [];
+    if (db) {
+      createdIdeaIds = await maybeCreateIdeasFromVideo(db, videoId, videoUrl, pass1, pass2, summaryPath, transcriptPath);
+    }
+
+    return {
+      success: true,
+      summaryPath,
+      parsed: { ...pass2 } as unknown as Record<string, unknown>,
+      pass1,
+      pass2,
+      createdIdeaIds,
+    };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    logger.error({ videoId, error: msg }, "YouTube summarization failed");
+    logger.error({ videoId, error: msg }, "YouTube summarization v2 failed");
     return { success: false, error: msg };
   }
 }

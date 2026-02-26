@@ -28,7 +28,6 @@ import { storeJobArtifact } from "../scheduler/jobs/artifact-store.js";
 // dedupeIdeasFile import removed — dedup handled by dedicated idea-dedup cron job
 import {
   summarizeYouTubeVideo,
-  geminiSemaphore,
   summaryExists,
   ensureSummariesDir,
 } from "../youtube/summarizer.js";
@@ -232,7 +231,8 @@ export class NightSupervisor {
       const ytTasks = queuedTasks.filter((t) => t.type === "youtube_summary");
       const otherTasks = queuedTasks.filter((t) => t.type !== "youtube_summary");
 
-      // Process YouTube tasks in parallel (max 3 concurrent via semaphore)
+      // Process YouTube tasks in parallel (semaphores inside summarizer control concurrency:
+      // Flash classification max 4, Pro analysis max 2)
       if (ytTasks.length > 0) {
         await this.processYouTubeBatch(ytTasks);
       }
@@ -354,41 +354,39 @@ export class NightSupervisor {
       return;
     }
 
-    // Mark as executing
+    // Mark as classifying (Pass 1: Flash)
     this.overnightStore.updateTaskStatus(task.id, "executing", {
       startedAt: new Date(),
     });
 
-    // Acquire semaphore slot (max 3 concurrent Gemini processes)
-    await geminiSemaphore.acquire();
-    try {
-      logger.info({ videoId, taskId: task.id }, "Processing YouTube video");
+    logger.info({ videoId, taskId: task.id }, "Processing YouTube video (v2 pipeline)");
 
-      const result = await summarizeYouTubeVideo(metadata, this.db ?? undefined);
+    // Semaphores are managed inside summarizeYouTubeVideo (Flash=4, Pro=2)
+    const result = await summarizeYouTubeVideo(metadata, this.db ?? undefined);
 
-      if (result.success) {
-        // Update metadata in DB with enriched data
-        this.overnightStore.updateTaskMetadata(
-          task.id,
-          JSON.stringify(metadata)
-        );
-        this.overnightStore.updateTaskStatus(task.id, "ready", {
-          completedAt: new Date(),
-        });
-        this.session?.findings.push(
-          `YouTube summary ready: ${metadata.videoTitle ?? videoId} (relevance: ${metadata.relevanceScore ?? "?"})`
-        );
-      } else {
-        this.overnightStore.updateTaskStatus(task.id, "failed", {
-          error: result.error,
-          completedAt: new Date(),
-        });
-        this.session?.findings.push(
-          `YouTube summary failed: ${videoId} — ${result.error}`
-        );
-      }
-    } finally {
-      geminiSemaphore.release();
+    if (result.success) {
+      // Update metadata in DB with enriched data
+      this.overnightStore.updateTaskMetadata(
+        task.id,
+        JSON.stringify(metadata)
+      );
+      this.overnightStore.updateTaskStatus(task.id, "ready", {
+        completedAt: new Date(),
+      });
+      const ideaNote = result.createdIdeaIds?.length
+        ? `, ideas: ${result.createdIdeaIds.length}`
+        : "";
+      this.session?.findings.push(
+        `YouTube summary ready: ${metadata.videoTitle ?? videoId} (relevance: ${metadata.relevanceScore ?? "?"}, category: ${metadata.primaryCategory ?? "?"}${ideaNote})`
+      );
+    } else {
+      this.overnightStore.updateTaskStatus(task.id, "failed", {
+        error: result.error,
+        completedAt: new Date(),
+      });
+      this.session?.findings.push(
+        `YouTube summary failed: ${videoId} — ${result.error}`
+      );
     }
   }
 
