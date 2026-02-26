@@ -87,8 +87,16 @@ export async function handleYouTubeUrl(
     return true;
   }
 
-  // Queue for nightly processing
-  const metadata: YouTubeSummaryMetadata = { videoUrl, videoId };
+  // Queue for nightly processing — capture provenance
+  const now = new Date();
+  const metadata: YouTubeSummaryMetadata = {
+    videoUrl,
+    videoId,
+    queuedAt: now.toISOString(),
+    queueSource: "telegram_bare_url",
+    queueLocalHour: now.getHours(),
+    queueLocalDow: now.getDay(),
+  };
   taskStore.createTask({
     type: "youtube_summary",
     subject: `YouTube: ${videoUrl}`,

@@ -73,6 +73,15 @@ export interface YouTubeSummaryMetadata {
   summary?: string;
   personalizedInsights?: string;
   relevanceScore?: number;
+  // Queue provenance (captured at queue time)
+  queuedAt?: string;          // ISO timestamp when queued
+  queueSource?: string;       // e.g. 'telegram_bare_url'
+  queueLocalHour?: number;    // 0-23 local hour when queued
+  queueLocalDow?: number;     // 0=Sun, day-of-week when queued
+  // Pipeline v2 enrichment (written by summarizer)
+  primaryCategory?: string;
+  intentPrimary?: string;
+  pass1Classification?: Record<string, unknown>;
 }
 
 export interface OvernightIteration {
