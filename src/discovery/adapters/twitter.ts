@@ -6,7 +6,7 @@
 
 import type { SourceConfig, RawDiscoveryItem } from "../types.js";
 import { BaseAdapter } from "./base.js";
-import { executeOpenCodeCLI } from "../../executors/opencode-cli.js";
+import { executeBrowserScrape } from "../../executors/browser-scrape.js";
 import { buildBookmarkScrapePrompt, SCRAPE_OPTIONS } from "../../scraping/browser-prompts.js";
 
 interface BrowserBookmark {
@@ -22,10 +22,10 @@ export class TwitterAdapter extends BaseAdapter {
 
   async isAvailable(): Promise<boolean> {
     try {
-      const result = await executeOpenCodeCLI(
+      const result = await executeBrowserScrape(
         'Run this command and report if it succeeds: agent-browser connect 9222',
         "",
-        { model: "google/gemini-3-flash-preview", browserOnly: true, timeout: 15_000 },
+        { browserOnly: true, timeout: 15_000 },
       );
       return result.exitCode === 0;
     } catch {
@@ -36,7 +36,7 @@ export class TwitterAdapter extends BaseAdapter {
   async fetch(config: SourceConfig): Promise<RawDiscoveryItem[]> {
     const maxItems = config.maxItems || 30;
 
-    const result = await executeOpenCodeCLI(
+    const result = await executeBrowserScrape(
       buildBookmarkScrapePrompt(maxItems),
       "",
       SCRAPE_OPTIONS,

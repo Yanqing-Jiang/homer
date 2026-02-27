@@ -318,13 +318,13 @@ Root cause the failure and fix it if possible. Check for:
 
 After analysis, restart the daemon properly and verify it's healthy."
 
-  # Run Claude Code in background
-  (
-    cd "$HOMER_DIR"
-    /Users/yj/.claude/local/claude --dangerously-skip-permissions -p "$prompt" >> "$STATE_DIR/investigation.log" 2>&1
-  ) &
+  # Delegate investigation to daemon's fallback chain via HTTP API
+  curl -s -X POST "http://localhost:${PORT}/api/investigate" \
+    -H "Content-Type: application/json" \
+    -d "{\"trigger\":\"watchdog\",\"description\":$(echo "$prompt" | jq -Rs .)}" \
+    >> "$STATE_DIR/investigation.log" 2>&1 &
 
-  log "investigation started in background (PID: $!)"
+  log "investigation delegated to daemon API (PID: $!)"
 }
 
 log "watchdog started for ${HOMER_LABEL} in ${LAUNCHD_DOMAIN}"

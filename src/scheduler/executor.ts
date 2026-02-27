@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 import { readFileSync, existsSync } from "fs";
 import { logger } from "../utils/logger.js";
+import { processRegistry } from "../process/registry.js";
 import type { RegisteredJob, JobExecutionResult, ProgressCallback, ProgressEvent } from "./types.js";
 import { LANE_CWD, DEFAULT_JOB_TIMEOUT } from "./types.js";
 import { processMemoryUpdates } from "../memory/writer.js";
@@ -446,6 +447,15 @@ async function executeClaudeJob(
       stdio: ["pipe", "pipe", "pipe"],
     });
 
+    // Register with process lifecycle management
+    processRegistry.register(proc, {
+      command: "claude",
+      type: "executor",
+      timeoutMs: timeout,
+      source: "scheduler",
+      jobId: config.id,
+    });
+
     let stdout = "";
     let stderr = "";
     let stdoutBytes = 0;
@@ -642,6 +652,7 @@ ${stderr.trim()}`
 
       proc.stdout.on("data", (chunk: string) => {
         stdoutBytes += Buffer.byteLength(chunk);
+        if (proc.pid) processRegistry.touch(proc.pid);
         if (stdoutBytes <= MAX_OUTPUT_BYTES) {
           stdout += chunk;
           buffer += chunk;

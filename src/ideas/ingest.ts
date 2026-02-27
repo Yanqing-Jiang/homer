@@ -6,6 +6,7 @@ import * as dao from "./dao.js";
 import { logger } from "../utils/logger.js";
 import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
+import { executeBrowserScrape } from "../executors/browser-scrape.js";
 import { buildBookmarkScrapePrompt, buildTweetReadPrompt, SCRAPE_OPTIONS, DEEP_FETCH_OPTIONS } from "../scraping/browser-prompts.js";
 import { cleanAgentOutput } from "../scraping/clean-output.js";
 import { insertScrape } from "../scraping/scrape-store.js";
@@ -72,7 +73,7 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
   logger.info("Scraping Twitter/X bookmarks via Gemini Flash + agent-browser");
 
   try {
-    const result = await executeOpenCodeCLI(
+    const result = await executeBrowserScrape(
       buildBookmarkScrapePrompt(20),
       "",
       SCRAPE_OPTIONS,
@@ -152,7 +153,7 @@ async function deepFetchUrl(url: string, ideaTitle: string): Promise<string | nu
   // Handle Twitter/X URLs via agent-browser
   if (url.includes("twitter.com") || url.includes("x.com")) {
     try {
-      const result = await executeOpenCodeCLI(
+      const result = await executeBrowserScrape(
         buildTweetReadPrompt(url),
         "",
         DEEP_FETCH_OPTIONS,

@@ -4,6 +4,7 @@ import { randomUUID } from "crypto";
 import { existsSync, readFileSync } from "fs";
 import type { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
+import { processRegistry } from "../../process/registry.js";
 import { getUploadContent } from "./uploads.js";
 import { processResponse } from "../../utils/response-processor.js";
 import { webLane } from "../../utils/lanes.js";
@@ -319,6 +320,14 @@ export function registerStreamingRoutes(
           stdio: ["pipe", "pipe", "pipe"],
         });
 
+        // Register with process lifecycle management
+        processRegistry.register(proc, {
+          command: "claude",
+          type: "executor",
+          timeoutMs: 30 * 60 * 1000,
+          source: "cli-runner",
+        });
+
         proc.stdin?.end();
 
         let buffer = "";
@@ -355,6 +364,7 @@ export function registerStreamingRoutes(
 
         proc.stdout?.setEncoding("utf8");
         proc.stdout?.on("data", (chunk: string) => {
+          if (proc?.pid) processRegistry.touch(proc.pid);
           buffer += chunk;
           const lines = buffer.split("\n");
           buffer = lines.pop() || "";
@@ -376,7 +386,7 @@ export function registerStreamingRoutes(
         });
 
         // Handle process completion
-        proc.on("close", async (code) => {
+        proc.on("close", (code) => {
           cleanup();
 
           // Detect session expiry from stderr
@@ -387,47 +397,64 @@ export function registerStreamingRoutes(
           if (sessionExpired) {
             // Mark thread as expired
             stateManager.updateThread(threadId, { status: "expired" });
-            sendEvent("error", {
-              message: "Session expired",
-              recoverable: true,
-              code: "SESSION_EXPIRED",
-            });
-            reply.raw.end();
+            try {
+              sendEvent("error", {
+                message: "Session expired",
+                recoverable: true,
+                code: "SESSION_EXPIRED",
+              });
+              reply.raw.end();
+            } catch { /* client disconnected */ }
             return;
           }
 
           // Process memory updates and save assistant message
           const assistantMessageId = randomUUID();
-          if (assistantContent.trim()) {
-            // Process memory updates before saving
-            const { cleanedContent } = await processResponse(assistantContent.trim(), "general");
+          (async () => {
+            if (assistantContent.trim()) {
+              try {
+                const { cleanedContent } = await processResponse(assistantContent.trim(), "general");
+                stateManager.createThreadMessage({
+                  id: assistantMessageId,
+                  threadId,
+                  role: "assistant",
+                  content: cleanedContent,
+                  metadata: {
+                    exitCode: code,
+                    sessionId: capturedSessionId,
+                  },
+                });
+              } catch (err) {
+                logger.warn({ error: err, threadId }, "Failed to process response in stream close");
+                // Save raw content as fallback
+                stateManager.createThreadMessage({
+                  id: assistantMessageId,
+                  threadId,
+                  role: "assistant",
+                  content: assistantContent.trim(),
+                  metadata: { exitCode: code, sessionId: capturedSessionId },
+                });
+              }
+            }
 
-            stateManager.createThreadMessage({
-              id: assistantMessageId,
-              threadId,
-              role: "assistant",
-              content: cleanedContent,
-              metadata: {
+            // Update thread with captured session ID
+            if (capturedSessionId && capturedSessionId !== thread.externalSessionId) {
+              stateManager.updateThread(threadId, {
+                externalSessionId: capturedSessionId,
+              });
+            }
+
+            // Send completion event (guard against write-after-end)
+            try {
+              sendEvent("complete", {
+                messageId: assistantMessageId,
                 exitCode: code,
-                sessionId: capturedSessionId,
-              },
-            });
-          }
-
-          // Update thread with captured session ID
-          if (capturedSessionId && capturedSessionId !== thread.externalSessionId) {
-            stateManager.updateThread(threadId, {
-              externalSessionId: capturedSessionId,
-            });
-          }
-
-          // Send completion event
-          sendEvent("complete", {
-            messageId: assistantMessageId,
-            exitCode: code,
+              });
+              reply.raw.end();
+            } catch { /* client disconnected */ }
+          })().catch((err) => {
+            logger.error({ error: err, threadId }, "Unhandled error in stream close handler");
           });
-
-          reply.raw.end();
         });
 
         proc.on("error", (error) => {

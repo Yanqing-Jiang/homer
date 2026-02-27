@@ -5,6 +5,7 @@ import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
 import { executeGeminiAPI } from "./gemini.js";
 import { googleAccountManager } from "../utils/google-auth.js";
+import { processRegistry } from "../process/registry.js";
 
 // ============================================
 // TYPES
@@ -136,7 +137,7 @@ export async function executeOpenCodeCLI(
   options: OpenCodeCLIOptions = {}
 ): Promise<OpenCodeCLIResult> {
   const {
-    model: rawModel = "google/gemini-3-flash-preview",
+    model: rawModel = "google-aistudio/gemini-3-flash-preview",
     timeout = 1200000, // 20 minutes default
     signal,
     researchOnly = true,
@@ -148,8 +149,8 @@ export async function executeOpenCodeCLI(
   // Normalize model name: callers may pass "gemini-3-flash-preview" without provider prefix
   let model = rawModel.includes("/") ? rawModel : `google/${rawModel}`;
   
-  // Use aistudio provider for 3.1 Pro because Antigravity gateway is unreliable for it
-  if (model.includes("3.1-pro")) {
+  // Use aistudio provider for 3.1 Pro and Flash — API key is more reliable than OAuth/Antigravity
+  if (model.includes("3.1-pro") || model.includes("flash")) {
     model = model.replace("google/", "google-aistudio/");
   }
 
@@ -201,6 +202,15 @@ export async function executeOpenCodeCLI(
       cwd: effectiveCwd,
       detached: true, // own process group so SIGTERM kills all children
       env,
+    });
+
+    // Register with process lifecycle management
+    processRegistry.register(child, {
+      command: "opencode",
+      type: "executor",
+      timeoutMs: timeout,
+      source: "cli-runner",
+      detached: true,
     });
 
     // State
@@ -255,6 +265,7 @@ export async function executeOpenCodeCLI(
 
     rl.on("line", (line: string) => {
       if (!line.trim()) return;
+      if (child.pid) processRegistry.touch(child.pid);
 
       try {
         const event: OpenCodeStreamEvent = JSON.parse(line);
@@ -487,7 +498,7 @@ export async function* streamOpenCodeCLI(
   options: OpenCodeCLIOptions = {}
 ): AsyncGenerator<OpenCodeStreamEvent> {
   const {
-    model = "google/gemini-3-flash-preview",
+    model = "google-aistudio/gemini-3-flash-preview",
     cwd,
   } = options;
 
@@ -506,6 +517,14 @@ export async function* streamOpenCodeCLI(
     stdio: ["pipe", "pipe", "pipe"],
     cwd: cwd || process.env.HOME || "/Users/yj",
     env: { ...process.env },
+  });
+
+  // Register with process lifecycle management
+  processRegistry.register(child, {
+    command: "opencode",
+    type: "executor",
+    timeoutMs: 20 * 60 * 1000,
+    source: "cli-runner",
   });
 
   child.stdin?.end();
