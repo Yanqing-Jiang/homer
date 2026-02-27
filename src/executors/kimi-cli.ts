@@ -1,6 +1,7 @@
 import { spawn, ChildProcess } from "child_process";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
+import { processRegistry } from "../process/registry.js";
 
 // ============================================
 // TYPES
@@ -91,6 +92,14 @@ export async function executeKimiCLI(
       env: cleanEnv,
     });
 
+    // Register with process lifecycle management
+    processRegistry.register(child, {
+      command: "kimi",
+      type: "executor",
+      timeoutMs: timeout,
+      source: "cli-runner",
+    });
+
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -123,6 +132,7 @@ export async function executeKimiCLI(
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
         stdout += chunk;
+        if (child.pid) processRegistry.touch(child.pid);
       });
     }
 

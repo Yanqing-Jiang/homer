@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
+import { processRegistry } from "../process/registry.js";
 
 const DEFAULT_TIMEOUT = 1800_000; // 30 minutes
 const KILL_GRACE_MS = 5_000;
@@ -71,6 +72,14 @@ export async function executeCodexCLI(
       },
     });
 
+    // Register with process lifecycle management
+    processRegistry.register(child, {
+      command: "codex",
+      type: "executor",
+      timeoutMs: timeout,
+      source: "cli-runner",
+    });
+
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -124,6 +133,7 @@ export async function executeCodexCLI(
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       stdout += chunk;
+      if (child.pid) processRegistry.touch(child.pid);
 
       buffer += chunk;
       const lines = buffer.split("\n");
