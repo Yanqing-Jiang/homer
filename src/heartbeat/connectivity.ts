@@ -1,6 +1,5 @@
 import { logger } from "../utils/logger.js";
-import { spawn } from "child_process";
-import { createWriteStream } from "fs";
+import { investigate } from "../process/fallback-chain.js";
 import type { Bot } from "grammy";
 
 const CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
@@ -69,48 +68,14 @@ export class ConnectivityMonitor {
       }
     }
 
-    const prompt = `Homer connectivity monitor detected ${failures} consecutive failures for ${endpoint}.
-
-Error: ${status.error || "Unknown"}
-URL: ${HEALTH_ENDPOINTS.find(e => e.name === endpoint)?.url || "Unknown"}
-Time: ${status.checkedAt.toISOString()}
-
-Use codex subagent to analyze and diagnose this connectivity issue.
-
-Steps:
-1. Check if it's a network issue (DNS, routing, firewall)
-2. Check if it's an API issue (endpoint down, rate limited)
-3. Check Homer's network configuration
-4. Run diagnostic commands (ping, curl, traceroute)
-
-If no clear root cause is found, use gemini agent to research:
-- Current status of ${endpoint} API
-- Known outages or issues
-- Alternative endpoints or workarounds
-
-Report findings and any fixes applied.`;
-
-    try {
-      const claude = spawn("/Users/yj/.claude/local/claude", [
-        "--dangerously-skip-permissions",
-        "-p",
-        prompt
-      ], {
-        cwd: "/Users/yj/homer",
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe"]
-      });
-
-      const logStream = createWriteStream("/Users/yj/Library/Logs/homer/investigation.log", { flags: "a" });
-      logStream.write(`\n\n=== Connectivity Investigation: ${endpoint} - ${new Date().toISOString()} ===\n`);
-      claude.stdout?.pipe(logStream);
-      claude.stderr?.pipe(logStream);
-
-      claude.unref();
-      logger.info({ endpoint }, "Claude Code investigation started for connectivity issue");
-    } catch (err) {
-      logger.error({ error: err, endpoint }, "Failed to start Claude Code investigation");
-    }
+    investigate({
+      trigger: "connectivity",
+      description: `${failures} consecutive failures for ${endpoint}`,
+      errorDetails: status.error,
+    }).catch((err) => {
+      logger.error({ error: err, endpoint }, "Investigation failed");
+    });
+    logger.info({ endpoint }, "Investigation started for connectivity issue");
   }
 
   /**

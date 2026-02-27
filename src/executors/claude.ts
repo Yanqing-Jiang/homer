@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import { readFileSync, existsSync } from "fs";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
+import { processRegistry } from "../process/registry.js";
 
 const DEFAULT_TIMEOUT = 1200_000; // 20 minutes
 const KILL_GRACE_MS = 5_000;
@@ -149,6 +150,15 @@ export async function executeClaudeCommand(
       detached: true, // Create new process group for proper cleanup
     });
 
+    // Register with process lifecycle management
+    processRegistry.register(proc, {
+      command: "claude",
+      type: "executor",
+      timeoutMs: timeout,
+      source: "cli-runner",
+      detached: true,
+    });
+
     let stdout = "";
     let stderr = "";
     let stdoutBytes = 0;
@@ -279,6 +289,7 @@ export async function executeClaudeCommand(
       proc.stdout.on("data", (chunk: string) => {
         const byteLen = Buffer.byteLength(chunk);
         stdoutBytes += byteLen;
+        if (proc.pid) processRegistry.touch(proc.pid);
 
         // Always parse stream events (captures result/session_id even if raw log is truncated)
         buffer += chunk;
