@@ -22,6 +22,10 @@ import { executeClaudeCommand } from "./executors/claude.js";
 import { CLIRunManager } from "./executors/cli-runner.js";
 import { runMigrations } from "./state/migrations/index.js";
 import { initConnectivityMonitor } from "./heartbeat/index.js";
+import { processRegistry } from "./process/registry.js";
+import { SessionTimeoutManager } from "./process/timeout-manager.js";
+import { cleanupScheduler } from "./process/cleanup-scheduler.js";
+import { initFallbackChain } from "./process/fallback-chain.js";
 import type { FastifyInstance } from "fastify";
 import type { Bot } from "grammy";
 import type { VoiceConfig } from "./voice/types.js";
@@ -91,6 +95,22 @@ async function main(): Promise<void> {
   // Run database migrations
   logger.info("Running database migrations...");
   runMigrations(stateManager.getDb());
+
+  // Initialize process lifecycle management
+  processRegistry.init(stateManager.getDb());
+  processRegistry.recover();
+  const timeoutManager = new SessionTimeoutManager();
+  timeoutManager.start();
+  cleanupScheduler.init(stateManager.getDb());
+  initFallbackChain(stateManager.getDb());
+  logger.info("Process lifecycle management initialized");
+
+  // Schedule cleanup every 4 hours
+  cron.schedule("0 */4 * * *", () => {
+    cleanupScheduler.run("scheduled").catch((err) => {
+      logger.error({ error: err }, "Cleanup scheduler failed");
+    });
+  });
 
   // Recover stale jobs from previous crashed instances
   logger.info("Checking for stale jobs from previous runs...");
@@ -223,6 +243,19 @@ async function main(): Promise<void> {
 
   // Register shutdown tasks with fatal-handlers
   // These will be called during graceful shutdown (SIGINT/SIGTERM)
+  registerShutdownTask(async () => {
+    logger.info("Killing all managed processes...");
+    timeoutManager.stop();
+    processRegistry.killAll("SIGTERM");
+    // Give 5s for graceful exit, then SIGKILL
+    await new Promise<void>((resolve) => {
+      setTimeout(() => {
+        processRegistry.killAll("SIGKILL");
+        resolve();
+      }, 5000);
+    });
+    processRegistry.stop();
+  });
   registerShutdownTask(() => {
     logger.info("Shutting down connectivity monitor...");
     connectivityMonitor.stop();

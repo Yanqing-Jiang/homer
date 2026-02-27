@@ -24,6 +24,7 @@ import { registerThreadEventRoutes } from "./api/thread-events.js";
 import { registerWebhookRoutes } from "./api/webhooks.js";
 import type { CLIRunManager } from "../executors/cli-runner.js";
 import type { Bot } from "grammy";
+import { investigate } from "../process/fallback-chain.js";
 
 // Scheduler reference (set after initialization)
 let schedulerRef: Scheduler | null = null;
@@ -99,6 +100,20 @@ export function createRoutes(
 
   // Register webhook routes (ElevenLabs call-complete, Twilio inbound SMS)
   registerWebhookRoutes(server, stateManager, botRef, config.telegram.allowedChatId);
+
+  // Investigation endpoint (used by watchdog.sh and internal callers)
+  server.post("/api/investigate", async (req, reply) => {
+    const { trigger, description, errorDetails } = req.body as {
+      trigger?: string;
+      description?: string;
+      errorDetails?: string;
+    };
+    if (!trigger || !description) {
+      return reply.status(400).send({ error: "trigger and description required" });
+    }
+    const result = await investigate({ trigger, description, errorDetails });
+    return reply.send(result);
+  });
 
   // Health check counter for periodic integrity checks
   let healthCheckCounter = 0;
