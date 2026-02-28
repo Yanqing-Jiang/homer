@@ -400,8 +400,8 @@ while true; do
   if (( CONSECUTIVE_FAILURES == INVESTIGATE_AFTER )) && [[ "$INVESTIGATION_TRIGGERED" != "true" ]]; then
     if can_attempt_fix; then
       increment_fix_count
-      INVESTIGATION_TRIGGERED=true
       trigger_investigation "$CONSECUTIVE_FAILURES"
+      INVESTIGATION_TRIGGERED=true  # Set after trigger_investigation so a curl failure doesn't block retries
       send_telegram "Homer watchdog: ${CONSECUTIVE_FAILURES} consecutive failures - triggered Claude Code investigation (fix $(get_fix_count)/${DAILY_FIX_LIMIT} today)"
       /bin/sleep "$RESTART_BACKOFF"
       continue

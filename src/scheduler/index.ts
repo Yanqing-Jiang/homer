@@ -86,6 +86,10 @@ export class Scheduler {
     // Start file watcher for hot reload
     await this.watcher.start();
 
+    // Sync enabled state from config to DB
+    const jobStates = jobs.map(j => ({ jobId: j.id, enabled: j.enabled }));
+    this.stateManager.syncScheduledJobEnabled(jobStates);
+
     this.isRunning = true;
     const enabledCount = this.cronManager.getEnabledJobs().length;
     logger.info({ totalJobs: jobs.length, enabledJobs: enabledCount }, "Scheduler started");
@@ -146,6 +150,10 @@ export class Scheduler {
     for (const job of jobs) {
       this.cronManager.registerJob(job, job.sourceFile);
     }
+
+    // Sync enabled state from config to DB
+    const jobStates = jobs.map(j => ({ jobId: j.id, enabled: j.enabled }));
+    this.stateManager.syncScheduledJobEnabled(jobStates);
 
     const enabledCount = this.cronManager.getEnabledJobs().length;
     logger.info({ totalJobs: jobs.length, enabledJobs: enabledCount }, "Schedules reloaded");

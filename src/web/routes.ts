@@ -197,6 +197,10 @@ export function createRoutes(
         rss: memUsage.rss,
         external: memUsage.external,
       },
+      backlog: {
+        count: stateManager.getUnprocessedSessionCount(),
+        oldestAgeHours: stateManager.getOldestUnprocessedSessionAge(),
+      },
     };
   });
 

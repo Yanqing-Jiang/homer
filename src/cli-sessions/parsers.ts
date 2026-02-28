@@ -775,7 +775,7 @@ export function scanThreadSessions(
     const threads = db.prepare(`
       SELECT id, chat_session_id, title, provider, model, last_message_at
       FROM threads
-      WHERE last_message_at > datetime('now', ?)
+      WHERE last_message_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
         AND status = 'active'
       ORDER BY last_message_at DESC
     `).all(`-${sinceDays} days`) as ThreadRow[];

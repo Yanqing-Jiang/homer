@@ -49,7 +49,7 @@ function extractSessionSignals(db: Database.Database): PreferenceSignal[] {
       SELECT project, COUNT(*) as count
       FROM session_summaries
       WHERE is_sub_agent = 0
-        AND started_at > datetime('now', '-24 hours')
+        AND started_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-24 hours')
         AND project IS NOT NULL AND project != ''
       GROUP BY project
     `).all() as Array<{ project: string; count: number }>;

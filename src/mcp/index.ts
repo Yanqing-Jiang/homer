@@ -50,7 +50,7 @@ const FEEDBACK_FILE = `${MEMORY_BASE}/feedback.md`;
  *
  * Provides tools for:
  * - memory_search: FTS5 search across all memory
- * - memory_append: Append to daily log
+ * - memory_append: Append session note to session_summaries
  * - memory_promote: Promote facts to permanent files
  * - memory_read: Read a memory file
  * - memory_suggestions: Get suggestions for promoting daily entries
@@ -136,7 +136,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "memory_append",
-        description: "Append an entry to today's daily log. Use for session notes, decisions, blockers.",
+        description: "Append a session note to Homer's memory (stored in session_summaries). Use for decisions, blockers, and observations during daemon/scheduled jobs.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1760,7 +1760,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           FROM session_summaries
           WHERE is_sub_agent = 0
             AND status = 'active'
-            AND started_at > datetime('now', ?)
+            AND started_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
           ORDER BY started_at DESC LIMIT 5
         `).all(`-${lookbackDays} days`) as Array<{
           title: string; project: string; agent: string;
@@ -1783,7 +1783,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             SELECT t.id, t.title, t.chat_session_id, t.provider, t.last_message_at,
                    (SELECT COUNT(*) FROM thread_messages WHERE thread_id = t.id) as msg_count
             FROM threads t
-            WHERE t.last_message_at > datetime('now', ?)
+            WHERE t.last_message_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
               AND t.status = 'active'
             ORDER BY t.last_message_at DESC LIMIT 5
           `).all(`-${lookbackDays} days`) as Array<{
@@ -1831,7 +1831,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           FROM session_summaries
           WHERE is_sub_agent = 0
             AND status = 'active'
-            AND started_at > datetime('now', ?)
+            AND started_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
             AND project IS NOT NULL AND project != ''
           GROUP BY project
           ORDER BY count DESC LIMIT 8
@@ -1850,7 +1850,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           SELECT job_name, output, completed_at
           FROM scheduled_job_runs
           WHERE success = 1
-            AND completed_at > datetime('now', '-24 hours')
+            AND completed_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-24 hours')
             AND output IS NOT NULL AND output != ''
           ORDER BY completed_at DESC LIMIT 5
         `).all() as Array<{ job_name: string; output: string; completed_at: string }>;
