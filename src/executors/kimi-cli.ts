@@ -89,6 +89,7 @@ export async function executeKimiCLI(
 
     const child: ChildProcess = spawn(KIMI_PATH, args, {
       stdio: ["pipe", "pipe", "pipe"],
+      detached: true,
       env: cleanEnv,
     });
 
@@ -98,6 +99,7 @@ export async function executeKimiCLI(
       type: "executor",
       timeoutMs: timeout,
       source: "cli-runner",
+      detached: true,
     });
 
     let stdout = "";
@@ -105,18 +107,27 @@ export async function executeKimiCLI(
     let timedOut = false;
     let aborted = false;
 
+    // Kill entire process group (detached) for clean child cleanup
+    const killGroup = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal);
+      } catch {
+        try { child.kill(signal); } catch { /* already dead */ }
+      }
+    };
+
     // Timeout: SIGTERM then SIGKILL after grace period
     const timeoutId = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5000);
+      killGroup("SIGTERM");
+      setTimeout(() => killGroup("SIGKILL"), 5000);
     }, timeout);
 
     // AbortSignal support
     const abortHandler = () => {
       aborted = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5000);
+      killGroup("SIGTERM");
+      setTimeout(() => killGroup("SIGKILL"), 5000);
     };
     if (signal) {
       if (signal.aborted) {

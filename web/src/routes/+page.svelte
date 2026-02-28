@@ -61,6 +61,36 @@
 	let attachedFiles = $state<api.Upload[]>([]);
 	let chatInputComponent: ChatInput;
 
+	// Full-page drag-drop state
+	let pageDragCounter = $state(0);
+
+	function handlePageDragEnter(e: DragEvent) {
+		if (e.dataTransfer?.types.includes('Files')) {
+			e.preventDefault();
+			pageDragCounter++;
+		}
+	}
+
+	function handlePageDragLeave(e: DragEvent) {
+		if (e.dataTransfer?.types.includes('Files')) {
+			pageDragCounter--;
+		}
+	}
+
+	function handlePageDragOver(e: DragEvent) {
+		if (e.dataTransfer?.types.includes('Files')) {
+			e.preventDefault();
+		}
+	}
+
+	function handlePageDrop(e: DragEvent) {
+		e.preventDefault();
+		pageDragCounter = 0;
+		if (e.dataTransfer?.files.length) {
+			chatInputComponent?.addFiles(e.dataTransfer.files);
+		}
+	}
+
 	// Slash command state
 	let showSlashCommands = $state(false);
 	let selectedCommandIndex = $state(0);
@@ -912,7 +942,14 @@ Just confirm when done. Keep your response brief.`;
 		<main class="main-content">
 			<!-- Copilot Chat Interface (Full Width) -->
 			<section class="copilot-section">
-				<div class="copilot-chat">
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div
+				class="copilot-chat"
+				ondragenter={handlePageDragEnter}
+				ondragleave={handlePageDragLeave}
+				ondragover={handlePageDragOver}
+				ondrop={handlePageDrop}
+			>
 					<!-- Copilot Header (Unified) -->
 					<div class="copilot-header">
 						<div class="copilot-title">
@@ -977,6 +1014,19 @@ Just confirm when done. Keep your response brief.`;
 						onSelectCommand={selectCommand}
 						onInputChange={handleInputChange}
 					/>
+
+					{#if pageDragCounter > 0}
+						<div class="page-drop-overlay">
+							<div class="page-drop-content">
+								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="32" height="32">
+									<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+									<polyline points="17 8 12 3 7 8"/>
+									<line x1="12" y1="3" x2="12" y2="15"/>
+								</svg>
+								<span>Drop files here</span>
+							</div>
+						</div>
+					{/if}
 				</div>
 			</section>
 		</main>
@@ -1357,6 +1407,30 @@ Just confirm when done. Keep your response brief.`;
 		flex-direction: column;
 		flex: 1;
 		min-height: 0;
+		position: relative;
+	}
+
+	.page-drop-overlay {
+		position: absolute;
+		inset: 0;
+		background: rgba(0, 120, 212, 0.08);
+		border: 2px dashed #0078d4;
+		border-radius: 8px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 50;
+		pointer-events: none;
+	}
+
+	.page-drop-content {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 8px;
+		color: #0078d4;
+		font-size: 16px;
+		font-weight: 500;
 	}
 
 	/* Chat Error Banner */

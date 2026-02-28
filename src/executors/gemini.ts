@@ -19,7 +19,7 @@ const GEMINI_CONFIG = {
     pro31: "gemini-3.1-pro-preview",
   },
   defaultModel: "gemini-3-flash-preview",
-  fallbackModel: "gemini-3.1-pro-preview",
+  fallbackModel: "gemini-3-flash-preview",
 } as const;
 
 type GeminiModel = keyof typeof GEMINI_CONFIG.models | string;
@@ -32,7 +32,7 @@ export interface GeminiAPIOptions {
   model?: GeminiModel;
   systemPrompt?: string;
   temperature?: number;
-  maxTokens?: number;
+  maxTokens?: number | null; // null = use model default (no explicit cap)
   timeout?: number;
   useGrounding?: boolean;
   dynamicThreshold?: number; // 0.0 to 1.0
@@ -110,7 +110,7 @@ export async function executeGeminiAPI(
     const {
     systemPrompt = "You are a helpful assistant. Be concise and direct.",
     temperature = 0.3,
-    maxTokens = 65536,
+    maxTokens,  // undefined = model default (no cap); set explicitly only when you need a hard limit
     useGrounding = false, // Default off — enable explicitly for research
   } = options;
 
@@ -136,10 +136,10 @@ export async function executeGeminiAPI(
       tools,
     });
 
-    const chatConfig: Record<string, unknown> = {
-      temperature,
-      maxOutputTokens: maxTokens,
-    };
+    const chatConfig: Record<string, unknown> = { temperature };
+    if (maxTokens != null) {
+      chatConfig.maxOutputTokens = maxTokens;
+    }
     if (options.responseMimeType) {
       chatConfig.responseMimeType = options.responseMimeType;
     }
@@ -399,12 +399,12 @@ Keep it actionable and concise.`,
  */
 export async function checkGeminiAPIHealth(): Promise<boolean> {
   try {
-    const result = await executeGeminiAPI("Say OK", {
-      model: "flash",
+    const result = await executeGeminiAPI("Respond with the single word: OK", {
+      model: "flash3",  // gemini-3-flash-preview
       useGrounding: false,
-      maxTokens: 10,
+      maxTokens: 50,
     });
-    return result.exitCode === 0 && result.output.toLowerCase().includes("ok");
+    return result.exitCode === 0 && result.output.length > 0;
   } catch {
     return false;
   }

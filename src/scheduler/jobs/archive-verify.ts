@@ -45,7 +45,7 @@ export async function runArchiveVerify(db: Database.Database): Promise<{
             SELECT 1 FROM session_transcripts st
             WHERE st.content_hash = ss.content_hash
           )
-          AND ss.created_at > datetime('now', '-7 days')
+          AND julianday(ss.created_at) > julianday('now', '-7 days')
           AND ss.is_sub_agent = 0
         `).get() as { count: number };
 
@@ -188,7 +188,7 @@ export async function runArchiveVerify(db: Database.Database): Promise<{
           const recentRuns = db.prepare(`
             SELECT id FROM scheduled_job_runs
             WHERE job_id = ? AND success = 1
-            AND completed_at > datetime('now', '-7 days')
+            AND completed_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')
             ORDER BY id DESC LIMIT 3
           `).all(jobName) as Array<{ id: number }>;
 
