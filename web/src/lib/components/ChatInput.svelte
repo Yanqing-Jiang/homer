@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { CommandDefinition, Upload } from '$lib/api/client';
-	import FileUpload from './FileUpload.svelte';
+	import FileUpload, { type DisplayFile } from './FileUpload.svelte';
 
 	let {
 		value = $bindable(''),
@@ -28,6 +28,7 @@
 
 	let fileUploadComponent: FileUpload;
 	let chatInputElement: HTMLTextAreaElement;
+	let displayFiles = $state<DisplayFile[]>([]);
 
 	function autoResizeTextarea(textarea: HTMLTextAreaElement) {
 		textarea.style.height = 'auto';
@@ -69,16 +70,70 @@
 	export function focus() {
 		chatInputElement?.focus();
 	}
+
+	export function addFiles(files: FileList | File[]) {
+		fileUploadComponent?.addFiles(files);
+	}
+
+	function removeFile(localId: string) {
+		fileUploadComponent?.removeFile(localId);
+	}
+
+	function handlePaste(e: ClipboardEvent) {
+		const items = e.clipboardData?.items;
+		if (!items) return;
+
+		const imageFiles: File[] = [];
+		for (const item of items) {
+			if (item.type.startsWith('image/')) {
+				const file = item.getAsFile();
+				if (file) {
+					imageFiles.push(new File([file], `pasted-image-${Date.now()}.png`, { type: file.type }));
+				}
+			}
+		}
+
+		if (imageFiles.length > 0) {
+			e.preventDefault();
+			fileUploadComponent.addFiles(imageFiles);
+		}
+	}
+
+	function getFileIcon(mimeType: string): string {
+		if (mimeType.startsWith('image/')) return '🖼️';
+		if (mimeType === 'application/pdf') return '📄';
+		if (mimeType.startsWith('text/') || mimeType === 'application/json') return '📝';
+		return '📎';
+	}
 </script>
 
 <div class="chat-input-area">
 	<div class="input-row">
-		<FileUpload
-			bind:this={fileUploadComponent}
-			{sessionId}
-			onFilesChange={(files) => attachedFiles = files}
-		/>
 		<div class="input-container">
+			{#if displayFiles.length > 0}
+				<div class="attachment-preview">
+					{#each displayFiles as file}
+						<div class="attachment-chip" class:uploading={file.status === 'uploading'} class:error={file.status === 'error'}>
+							{#if file.previewUrl && file.mimeType.startsWith('image/')}
+								<img src={file.previewUrl} alt={file.filename} class="attachment-thumb" />
+							{:else}
+								<span class="attachment-icon">{getFileIcon(file.mimeType)}</span>
+							{/if}
+							<span class="attachment-name" title={file.filename}>{file.filename}</span>
+							{#if file.status === 'uploading'}
+								<span class="attachment-spinner"></span>
+							{:else if file.status === 'error'}
+								<span class="attachment-error" title={file.error}>!</span>
+							{/if}
+							<button class="attachment-remove" onclick={() => removeFile(file.localId)} title="Remove">
+								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+									<path d="M18 6L6 18M6 6l12 12"/>
+								</svg>
+							</button>
+						</div>
+					{/each}
+				</div>
+			{/if}
 			{#if showSlashCommands && filteredCommands.length > 0}
 				<div class="slash-command-dropdown">
 					{#each filteredCommands as cmd, i}
@@ -98,34 +153,43 @@
 					{/each}
 				</div>
 			{/if}
-			<textarea
-				placeholder="Ask me anything... (type / for commands)"
-				class="chat-input"
-				bind:value
-				bind:this={chatInputElement}
-				disabled={isStreaming}
-				oninput={(e) => {
-					onInputChange(e);
-					autoResizeTextarea(e.target as HTMLTextAreaElement);
-				}}
-				onkeydown={(e) => {
-					handleCommandKeydown(e);
-					if (e.key === 'Enter' && !e.shiftKey && !showSlashCommands) {
-						e.preventDefault();
-						onSend();
-					}
-				}}
-				rows="1"
-			></textarea>
-			<button class="send-btn" onclick={onSend} disabled={!value.trim() || isStreaming} aria-label="Send">
-				{#if isStreaming}
-					<span class="spinner-small"></span>
-				{:else}
-					<svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
-						<path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-					</svg>
-				{/if}
-			</button>
+			<div class="input-bottom-row">
+				<FileUpload
+					bind:this={fileUploadComponent}
+					{sessionId}
+					onFilesChange={(files) => attachedFiles = files}
+					onDisplayChange={(files) => displayFiles = files}
+				/>
+				<textarea
+					placeholder="Ask me anything... (type / for commands)"
+					class="chat-input"
+					bind:value
+					bind:this={chatInputElement}
+					disabled={isStreaming}
+					oninput={(e) => {
+						onInputChange(e);
+						autoResizeTextarea(e.target as HTMLTextAreaElement);
+					}}
+					onkeydown={(e) => {
+						handleCommandKeydown(e);
+						if (e.key === 'Enter' && !e.shiftKey && !showSlashCommands) {
+							e.preventDefault();
+							onSend();
+						}
+					}}
+					onpaste={handlePaste}
+					rows="1"
+				></textarea>
+				<button class="send-btn" onclick={onSend} disabled={!value.trim() || isStreaming} aria-label="Send">
+					{#if isStreaming}
+						<span class="spinner-small"></span>
+					{:else}
+						<svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+							<path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+						</svg>
+					{/if}
+				</button>
+			</div>
 		</div>
 	</div>
 	<div class="input-disclaimer">
@@ -150,8 +214,7 @@
 
 	.input-container {
 		display: flex;
-		align-items: flex-end;
-		gap: 8px;
+		flex-direction: column;
 		background: #f5f5f5;
 		border: 1px solid #e0e0e0;
 		border-radius: 8px;
@@ -165,6 +228,90 @@
 		box-shadow: 0 0 0 1px #0078d4;
 	}
 
+	.input-bottom-row {
+		display: flex;
+		align-items: flex-end;
+		gap: 8px;
+	}
+
+	/* Attachment preview */
+	.attachment-preview {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		width: 100%;
+		padding-bottom: 6px;
+	}
+
+	.attachment-chip {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		background: #e8e8e8;
+		border-radius: 6px;
+		padding: 4px 6px;
+		font-size: 12px;
+		position: relative;
+	}
+
+	.attachment-chip.uploading {
+		opacity: 0.7;
+	}
+
+	.attachment-chip.error {
+		background: #fef2f2;
+		border: 1px solid #fca5a5;
+	}
+
+	.attachment-thumb {
+		width: 32px;
+		height: 32px;
+		object-fit: cover;
+		border-radius: 4px;
+	}
+
+	.attachment-icon {
+		font-size: 14px;
+	}
+
+	.attachment-name {
+		max-width: 100px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.attachment-spinner {
+		width: 12px;
+		height: 12px;
+		border: 1.5px solid #ccc;
+		border-top-color: #0078d4;
+		border-radius: 50%;
+		animation: spin 0.8s linear infinite;
+	}
+
+	.attachment-error {
+		color: #dc2626;
+		font-weight: bold;
+		font-size: 12px;
+	}
+
+	.attachment-remove {
+		background: none;
+		border: none;
+		padding: 2px;
+		cursor: pointer;
+		color: #888;
+		display: flex;
+		border-radius: 2px;
+	}
+
+	.attachment-remove:hover {
+		background: #d4d4d4;
+		color: #333;
+	}
+
+	/* Slash command dropdown */
 	.slash-command-dropdown {
 		position: absolute;
 		bottom: 100%;

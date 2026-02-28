@@ -1,10 +1,17 @@
 import { logger } from "../utils/logger.js";
-import { appendDailyLog, createDailyEntry } from "./daily.js";
+import type { StateManager } from "../state/manager.js";
+
+// Module-level reference, wired at startup via setWriterStateManager()
+let stateManagerRef: StateManager | null = null;
+
+export function setWriterStateManager(sm: StateManager): void {
+  stateManagerRef = sm;
+}
 
 /**
- * Map target to context type for daily log
+ * Map target to a project label for session_summaries
  */
-function targetToContext(target: string): "work" | "life" | "general" {
+function targetToProject(target: string): string {
   switch (target) {
     case "work":
       return "work";
@@ -18,18 +25,27 @@ function targetToContext(target: string): "work" | "life" | "general" {
 }
 
 /**
- * Append content to daily log instead of direct memory files
- * The 3 AM organization job will move entries to appropriate memory files
+ * Write memory update to session_summaries via stateManager.insertDaemonEvent.
+ * Replaces the old appendDailyLog path — data now flows through the same
+ * pipeline as session-harvester output.
  */
 async function appendToMemoryFile(target: string, content: string): Promise<void> {
-  const context = targetToContext(target);
+  const project = targetToProject(target);
+
+  if (!stateManagerRef) {
+    logger.warn({ target }, "Writer stateManager not wired — memory update dropped");
+    return;
+  }
 
   try {
-    const entry = createDailyEntry(content, context, "conversation");
-    await appendDailyLog(entry);
-    logger.info({ target, context, contentLength: content.length }, "Memory update added to daily log");
+    stateManagerRef.insertDaemonEvent(
+      `memory-update [${project}]`,
+      content,
+      project,
+    );
+    logger.info({ target, project, contentLength: content.length }, "Memory update written to session_summaries");
   } catch (error) {
-    logger.error({ error, target }, "Failed to write to daily log");
+    logger.error({ error, target }, "Failed to write memory update to session_summaries");
     throw error;
   }
 }

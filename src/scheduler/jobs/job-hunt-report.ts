@@ -27,7 +27,10 @@ export async function runJobHuntWeeklyReport(db: Database.Database): Promise<{
 }> {
   try {
     const now = new Date();
-    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    // Generate space-separated timestamps to match discovered_at format in job_postings
+    const toSpaceSep = (d: Date) => d.toISOString().replace("T", " ").slice(0, 19);
+    const weekAgo = toSpaceSep(new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000));
 
     // Pipeline funnel — all time
     const allTime = getPipelineStats(db);
@@ -44,7 +47,7 @@ export async function runJobHuntWeeklyReport(db: Database.Database): Promise<{
     `).all(weekAgo) as Array<{ title: string; company: string; match_score: number; status: string }>;
 
     // Skill demand (count mentions across all JDs from last 4 weeks)
-    const fourWeeksAgo = new Date(now.getTime() - 28 * 24 * 60 * 60 * 1000).toISOString();
+    const fourWeeksAgo = toSpaceSep(new Date(now.getTime() - 28 * 24 * 60 * 60 * 1000));
     const skillDemand = getSkillDemand(db, fourWeeksAgo);
 
     // Stale jobs (> 14 days, no action taken)

@@ -49,23 +49,6 @@ const NightlyOutputSchema = z.object({
 // HELPERS
 // ============================================
 
-function getYesterdayDate(): string {
-  const d = new Date();
-  d.setDate(d.getDate() - 1);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-function getTodayDate(): string {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
 function loadPermanentFiles(): Record<string, string> {
   const contents: Record<string, string> = {};
   for (const [key, path] of Object.entries(PERMANENT_FILES)) {
@@ -114,13 +97,15 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
   output: string;
   error?: string;
 }> {
-  const yesterday = getYesterdayDate();
-  const today = getTodayDate();
+  // Yesterday label for feedback log and output messages
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  const yesterday = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
   try {
-    // Read unprocessed sessions from session_summaries
-    const sessions = stateManager.getUnprocessedSessions(yesterday, today);
-    logger.info({ date: yesterday, sessionCount: sessions.length }, "Loaded unprocessed sessions for nightly memory");
+    // Read unprocessed sessions — queue-based, no date filter
+    const sessions = stateManager.getUnprocessedSessionsBatch(50);
+    logger.info({ sessionCount: sessions.length }, "Loaded unprocessed sessions for nightly memory");
 
     // Read yesterday's explicit feedback to include in analysis
     let feedbackLog = "";
@@ -183,7 +168,7 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
     }
 
     if (sessions.length === 0 && !feedbackLog) {
-      return { success: true, output: `No unprocessed sessions or feedback for ${yesterday}, skipping` };
+      return { success: true, output: "No unprocessed sessions or feedback, skipping" };
     }
 
     // Format sessions as structured blocks grouped by project

@@ -40,6 +40,9 @@ export class StateManager {
   }
 
   private init(): void {
+    // Enable foreign key enforcement (SQLite defaults to OFF per-connection)
+    this._db.pragma("foreign_keys = ON");
+
     this._db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
@@ -611,6 +614,23 @@ export class StateManager {
          ORDER BY updated_at DESC`
       )
       .all() as ScheduledJobState[];
+  }
+
+  /**
+   * Sync enabled state from schedule config into DB.
+   * Prevents drift between schedule.json and scheduled_job_state table.
+   */
+  syncScheduledJobEnabled(jobStates: { jobId: string; enabled: boolean }[]): void {
+    const stmt = this._db.prepare(
+      `UPDATE scheduled_job_state SET enabled = ?, updated_at = ? WHERE job_id = ?`
+    );
+    const now = new Date().toISOString();
+    const txn = this._db.transaction(() => {
+      for (const { jobId, enabled } of jobStates) {
+        stmt.run(enabled ? 1 : 0, now, jobId);
+      }
+    });
+    txn();
   }
 
   cleanupOldScheduledJobRuns(maxAgeMs: number = 30 * 24 * 60 * 60 * 1000): number {
@@ -1791,8 +1811,49 @@ export class StateManager {
   }
 
   /**
-   * Get unprocessed sessions for nightly-memory promotion.
-   * Returns active sessions that haven't been processed yet.
+   * Get oldest unprocessed sessions for nightly-memory promotion (queue-based).
+   * No date filter — drains the backlog in order.
+   */
+  getUnprocessedSessionsBatch(limit: number = 50): SessionSummaryRow[] {
+    return this._db.prepare(
+      `SELECT id, agent, started_at as startedAt, ended_at as endedAt, model, project,
+              title, message_count as messageCount, summary, is_sub_agent as isSubAgent,
+              created_at as createdAt, status
+       FROM session_summaries
+       WHERE status = 'active'
+         AND processed_for_promotion = 0
+       ORDER BY COALESCE(started_at, created_at) ASC
+       LIMIT ?`
+    ).all(limit) as SessionSummaryRow[];
+  }
+
+  /**
+   * Count of unprocessed sessions in the backlog.
+   */
+  getUnprocessedSessionCount(): number {
+    const row = this._db.prepare(
+      `SELECT COUNT(*) as cnt FROM session_summaries WHERE status = 'active' AND processed_for_promotion = 0`
+    ).get() as { cnt: number };
+    return row.cnt;
+  }
+
+  /**
+   * Hours since the oldest unprocessed session was created.
+   * Returns 0 if no unprocessed sessions exist.
+   */
+  getOldestUnprocessedSessionAge(): number {
+    const row = this._db.prepare(
+      `SELECT MIN(COALESCE(started_at, created_at)) as oldest
+       FROM session_summaries
+       WHERE status = 'active' AND processed_for_promotion = 0`
+    ).get() as { oldest: string | null };
+    if (!row.oldest) return 0;
+    const ageMs = Date.now() - new Date(row.oldest).getTime();
+    return Math.round(ageMs / 3600000 * 10) / 10; // 1 decimal place
+  }
+
+  /**
+   * @deprecated Use getUnprocessedSessionsBatch instead — date-window query orphans old rows.
    */
   getUnprocessedSessions(dateStart: string, dateEnd: string): SessionSummaryRow[] {
     return this._db.prepare(

@@ -12,9 +12,9 @@ let genAI: GoogleGenerativeAI | null = null;
 
 function getClient(): GoogleGenerativeAI {
   if (!genAI) {
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY_Primary || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
     if (!apiKey) {
-      throw new Error("GEMINI_API_KEY not set in environment");
+      throw new Error("GEMINI_API_KEY_Primary not set in environment");
     }
     genAI = new GoogleGenerativeAI(apiKey);
   }

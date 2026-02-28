@@ -218,6 +218,15 @@ export function registerStreamingRoutes(
 
       let lockHeartbeatInterval: NodeJS.Timeout | undefined;
 
+      // Kill entire process group (detached) for clean child cleanup
+      const killGroup = (sig: NodeJS.Signals) => {
+        try {
+          if (proc?.pid) process.kill(-proc.pid, sig);
+        } catch {
+          try { proc?.kill(sig); } catch { /* already dead */ }
+        }
+      };
+
       const cleanup = () => {
         if (heartbeatInterval) {
           clearInterval(heartbeatInterval);
@@ -228,15 +237,15 @@ export function registerStreamingRoutes(
         // Release thread lock
         releaseLock(threadId, lockReqId);
 
-        // Kill spawned process if still running
+        // Kill spawned process group if still running
         if (proc && proc.exitCode === null) {
           logger.debug({ threadId }, "Killing Claude process due to cleanup");
-          proc.kill("SIGTERM");
+          killGroup("SIGTERM");
           // Force kill after 5s if still running
           setTimeout(() => {
             if (proc && proc.exitCode === null) {
               logger.warn({ threadId }, "Force killing Claude process");
-              proc.kill("SIGKILL");
+              killGroup("SIGKILL");
             }
           }, 5000);
         }
@@ -318,6 +327,7 @@ export function registerStreamingRoutes(
           cwd: process.env.HOME ?? "/Users/yj",
           env,
           stdio: ["pipe", "pipe", "pipe"],
+          detached: true,
         });
 
         // Register with process lifecycle management
@@ -326,6 +336,7 @@ export function registerStreamingRoutes(
           type: "executor",
           timeoutMs: 30 * 60 * 1000,
           source: "cli-runner",
+          detached: true,
         });
 
         proc.stdin?.end();
@@ -471,10 +482,10 @@ export function registerStreamingRoutes(
         const timeoutTimer = setTimeout(() => {
           logger.warn({ threadId }, "Claude CLI timed out");
           if (proc) {
-            proc.kill("SIGTERM");
+            killGroup("SIGTERM");
             setTimeout(() => {
               if (proc && proc.exitCode === null) {
-                proc.kill("SIGKILL");
+                killGroup("SIGKILL");
               }
             }, 5000);
           }

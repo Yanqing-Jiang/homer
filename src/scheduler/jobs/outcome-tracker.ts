@@ -78,7 +78,7 @@ async function gatherEvidence(db: Database.Database, check: OutcomeCheck): Promi
     try {
       const refs = db.prepare(`
         SELECT COUNT(*) as count FROM session_summaries
-        WHERE summary LIKE ? AND started_at > ?
+        WHERE summary LIKE ? AND julianday(started_at) > julianday(?)
       `).get(`%${check.source_title.slice(0, 40)}%`, check.created_at) as { count: number };
 
       evidence.push(`Referenced in ${refs.count} session(s) since promotion`);
@@ -90,7 +90,7 @@ async function gatherEvidence(db: Database.Database, check: OutcomeCheck): Promi
     try {
       const refs = db.prepare(`
         SELECT COUNT(*) as count FROM session_summaries
-        WHERE summary LIKE ? AND started_at > ?
+        WHERE summary LIKE ? AND julianday(started_at) > julianday(?)
       `).get(`%${check.source_title.slice(0, 40)}%`, check.created_at) as { count: number };
 
       evidence.push(`Mentioned in ${refs.count} session(s) since proposal`);
@@ -102,7 +102,7 @@ async function gatherEvidence(db: Database.Database, check: OutcomeCheck): Promi
     const mentions = db.prepare(`
       SELECT title, summary, started_at FROM session_summaries
       WHERE (summary LIKE ? OR title LIKE ?)
-        AND started_at > ?
+        AND julianday(started_at) > julianday(?)
       ORDER BY started_at DESC LIMIT 3
     `).all(
       `%${check.source_title.slice(0, 30)}%`,

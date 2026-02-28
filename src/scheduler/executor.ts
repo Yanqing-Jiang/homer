@@ -445,6 +445,7 @@ async function executeClaudeJob(
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
+      detached: true,
     });
 
     // Register with process lifecycle management
@@ -454,6 +455,7 @@ async function executeClaudeJob(
       timeoutMs: timeout,
       source: "scheduler",
       jobId: config.id,
+      detached: true,
     });
 
     let stdout = "";
@@ -687,19 +689,24 @@ ${stderr.trim()}`
       void finalize(code);
     });
 
+    // Kill entire process group (detached) for clean child cleanup
+    const killGroup = (sig: NodeJS.Signals) => {
+      try {
+        if (proc.pid) process.kill(-proc.pid, sig);
+      } catch {
+        try { proc.kill(sig); } catch { /* already dead */ }
+      }
+    };
+
     // Timeout handling
     timeoutTimer = setTimeout(() => {
       timedOut = true;
       logger.warn({ jobId: config.id, timeout }, "Scheduled job timed out");
-      try {
-        proc.kill("SIGTERM");
-      } catch {}
+      killGroup("SIGTERM");
 
       killTimer = setTimeout(() => {
         if (!settled) {
-          try {
-            proc.kill("SIGKILL");
-          } catch {}
+          killGroup("SIGKILL");
         }
       }, KILL_GRACE_MS);
     }, timeout);

@@ -14,13 +14,144 @@ import { runMigrations } from "../state/migrations/index.js";
 import { logger } from "../utils/logger.js";
 import { CronUtils } from "../utils/cron.js";
 import { getClaudeAuthStatus } from "../utils/claude-auth.js";
+import { checkGeminiAPIHealth } from "../executors/gemini.js";
 import { readFileSync, existsSync } from "fs";
+import { createHash } from "crypto";
 
 interface InternalJobContext {
   stateManager: StateManager;
   bot: Bot;
   chatId: number;
   jobRunId?: number;
+}
+
+interface HealthAlertState {
+  active_fingerprint: string | null;
+  active_issues: string | null;
+  first_detected_at: string | null;
+  last_sent_fingerprint: string | null;
+  last_sent_at: string | null;
+  send_failures: number;
+  retry_after: string | null;
+  last_recovery_sent_at: string | null;
+}
+
+const HEALTH_ALERT_REMINDER_MS = 6 * 60 * 60 * 1000; // 6h
+const HEALTH_ALERT_RETRY_BASE_MS = 60 * 1000; // 1m
+const HEALTH_ALERT_RETRY_MAX_MS = 30 * 60 * 1000; // 30m
+const HEALTH_ALERT_SEND_ATTEMPTS = 2;
+
+function toMillis(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const ts = Date.parse(value);
+  return Number.isFinite(ts) ? ts : null;
+}
+
+function fingerprintIssues(issues: string[]): string {
+  const normalized = [...issues]
+    .map((item) => item.replace(/\s+/g, " ").trim())
+    .sort()
+    .join("\n");
+  return createHash("sha256").update(normalized).digest("hex");
+}
+
+function ensureHealthAlertTable(db: ReturnType<StateManager["getDb"]>): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS health_check_alert_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      active_fingerprint TEXT,
+      active_issues TEXT,
+      first_detected_at TEXT,
+      last_sent_fingerprint TEXT,
+      last_sent_at TEXT,
+      send_failures INTEGER NOT NULL DEFAULT 0,
+      retry_after TEXT,
+      last_recovery_sent_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+}
+
+function loadHealthAlertState(db: ReturnType<StateManager["getDb"]>): HealthAlertState {
+  const row = db.prepare(`
+    SELECT
+      active_fingerprint,
+      active_issues,
+      first_detected_at,
+      last_sent_fingerprint,
+      last_sent_at,
+      send_failures,
+      retry_after,
+      last_recovery_sent_at
+    FROM health_check_alert_state
+    WHERE id = 1
+  `).get() as HealthAlertState | undefined;
+
+  return row ?? {
+    active_fingerprint: null,
+    active_issues: null,
+    first_detected_at: null,
+    last_sent_fingerprint: null,
+    last_sent_at: null,
+    send_failures: 0,
+    retry_after: null,
+    last_recovery_sent_at: null,
+  };
+}
+
+function saveHealthAlertState(db: ReturnType<StateManager["getDb"]>, state: HealthAlertState): void {
+  db.prepare(`
+    INSERT INTO health_check_alert_state (
+      id,
+      active_fingerprint,
+      active_issues,
+      first_detected_at,
+      last_sent_fingerprint,
+      last_sent_at,
+      send_failures,
+      retry_after,
+      last_recovery_sent_at,
+      updated_at
+    ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(id) DO UPDATE SET
+      active_fingerprint = excluded.active_fingerprint,
+      active_issues = excluded.active_issues,
+      first_detected_at = excluded.first_detected_at,
+      last_sent_fingerprint = excluded.last_sent_fingerprint,
+      last_sent_at = excluded.last_sent_at,
+      send_failures = excluded.send_failures,
+      retry_after = excluded.retry_after,
+      last_recovery_sent_at = excluded.last_recovery_sent_at,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(
+    state.active_fingerprint,
+    state.active_issues,
+    state.first_detected_at,
+    state.last_sent_fingerprint,
+    state.last_sent_at,
+    state.send_failures,
+    state.retry_after,
+    state.last_recovery_sent_at
+  );
+}
+
+async function sendHealthMessage(ctx: InternalJobContext, message: string): Promise<boolean> {
+  for (let attempt = 1; attempt <= HEALTH_ALERT_SEND_ATTEMPTS; attempt++) {
+    try {
+      await ctx.bot.api.sendMessage(ctx.chatId, message, {
+        parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
+      });
+      return true;
+    } catch (error) {
+      logger.error({ error, attempt }, "Failed to send health check notification");
+      if (attempt < HEALTH_ALERT_SEND_ATTEMPTS) {
+        const waitMs = attempt * 2000;
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+      }
+    }
+  }
+  return false;
 }
 
 // Handlers safe to retry (idempotent, no user-facing side effects)
@@ -83,6 +214,8 @@ async function runHealthCheck(
   const now = Date.now();
   const db = ctx.stateManager.getDb();
   const issues: string[] = [];
+
+  ensureHealthAlertTable(db);
 
   // Load all job configs from schedule files
   const { loadAllSchedules, getAllJobs } = await import("./loader.js");
@@ -169,29 +302,87 @@ async function runHealthCheck(
     issues.push("🔴 Claude: auth check failed");
   }
 
+  try {
+    const geminiOk = await checkGeminiAPIHealth();
+    if (!geminiOk) {
+      issues.push("🔴 Gemini API: health check failed (flash3 / gemini-3-flash-preview)");
+    }
+  } catch {
+    issues.push("🔴 Gemini API: health check threw");
+  }
+
   if (issues.length === 0) {
-    return { success: true, output: "All systems healthy" };
+    const state = loadHealthAlertState(db);
+    let output = "All systems healthy";
+
+    if (state.active_fingerprint) {
+      const recovery = `✅ <b>Health Check</b>\n\nRecovered from previous alert:\n${state.active_issues ?? "Unknown issue"}`;
+      const recoverySent = await sendHealthMessage(ctx, recovery);
+      if (recoverySent) {
+        output = "All systems healthy, recovery alert sent";
+        state.last_recovery_sent_at = new Date(now).toISOString();
+      } else {
+        output = "All systems healthy, recovery alert FAILED to send";
+      }
+    }
+
+    state.active_fingerprint = null;
+    state.active_issues = null;
+    state.first_detected_at = null;
+    state.send_failures = 0;
+    state.retry_after = null;
+    saveHealthAlertState(db, state);
+
+    return { success: true, output };
   }
 
   // Send alert — use bot.api directly so errors propagate (sendNotification swallows them)
   const hasCritical = issues.some(i => i.startsWith("🔴"));
   const statusEmoji = hasCritical ? "🚨" : "⚠️";
   const message = `${statusEmoji} <b>Health Check</b>\n\n${issues.join("\n")}`;
+  const issueFingerprint = fingerprintIssues(issues);
+  const state = loadHealthAlertState(db);
+  const nowIso = new Date(now).toISOString();
 
-  let alertSent = false;
-  try {
-    await ctx.bot.api.sendMessage(ctx.chatId, message, {
-      parse_mode: "HTML",
-      link_preview_options: { is_disabled: true },
-    });
-    alertSent = true;
-  } catch (e) {
-    logger.error({ error: e }, "Failed to send health check notification");
+  if (state.active_fingerprint !== issueFingerprint) {
+    state.first_detected_at = nowIso;
+  }
+  state.active_fingerprint = issueFingerprint;
+  state.active_issues = issues.join("\n");
+
+  const lastSentMs = toMillis(state.last_sent_at);
+  const retryAfterMs = toMillis(state.retry_after);
+  const sameAsLastSent = state.last_sent_fingerprint === issueFingerprint;
+  const reminderDue = lastSentMs === null || (now - lastSentMs) >= HEALTH_ALERT_REMINDER_MS;
+  const retryDue = state.send_failures > 0 && (retryAfterMs === null || now >= retryAfterMs);
+  const shouldSend = !sameAsLastSent || reminderDue || retryDue;
+
+  if (!shouldSend) {
+    saveHealthAlertState(db, state);
+    return {
+      success: true,
+      output: `${issues.length} issue(s) found, duplicate alert suppressed`,
+    };
+  }
+
+  const alertSent = await sendHealthMessage(ctx, message);
+  if (alertSent) {
+    state.last_sent_fingerprint = issueFingerprint;
+    state.last_sent_at = nowIso;
+    state.send_failures = 0;
+    state.retry_after = null;
+    saveHealthAlertState(db, state);
+  } else {
+    const failures = Math.max(0, state.send_failures) + 1;
+    const delay = Math.min(HEALTH_ALERT_RETRY_BASE_MS * (2 ** (failures - 1)), HEALTH_ALERT_RETRY_MAX_MS);
+    state.send_failures = failures;
+    state.retry_after = new Date(now + delay).toISOString();
+    saveHealthAlertState(db, state);
   }
 
   return {
     success: true,
-    output: `${issues.length} issue(s) found${alertSent ? ", alert sent" : ", alert FAILED to send"}`,
+    output: `${issues.length} issue(s) found${alertSent ? ", alert sent" : ", alert FAILED to send; retry scheduled"}`,
   };
 }
 

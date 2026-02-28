@@ -22,7 +22,10 @@ CREATE INDEX IF NOT EXISTS idx_yt_intent    ON youtube_videos(intent_primary);
 CREATE INDEX IF NOT EXISTS idx_yt_status    ON youtube_videos(analysis_status);
 
 -- Rebuild youtube_videos_fts to include new columns
--- Drop old triggers first
+-- Drop old triggers first (both naming conventions from 037 and earlier)
+DROP TRIGGER IF EXISTS youtube_videos_fts_ai;
+DROP TRIGGER IF EXISTS youtube_videos_fts_au;
+DROP TRIGGER IF EXISTS youtube_videos_fts_ad;
 DROP TRIGGER IF EXISTS youtube_videos_ai;
 DROP TRIGGER IF EXISTS youtube_videos_au;
 DROP TRIGGER IF EXISTS youtube_videos_ad;

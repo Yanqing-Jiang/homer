@@ -15,7 +15,9 @@
 import { readFileSync, existsSync } from "fs";
 import { z } from "zod";
 import type Database from "better-sqlite3";
-import { executeGeminiAPI, type GeminiAPIOptions } from "../../executors/gemini.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
+import { executeOpenCodeCLI } from "../../executors/opencode-cli.js";
+import { executeGeminiAPI } from "../../executors/gemini.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { getUnprocessedScrapes, markProcessed, type StoredScrape } from "../../scraping/scrape-store.js";
 import type { ParsedIdea } from "../../ideas/parser.js";
@@ -208,32 +210,31 @@ ${summariesText}
 Return ONLY a JSON object (no markdown):
 {"ideas": [{"title": "...", "content": "...", "source": "x-bookmark|github-trending|medium-trending|github-gap-analysis", "link": "https://...", "tags": ["tag1"], "relevance": "why this matters", "confidenceScore": 0.8, "scrapeIds": ["id1", "id2"]}], "stats": {"candidatesGenerated": N, "candidatesFiltered": M}}`;
 
-  const options: GeminiAPIOptions = {
-    model: "pro31",
-    maxTokens: 8192,
-    responseMimeType: "application/json",
-    temperature: 0.7,
-  };
-
   try {
-    const result = await executeGeminiAPI(prompt, options);
+    // Primary: Sonnet via Claude Code CLI — full context window, best synthesis quality
+    const sonnetResult = await executeClaudeCommand(prompt, {
+      cwd: process.env.HOME ?? "/Users/yj",
+      model: "sonnet",
+      timeout: 120_000,
+    });
 
-    if (result.exitCode !== 0 || !result.output) {
-      // Fallback to Flash
-      logger.warn({ exitCode: result.exitCode }, "Pro 3.1 synthesis failed, falling back to Flash");
-      const fallback = await executeGeminiAPI(prompt, {
-        ...options,
-        model: "flash3",
-      });
-
-      if (fallback.exitCode !== 0 || !fallback.output) {
-        return { ideas: [], stats: { candidatesGenerated: 0, candidatesFiltered: 0 } };
-      }
-
-      return parseSwarmJSON(fallback.output, SynthesisOutputSchema);
+    if (sonnetResult.exitCode === 0 && sonnetResult.output) {
+      return parseSwarmJSON(sonnetResult.output, SynthesisOutputSchema);
     }
 
-    return parseSwarmJSON(result.output, SynthesisOutputSchema);
+    // Fallback: Flash via OpenCode (Google OAuth)
+    logger.warn({ exitCode: sonnetResult.exitCode }, "Sonnet synthesis failed, falling back to Flash");
+    const flashResult = await executeOpenCodeCLI(prompt, "", {
+      model: "google/gemini-3-flash-preview",
+      researchOnly: false,
+      timeout: 120_000,
+    });
+
+    if (flashResult.exitCode !== 0 || !flashResult.output) {
+      return { ideas: [], stats: { candidatesGenerated: 0, candidatesFiltered: 0 } };
+    }
+
+    return parseSwarmJSON(flashResult.output, SynthesisOutputSchema);
   } catch (err) {
     logger.warn({ error: err }, "Synthesis parse failed");
     return { ideas: [], stats: { candidatesGenerated: 0, candidatesFiltered: 0 } };

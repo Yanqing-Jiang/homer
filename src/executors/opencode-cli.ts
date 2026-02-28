@@ -3,7 +3,8 @@ import { mkdirSync } from "fs";
 import * as readline from "readline";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
-import { executeGeminiAPI } from "./gemini.js";
+import { executeKimiCLI } from "./kimi-cli.js";
+import { executeClaudeCommand } from "./claude.js";
 import { googleAccountManager } from "../utils/google-auth.js";
 import { processRegistry } from "../process/registry.js";
 
@@ -137,7 +138,7 @@ export async function executeOpenCodeCLI(
   options: OpenCodeCLIOptions = {}
 ): Promise<OpenCodeCLIResult> {
   const {
-    model: rawModel = "google-aistudio/gemini-3-flash-preview",
+    model: rawModel = "google/gemini-3-flash-preview",
     timeout = 1200000, // 20 minutes default
     signal,
     researchOnly = true,
@@ -147,12 +148,7 @@ export async function executeOpenCodeCLI(
   } = options;
 
   // Normalize model name: callers may pass "gemini-3-flash-preview" without provider prefix
-  let model = rawModel.includes("/") ? rawModel : `google/${rawModel}`;
-  
-  // Use aistudio provider for 3.1 Pro and Flash — API key is more reliable than OAuth/Antigravity
-  if (model.includes("3.1-pro") || model.includes("flash")) {
-    model = model.replace("google/", "google-aistudio/");
-  }
+  const model = rawModel.includes("/") ? rawModel : `google/${rawModel}`;
 
   const prefix = browserOnly ? BROWSER_ONLY_PREFIX : researchOnly ? RESEARCH_ONLY_PREFIX : "";
   const effectivePrompt = prefix + prompt;
@@ -459,28 +455,55 @@ export async function executeOpenCodeWithFallback(
     return result;
   }
 
-  // Quota or Auth error - log it and rotate account
+  // Tier 1 fallback: quota/auth error — rotate Google account, retry Flash
   const account = await googleAccountManager.getActiveAccount();
   logger.info({ exitCode: result.exitCode, email: account.email }, "OpenCode quota/auth error, rotating account");
   await googleAccountManager.markRateLimited(account.email, 60 * 60 * 1000); // 1 hour cooldown
   await googleAccountManager.rotateAccount();
 
-  // Retry once with new account
   const retryResult = await executeOpenCodeCLI(prompt, context, options);
+  if (retryResult.exitCode === 0) return retryResult;
 
-  // If retry still quota-exhausted, fall back to direct API key for Gemini models
-  if (retryResult.exitCode === 2 && retryResult.model.includes("gemini")) {
-    logger.info({ model: retryResult.model }, "All OAuth accounts exhausted, falling back to direct API key");
-    const apiModel = retryResult.model.replace("google/", "");
+  // Tier 2 fallback: all Flash/Google accounts exhausted — try Sonnet via Claude Code CLI
+  if (retryResult.exitCode === 2 || retryResult.exitCode === 3) {
+    logger.info("All Flash/Google accounts exhausted, falling back to Sonnet (Claude Code)");
+    try {
+      const fullPrompt = context ? `${context}\n\n---\n\n${prompt}` : prompt;
+      const sonnetResult = await executeClaudeCommand(fullPrompt, {
+        cwd: options.cwd ?? process.env.HOME ?? "/Users/yj",
+        model: "sonnet",
+        timeout: options.timeout,
+        signal: options.signal,
+      });
+      if (sonnetResult.exitCode === 0) {
+        return {
+          output: sonnetResult.output,
+          exitCode: 0,
+          duration: sonnetResult.duration,
+          executor: "claude",
+          sessionId: sonnetResult.claudeSessionId ?? "",
+          model: "claude-sonnet-4-6",
+          accountId: 0,
+        } as OpenCodeCLIResult;
+      }
+    } catch (err) {
+      logger.warn({ err }, "Sonnet (Claude Code) fallback failed");
+    }
+
+    // Tier 3 emergency fallback: Kimi K2.5 (independent auth, native web tools)
+    logger.warn("Sonnet fallback also failed, using Kimi K2.5 emergency fallback");
     const fullPrompt = context ? `${context}\n\n---\n\n${prompt}` : prompt;
-    const apiResult = await executeGeminiAPI(fullPrompt, { model: apiModel });
+    const kimiResult = await executeKimiCLI(fullPrompt, "", {
+      timeout: options.timeout,
+      signal: options.signal,
+    });
     return {
-      output: apiResult.output,
-      exitCode: apiResult.exitCode,
-      duration: apiResult.duration,
-      executor: "opencode",
+      output: kimiResult.output,
+      exitCode: kimiResult.exitCode,
+      duration: kimiResult.duration,
+      executor: "kimi-cli",
       sessionId: "",
-      model: retryResult.model,
+      model: "moonshot-ai/kimi-k2.5",
       accountId: 0,
     } as OpenCodeCLIResult;
   }
