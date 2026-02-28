@@ -63,6 +63,7 @@ export async function executeCodexCLI(
     const child = spawn("codex", args, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
+      detached: true,
       env: {
         ...process.env,
         CI: process.env.CI ?? "1",
@@ -78,6 +79,7 @@ export async function executeCodexCLI(
       type: "executor",
       timeoutMs: timeout,
       source: "cli-runner",
+      detached: true,
     });
 
     let stdout = "";
@@ -102,10 +104,19 @@ export async function executeCodexCLI(
       });
     };
 
+    // Kill entire process group (detached) for clean child cleanup
+    const killGroup = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal);
+      } catch {
+        try { child.kill(signal); } catch { /* already dead */ }
+      }
+    };
+
     const killProcess = () => {
       if (child.exitCode == null && child.signalCode == null) {
-        child.kill("SIGTERM");
-        setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
+        killGroup("SIGTERM");
+        setTimeout(() => killGroup("SIGKILL"), KILL_GRACE_MS);
       }
     };
 

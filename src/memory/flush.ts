@@ -1,5 +1,4 @@
 import { logger } from "../utils/logger.js";
-import { appendDailyLog, createDailyEntry } from "./daily.js";
 import type { StateManager } from "../state/manager.js";
 
 /**
@@ -145,10 +144,12 @@ export function generateFlushContent(
 }
 
 /**
- * Execute a pre-timeout flush for a session
+ * Execute a pre-timeout flush for a session.
+ * Writes to session_summaries via stateManager.insertDaemonEvent.
  */
 export async function executeFlush(
   data: SessionFlushData,
+  stateManager: StateManager,
   summary?: string
 ): Promise<boolean> {
   const decision = calculateFlushScore(data);
@@ -163,10 +164,13 @@ export async function executeFlush(
 
   try {
     const content = generateFlushContent(data, summary);
-    const context = data.context === "default" ? "general" : data.context as "work" | "life" | "general";
+    const project = data.context === "default" ? "general" : data.context;
 
-    const entry = createDailyEntry(content, context, "flush");
-    await appendDailyLog(entry);
+    stateManager.insertDaemonEvent(
+      `session-flush [${project}]`,
+      content,
+      project,
+    );
 
     logger.info(
       {
@@ -212,19 +216,17 @@ export async function checkAndFlushExpiringSessions(
     }
 
     // Build flush data
-    // Note: remindersCreated and jobsTriggered would need tracking in StateManager
-    // For now, we'll use 0 as placeholders
     const flushData: SessionFlushData = {
       sessionId: session.id,
       context: session.lane,
       messageCount: session.messageCount,
       createdAt: session.createdAt,
       lastActivityAt: session.lastActivityAt,
-      remindersCreated: 0, // TODO: track in state manager
-      jobsTriggered: 0, // TODO: track in state manager
+      remindersCreated: 0,
+      jobsTriggered: 0,
     };
 
-    const flushed = await executeFlush(flushData);
+    const flushed = await executeFlush(flushData, stateManager);
     if (flushed) {
       flushedCount++;
     }

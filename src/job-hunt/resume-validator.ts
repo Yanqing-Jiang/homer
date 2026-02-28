@@ -21,9 +21,9 @@ export async function validateOptimizedResume(
   optimizedText: string,
   jobDescription: string
 ): Promise<ValidationResult> {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY_Primary || process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    logger.warn("No GEMINI_API_KEY, skipping validation");
+    logger.warn("No GEMINI_API_KEY_Primary, skipping validation");
     return { valid: false, issues: ["Validation unavailable — manual review required (no API key)"], confidence: 0 };
   }
 

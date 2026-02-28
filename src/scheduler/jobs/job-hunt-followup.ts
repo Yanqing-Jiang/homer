@@ -133,7 +133,7 @@ export async function runJobHuntFollowup(
 }
 
 async function generateFollowUpDraft(candidate: FollowUpCandidate): Promise<string | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY_Primary || process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
 
   const prompt = `Write a brief professional follow-up email for a job application.

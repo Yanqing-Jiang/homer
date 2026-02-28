@@ -19,9 +19,9 @@ export async function generateCoverLetter(
   jobDescription: string,
   matchAnalysis: string
 ): Promise<CoverLetterResult | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY_Primary || process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    logger.warn("No GEMINI_API_KEY, skipping cover letter");
+    logger.warn("No GEMINI_API_KEY_Primary, skipping cover letter");
     return null;
   }
 

@@ -14,7 +14,7 @@ import { readFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { execSync } from "child_process";
 import { z } from "zod";
-import { executeOpenCodeCLI } from "../../executors/opencode-cli.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
 import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { executeGeminiAPI } from "../../executors/gemini.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
@@ -274,7 +274,7 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
     const geminiPrompt = buildSharedPrompt({
       ...sharedParams,
       outputPath: geminiOutputPath,
-      agentLabel: "Gemini 3.1 Pro (architectural analysis)",
+      agentLabel: "Sonnet (architectural analysis)",
     });
 
     const codexPrompt = buildSharedPrompt({
@@ -283,21 +283,19 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
       agentLabel: "Codex (deep code analysis)",
     });
 
-    logger.info("Running homer-improvements: Gemini 3.1 Pro + Codex in parallel");
+    logger.info("Running homer-improvements: Sonnet (Claude Code) + Codex in parallel");
 
     // Fan-out: run both agents in parallel
     const [geminiResult, codexResult] = await Promise.allSettled([
-      executeOpenCodeCLI(geminiPrompt, "", {
-        model: "google-aistudio/gemini-3.1-pro-preview",
-        researchOnly: false,
-        agent: "build",
+      executeClaudeCommand(geminiPrompt, {
         cwd: HOMER_DIR,
+        model: "sonnet",
         timeout: 900_000, // 15 min
       }),
       executeCodexCLI(codexPrompt, {
         cwd: HOMER_DIR,
         model: "gpt-5.3-codex",
-        reasoningEffort: "xhigh",
+        reasoningEffort: "high",
         timeout: 1_200_000, // 20 min
       }),
     ]);
@@ -306,7 +304,7 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
     const outputs: Array<{ agent: string; content: string }> = [];
 
     if (existsSync(geminiOutputPath)) {
-      outputs.push({ agent: "Gemini 3.1 Pro", content: readFileSync(geminiOutputPath, "utf-8") });
+      outputs.push({ agent: "Sonnet", content: readFileSync(geminiOutputPath, "utf-8") });
       logger.info({ path: geminiOutputPath }, "Gemini output written");
     } else {
       const err = geminiResult.status === "rejected" ? geminiResult.reason : "file not written";

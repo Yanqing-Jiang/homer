@@ -11,7 +11,7 @@
  * Plus parseSwarmJSON: robust JSON extraction from LLM output with Zod validation.
  */
 
-import { z, type ZodSchema } from "zod";
+import { z } from "zod";
 import { executeOpenCodeCLI } from "./opencode-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
@@ -466,7 +466,7 @@ export async function consolidateResults(
  * Robust JSON extraction from LLM output with Zod validation.
  * For arrays: validates per-element, skips invalid ones.
  */
-export function parseSwarmJSON<T>(raw: string, schema: ZodSchema<T>): T {
+export function parseSwarmJSON<T>(raw: string, schema: z.ZodType<T, any, any>): T {
   const { candidates, labels } = extractJSONCandidates(raw);
   const errors: Array<{ strategy: string; error: string }> = [];
 
@@ -542,7 +542,7 @@ function extractJSONCandidates(raw: string): { candidates: string[]; labels: str
   return { candidates, labels };
 }
 
-function validateArrayElements<T>(parsed: unknown[], schema: ZodSchema<T>): T {
+function validateArrayElements<T>(parsed: unknown[], schema: z.ZodType<T, any, any>): T {
   // Get the element schema from the array schema
   const arraySchema = schema as unknown as z.ZodArray<z.ZodTypeAny>;
   const elementSchema = arraySchema.element;

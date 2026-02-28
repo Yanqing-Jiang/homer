@@ -11,6 +11,7 @@
 import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { executeGeminiAPI } from "../executors/gemini.js";
+import { executeClaudeCommand } from "../executors/claude.js";
 import { extractTranscript, buildTranscriptSampleForPass1, buildTranscriptForPass2, getLocalTranscriptPath } from "./transcript.js";
 import { logger } from "../utils/logger.js";
 import { buildCondensedContext } from "../scheduler/shared-context.js";
@@ -325,7 +326,7 @@ async function buildDynamicContextPack(
         FROM session_summaries
         WHERE status = 'active'
           AND is_sub_agent = 0
-          AND started_at >= datetime('now', '-7 days')
+          AND started_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')
         ORDER BY started_at DESC
         LIMIT 10
       `).all() as Array<{ title: string; summary: string; started_at: string }>;
@@ -491,43 +492,42 @@ Rules:
 - Set shouldCreateIdea=true only for ideas that are genuinely novel and immediately actionable
 - Return ONLY valid JSON, no markdown fences`;
 
-  // Try 3.1 Pro first, fall back to 3 Pro then Flash
-  const models = [
-    "gemini-3.1-pro-preview",
-    "gemini-3-pro-preview",
-    "gemini-3-flash-preview",
-  ];
+  // Primary: Sonnet via Claude Code CLI — full context window
+  try {
+    const sonnetResult = await executeClaudeCommand(prompt, {
+      cwd: process.env.HOME ?? "/Users/yj",
+      model: "sonnet",
+      timeout: 180_000,
+    });
 
-  let lastError = "";
-  for (let i = 0; i < models.length; i++) {
-    const model = models[i]!;
-    const isDegraded = i > 0;
-
-    try {
-      const result = await executeGeminiAPI(prompt, {
-        model,
-        responseMimeType: "application/json",
-        maxTokens: 8192,
-        temperature: 0.3,
-      });
-
-      if (result.exitCode !== 0) {
-        lastError = result.output;
-        continue;
+    if (sonnetResult.exitCode === 0 && sonnetResult.output) {
+      const jsonMatch = sonnetResult.output.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]) as Pass2Result;
+        logger.info({ model: "claude-sonnet-4-6" }, "Pass 2 analysis complete");
+        return parsed;
       }
-
-      const parsed = JSON.parse(result.output) as Pass2Result;
-      if (isDegraded) parsed.degraded = true;
-
-      logger.info({ model, degraded: isDegraded }, "Pass 2 analysis complete");
-      return parsed;
-    } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
-      logger.warn({ model, error: lastError }, "Pass 2 model attempt failed, trying next");
     }
+  } catch (err) {
+    logger.warn({ error: err }, "Pass 2 Sonnet attempt failed, falling back to Flash");
   }
 
-  throw new Error(`All Pass 2 models failed. Last error: ${lastError}`);
+  // Fallback: Flash via Gemini API
+  const flashResult = await executeGeminiAPI(prompt, {
+    model: "gemini-3-flash-preview",
+    responseMimeType: "application/json",
+    maxTokens: 8192,
+    temperature: 0.3,
+  });
+
+  if (flashResult.exitCode !== 0) {
+    throw new Error(`Pass 2 all models failed. Last error: ${flashResult.output}`);
+  }
+
+  const parsed = JSON.parse(flashResult.output) as Pass2Result;
+  parsed.degraded = true;
+  logger.info({ model: "gemini-3-flash-preview", degraded: true }, "Pass 2 analysis complete (Flash fallback)");
+  return parsed;
 }
 
 // ============================================
@@ -652,7 +652,7 @@ function upsertYouTubeVideo(
       JSON.stringify(pass2),
       topicsText,
       modelPass1 ?? "gemini-3-flash-preview",
-      modelPass2 ?? "gemini-3.1-pro-preview",
+      modelPass2 ?? "claude-sonnet-4.6",
       queuedAt ?? null,
       processingMs,
     );
@@ -911,7 +911,7 @@ export async function summarizeYouTubeVideo(
         processingMs,
         metadata.queuedAt,
         "gemini-3-flash-preview",
-        pass2.degraded ? "gemini-3-flash-preview" : "gemini-3.1-pro-preview",
+        pass2.degraded ? "gemini-3-flash-preview" : "claude-sonnet-4.6",
       );
     }
 

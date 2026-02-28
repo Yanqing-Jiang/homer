@@ -59,7 +59,8 @@ async function ensureMemoryDir(): Promise<void> {
 }
 
 /**
- * Append an entry to the daily log
+ * @deprecated Use stateManager.insertDaemonEvent() instead — daily log writes go nowhere useful.
+ * Kept for backward compatibility; callers should migrate to session_summaries pipeline.
  */
 export async function appendDailyLog(entry: DailyEntry, date?: Date): Promise<void> {
   const filePath = getDailyLogPath(date);
@@ -214,7 +215,7 @@ export function getYesterday(): Date {
 }
 
 /**
- * Create a daily log entry from a memory update
+ * @deprecated Use stateManager.insertDaemonEvent() instead.
  */
 export function createDailyEntry(
   content: string,

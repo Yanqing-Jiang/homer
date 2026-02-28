@@ -11,13 +11,13 @@
 import { readFileSync, existsSync } from "fs";
 import { z } from "zod";
 import type Database from "better-sqlite3";
-import { executeOpenCodeCLI } from "../../executors/opencode-cli.js";
+import { executeOpenCodeWithFallback } from "../../executors/opencode-cli.js";
+import { executeGeminiAPI } from "../../executors/gemini.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import * as ideaDao from "../../ideas/dao.js";
 import { insertScrape } from "../../scraping/scrape-store.js";
 import { extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
 import { logger } from "../../utils/logger.js";
-import { OPUS_COPILOT_MODEL } from "../../models.js";
 
 const MEMORY_PATH = "/Users/yj/memory";
 const DENY_HISTORY = `${MEMORY_PATH}/deny-history.md`;
@@ -29,7 +29,7 @@ const DENY_HISTORY = `${MEMORY_PATH}/deny-history.md`;
 const RepoSchema = z.object({
   name: z.string().min(1),
   url: z.string().url(),
-  description: z.string(),
+  description: z.union([z.string(), z.null()]).transform((v): string => v ?? ""),
   stars: z.number().optional(),
   language: z.string().optional(),
   relevance: z.string(), // why this matters to Yanqing
@@ -70,8 +70,8 @@ export async function runIdeasExplore(db?: Database.Database): Promise<{
 
 Search GitHub trending repositories from the last 7 days that match Yanqing's interests.
 
-Use this command to find trending repos:
-gh api /search/repositories -f q='created:>${new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10)} stars:>100' -f sort=stars --jq '.items[:15] | .[] | {name: .full_name, description: .description, stars: .stargazers_count, language: .language, url: .html_url}'
+Use this command to find trending repos (run via shell):
+gh api "search/repositories?q=created:>${new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10)}+stars:>50&sort=stars&order=desc&per_page=20" --jq '.items[] | {name: .full_name, description: .description, stars: .stargazers_count, language: .language, url: .html_url}'
 
 Filter criteria — MATCH repos related to Yanqing's active projects:
 - Quant trading, algorithmic finance, IBKR integration (MAHORAGA project)
@@ -98,39 +98,36 @@ Return ONLY a JSON array (no markdown, no commentary):
 
 If nothing relevant, return: []`;
 
-    const flashResult = await executeOpenCodeCLI(discoveryPrompt, "", {
+    const flashResult = await executeOpenCodeWithFallback(discoveryPrompt, "", {
       model: "google/gemini-3-flash-preview",
       timeout: 180_000,
       researchOnly: true,
+      // Flash via OpenCode (Google OAuth, 3-account rotation) → Sonnet → Kimi emergency
     });
 
     if (flashResult.exitCode !== 0 || !flashResult.output) {
       return { success: false, output: "", error: `GitHub discovery failed: exit ${flashResult.exitCode}` };
     }
 
-    // Also run Opus competitive gap analysis (non-blocking)
+    // Also run Gemini 3.1 Pro competitive gap analysis via API (non-blocking)
     let gapAnalysisInserted = 0;
     const opusPromise = (async () => {
       try {
-        const opusResult = await executeOpenCodeCLI(
-          `Perform a focused competitive analysis: search GitHub for 3-5 personal AI assistant projects similar to Homer. For each, fetch its README and identify 1-2 feature gaps Homer doesn't have. Return ONLY a JSON array:
-[{"name": "owner/repo", "url": "https://github.com/...", "description": "feature gap description", "relevance": "why Homer should have this"}]
+        const proResult = await executeGeminiAPI(
+          `Perform a focused competitive analysis: identify 3-5 personal AI assistant projects similar to Homer (a personal AI with Telegram bot, memory system, and job scheduler). For each, describe 1-2 feature gaps Homer doesn't have. Return ONLY a JSON array, no markdown:
+[{"name": "owner/repo", "url": "https://github.com/owner/repo", "description": "feature gap description", "relevance": "why Homer should have this"}]
 
-Steps:
-1. gh api /search/repositories -f q="personal AI assistant telegram bot" --jq '.items[:5] | .[] | {name: .full_name, url: .html_url}'
-2. For top 3, fetch README: gh api repos/OWNER/REPO/readme -H "Accept: application/vnd.github.raw"
-3. Identify actionable feature gaps`,
-          "",
+Base your analysis on your knowledge of open-source personal AI assistant projects. Focus on actionable gaps like: voice interfaces, proactive goal tracking, calendar integration, smart notifications, context-aware reminders, multi-modal inputs.`,
           {
-            model: OPUS_COPILOT_MODEL,
-            timeout: 300_000,
-            researchOnly: true,
+            model: "pro31",  // gemini-3.1-pro-preview via API key
+            useGrounding: false,
+            reasoningEffort: "medium",
           },
         );
 
-        if (opusResult.exitCode === 0 && opusResult.output) {
+        if (proResult.exitCode === 0 && proResult.output) {
           try {
-            const gaps = parseSwarmJSON(opusResult.output, ReposArraySchema);
+            const gaps = parseSwarmJSON(proResult.output, ReposArraySchema);
             for (const gap of gaps) {
               if (!existingUrls.has(gap.url)) {
                 const inserted = insertScrape(db, {
@@ -149,7 +146,7 @@ Steps:
           }
         }
       } catch {
-        // Opus failure is non-blocking
+        // Pro failure is non-blocking
       }
     })();
 

@@ -32,6 +32,8 @@ export class MemoryIndexer {
   }
 
   private init(): void {
+    this.db.pragma("foreign_keys = ON");
+
     // Create FTS5 virtual table for memory search with chunk support
     this.db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -170,8 +172,12 @@ export class MemoryIndexer {
       const purgedMeta = this.db.prepare(
         "DELETE FROM memory_index_meta WHERE file_path LIKE '/Users/yj/memory/daily/%'"
       ).run();
-      if (purged.changes > 0 || purgedMeta.changes > 0) {
-        logger.info({ ftsChunks: purged.changes, metaFiles: purgedMeta.changes }, "Purged stale daily log entries from memory_fts");
+      // Also purge orphaned embeddings for daily logs
+      const purgedEmbed = this.db.prepare(
+        "DELETE FROM memory_embeddings WHERE file_path LIKE '/Users/yj/memory/daily/%'"
+      ).run();
+      if (purged.changes > 0 || purgedMeta.changes > 0 || purgedEmbed.changes > 0) {
+        logger.info({ ftsChunks: purged.changes, metaFiles: purgedMeta.changes, embeddings: purgedEmbed.changes }, "Purged stale daily log entries from memory indexes");
       }
     } catch (err) {
       logger.warn({ error: err }, "Failed to purge stale daily log entries");
