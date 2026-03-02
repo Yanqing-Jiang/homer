@@ -11,16 +11,17 @@
 import { readFileSync, existsSync } from "fs";
 import { z } from "zod";
 import type Database from "better-sqlite3";
-import { executeOpenCodeWithFallback } from "../../executors/opencode-cli.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
+import { RESEARCH_ONLY_PREFIX } from "../../executors/opencode-cli.js";
 import { executeGeminiAPI } from "../../executors/gemini.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import * as ideaDao from "../../ideas/dao.js";
 import { insertScrape } from "../../scraping/scrape-store.js";
 import { extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
 import { logger } from "../../utils/logger.js";
+import { PATHS } from "../../config/paths.js";
 
-const MEMORY_PATH = "/Users/yj/memory";
-const DENY_HISTORY = `${MEMORY_PATH}/deny-history.md`;
+const DENY_HISTORY = PATHS.denyHistory;
 
 // ============================================
 // SCHEMAS
@@ -65,7 +66,7 @@ export async function runIdeasExplore(db?: Database.Database): Promise<{
       extractActiveProjects(),
     ]);
 
-    // Single Flash agent — GitHub trending discovery
+    // Single Sonnet agent — GitHub trending discovery
     const discoveryPrompt = `You are a GitHub trending discovery agent.
 
 Search GitHub trending repositories from the last 7 days that match Yanqing's interests.
@@ -98,11 +99,10 @@ Return ONLY a JSON array (no markdown, no commentary):
 
 If nothing relevant, return: []`;
 
-    const flashResult = await executeOpenCodeWithFallback(discoveryPrompt, "", {
-      model: "google/gemini-3-flash-preview",
+    const flashResult = await executeClaudeCommand(RESEARCH_ONLY_PREFIX + discoveryPrompt, {
+      cwd: process.env.HOME ?? "/Users/yj",
+      model: "sonnet",
       timeout: 180_000,
-      researchOnly: true,
-      // Flash via OpenCode (Google OAuth, 3-account rotation) → Sonnet → Kimi emergency
     });
 
     if (flashResult.exitCode !== 0 || !flashResult.output) {

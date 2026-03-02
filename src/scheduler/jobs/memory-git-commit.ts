@@ -6,8 +6,9 @@
 import { execSync } from "child_process";
 import { existsSync } from "fs";
 import { logger } from "../../utils/logger.js";
+import { PATHS } from "../../config/paths.js";
 
-const MEMORY_DIR = "/Users/yj/memory";
+const MEMORY_DIR = PATHS.memory;
 
 export async function runMemoryGitCommit(): Promise<{
   success: boolean;

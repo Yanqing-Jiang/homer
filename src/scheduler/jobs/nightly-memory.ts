@@ -18,15 +18,14 @@ import { logger } from "../../utils/logger.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
 import type { StateManager } from "../../state/manager.js";
 import { trackPromotion } from "../../outcomes/hooks.js";
-
-const MEMORY_PATH = "/Users/yj/memory";
+import { PATHS } from "../../config/paths.js";
 
 const PERMANENT_FILES: Record<string, string> = {
-  me: `${MEMORY_PATH}/me.md`,
-  work: `${MEMORY_PATH}/work.md`,
-  life: `${MEMORY_PATH}/life.md`,
-  preferences: `${MEMORY_PATH}/preferences.md`,
-  tools: `${MEMORY_PATH}/tools.md`,
+  me: PATHS.me,
+  work: PATHS.work,
+  life: PATHS.life,
+  preferences: PATHS.preferences,
+  tools: PATHS.tools,
 };
 
 // ============================================
@@ -110,7 +109,7 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
     // Read yesterday's explicit feedback to include in analysis
     let feedbackLog = "";
     try {
-      const feedbackPath = `${MEMORY_PATH}/feedback.md`;
+      const feedbackPath = PATHS.feedback;
       if (existsSync(feedbackPath)) {
         const lines = readFileSync(feedbackPath, "utf-8").split("\n");
         const yesterdayFeedback: string[] = [];

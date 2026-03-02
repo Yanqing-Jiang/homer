@@ -15,8 +15,9 @@ import type {
   SpeakerMapping,
 } from "./types.js";
 import { logger } from "../utils/logger.js";
+import { PATHS } from "../config/paths.js";
 
-const MEETINGS_BASE = "/Users/yj/memory/meetings";
+const MEETINGS_BASE = PATHS.meetings;
 const AUDIO_DIR = join(MEETINGS_BASE, "audio");
 
 /**

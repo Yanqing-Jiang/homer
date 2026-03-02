@@ -24,6 +24,7 @@ import { logger } from "../../utils/logger.js";
 import type Database from "better-sqlite3";
 import { trackImprovement } from "../../outcomes/hooks.js";
 import { storeJobArtifact } from "./artifact-store.js";
+import { PATHS } from "../../config/paths.js";
 
 const HOMER_DIR = "/Users/yj/homer";
 const GEMINI_OUTPUT_DIR = "/Users/yj/homer/output/gemini";
@@ -114,7 +115,7 @@ function getRecentFailures(db: Database.Database): string {
 
 /** Extract archived idea titles from feedback.md to avoid repeating them */
 function getArchivedTitles(): string[] {
-  const feedbackPath = "/Users/yj/memory/feedback.md";
+  const feedbackPath = PATHS.feedback;
   if (!existsSync(feedbackPath)) return [];
   try {
     const content = readFileSync(feedbackPath, "utf-8");

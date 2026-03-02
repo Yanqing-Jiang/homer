@@ -1,6 +1,7 @@
 import { appendFile, readFile, mkdir } from "fs/promises";
 import { existsSync } from "fs";
 import { logger } from "../utils/logger.js";
+import { PATHS } from "../config/paths.js";
 
 /**
  * Daily log entry structure
@@ -22,7 +23,7 @@ export interface DailyLog {
 }
 
 // Base path for daily logs
-const DAILY_LOG_BASE = "/Users/yj/memory/daily";
+const DAILY_LOG_BASE = PATHS.daily;
 
 /**
  * Get the file path for a daily log

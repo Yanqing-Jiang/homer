@@ -9,8 +9,9 @@ import { readFileSync, existsSync, readdirSync } from "fs";
 import { join } from "path";
 import { loadIdeasFromDir } from "../../ideas/parser.js";
 import { logger } from "../../utils/logger.js";
+import { PATHS } from "../../config/paths.js";
 
-const PLANS_DIR = "/Users/yj/memory/plans";
+const PLANS_DIR = PATHS.plans;
 
 interface PlanStatus {
   title: string;

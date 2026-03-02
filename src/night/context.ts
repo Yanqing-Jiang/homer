@@ -15,6 +15,7 @@ import type { ContextPack, NightModeConfig } from "./types.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import { logger } from "../utils/logger.js";
 import { StateManager, type SessionSummaryRow } from "../state/manager.js";
+import { PATHS } from "../config/paths.js";
 
 // ============================================
 // FILE LOADING HELPERS
@@ -78,7 +79,7 @@ export async function buildContextPack(
   const recentLogs: string[] = [];
   let sm: StateManager | null = null;
   try {
-    sm = new StateManager("/Users/yj/homer/data/homer.db");
+    sm = new StateManager(PATHS.db);
     const today = getTodayDate();
     const sessionsByDate = loadSessionsByDate(sm, 4); // today + 3 days
 
@@ -362,7 +363,7 @@ export async function refreshDailyLog(
   // Read today's sessions from session_summaries (replaces daily .md file read)
   let sm: StateManager | null = null;
   try {
-    sm = new StateManager("/Users/yj/homer/data/homer.db");
+    sm = new StateManager(PATHS.db);
     const today = getTodayDate();
     const sessions = sm.getRecentSessions(1, { activeOnly: true });
     const todaySessions = sessions.filter(s => (s.startedAt ?? s.createdAt).startsWith(today));

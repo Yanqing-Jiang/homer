@@ -2,17 +2,16 @@ import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
 import { logger } from "../utils/logger.js";
-
-const HOME = process.env.HOME || "/Users/yj";
+import { PATHS } from "../config/paths.js";
 
 /**
  * Core memory files to load at session start
  * Claude reads these to understand who it is and the user's context
  */
 const MEMORY_FILES = [
-  join(HOME, "memory/me.md"),
-  join(HOME, "memory/work.md"),
-  join(HOME, "memory/preferences.md"),
+  PATHS.me,
+  PATHS.work,
+  PATHS.preferences,
 ];
 
 /**

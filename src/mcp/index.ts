@@ -17,11 +17,12 @@ import {
 } from "../ideas/parser.js";
 import * as ideaDao from "../ideas/dao.js";
 import { savePlanFile, parsePlanFile, loadPlansFromDir, type ParsedPhase } from "../plans/parser.js";
+import { PATHS } from "../config/paths.js";
 // Shared StateManager singleton — better-sqlite3 is synchronous, MCP is single-threaded
 let sharedSM: StateManager | null = null;
 function getSharedStateManager(): StateManager {
   if (!sharedSM) {
-    sharedSM = new StateManager("/Users/yj/homer/data/homer.db");
+    sharedSM = new StateManager(PATHS.db);
   }
   return sharedSM;
 }
@@ -41,9 +42,9 @@ async function getAzureBlob() {
 }
 // randomUUID removed - using timestamp-based IDs for consistency
 
-const MEMORY_BASE = "/Users/yj/memory";
-const PLANS_DIR = `${MEMORY_BASE}/plans`;
-const FEEDBACK_FILE = `${MEMORY_BASE}/feedback.md`;
+const MEMORY_BASE = PATHS.memory;
+const PLANS_DIR = PATHS.plans;
+const FEEDBACK_FILE = PATHS.feedback;
 
 /**
  * Homer Memory MCP Server
@@ -710,6 +711,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["id"],
         },
       },
+      {
+        name: "thread_load",
+        description: "Load a Homer web UI thread's conversation as formatted markdown. Use this to bring thread context into an existing Claude Code session without creating a new JSONL file.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            thread_id: {
+              type: "string",
+              description: "The thread ID to load",
+            },
+            limit: {
+              type: "number",
+              description: "Max messages to include (default: 100)",
+            },
+          },
+          required: ["thread_id"],
+        },
+      },
     ],
   };
 });
@@ -871,9 +890,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           logger.debug({ error: err }, "Session summaries FTS search failed (table may not exist yet)");
         }
 
+        // Enrich memory results with provenance (source_file + indexed_at)
+        const indexStats = indexer.getStats();
+        const metaMap = new Map(indexStats.fileStats.map(f => [f.filePath, f.indexedAt]));
+        const enrichedMemory = memoryResults.map(r => ({
+          ...r,
+          source_file: r.filePath,
+          indexed_at: metaMap.get(r.filePath) ?? null,
+        }));
+
         // Combine results
         const combined = {
-          memory: memoryResults,
+          memory: enrichedMemory,
           sessions: sessionResults.map((r) => ({
             type: "session" as const,
             id: r.id,
@@ -953,11 +981,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           limit?: number;
         };
         const results = await indexer.hybridSearch(query, limit || 10, context);
+        // Add provenance
+        const hybridStats = indexer.getStats();
+        const hybridMetaMap = new Map(hybridStats.fileStats.map(f => [f.filePath, f.indexedAt]));
+        const enrichedResults = results.map(r => ({
+          ...r,
+          source_file: r.filePath,
+          indexed_at: hybridMetaMap.get(r.filePath) ?? null,
+        }));
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(results, null, 2),
+              text: JSON.stringify(enrichedResults, null, 2),
             },
           ],
         };
@@ -1749,83 +1785,76 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // === Context & Intelligence tools ===
       case "memory_context": {
         const { days } = args as { days?: number };
-        const lookbackDays = days || 7;
+        const lookbackDays = days || 3;
         const sections: string[] = [];
 
         const sm = getSharedStateManager();
 
-        // 1. Recent sessions (non-sub-agent, active only)
+        // 1. Recent sessions (compact: last 3, non-sub-agent, active only)
         const sessions = sm.getDb().prepare(`
-          SELECT title, project, agent, started_at, message_count
+          SELECT title, project, started_at
           FROM session_summaries
           WHERE is_sub_agent = 0
             AND status = 'active'
             AND started_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
-          ORDER BY started_at DESC LIMIT 5
+          ORDER BY started_at DESC LIMIT 3
         `).all(`-${lookbackDays} days`) as Array<{
-          title: string; project: string; agent: string;
-          started_at: string; message_count: number;
+          title: string; project: string; started_at: string;
         }>;
 
         if (sessions.length > 0) {
           sections.push("## Recent Sessions");
           for (const s of sessions) {
-            const date = s.started_at.slice(5, 10); // MM-DD
-            const proj = s.project || "unknown";
-            const title = (s.title || "untitled").slice(0, 60);
-            sections.push(`- [${date}] ${proj}: ${title} (${s.message_count} msgs)`);
+            const date = s.started_at.slice(5, 10);
+            sections.push(`- [${date}] ${s.project || "~"}: ${(s.title || "untitled").slice(0, 50)}`);
           }
         }
 
-        // 1b. Recent Telegram/Web conversations
+        // 1b. Recent Telegram/Web conversations (compact)
         try {
           const recentThreads = sm.getDb().prepare(`
-            SELECT t.id, t.title, t.chat_session_id, t.provider, t.last_message_at,
-                   (SELECT COUNT(*) FROM thread_messages WHERE thread_id = t.id) as msg_count
+            SELECT t.title, t.chat_session_id, t.last_message_at
             FROM threads t
             WHERE t.last_message_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
               AND t.status = 'active'
-            ORDER BY t.last_message_at DESC LIMIT 5
+            ORDER BY t.last_message_at DESC LIMIT 3
           `).all(`-${lookbackDays} days`) as Array<{
-            id: string; title: string; chat_session_id: string;
-            provider: string; last_message_at: string; msg_count: number;
+            title: string; chat_session_id: string; last_message_at: string;
           }>;
 
           if (recentThreads.length > 0) {
             sections.push("\n## Recent Conversations");
             for (const t of recentThreads) {
               const label = t.chat_session_id === "tg:system" ? "TG" : "Web";
-              const date = t.last_message_at.slice(5, 10);
-              const title = (t.title || "untitled").slice(0, 60);
-              sections.push(`- [${label}] [${date}] ${title} (${t.msg_count} msgs)`);
+              sections.push(`- [${label}] ${(t.title || "untitled").slice(0, 50)}`);
             }
           }
         } catch {
           // threads table may not exist
         }
 
-        // 2. Active plans
+        // 2. Active plans (count + titles)
         const plans = loadPlansFromDir();
         const activePlans = plans.filter(p =>
           p.status === "execution" || p.status === "planning"
         );
         if (activePlans.length > 0) {
-          sections.push("\n## Active Plans");
+          sections.push(`\n## Active Plans (${activePlans.length})`);
           for (const p of activePlans) {
-            sections.push(`- ${p.title} (${p.status}, ${p.completedTasks}/${p.totalTasks} tasks)${p.currentPhase ? ` — phase: ${p.currentPhase}` : ""}`);
+            sections.push(`- ${p.title} (${p.completedTasks}/${p.totalTasks})`);
           }
         }
 
         // 3. Pending decisions (ideas in review)
-        const reviewIdeas = ideaDao.getAllIdeas(sm.getDb(), { status: "review", limit: 5 });
+        const reviewIdeas = ideaDao.getAllIdeas(sm.getDb(), { status: "review", limit: 3 });
         if (reviewIdeas.length > 0) {
-          sections.push("\n## Pending Decisions");
+          sections.push(`\n## Pending Decisions (${reviewIdeas.length})`);
           for (const idea of reviewIdeas) {
-            sections.push(`- Idea: "${idea.title}" (in review)`);
+            sections.push(`- "${idea.title.slice(0, 50)}"`);
           }
         }
 
-        // 4. Project momentum (active only)
+        // 4. Project momentum (compact, top 5)
         const momentum = sm.getDb().prepare(`
           SELECT project, COUNT(*) as count
           FROM session_summaries
@@ -1834,47 +1863,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             AND started_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
             AND project IS NOT NULL AND project != ''
           GROUP BY project
-          ORDER BY count DESC LIMIT 8
+          ORDER BY count DESC LIMIT 5
         `).all(`-${lookbackDays} days`) as Array<{ project: string; count: number }>;
 
         if (momentum.length > 0) {
-          sections.push("\n## Project Momentum (" + lookbackDays + " days)");
+          sections.push("\n## Project Momentum");
           for (const m of momentum) {
             const heat = m.count >= 6 ? "hot" : m.count >= 3 ? "active" : "light";
-            sections.push(`- ${m.project}: ${m.count} sessions (${heat})`);
+            sections.push(`- ${m.project}: ${m.count} (${heat})`);
           }
         }
 
-        // 5. Recent Homer activity (last 24h successful jobs)
+        // 5. Recent Homer jobs (last 24h, compact)
         const recentJobs = sm.getDb().prepare(`
-          SELECT job_name, output, completed_at
+          SELECT job_name, completed_at
           FROM scheduled_job_runs
           WHERE success = 1
             AND completed_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-24 hours')
-            AND output IS NOT NULL AND output != ''
-          ORDER BY completed_at DESC LIMIT 5
-        `).all() as Array<{ job_name: string; output: string; completed_at: string }>;
+          ORDER BY completed_at DESC LIMIT 3
+        `).all() as Array<{ job_name: string; completed_at: string }>;
 
         if (recentJobs.length > 0) {
-          sections.push("\n## Recent Homer Activity");
-          for (const j of recentJobs) {
-            sections.push(`- ${j.job_name}: ${j.output.slice(0, 100)}`);
-          }
+          sections.push("\n## Recent Jobs");
+          sections.push(recentJobs.map(j => j.job_name).join(", "));
         }
 
         // 6. Pending outcome checks (if table exists)
         try {
           const pendingOutcomes = sm.getDb().prepare(`
-            SELECT source_type, source_title, check_at
+            SELECT source_title, check_at
             FROM outcome_checks
             WHERE status = 'pending' AND check_at <= datetime('now', '+3 days')
             ORDER BY check_at ASC LIMIT 3
-          `).all() as Array<{ source_type: string; source_title: string; check_at: string }>;
+          `).all() as Array<{ source_title: string; check_at: string }>;
 
           if (pendingOutcomes.length > 0) {
-            sections.push("\n## Upcoming Outcome Checks");
+            sections.push("\n## Due Checks");
             for (const o of pendingOutcomes) {
-              sections.push(`- [${o.source_type}] ${o.source_title} (due: ${o.check_at.slice(0, 10)})`);
+              sections.push(`- ${o.source_title} (${o.check_at.slice(0, 10)})`);
             }
           }
         } catch {
@@ -2166,6 +2192,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
+      }
+
+      case "thread_load": {
+        const { thread_id, limit: rawLimit } = args as { thread_id: string; limit?: number };
+        const clampedLimit = Math.min(Math.max(rawLimit || 100, 1), 500);
+
+        const sm = getSharedStateManager();
+        const thread = sm.getThread(thread_id);
+
+        if (!thread) {
+          return {
+            content: [{ type: "text", text: `Thread not found: ${thread_id}` }],
+            isError: true,
+          };
+        }
+
+        // Fetch all messages, then take the most recent `clampedLimit`
+        // listThreadMessages returns ASC order, so slice from the end for recency
+        const allMessages = sm.listThreadMessages(thread_id, { limit: 10000 });
+        if (allMessages.length === 0) {
+          return {
+            content: [{ type: "text", text: `Thread "${thread.title || thread_id}" has no messages` }],
+            isError: true,
+          };
+        }
+
+        const messages = allMessages.length > clampedLimit
+          ? allMessages.slice(-clampedLimit)
+          : allMessages;
+
+        const { formatThreadAsMarkdown } = await import("../cli-sessions/bridge.js");
+        let markdown = formatThreadAsMarkdown(thread, messages);
+        if (allMessages.length > clampedLimit) {
+          markdown = `*Showing ${messages.length} of ${allMessages.length} messages (most recent)*\n\n` + markdown;
+        }
+
+        return {
+          content: [{ type: "text", text: markdown }],
+        };
       }
 
       case "session_archive": {

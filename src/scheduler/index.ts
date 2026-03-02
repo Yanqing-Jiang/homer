@@ -5,7 +5,7 @@ import { CronManager } from "./manager.js";
 import { executeScheduledJob } from "./executor.js";
 import { notifyJobResult } from "./notifier.js";
 import type { StateManager } from "../state/manager.js";
-import type { RegisteredJob, ProgressEvent } from "./types.js";
+import type { RegisteredJob, ProgressEvent, JobExecutionResult } from "./types.js";
 import { isPlanRequiringApproval, createPlanApprovalKeyboard } from "../bot/handlers/approval.js";
 import { executeInternalJob } from "./internal-handlers.js";
 import { runCompletionCheckup } from "../executors/completion-checkup.js";
@@ -286,15 +286,45 @@ export class Scheduler {
       const isInternal = job.config.executor === "internal" || !!job.config.handler;
       const takeoverEnabled = job.config.failureTakeover !== false;
 
-      // Execute the job (internal handler or CLI executor)
-      const result = isInternal
-        ? await executeInternalJob(job, {
-            stateManager: this.stateManager,
-            bot: this.bot,
-            chatId: this.chatId,
-            jobRunId: runId,
-          })
-        : await executeScheduledJob(job, onProgress, takeoverEnabled ? { skipDiagnosis: true } : undefined);
+      // Execute the job (internal handler or CLI executor) with 20-min hang watchdog
+      const HANG_TIMEOUT_MS = 20 * 60 * 1000;
+      let hangTimerId: ReturnType<typeof setTimeout> | null = null;
+      const hangPromise = new Promise<never>((_, reject) => {
+        hangTimerId = setTimeout(
+          () => reject(new Error("Job hung: exceeded 20-minute timeout")),
+          HANG_TIMEOUT_MS
+        );
+      });
+
+      let result: JobExecutionResult;
+      try {
+        const execPromise = isInternal
+          ? executeInternalJob(job, {
+              stateManager: this.stateManager,
+              bot: this.bot,
+              chatId: this.chatId,
+              jobRunId: runId,
+            })
+          : executeScheduledJob(job, onProgress, takeoverEnabled ? { skipDiagnosis: true } : undefined);
+        result = await Promise.race([execPromise, hangPromise]);
+      } catch (hangError) {
+        const msg = hangError instanceof Error ? hangError.message : String(hangError);
+        logger.warn({ jobId: job.config.id, jobName: job.config.name }, msg);
+        result = {
+          jobId: job.config.id,
+          jobName: job.config.name,
+          sourceFile: job.sourceFile,
+          startedAt: new Date(),
+          completedAt: new Date(),
+          success: false,
+          output: msg,
+          error: msg,
+          exitCode: -1,
+          duration: HANG_TIMEOUT_MS,
+        };
+      } finally {
+        if (hangTimerId) clearTimeout(hangTimerId);
+      }
 
       // === FAILURE + TAKEOVER PATH ===
       if (!result.success && takeoverEnabled) {

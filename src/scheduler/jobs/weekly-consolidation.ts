@@ -16,17 +16,18 @@ import { executeGeminiAPI } from "../../executors/gemini.js";
 import { logger } from "../../utils/logger.js";
 import { StateManager, type SessionSummaryRow } from "../../state/manager.js";
 import { buildSchedulerContext, buildGoalScoreboard } from "../shared-context.js";
+import { PATHS } from "../../config/paths.js";
 
-const MEMORY_DIR = "/Users/yj/memory";
-const DAILY_LOG_DIR = `${MEMORY_DIR}/daily`;
+const MEMORY_DIR = PATHS.memory;
+const DAILY_LOG_DIR = PATHS.daily;
 const MAX_INPUT_CHARS = 1_800_000; // ~450K tokens, well within 1M context
 
 const PERMANENT_FILES = [
-  { path: `${MEMORY_DIR}/me.md`, label: "me.md (identity, goals, ambition)" },
-  { path: `${MEMORY_DIR}/work.md`, label: "work.md (career, projects, org)" },
-  { path: `${MEMORY_DIR}/life.md`, label: "life.md (personal, routines)" },
-  { path: `${MEMORY_DIR}/tools.md`, label: "tools.md (HOMER config, fixes)" },
-  { path: `${MEMORY_DIR}/preferences.md`, label: "preferences.md" },
+  { path: PATHS.me, label: "me.md (identity, goals, ambition)" },
+  { path: PATHS.work, label: "work.md (career, projects, org)" },
+  { path: PATHS.life, label: "life.md (personal, routines)" },
+  { path: PATHS.tools, label: "tools.md (HOMER config, fixes)" },
+  { path: PATHS.preferences, label: "preferences.md" },
 ] as const;
 
 async function buildConsolidationPrompt(): Promise<string> {
@@ -133,7 +134,7 @@ async function readFileIfExists(path: string): Promise<string | null> {
   return readFile(path, "utf-8");
 }
 
-const DB_PATH = "/Users/yj/homer/data/homer.db";
+const DB_PATH = PATHS.db;
 
 export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateManager): Promise<{
   success: boolean;

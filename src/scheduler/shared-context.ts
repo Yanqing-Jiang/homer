@@ -11,12 +11,13 @@
 import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { StateManager, type SessionSummaryRow } from "../state/manager.js";
+import { PATHS } from "../config/paths.js";
 
 // Re-export for backward compatibility (function lives in job-outputs.ts)
 export { getRecentJobOutputs } from "./job-outputs.js";
 
-const CLAUDE_MD_PATH = "/Users/yj/.claude/CLAUDE.md";
-const MEMORY_DIR = "/Users/yj/memory";
+const CLAUDE_MD_PATH = PATHS.claudeMd;
+const MEMORY_DIR = PATHS.memory;
 const ARCHITECTURE_MD_PATH = "/Users/yj/homer/architecture.md";
 
 const CONTEXT_FILES: Array<{ path: string; label: string }> = [
@@ -69,7 +70,7 @@ async function getRecentDailyLogs(
 
   let sm: StateManager | null = null;
   try {
-    sm = new StateManager("/Users/yj/homer/data/homer.db");
+    sm = new StateManager(PATHS.db);
     const sessions = sm.getRecentSessions(days, { activeOnly: true });
     return formatSessionsAsMarkdown(sessions);
   } catch {

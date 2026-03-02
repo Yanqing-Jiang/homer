@@ -4,7 +4,7 @@
  * Context-aware swarm that finds content patterns specifically useful
  * for Yanqing's career and content strategy.
  *
- * Uses Kimi (viral content research) + OpenCode Flash (pattern analysis),
+ * Uses Claude Sonnet (pattern analysis + web research),
  * consolidated via Gemini Flash API.
  *
  * Post-consolidation: updates ~/memory/patterns.md and writes content ideas
@@ -14,7 +14,8 @@
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { z } from "zod";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
-import { executeOpenCodeCLI } from "../../executors/opencode-cli.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
+import { RESEARCH_ONLY_PREFIX } from "../../executors/opencode-cli.js";
 import type Database from "better-sqlite3";
 import { buildCondensedContext, extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
 import { getRecentJobOutputs } from "../job-outputs.js";
@@ -23,10 +24,10 @@ import { storeJobArtifact } from "./artifact-store.js";
 import type { ParsedIdea } from "../../ideas/parser.js";
 import { smartSaveIdea, type SmartSaveResult } from "../../ideas/smart-save.js";
 import { logger } from "../../utils/logger.js";
+import { PATHS } from "../../config/paths.js";
 
-const MEMORY_PATH = "/Users/yj/memory";
-const DAILY_DIR = `${MEMORY_PATH}/daily`;
-const PATTERNS_PATH = `${MEMORY_PATH}/patterns.md`;
+const DAILY_DIR = PATHS.daily;
+const PATTERNS_PATH = PATHS.patterns;
 
 // ============================================
 // SCHEMAS
@@ -159,19 +160,20 @@ Return ONLY a valid JSON object (no markdown, no preamble):
 
 If no patterns or ideas found, use empty arrays.`;
 
-    const result = await executeOpenCodeCLI(fullPrompt, "", {
-      model: "google/gemini-3-flash-preview",
+    const constrainedPrompt = RESEARCH_ONLY_PREFIX + fullPrompt;
+    const result = await executeClaudeCommand(constrainedPrompt, {
+      cwd: process.env.HOME ?? "/Users/yj",
+      model: "sonnet",
       timeout: 300_000,
-      researchOnly: true,
     });
 
     if (result.exitCode !== 0 || !result.output || result.output.length < 50) {
-      logger.warn({ exitCode: result.exitCode, outputLen: result.output?.length }, "Learning engine Flash call failed, retrying...");
+      logger.warn({ exitCode: result.exitCode, outputLen: result.output?.length }, "Learning engine Sonnet call failed, retrying...");
       // Single retry with higher timeout
-      const retry = await executeOpenCodeCLI(fullPrompt, "", {
-        model: "google/gemini-3-flash-preview",
+      const retry = await executeClaudeCommand(constrainedPrompt, {
+        cwd: process.env.HOME ?? "/Users/yj",
+        model: "sonnet",
         timeout: 600_000,
-        researchOnly: true,
       });
       if (retry.exitCode !== 0 || !retry.output || retry.output.length < 50) {
         return { success: false, output: "", error: `Learning engine failed after retry: ${retry.output?.slice(0, 200)}` };
@@ -207,7 +209,7 @@ If no patterns or ideas found, use empty arrays.`;
       // Snapshot patterns.md before overwriting
       if (existsSync(PATTERNS_PATH)) {
         try {
-          const snapSm = new StateManager("/Users/yj/homer/data/homer.db");
+          const snapSm = new StateManager(PATHS.db);
           try {
             const existing = readFileSync(PATTERNS_PATH, "utf-8");
             snapSm.snapshotMemoryFile("patterns.md", existing, "pre-learning-engine");
@@ -265,7 +267,7 @@ If no patterns or ideas found, use empty arrays.`;
     }
 
     const resultParts: string[] = [];
-    resultParts.push("single Flash call");
+    resultParts.push("single Sonnet call");
     if (patternsWritten > 0) resultParts.push(`${patternsWritten} patterns updated`);
     const ideaCreated = ideaSaveResults.filter((r) => r.action === "created").length;
     const ideaEnhanced = ideaSaveResults.filter((r) => r.action === "enhanced").length;

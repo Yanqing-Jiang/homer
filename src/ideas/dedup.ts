@@ -24,9 +24,9 @@ import { canonicalizeUrl, extractRepoId } from "./canonical-url.js";
 import { createFingerprint, fingerprintSimilarity } from "./fingerprint.js";
 import { storeJobArtifact } from "../scheduler/jobs/artifact-store.js";
 import type Database from "better-sqlite3";
+import { PATHS } from "../config/paths.js";
 
-const MEMORY_BASE = "/Users/yj/memory";
-const DENY_HISTORY_FILE = `${MEMORY_BASE}/deny-history.md`;
+const DENY_HISTORY_FILE = PATHS.denyHistory;
 
 // Max LLM calls per batch run
 const MAX_LLM_CALLS = 5;

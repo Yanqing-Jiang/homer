@@ -14,9 +14,9 @@ import { formatIdeaFile, type ParsedIdea } from "./parser.js";
 import { canonicalizeUrl } from "./canonical-url.js";
 import { createFingerprint } from "./fingerprint.js";
 import { logger } from "../utils/logger.js";
+import { PATHS } from "../config/paths.js";
 
-const MEMORY_PATH = process.env.MEMORY_PATH ?? "/Users/yj/memory";
-const IDEAS_DIR = join(MEMORY_PATH, "ideas");
+const IDEAS_DIR = PATHS.ideas;
 
 // ============================================
 // Types

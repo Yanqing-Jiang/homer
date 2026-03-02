@@ -18,15 +18,15 @@ import { logger } from "../../utils/logger.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
 import { buildSchedulerContext } from "../shared-context.js";
 import { StateManager } from "../../state/manager.js";
+import { PATHS } from "../../config/paths.js";
 
-const MEMORY_DIR = "/Users/yj/memory";
-const DB_PATH = "/Users/yj/homer/data/homer.db";
+const DB_PATH = PATHS.db;
 
 const FILES_TO_CLEAN = [
-  { name: "preferences.md", path: `${MEMORY_DIR}/preferences.md` },
-  { name: "tools.md", path: `${MEMORY_DIR}/tools.md` },
-  { name: "work.md", path: `${MEMORY_DIR}/work.md` },
-  { name: "life.md", path: `${MEMORY_DIR}/life.md` },
+  { name: "preferences.md", path: PATHS.preferences },
+  { name: "tools.md", path: PATHS.tools },
+  { name: "work.md", path: PATHS.work },
+  { name: "life.md", path: PATHS.life },
 ] as const;
 
 function getTodayDateString(): string {
