@@ -16,8 +16,9 @@ import { logger } from "../../utils/logger.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
 import { StateManager } from "../../state/manager.js";
 import { buildSchedulerContext, extractCurrentGoals } from "../shared-context.js";
+import { PATHS } from "../../config/paths.js";
 
-const DAILY_LOG_DIR = "/Users/yj/memory/daily";
+const DAILY_LOG_DIR = PATHS.daily;
 const MAX_INPUT_CHARS = 900_000;
 
 /**
@@ -36,7 +37,7 @@ function getLogicalTodayDateString(): string {
   return `${y}-${m}-${d}`;
 }
 
-const DB_PATH = "/Users/yj/homer/data/homer.db";
+const DB_PATH = PATHS.db;
 
 interface SessionSummaryRow {
   id: string;

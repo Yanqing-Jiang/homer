@@ -10,6 +10,7 @@ import {
 import * as dao from "../../ideas/dao.js";
 import { join } from "path";
 import { recordFeedback } from "../../feedback/events.js";
+import { PATHS } from "../../config/paths.js";
 
 let ideasIndexer: IdeasIndexer | null = null;
 
@@ -424,8 +425,7 @@ generate a structured plan and offer to save it.`;
       .replace(/^-|-$/g, "");
 
     const now = new Date().toISOString().split("T")[0];
-    const MEMORY_PATH = process.env.MEMORY_PATH ?? "/Users/yj/memory";
-    const PLANS_DIR = join(MEMORY_PATH, "plans");
+    const PLANS_DIR = PATHS.plans;
     const planPath = join(PLANS_DIR, `${slug}.md`);
 
     let planContent = `# ${planTitle}

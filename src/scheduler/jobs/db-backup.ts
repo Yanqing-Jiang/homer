@@ -16,8 +16,9 @@ import { existsSync, mkdirSync, readdirSync, unlinkSync, readFileSync, statSync 
 import { join } from "path";
 import { logger } from "../../utils/logger.js";
 import { StateManager } from "../../state/manager.js";
+import { PATHS } from "../../config/paths.js";
 
-const DB_PATH = "/Users/yj/homer/data/homer.db";
+const DB_PATH = PATHS.db;
 const BACKUP_DIR = "/Users/yj/homer/backups";
 
 // GFS retention policies

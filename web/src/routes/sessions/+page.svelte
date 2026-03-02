@@ -481,6 +481,31 @@
 		}
 	}
 
+	let bridgingThread = $state<string | null>(null);
+	let bridgedId = $state<string | null>(null);
+	let bridgeTimer: ReturnType<typeof setTimeout> | null = null;
+
+	async function bridgeAndCopy(threadId: string) {
+		if (!threadId || bridgingThread) return;
+		bridgingThread = threadId;
+		try {
+			const result = await api.bridgeThread(threadId);
+			try {
+				await navigator.clipboard.writeText(result.command);
+			} catch {
+				// Clipboard failed — show command in error banner as fallback
+				error = `Bridge OK. Run: ${result.command}`;
+			}
+			if (bridgeTimer) clearTimeout(bridgeTimer);
+			bridgedId = threadId;
+			bridgeTimer = setTimeout(() => { bridgedId = null; bridgeTimer = null; }, 3000);
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to bridge thread';
+		} finally {
+			bridgingThread = null;
+		}
+	}
+
 	// Load Claude sessions when tab changes
 	$effect(() => {
 		if (activeTab === 'claude-code' && claudeSessions.length === 0 && !claudeLoading) {
@@ -812,6 +837,20 @@
 								<span class="provider-icon">{getProviderIcon(selectedThread.provider)}</span>
 								<span class="thread-title">{selectedThread.title || 'Untitled thread'}</span>
 								<StatusBadge status={selectedThread.status} />
+								<button
+									class="bridge-cli-btn"
+									onclick={() => bridgeAndCopy(selectedThread!.id)}
+									disabled={bridgingThread === selectedThread.id}
+									title="Bridge to Claude Code CLI"
+								>
+									{#if bridgingThread === selectedThread.id}
+										...
+									{:else if bridgedId === selectedThread.id}
+										Copied!
+									{:else}
+										CLI
+									{/if}
+								</button>
 							</div>
 						</div>
 
@@ -1558,6 +1597,30 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
+	}
+
+	.bridge-cli-btn {
+		padding: 2px 8px;
+		font-size: 11px;
+		font-weight: 600;
+		border: 1px solid var(--border-color, #555);
+		border-radius: 4px;
+		background: transparent;
+		color: var(--text-secondary, #aaa);
+		cursor: pointer;
+		white-space: nowrap;
+		transition: all 0.15s ease;
+	}
+
+	.bridge-cli-btn:hover:not(:disabled) {
+		background: var(--accent-color, #4a9eff);
+		color: white;
+		border-color: var(--accent-color, #4a9eff);
+	}
+
+	.bridge-cli-btn:disabled {
+		opacity: 0.6;
+		cursor: default;
 	}
 
 	.messages-container {

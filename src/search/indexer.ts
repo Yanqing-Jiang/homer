@@ -6,14 +6,15 @@ import { logger } from "../utils/logger.js";
 import type { SearchConfig, MemoryDocument } from "./types.js";
 import { chunkText } from "./chunker.js";
 import { generateEmbeddings } from "./embeddings.js";
+import { PATHS } from "../config/paths.js";
 
 /**
  * Memory files to index
  */
 const MEMORY_FILES = [
-  { path: "/Users/yj/memory/user.md", context: "global" },
-  { path: "/Users/yj/memory/facts.md", context: "global" },
-  { path: "/Users/yj/memory/preferences.md", context: "global" },
+  { path: `${PATHS.memory}/user.md`, context: "global" },
+  { path: `${PATHS.memory}/facts.md`, context: "global" },
+  { path: PATHS.preferences, context: "global" },
   { path: "/Users/yj/work/memory.md", context: "work" },
   { path: "/Users/yj/life/memory.md", context: "life" },
 ];

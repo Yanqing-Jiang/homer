@@ -7,7 +7,8 @@ import { LANE_CWD, DEFAULT_JOB_TIMEOUT } from "./types.js";
 import { processMemoryUpdates } from "../memory/writer.js";
 import { executeKimiCLI } from "../executors/kimi-cli.js";
 import { executeCodexCLI } from "../executors/codex-cli.js";
-import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
+import { executeClaudeCommand } from "../executors/claude.js";
+import { RESEARCH_ONLY_PREFIX } from "../executors/opencode-cli.js";
 import {
   runWithFallbackChain,
   DEFAULT_CHAIN,
@@ -173,7 +174,7 @@ async function executeKimiJob(
 }
 
 /**
- * Execute a Gemini job via OpenCode CLI (replaces direct gemini CLI spawn)
+ * Execute a Gemini-lane job via Claude Sonnet (migrated from OpenCode CLI)
  */
 async function executeGeminiJob(
   job: RegisteredJob,
@@ -191,17 +192,20 @@ async function executeGeminiJob(
     ? loadContextFiles(config.contextFiles)
     : "";
 
+  const fullQuery = contextPrompt
+    ? RESEARCH_ONLY_PREFIX + `Context:\n${contextPrompt}\n\n---\n\nTask:\n${query}`
+    : RESEARCH_ONLY_PREFIX + query;
+
   logger.info(
-    { jobId: config.id, executor: "opencode", queryLength: query.length },
-    "Executing Gemini job via OpenCode CLI"
+    { jobId: config.id, executor: "claude-sonnet", queryLength: query.length },
+    "Executing Gemini-lane job via Claude Sonnet"
   );
 
   try {
-    const result = await executeOpenCodeCLI(query, contextPrompt, {
+    const result = await executeClaudeCommand(fullQuery, {
       timeout,
       cwd,
-      researchOnly: true,
-      model: options?.modelOverride,
+      model: options?.modelOverride ?? "sonnet",
     });
 
     const completedAt = new Date();
@@ -215,7 +219,7 @@ async function executeGeminiJob(
         jobName: config.name,
         timestamp: completedAt,
         message: success
-          ? `✅ Completed: ${config.name} (${Math.round(duration / 1000)}s, Gemini)`
+          ? `✅ Completed: ${config.name} (${Math.round(duration / 1000)}s, Sonnet)`
           : `❌ Failed: ${config.name}`,
         details: { duration, success },
       });
@@ -223,7 +227,7 @@ async function executeGeminiJob(
 
     logger.info(
       { jobId: config.id, success, duration, exitCode: result.exitCode },
-      "Gemini job completed"
+      "Gemini-lane job completed via Sonnet"
     );
 
     return {
@@ -254,7 +258,7 @@ async function executeGeminiJob(
       });
     }
 
-    logger.error({ jobId: config.id, error: errorMessage }, "Gemini job failed");
+    logger.error({ jobId: config.id, error: errorMessage }, "Gemini-lane job failed");
 
     return {
       jobId: config.id,

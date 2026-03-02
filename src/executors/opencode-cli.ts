@@ -5,7 +5,6 @@ import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { executeClaudeCommand } from "./claude.js";
-import { googleAccountManager } from "../utils/google-auth.js";
 import { processRegistry } from "../process/registry.js";
 
 // ============================================
@@ -55,6 +54,8 @@ export interface OpenCodeCLIOptions {
   sandbox?: boolean;
   includeDirectories?: string[];
   accountId?: number;
+  /** Skip flash→Gemini CLI routing and use OpenCode directly */
+  forceOpenCode?: boolean;
 }
 
 export interface OpenCodeCLIResult extends ExecutorResult {
@@ -91,7 +92,7 @@ export function isAuthError(text: string): boolean {
 // RESEARCH-ONLY PROMPT INJECTION
 // ============================================
 
-const RESEARCH_ONLY_PREFIX = `CRITICAL CONSTRAINTS - You MUST follow these rules:
+export const RESEARCH_ONLY_PREFIX = `CRITICAL CONSTRAINTS - You MUST follow these rules:
 
 ALLOWED:
 - READ any files for context and analysis
@@ -112,7 +113,7 @@ Now proceed with the task:
 
 `;
 
-const BROWSER_ONLY_PREFIX = `CRITICAL CONSTRAINTS:
+export const BROWSER_ONLY_PREFIX = `CRITICAL CONSTRAINTS:
 
 ALLOWED:
 - Run agent-browser commands via bash (connect, snapshot, open, click, scroll)
@@ -150,24 +151,24 @@ export async function executeOpenCodeCLI(
   // Normalize model name: callers may pass "gemini-3-flash-preview" without provider prefix
   const model = rawModel.includes("/") ? rawModel : `google/${rawModel}`;
 
+  // Route Flash calls to Claude Sonnet (Claude Code CLI)
+  if (model.includes("flash") && !options.forceOpenCode) {
+    const prefix = browserOnly ? BROWSER_ONLY_PREFIX : researchOnly ? RESEARCH_ONLY_PREFIX : "";
+    const effectivePrompt = prefix + prompt;
+    const result = await executeClaudeCommand(effectivePrompt, {
+      model: "sonnet",
+      timeout,
+      signal,
+      cwd: cwd ?? process.env.HOME ?? "/Users/yj",
+    });
+    return { ...result, sessionId: result.claudeSessionId ?? "", model: "claude-sonnet-4-6", accountId: 0 } as OpenCodeCLIResult;
+  }
+
   const prefix = browserOnly ? BROWSER_ONLY_PREFIX : researchOnly ? RESEARCH_ONLY_PREFIX : "";
   const effectivePrompt = prefix + prompt;
   const startTime = Date.now();
 
-  // Get active Google account and its valid access token
-  let activeAccount;
-  let accessToken = "";
-  if (!model.includes("google-aistudio")) {
-    try {
-      activeAccount = await googleAccountManager.getActiveAccount();
-      const tokens = await googleAccountManager.refreshAccessToken(activeAccount);
-      accessToken = tokens.accessToken;
-    } catch (err) {
-      logger.warn({ err }, "Failed to get Google OAuth token, continuing without it");
-    }
-  }
-
-  logger.debug({ model, promptLength: effectivePrompt.length, contextLength: context.length, researchOnly, activeEmail: activeAccount?.email }, "Executing OpenCode CLI");
+  logger.debug({ model, promptLength: effectivePrompt.length, contextLength: context.length, researchOnly }, "Executing OpenCode CLI");
 
   return new Promise((resolve) => {
     // Build the full message: context + prompt combined via stdin if context exists
@@ -187,17 +188,10 @@ export async function executeOpenCodeCLI(
     const effectiveCwd = cwd || (browserOnly ? "/tmp/homer-scrape" : (process.env.HOME || "/Users/yj"));
     if (browserOnly) mkdirSync(effectiveCwd, { recursive: true });
 
-    const env = { ...process.env };
-    if (accessToken) {
-      // Pass the token to OpenCode's native provider
-      env.GOOGLE_ACCESS_TOKEN = accessToken;
-    }
-
     const child: ChildProcess = spawn("opencode", args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: effectiveCwd,
       detached: true, // own process group so SIGTERM kills all children
-      env,
     });
 
     // Register with process lifecycle management
@@ -406,6 +400,20 @@ export async function executeOpenCodeCLI(
         "OpenCode CLI completed successfully"
       );
 
+      if (!output.trim()) {
+        logger.warn("OpenCode CLI returned empty output despite exit code 0. Treating as quota/auth error.");
+        resolve({
+          output: "Empty output (possible silent auth failure)",
+          exitCode: 2, // Map to quota error to trigger fallback/rotation
+          duration,
+          executor: "opencode",
+          sessionId,
+          model,
+          accountId: 1,
+        });
+        return;
+      }
+
       resolve({
         output,
         exitCode: 0,
@@ -455,12 +463,8 @@ export async function executeOpenCodeWithFallback(
     return result;
   }
 
-  // Tier 1 fallback: quota/auth error — rotate Google account, retry Flash
-  const account = await googleAccountManager.getActiveAccount();
-  logger.info({ exitCode: result.exitCode, email: account.email }, "OpenCode quota/auth error, rotating account");
-  await googleAccountManager.markRateLimited(account.email, 60 * 60 * 1000); // 1 hour cooldown
-  await googleAccountManager.rotateAccount();
-
+  // Tier 1 fallback: quota/auth error — retry (Antigravity plugin handles account rotation internally)
+  logger.info({ exitCode: result.exitCode }, "OpenCode quota/auth error, retrying");
   const retryResult = await executeOpenCodeCLI(prompt, context, options);
   if (retryResult.exitCode === 0) return retryResult;
 
