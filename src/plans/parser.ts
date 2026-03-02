@@ -3,9 +3,9 @@ import { join, basename } from "path";
 import { createHash } from "crypto";
 import YAML from "yaml";
 import { logger } from "../utils/logger.js";
+import { PATHS } from "../config/paths.js";
 
-const MEMORY_PATH = process.env.MEMORY_PATH ?? "/Users/yj/memory";
-const PLANS_DIR = join(MEMORY_PATH, "plans");
+const PLANS_DIR = PATHS.plans;
 
 export interface ParsedTask {
   text: string;

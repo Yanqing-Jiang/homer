@@ -3,6 +3,7 @@ import type { SearchResult, SearchConfig } from "./types.js";
 import { vectorSearch } from "./vector.js";
 import { keywordSearch } from "./keyword.js";
 import { searchMemory } from "../memory/search.js";
+import { PATHS } from "../config/paths.js";
 
 /**
  * Hybrid search combining vector (0.7) and keyword (0.3) results
@@ -102,7 +103,7 @@ async function grepFallback(query: string, limit: number): Promise<SearchResult[
   const grepResults = await searchMemory(query);
 
   return grepResults.slice(0, limit).map((r) => ({
-    filePath: `/Users/yj/memory/${r.file}`,
+    filePath: `${PATHS.memory}/${r.file}`,
     chunkIndex: 0,
     content: r.content,
     context: r.context.join("\n"),

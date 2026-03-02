@@ -17,11 +17,11 @@ import {
   type ParsedIdea,
 } from "../../ideas/parser.js";
 import * as dao from "../../ideas/dao.js";
+import { PATHS } from "../../config/paths.js";
 
-const MEMORY_BASE = "/Users/yj/memory";
-const IDEAS_FILE = `${MEMORY_BASE}/ideas.md`;
-const FEEDBACK_FILE = `${MEMORY_BASE}/feedback.md`;
-const DENY_HISTORY_FILE = `${MEMORY_BASE}/deny-history.md`;
+const IDEAS_FILE = PATHS.ideasMd;
+const FEEDBACK_FILE = PATHS.feedback;
+const DENY_HISTORY_FILE = PATHS.denyHistory;
 
 // Track pending deny reasons (messageId -> pending info)
 interface PendingDeny {

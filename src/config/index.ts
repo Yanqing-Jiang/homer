@@ -19,6 +19,9 @@ const configSchema = z.object({
     logs: z.string().default("/Users/yj/homer/logs"),
     browserProfiles: z.string().default("/Users/yj/homer/profiles"),
     uploadLanding: z.string().default("/Users/yj/homer-upload-landing"),
+    memory: z.string().default("/Users/yj/memory"),
+    claudeDir: z.string().default("/Users/yj/.claude"),
+    homerData: z.string().default("/Users/yj/homer/data"),
   }),
   web: z.object({
     enabled: z.boolean().default(true),
@@ -81,6 +84,9 @@ function loadConfig(): Config {
       logs: process.env.LOGS_PATH ?? "/Users/yj/homer/logs",
       browserProfiles: process.env.BROWSER_PROFILES_PATH ?? "/Users/yj/homer/profiles",
       uploadLanding: process.env.UPLOAD_LANDING_PATH ?? "/Users/yj/homer-upload-landing",
+      memory: process.env.MEMORY_PATH ?? "/Users/yj/memory",
+      claudeDir: process.env.CLAUDE_DIR ?? "/Users/yj/.claude",
+      homerData: process.env.HOMER_DATA_PATH ?? "/Users/yj/homer/data",
     },
     web: {
       enabled: process.env.WEB_ENABLED !== "false",
