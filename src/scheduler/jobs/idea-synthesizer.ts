@@ -16,7 +16,6 @@ import { readFileSync, existsSync } from "fs";
 import { z } from "zod";
 import type Database from "better-sqlite3";
 import { executeClaudeCommand } from "../../executors/claude.js";
-import { executeOpenCodeCLI } from "../../executors/opencode-cli.js";
 import { executeGeminiAPI } from "../../executors/gemini.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { getUnprocessedScrapes, markProcessed, type StoredScrape } from "../../scraping/scrape-store.js";
@@ -27,11 +26,11 @@ import { formatForPrompt as getPreferenceContext } from "../../preferences/engin
 import { buildCondensedContext } from "../shared-context.js";
 import { logger } from "../../utils/logger.js";
 import { storeJobArtifact } from "./artifact-store.js";
+import { PATHS } from "../../config/paths.js";
 
-const MEMORY_PATH = "/Users/yj/memory";
-const ME_MD = `${MEMORY_PATH}/me.md`;
-const WORK_MD = `${MEMORY_PATH}/work.md`;
-const DENY_HISTORY = `${MEMORY_PATH}/deny-history.md`;
+const ME_MD = PATHS.me;
+const WORK_MD = PATHS.work;
+const DENY_HISTORY = PATHS.denyHistory;
 
 // ============================================
 // SCHEMAS
@@ -222,19 +221,19 @@ Return ONLY a JSON object (no markdown):
       return parseSwarmJSON(sonnetResult.output, SynthesisOutputSchema);
     }
 
-    // Fallback: Flash via OpenCode (Google OAuth)
-    logger.warn({ exitCode: sonnetResult.exitCode }, "Sonnet synthesis failed, falling back to Flash");
-    const flashResult = await executeOpenCodeCLI(prompt, "", {
-      model: "google/gemini-3-flash-preview",
-      researchOnly: false,
-      timeout: 120_000,
+    // Fallback: retry Sonnet with higher timeout
+    logger.warn({ exitCode: sonnetResult.exitCode }, "Sonnet synthesis failed, retrying with longer timeout");
+    const retryResult = await executeClaudeCommand(prompt, {
+      cwd: process.env.HOME ?? "/Users/yj",
+      model: "sonnet",
+      timeout: 180_000,
     });
 
-    if (flashResult.exitCode !== 0 || !flashResult.output) {
+    if (retryResult.exitCode !== 0 || !retryResult.output) {
       return { ideas: [], stats: { candidatesGenerated: 0, candidatesFiltered: 0 } };
     }
 
-    return parseSwarmJSON(flashResult.output, SynthesisOutputSchema);
+    return parseSwarmJSON(retryResult.output, SynthesisOutputSchema);
   } catch (err) {
     logger.warn({ error: err }, "Synthesis parse failed");
     return { ideas: [], stats: { candidatesGenerated: 0, candidatesFiltered: 0 } };

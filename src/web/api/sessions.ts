@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomUUID } from "crypto";
 import type { StateManager } from "../../state/manager.js";
+import { bridgeThread } from "../../cli-sessions/bridge.js";
 
 interface CreateSessionBody {
   name: string;
@@ -291,5 +292,38 @@ export function registerSessionRoutes(
 
     reply.status(201);
     return message;
+  });
+
+  // ============================================
+  // Bridge (Web UI → Claude Code CLI)
+  // ============================================
+
+  server.post("/api/threads/:threadId/bridge", async (request: FastifyRequest, reply: FastifyReply) => {
+    const { threadId } = request.params as { threadId: string };
+    const query = request.query as { force?: string };
+
+    const thread = stateManager.getThread(threadId);
+    if (!thread) {
+      reply.status(404);
+      return { error: "Thread not found" };
+    }
+
+    try {
+      const result = await bridgeThread(stateManager, threadId, {
+        force: query.force === "true",
+      });
+
+      return {
+        sessionId: result.sessionId,
+        command: result.command,
+        messageCount: result.messageCount,
+        mode: result.mode,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Bridge failed";
+      const isClientError = message.includes("not found") || message.includes("No messages");
+      reply.status(isClientError ? 400 : 500);
+      return { error: message };
+    }
   });
 }

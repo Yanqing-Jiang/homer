@@ -4,8 +4,9 @@ import { CronUtils } from "../../utils/cron.js";
 import type { StateManager } from "../../state/manager.js";
 import type { Scheduler } from "../../scheduler/index.js";
 import { logger } from "../../utils/logger.js";
+import { PATHS } from "../../config/paths.js";
 
-const SCHEDULE_FILE = process.env.SCHEDULE_FILE ?? "/Users/yj/memory/schedule.json";
+const SCHEDULE_FILE = process.env.SCHEDULE_FILE ?? PATHS.schedule;
 
 let schedulerRef: Scheduler | null = null;
 

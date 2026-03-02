@@ -2,16 +2,17 @@ import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { basename } from "path";
 import { logger } from "../utils/logger.js";
+import { PATHS } from "../config/paths.js";
 
 /**
  * Paths to search for memory content
  */
 const SEARCH_PATHS = [
-  "/Users/yj/memory/me.md",
-  "/Users/yj/memory/work.md",
-  "/Users/yj/memory/life.md",
-  "/Users/yj/memory/preferences.md",
-  "/Users/yj/memory/tools.md",
+  PATHS.me,
+  PATHS.work,
+  PATHS.life,
+  PATHS.preferences,
+  PATHS.tools,
 ];
 
 export interface SearchResult {

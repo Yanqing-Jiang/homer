@@ -1,3 +1,5 @@
+import { PATHS } from "../config/paths.js";
+
 /**
  * Schedule file structure (schedule.json)
  */
@@ -99,7 +101,7 @@ export type ProgressCallback = (event: ProgressEvent) => void;
 export const SCHEDULE_LOCATIONS = [
   { path: "/Users/yj/work/schedule.json", lane: "work" as const },
   { path: "/Users/yj/life/schedule.json", lane: "life" as const },
-  { path: "/Users/yj/memory/schedule.json", lane: "default" as const },
+  { path: PATHS.schedule, lane: "default" as const },
   ...(process.env.TRADING_SCHEDULE_ENABLED === "1"
     ? [{
         path: process.env.TRADING_SCHEDULE_FILE ?? "/Users/yj/trading/config/schedule.json",

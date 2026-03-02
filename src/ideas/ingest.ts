@@ -1,5 +1,4 @@
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
-import { join } from "path";
 import type Database from "better-sqlite3";
 import { parseIdeasMd, type ParsedIdea } from "./parser.js";
 import * as dao from "./dao.js";
@@ -10,10 +9,10 @@ import { executeBrowserScrape } from "../executors/browser-scrape.js";
 import { buildBookmarkScrapePrompt, buildTweetReadPrompt, SCRAPE_OPTIONS, DEEP_FETCH_OPTIONS } from "../scraping/browser-prompts.js";
 import { cleanAgentOutput } from "../scraping/clean-output.js";
 import { insertScrape } from "../scraping/scrape-store.js";
+import { PATHS } from "../config/paths.js";
 
-const MEMORY_PATH = process.env.MEMORY_PATH ?? "/Users/yj/memory";
-const IDEAS_FILE = join(MEMORY_PATH, "ideas.md");
-const DENY_HISTORY_FILE = join(MEMORY_PATH, "deny-history.md");
+const IDEAS_FILE = PATHS.ideasMd;
+const DENY_HISTORY_FILE = PATHS.denyHistory;
 
 interface SyncState {
   id: string;

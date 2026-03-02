@@ -8,9 +8,10 @@
 
 import Database from "better-sqlite3";
 import { readFileSync, readdirSync } from "fs";
+import { PATHS } from "../config/paths.js";
 
-const DB_PATH = "/Users/yj/homer/data/homer.db";
-const DAILY_DIR = "/Users/yj/memory/daily";
+const DB_PATH = PATHS.db;
+const DAILY_DIR = PATHS.daily;
 
 const db = new Database(DB_PATH);
 

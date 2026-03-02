@@ -1221,3 +1221,22 @@ export async function startTradingService(options?: {
 export async function stopTradingService(): Promise<{ success: boolean; message: string }> {
 	return apiFetch('/api/trading/stop', { method: 'POST' });
 }
+
+// ============================================
+// Session Bridge
+// ============================================
+
+export interface BridgeResult {
+	sessionId: string;
+	command: string;
+	messageCount: number;
+	mode: 'full' | 'summarized';
+}
+
+/**
+ * Bridge a web UI thread into a Claude Code CLI session
+ */
+export async function bridgeThread(threadId: string, options?: { force?: boolean }): Promise<BridgeResult> {
+	const query = options?.force ? '?force=true' : '';
+	return apiFetch(`/api/threads/${threadId}/bridge${query}`, { method: 'POST' });
+}

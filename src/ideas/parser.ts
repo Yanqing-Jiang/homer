@@ -2,10 +2,10 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 
 import { join } from "path";
 import { createHash } from "crypto";
 import { logger } from "../utils/logger.js";
+import { PATHS } from "../config/paths.js";
 
-const MEMORY_PATH = process.env.MEMORY_PATH ?? "/Users/yj/memory";
-const IDEAS_FILE = join(MEMORY_PATH, "ideas.md");
-const IDEAS_DIR = join(MEMORY_PATH, "ideas");
+const IDEAS_FILE = PATHS.ideasMd;
+const IDEAS_DIR = PATHS.ideas;
 
 export interface ParsedIdea {
   id: string;

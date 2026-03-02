@@ -8,15 +8,16 @@ import type { Bot } from "grammy";
 import { logger } from "../../utils/logger.js";
 import { StateManager } from "../../state/manager.js";
 import { appendFile } from "fs/promises";
+import { PATHS } from "../../config/paths.js";
 
-const FEEDBACK_FILE = "/Users/yj/memory/feedback.md";
+const FEEDBACK_FILE = PATHS.feedback;
 
 export function registerOutcomeHandlers(bot: Bot): void {
   bot.callbackQuery(/^a:oc:([^:]+):(yes|no|partial|skip)$/, async (ctx) => {
     const checkId = ctx.match![1]!;
     const action = ctx.match![2]! as "yes" | "no" | "partial" | "skip";
 
-    const sm = new StateManager("/Users/yj/homer/data/homer.db");
+    const sm = new StateManager(PATHS.db);
     try {
       if (action === "skip") {
         sm.getDb().prepare(`

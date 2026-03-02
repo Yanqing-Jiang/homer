@@ -7,10 +7,11 @@
  */
 
 import { existsSync, readFileSync } from "fs";
+import { PATHS } from "../config/paths.js";
 
 export type WritingPlatform = "medium" | "linkedin" | "x";
 
-const PATTERNS_PATH = "/Users/yj/memory/patterns.md";
+const PATTERNS_PATH = PATHS.patterns;
 const HOME = process.env.HOME ?? "/Users/yj";
 
 const SKILL_PATHS: Record<WritingPlatform, string> = {

@@ -14,13 +14,15 @@
  * - Heuristic scoring for trending idea selection (replaces positional first-4)
  * - ingestTrendingIdeas() failure logged to results (was silently swallowed)
  * - writeRunSummaryMarkdown() moved to finally block — always runs
- * - Post-scrape pattern analysis: Gemini Flash extracts content patterns → patterns.md
+ * - Post-scrape pattern analysis: Gemini Flash API extracts content patterns → patterns.md
+ * - Browser scraping via Claude Sonnet (agent-browser CDP)
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { createHash } from "crypto";
 import type Database from "better-sqlite3";
-import { executeOpenCodeCLI } from "../../executors/opencode-cli.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
+import { BROWSER_ONLY_PREFIX } from "../../executors/opencode-cli.js";
 import { executeGeminiAPI } from "../../executors/gemini.js";
 import {
   SCRAPE_OPTIONS,
@@ -33,14 +35,15 @@ import { cleanAgentOutput } from "../../scraping/clean-output.js";
 import { insertScrape } from "../../scraping/scrape-store.js";
 import { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
+import { PATHS } from "../../config/paths.js";
 
-const DB_PATH = "/Users/yj/homer/data/homer.db";
+const DB_PATH = PATHS.db;
 
 // ============================================
 // CONSTANTS
 // ============================================
 
-const SCRAPES_DIR = "/Users/yj/memory/scrapes";
+const SCRAPES_DIR = PATHS.scrapes;
 const MEDIUM_FILE = `${SCRAPES_DIR}/medium-posts.md`;
 const LINKEDIN_FILE = `${SCRAPES_DIR}/linkedin-posts.md`;
 const MEDIUM_DIR = `${SCRAPES_DIR}/medium`;
@@ -68,7 +71,7 @@ const MAX_MEDIUM_TAG_ITEMS = 10;
 const MAX_DEEP_FETCH_ARTICLES = 5; // top N trending articles to deep-fetch (Medium trending only)
 // Disabled: Medium trending articles were low-signal clickbait polluting the ideas pipeline.
 // Scraping + patterns continue; idea creation skipped. Re-enable with CONTENT_SCRAPER_IDEA_INGEST=1.
-const PATTERNS_FILE = "/Users/yj/memory/patterns.md";
+const PATTERNS_FILE = PATHS.patterns;
 
 // ============================================
 // TYPES
@@ -573,9 +576,8 @@ async function deepFetchTrendingArticles(posts: ScrapedPost[]): Promise<ScrapedP
         const idx = i + batchIdx;
         if (!post.link) return;
         try {
-          const result = await executeOpenCodeCLI(
-            buildArticleDeepFetchPrompt(post.link),
-            "",
+          const result = await executeClaudeCommand(
+            BROWSER_ONLY_PREFIX + buildArticleDeepFetchPrompt(post.link),
             DEEP_FETCH_OPTIONS,
           );
           if (result.exitCode === 0 && result.output) {
@@ -831,7 +833,7 @@ export async function runContentScraper(db: Database.Database): Promise<{
   const results: string[] = [];
   const runStartedAt = new Date();
   const scrapeTime = runStartedAt.toISOString();
-  const scrapeOpts = { ...SCRAPE_OPTIONS, browserOnly: true };
+  const scrapeOpts = { ...SCRAPE_OPTIONS };
 
   // Track scraped content for post-scrape analysis
   let ownMediumPosts: ScrapedPost[] = [];
@@ -881,14 +883,14 @@ export async function runContentScraper(db: Database.Database): Promise<{
         ? Promise.resolve(null)
         : (async () => {
             logger.info("Medium RSS empty — launching browser fallback in parallel");
-            return executeOpenCodeCLI(buildMediumScrapePrompt(), "", { ...scrapeOpts, timeout: 120_000 });
+            return executeClaudeCommand(BROWSER_ONLY_PREFIX + buildMediumScrapePrompt(), { ...scrapeOpts, timeout: 120_000 });
           })(),
       // Medium trending: 7 tag RSS feeds all parallel
       fetchMediumTrendingByTags(),
       // LinkedIn: agent-browser CDP, 90s timeout
       (async () => {
         logger.info("Starting LinkedIn scrape");
-        return executeOpenCodeCLI(buildLinkedInScrapePrompt(), "", { ...scrapeOpts, timeout: 90_000 });
+        return executeClaudeCommand(BROWSER_ONLY_PREFIX + buildLinkedInScrapePrompt(), { ...scrapeOpts, timeout: 90_000 });
       })(),
     ]);
 

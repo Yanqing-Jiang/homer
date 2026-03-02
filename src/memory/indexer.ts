@@ -4,6 +4,7 @@ import { existsSync, readdirSync } from "fs";
 import { logger } from "../utils/logger.js";
 import { chunkText } from "../search/chunker.js";
 import { generateEmbedding, generateQueryEmbedding, cosineSimilarity, mergeRRF } from "./embeddings.js";
+import { PATHS } from "../config/paths.js";
 
 /**
  * Memory index search result
@@ -81,6 +82,12 @@ export class MemoryIndexer {
       return false;
     }
 
+    // Skip archived/backup files
+    if (filePath.includes(`${PATHS.backups}/`) || filePath.includes("/backups/")) {
+      logger.debug({ filePath }, "Skipping archived file");
+      return false;
+    }
+
     try {
       const content = await readFile(filePath, "utf-8");
       const contentHash = this.hashContent(content);
@@ -144,13 +151,13 @@ export class MemoryIndexer {
 
     // Core memory files (identity, preferences, tools)
     const coreFiles: Array<{ path: string; context: "work" | "life" | "general" }> = [
-      { path: "/Users/yj/memory/me.md", context: "general" },
-      { path: "/Users/yj/memory/work.md", context: "work" },
-      { path: "/Users/yj/memory/life.md", context: "life" },
-      { path: "/Users/yj/memory/preferences.md", context: "general" },
-      { path: "/Users/yj/memory/tools.md", context: "general" },
-      { path: "/Users/yj/memory/patterns.md", context: "general" },
-      { path: "/Users/yj/memory/deny-history.md", context: "general" },
+      { path: PATHS.me, context: "general" },
+      { path: PATHS.work, context: "work" },
+      { path: PATHS.life, context: "life" },
+      { path: PATHS.preferences, context: "general" },
+      { path: PATHS.tools, context: "general" },
+      { path: PATHS.patterns, context: "general" },
+      { path: PATHS.denyHistory, context: "general" },
     ];
 
     for (const { path, context } of coreFiles) {
@@ -167,14 +174,14 @@ export class MemoryIndexer {
     // Purge any previously-indexed daily log chunks from memory_fts
     try {
       const purged = this.db.prepare(
-        "DELETE FROM memory_fts WHERE file_path LIKE '/Users/yj/memory/daily/%'"
+        `DELETE FROM memory_fts WHERE file_path LIKE '${PATHS.daily}/%'`
       ).run();
       const purgedMeta = this.db.prepare(
-        "DELETE FROM memory_index_meta WHERE file_path LIKE '/Users/yj/memory/daily/%'"
+        `DELETE FROM memory_index_meta WHERE file_path LIKE '${PATHS.daily}/%'`
       ).run();
       // Also purge orphaned embeddings for daily logs
       const purgedEmbed = this.db.prepare(
-        "DELETE FROM memory_embeddings WHERE file_path LIKE '/Users/yj/memory/daily/%'"
+        `DELETE FROM memory_embeddings WHERE file_path LIKE '${PATHS.daily}/%'`
       ).run();
       if (purged.changes > 0 || purgedMeta.changes > 0 || purgedEmbed.changes > 0) {
         logger.info({ ftsChunks: purged.changes, metaFiles: purgedMeta.changes, embeddings: purgedEmbed.changes }, "Purged stale daily log entries from memory indexes");
@@ -184,7 +191,7 @@ export class MemoryIndexer {
     }
 
     // Meeting transcripts
-    const meetingsDir = "/Users/yj/memory/meetings";
+    const meetingsDir = PATHS.meetings;
     if (existsSync(meetingsDir)) {
       const files = readdirSync(meetingsDir);
       const meetingPattern = /^\d{4}-\d{2}-\d{2}-.*\.md$/;
@@ -568,7 +575,7 @@ let indexerInstance: MemoryIndexer | null = null;
  */
 export function getMemoryIndexer(dbPath?: string): MemoryIndexer {
   if (!indexerInstance) {
-    const path = dbPath || "/Users/yj/homer/data/homer.db";
+    const path = dbPath || PATHS.db;
     indexerInstance = new MemoryIndexer(path);
   }
   return indexerInstance;

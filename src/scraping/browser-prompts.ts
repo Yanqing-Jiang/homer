@@ -6,7 +6,7 @@
  * and browserOnly mode.
  */
 
-import type { OpenCodeCLIOptions } from "../executors/opencode-cli.js";
+import type { ClaudeExecutorOptions } from "../executors/claude.js";
 
 // ============================================
 // TOOL DOCUMENTATION
@@ -324,14 +324,14 @@ OUTPUT FORMAT (JSON only):
 // SHARED OPTIONS
 // ============================================
 
-export const SCRAPE_OPTIONS: OpenCodeCLIOptions = {
-  model: "google/gemini-3-flash-preview",
-  browserOnly: true,
+export const SCRAPE_OPTIONS: ClaudeExecutorOptions = {
+  cwd: "/tmp/homer-scrape",
+  model: "sonnet",
   timeout: 600_000,
 };
 
-export const DEEP_FETCH_OPTIONS: OpenCodeCLIOptions = {
-  model: "google/gemini-3-flash-preview",
-  browserOnly: true,
+export const DEEP_FETCH_OPTIONS: ClaudeExecutorOptions = {
+  cwd: "/tmp/homer-scrape",
+  model: "sonnet",
   timeout: 120_000, // 2 min — sleep 5+2+2=9s + 3 snapshots + scroll + render time
 };

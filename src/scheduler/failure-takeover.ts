@@ -390,7 +390,7 @@ export async function runFailureTakeover(params: {
     try {
       const result = await executeClaudeCommand(prompt, {
         cwd,
-        model: "sonnet",
+        model: "opus",
       });
       claudeOutput = result.output;
     } catch (error) {

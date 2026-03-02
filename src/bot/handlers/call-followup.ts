@@ -8,8 +8,9 @@ import { InlineKeyboard, type Bot } from "grammy";
 import { logger } from "../../utils/logger.js";
 import { writeFileSync } from "fs";
 import { join } from "path";
+import { PATHS } from "../../config/paths.js";
 
-const IDEAS_DIR = "/Users/yj/memory/ideas";
+const IDEAS_DIR = PATHS.ideas;
 
 /**
  * Send call summary with action buttons.
