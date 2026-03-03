@@ -11,6 +11,8 @@ import { config } from "./index.js";
 const mem = config.paths.memory;
 const claude = config.paths.claudeDir;
 const data = config.paths.homerData;
+const homer = config.paths.homerRoot;
+const archive = config.paths.archive;
 
 export const PATHS = {
   // ── Memory root ─────────────────────────────────────────────
@@ -41,8 +43,16 @@ export const PATHS = {
   // ── Claude dir ──────────────────────────────────────────────
   claudeDir: claude,
   claudeMd: `${claude}/CLAUDE.md`,
+  autoMemoryDir: `${claude}/projects/-Users-yj/memory`,
+
+  // ── Homer root ─────────────────────────────────────────────
+  homerRoot: homer,
+  architectureMd: `${homer}/architecture.md`,
 
   // ── Homer data ──────────────────────────────────────────────
   homerData: data,
   db: `${data}/homer.db`,
+
+  // ── Archive ───────────────────────────────────────────────
+  archive: archive,
 } as const;

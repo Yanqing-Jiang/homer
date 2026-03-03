@@ -13,9 +13,12 @@
 import Database from "better-sqlite3";
 import { homedir } from "os";
 import { CLISessionImporter } from "../../cli-sessions/importer.js";
+import { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
 
 const DB_PATH = `${homedir()}/homer/data/homer.db`;
+const CLI_AGENTS = ["codex", "kimi", "claude", "opencode"] as const;
+const MAX_BACKFILL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days cap for first run
 
 export async function runSessionHarvester(
   db?: Database.Database
@@ -24,25 +27,57 @@ export async function runSessionHarvester(
   const database = db ?? new Database(DB_PATH);
 
   try {
-    const importer = new CLISessionImporter(database, homedir());
+    const sm = new StateManager(DB_PATH);
+    const ownSm = true; // always owned — sm is created locally for watermark ops
 
-    const stats = await importer.import({
-      sinceDays: 1,
-      agent: "all",
-      dryRun: false,
-    });
+    try {
+      const importer = new CLISessionImporter(database, homedir());
 
-    const parts: string[] = [];
-    parts.push(`Scanned: ${stats.scanned}`);
-    parts.push(`Imported: ${stats.imported}`);
-    if (stats.subAgents > 0) parts.push(`Sub-agents skipped: ${stats.subAgents}`);
-    if (stats.skipped > 0) parts.push(`Duplicates: ${stats.skipped}`);
-    if (stats.errors > 0) parts.push(`Errors: ${stats.errors}`);
+      // Load per-agent watermarks
+      const cutoffPerAgent: Record<string, number> = {};
+      for (const agent of CLI_AGENTS) {
+        const watermark = sm.getHarvestWatermark(agent);
+        if (watermark !== null) {
+          cutoffPerAgent[agent] = watermark;
+        } else {
+          // First run: cap at 30 days backfill
+          cutoffPerAgent[agent] = Date.now() - MAX_BACKFILL_MS;
+        }
+      }
 
-    const output = `Session harvest: ${parts.join(", ")}`;
-    logger.info({ stats }, output);
+      logger.info({ cutoffPerAgent }, "Loaded harvest watermarks");
 
-    return { success: true, output };
+      const stats = await importer.import({
+        sinceDays: 1, // fallback for thread sessions (no cutoffPerAgent support)
+        agent: "all",
+        dryRun: false,
+        cutoffPerAgent,
+      });
+
+      // Update watermarks only if no errors — avoids permanently skipping errored sessions
+      if (stats.errors === 0) {
+        const now = Date.now();
+        for (const agent of CLI_AGENTS) {
+          sm.setHarvestWatermark(agent, now);
+        }
+      } else {
+        logger.warn({ errors: stats.errors }, "Skipping watermark update — errors occurred, sessions will be retried");
+      }
+
+      const parts: string[] = [];
+      parts.push(`Scanned: ${stats.scanned}`);
+      parts.push(`Imported: ${stats.imported}`);
+      if (stats.subAgents > 0) parts.push(`Sub-agents skipped: ${stats.subAgents}`);
+      if (stats.skipped > 0) parts.push(`Duplicates: ${stats.skipped}`);
+      if (stats.errors > 0) parts.push(`Errors: ${stats.errors}`);
+
+      const output = `Session harvest: ${parts.join(", ")}`;
+      logger.info({ stats }, output);
+
+      return { success: true, output };
+    } finally {
+      if (ownSm) sm.close();
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error({ error: message }, "Session harvester failed");

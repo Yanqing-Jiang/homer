@@ -18,8 +18,15 @@ import { StateManager, type SessionSummaryRow } from "../../state/manager.js";
 import { buildSchedulerContext, buildGoalScoreboard } from "../shared-context.js";
 import { PATHS } from "../../config/paths.js";
 
-const MEMORY_DIR = PATHS.memory;
 const DAILY_LOG_DIR = PATHS.daily;
+
+const FILE_PATH_MAP: Record<string, string> = {
+  "me.md": PATHS.me,
+  "work.md": PATHS.work,
+  "life.md": PATHS.life,
+  "tools.md": PATHS.tools,
+  "preferences.md": PATHS.preferences,
+};
 const MAX_INPUT_CHARS = 1_800_000; // ~450K tokens, well within 1M context
 
 const PERMANENT_FILES = [
@@ -86,15 +93,18 @@ You have Homer's full architecture and soul now. Be sharp:
 
 Facts from this week that should be promoted to permanent memory. These are DURABLE facts — things that will be useful weeks/months from now, not session-level details.
 
-Criteria for promotion:
-- Architecture decisions or system changes (tools.md)
-- Career milestones, org changes, relationship developments (work.md)
-- Goal updates, priority shifts, new ambitions (me.md)
-- Life events, routine changes (life.md)
-- New preferences or workflow discoveries (preferences.md)
+Weekly consolidation focuses on CROSS-DAY SYNTHESIS — patterns and insights that only emerge from looking at the full week. Nightly-memory handles individual daily facts via CAS dedup.
+
+Criteria for weekly promotion (cross-day only):
+- Recurring themes across 3+ days (e.g., "spent most of the week on X" → work.md)
+- Trend-level career or life shifts visible over the week (work.md, life.md)
+- Architecture decisions that evolved across multiple sessions (tools.md)
+- Goal progress or priority shifts apparent from the week's arc (me.md)
+- Workflow patterns confirmed by repeated use (preferences.md)
 
 Do NOT promote:
 - Things already in the permanent files (check the context below)
+- Single-session facts (nightly-memory handles these)
 - Session-level debugging or ephemeral fixes
 - Generic observations without specific facts
 
@@ -296,7 +306,7 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
       try {
         const targetFiles = new Set(promotions.map((p: { file: string }) => p.file));
         for (const fileName of targetFiles) {
-          const filePath = `${MEMORY_DIR}/${fileName}`;
+          const filePath = FILE_PATH_MAP[fileName] ?? `${PATHS.memory}/${fileName}`;
           if (!existsSync(filePath)) continue;
           try {
             const content = await readFile(filePath, "utf-8");
@@ -310,37 +320,42 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
       }
     }
 
-    // Apply promotions
+    // Apply promotions (CAS dedup via promoted_facts table)
     let promotionsApplied = 0;
     const promotionLog: string[] = [];
     const validFiles = new Set(PERMANENT_FILES.map(f => f.path.split("/").pop()));
+    const dedupSm = stateManager ?? new StateManager(DB_PATH);
+    const ownedDedupSm = !stateManager;
 
-    for (const promo of promotions) {
-      const fileName = promo.file;
-      if (!validFiles.has(fileName)) {
-        logger.warn({ file: fileName }, "Skipping promotion to unknown file");
-        continue;
+    try {
+      for (const promo of promotions) {
+        const fileName = promo.file;
+        if (!validFiles.has(fileName)) {
+          logger.warn({ file: fileName }, "Skipping promotion to unknown file");
+          continue;
+        }
+
+        const filePath = FILE_PATH_MAP[fileName] ?? `${PATHS.memory}/${fileName}`;
+        if (!existsSync(filePath)) {
+          logger.warn({ filePath }, "Promotion target does not exist, skipping");
+          continue;
+        }
+
+        // CAS dedup check — skip if already promoted
+        if (dedupSm.checkFactExists(promo.content, fileName)) {
+          logger.debug({ file: fileName, content: promo.content.slice(0, 60) }, "Skipping duplicate promoted fact (CAS)");
+          continue;
+        }
+
+        await appendFile(filePath, `\n\n${promo.content}\n`);
+        dedupSm.recordPromotedFact(promo.content, fileName, null, "weekly");
+        promotionsApplied++;
+        promotionLog.push(`→ ${fileName}: ${promo.reason}`);
+
+        logger.info({ file: fileName, reason: promo.reason }, "Promoted fact to permanent memory");
       }
-
-      const filePath = `${MEMORY_DIR}/${fileName}`;
-      if (!existsSync(filePath)) {
-        logger.warn({ filePath }, "Promotion target does not exist, skipping");
-        continue;
-      }
-
-      // Dedup check — don't append if content already exists
-      const existing = await readFile(filePath, "utf-8");
-      const contentSnippet = promo.content.slice(0, 80);
-      if (existing.includes(contentSnippet)) {
-        logger.debug({ file: fileName, snippet: contentSnippet }, "Promotion already exists, skipping");
-        continue;
-      }
-
-      await appendFile(filePath, `\n\n${promo.content}\n`);
-      promotionsApplied++;
-      promotionLog.push(`→ ${fileName}: ${promo.reason}`);
-
-      logger.info({ file: fileName, reason: promo.reason }, "Promoted fact to permanent memory");
+    } finally {
+      if (ownedDedupSm) dedupSm.close();
     }
 
     const tokenInfo = result.inputTokens

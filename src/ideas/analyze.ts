@@ -14,9 +14,10 @@ import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
 import { buildCondensedContext } from "../scheduler/shared-context.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { logger } from "../utils/logger.js";
+import { PATHS } from "../config/paths.js";
 
-const OUTPUT_DIR = "/Users/yj/homer/output/ideas";
-const ARCHITECTURE_MD = "/Users/yj/homer/architecture.md";
+const OUTPUT_DIR = `${PATHS.homerRoot}/output/ideas`;
+const ARCHITECTURE_MD = PATHS.architectureMd;
 const MAX_ARCH_CHARS = 6000;
 
 export interface AnalysisIdea {

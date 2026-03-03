@@ -23,7 +23,7 @@ import { registerCallFollowupHandlers } from "./handlers/call-followup.js";
 import { registerSmsReplyHandlers } from "./handlers/sms-reply.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { StateManager } from "../state/manager.js";
-import { sendThinkingIndicator, editWithResponse, TelegramDraftStream } from "./streaming.js";
+import { TelegramDraftStream, sendFinalResponse } from "./streaming.js";
 import { loadBootstrapFiles } from "../memory/loader.js";
 import { searchMemory, formatSearchResults } from "../memory/search.js";
 import { hybridSearch, formatHybridResults } from "../search/index.js";
@@ -1064,19 +1064,15 @@ async function handleNewExecution(
     "Executing command"
   );
 
-  let streamingMsg = null;
   let draftStream: TelegramDraftStream | null = null;
 
   if (!returnResponse) {
     if (ENABLE_STREAMING) {
-      streamingMsg = await sendThinkingIndicator(ctx);
-      if (streamingMsg) {
-        draftStream = new TelegramDraftStream(
-          streamingMsg.chatId,
-          ctx.api,
-          streamingMsg.messageId
-        );
-      }
+      draftStream = new TelegramDraftStream(
+        ctx.chat!.id,
+        ctx.update.update_id,
+        ctx.api
+      );
     } else {
       await ctx.replyWithChatAction("typing");
     }
@@ -1131,7 +1127,7 @@ async function handleNewExecution(
 
     const runResult = await result;
 
-    // Await in-flight edit before final editWithResponse
+    // Await in-flight draft before sending final message
     if (draftStream) await draftStream.stop();
 
     // Update session activity
@@ -1141,18 +1137,7 @@ async function handleNewExecution(
       return runResult.output;
     }
 
-    if (ENABLE_STREAMING && streamingMsg) {
-      await editWithResponse(ctx, streamingMsg, runResult.output);
-    } else {
-      const chunks = chunkMessage(runResult.output);
-      for (const chunk of chunks) {
-        try {
-          await ctx.reply(chunk, { parse_mode: "Markdown" });
-        } catch {
-          await ctx.reply(chunk);
-        }
-      }
-    }
+    await sendFinalResponse(ctx, runResult.output);
   } catch (error) {
     if (draftStream) await draftStream.stop();
 
@@ -1163,11 +1148,7 @@ async function handleNewExecution(
       return `Error: ${errorMessage}`;
     }
 
-    if (ENABLE_STREAMING && streamingMsg) {
-      await editWithResponse(ctx, streamingMsg, `Error: ${errorMessage}`);
-    } else {
-      await ctx.reply(`Error: ${errorMessage}`);
-    }
+    await ctx.reply(`Error: ${errorMessage}`);
   }
 }
 

@@ -20,9 +20,10 @@ import type { ParsedIdea } from "../ideas/parser.js";
 import { randomUUID } from "crypto";
 import type { YouTubeSummaryMetadata } from "../overnight/types.js";
 import type Database from "better-sqlite3";
+import { PATHS } from "../config/paths.js";
 
-const SUMMARIES_DIR = `${process.env.HOME}/homer/data/youtube-summaries`;
-const ARCHITECTURE_PATH = "/Users/yj/homer/architecture.md";
+const SUMMARIES_DIR = `${PATHS.homerData}/youtube-summaries`;
+const ARCHITECTURE_PATH = PATHS.architectureMd;
 
 // ============================================
 // CONCURRENCY CONTROL
@@ -495,7 +496,7 @@ Rules:
   // Primary: Sonnet via Claude Code CLI — full context window
   try {
     const sonnetResult = await executeClaudeCommand(prompt, {
-      cwd: process.env.HOME ?? "/Users/yj",
+      cwd: process.env.HOME ?? process.cwd(),
       model: "sonnet",
       timeout: 180_000,
     });
