@@ -1938,6 +1938,93 @@ export class StateManager {
 
     return this._db.prepare(sql).all(...params) as SessionSummaryRow[];
   }
+
+  // ============================================
+  // Promoted Facts CAS Dedup (Migration 045)
+  // ============================================
+
+  /**
+   * Normalize content for hashing: collapse whitespace, lowercase, trim.
+   */
+  private normalizeForHash(content: string): string {
+    return content.replace(/\s+/g, " ").trim().toLowerCase();
+  }
+
+  /**
+   * Compute a SHA-256 hash for dedup of promoted facts.
+   */
+  private factHash(content: string, targetFile: string): string {
+    return createHash("sha256")
+      .update(this.normalizeForHash(content) + "::" + targetFile)
+      .digest("hex");
+  }
+
+  /**
+   * Check if a fact has already been promoted (by content hash).
+   */
+  checkFactExists(content: string, targetFile: string): boolean {
+    const hash = this.factHash(content, targetFile);
+    const row = this._db.prepare(
+      "SELECT 1 FROM promoted_facts WHERE fact_hash = ?"
+    ).get(hash);
+    return row !== undefined;
+  }
+
+  /**
+   * Record a promoted fact for dedup tracking. INSERT OR IGNORE — idempotent.
+   */
+  recordPromotedFact(
+    content: string,
+    targetFile: string,
+    section: string | null,
+    source: "nightly" | "weekly" | "mcp" | "unknown"
+  ): void {
+    const hash = this.factHash(content, targetFile);
+    this._db.prepare(
+      `INSERT OR IGNORE INTO promoted_facts (fact_hash, content, target_file, section, source)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(hash, content, targetFile, section, source);
+  }
+
+  /**
+   * Get recently promoted facts (for context-bridge).
+   */
+  getRecentPromotedFacts(days: number = 7): Array<{ content: string; targetFile: string; section: string | null; promotedAt: string; source: string }> {
+    return this._db.prepare(
+      `SELECT content, target_file as targetFile, section, promoted_at as promotedAt, source
+       FROM promoted_facts
+       WHERE promoted_at >= datetime('now', ?)
+       ORDER BY promoted_at DESC`
+    ).all(`-${days} days`) as Array<{ content: string; targetFile: string; section: string | null; promotedAt: string; source: string }>;
+  }
+
+  // ============================================
+  // CLI Harvest Watermarks (Migration 046)
+  // ============================================
+
+  /**
+   * Get the last scan epoch (ms) for a CLI agent.
+   * Returns null if no watermark exists (first run).
+   */
+  getHarvestWatermark(agent: string): number | null {
+    const row = this._db.prepare(
+      "SELECT last_scan_epoch_ms FROM cli_harvest_watermark WHERE agent = ?"
+    ).get(agent) as { last_scan_epoch_ms: number } | undefined;
+    return row?.last_scan_epoch_ms ?? null;
+  }
+
+  /**
+   * Set the harvest watermark for a CLI agent. INSERT ON CONFLICT UPDATE.
+   */
+  setHarvestWatermark(agent: string, epochMs: number): void {
+    this._db.prepare(
+      `INSERT INTO cli_harvest_watermark (agent, last_scan_epoch_ms)
+       VALUES (?, ?)
+       ON CONFLICT(agent) DO UPDATE SET
+         last_scan_epoch_ms = excluded.last_scan_epoch_ms,
+         last_scan_at = datetime('now')`
+    ).run(agent, epochMs);
+  }
 }
 
 // Session summary row (from session_summaries table)

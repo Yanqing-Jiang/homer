@@ -160,7 +160,8 @@ const RETRYABLE_HANDLERS = new Set([
   "learning_engine", "homer_improvements", "session_summaries", "weekly_consolidation",
   "memory_cleanup", "planning_reminder", "content_scraper", "outcome_tracker",
   "preference_updater", "idea_dedup", "memory_git_commit", "nightly_code_push", "db_backup",
-  "idea_synthesizer", "archive_verify", "health_check",
+  "idea_synthesizer", "archive_verify", "health_check", "context_bridge",
+  "architecture_updater",
 ]);
 
 const TRANSIENT_PATTERNS = [
@@ -484,6 +485,11 @@ async function runHandler(
         const result = await runSessionHarvester(ctx.stateManager.getDb());
         return buildResult(job, startedAt, result.success, result.output, result.error);
       }
+      case "context_bridge": {
+        const { runContextBridge } = await import("./jobs/context-bridge.js");
+        const result = await runContextBridge(ctx.stateManager);
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
       case "memory_embeddings": {
         const { runMemoryEmbeddings } = await import("./jobs/memory-embeddings.js");
         const result = await runMemoryEmbeddings();
@@ -605,6 +611,11 @@ async function runHandler(
       }
       case "health_check": {
         const result = await runHealthCheck(ctx);
+        return buildResult(job, startedAt, result.success, result.output, result.error);
+      }
+      case "architecture_updater": {
+        const { runArchitectureUpdater } = await import("./jobs/architecture-updater.js");
+        const result = await runArchitectureUpdater();
         return buildResult(job, startedAt, result.success, result.output, result.error);
       }
       default: {
