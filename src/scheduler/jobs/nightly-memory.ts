@@ -154,8 +154,8 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
         if (archiveLines.length > 0) {
             writeFileSync(feedbackPath, keepLines.join("\n"), "utf-8");
             try {
-              if (!existsSync("/Users/yj/archive")) mkdirSync("/Users/yj/archive", { recursive: true });
-              appendFileSync("/Users/yj/archive/feedback-archive.md", "\n" + archiveLines.join("\n"), "utf-8");
+              if (!existsSync(PATHS.archive)) mkdirSync(PATHS.archive, { recursive: true });
+              appendFileSync(`${PATHS.archive}/feedback-archive.md`, "\n" + archiveLines.join("\n"), "utf-8");
             } catch (err) {
               logger.warn({ error: err }, "Failed to write to feedback archive");
             }
@@ -321,10 +321,17 @@ If nothing to promote, use an empty array.`;
         continue;
       }
 
+      // CAS dedup: skip if already promoted
+      if (stateManager.checkFactExists(promo.content, promo.file)) {
+        logger.debug({ file: promo.file, content: promo.content.slice(0, 60) }, "Skipping duplicate promoted fact");
+        continue;
+      }
+
       try {
         const ok = appendToSection(filePath, promo.section, promo.content);
         if (ok) {
           writtenPromos++;
+          stateManager.recordPromotedFact(promo.content, promo.file, promo.section, "nightly");
           logger.info({ file: promo.file, section: promo.section, content: promo.content.slice(0, 80) }, "Promoted fact to permanent memory");
           try {
             trackPromotion(stateManager.getDb(), promo.content.slice(0, 80), promo.file);

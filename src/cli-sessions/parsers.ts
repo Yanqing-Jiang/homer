@@ -192,13 +192,13 @@ export function parseKimiSession(filePath: string): ParsedSession | null {
 /**
  * Scan for Codex session files within a date range
  */
-export function scanCodexSessions(homeDir: string, sinceDays: number = 7): string[] {
+export function scanCodexSessions(homeDir: string, sinceDays: number = 7, cutoffEpochMs?: number): string[] {
   const codexDir = join(homeDir, ".codex", "sessions");
   if (!existsSync(codexDir)) {
     return [];
   }
 
-  const cutoffTime = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
+  const cutoffTime = cutoffEpochMs ?? (Date.now() - sinceDays * 24 * 60 * 60 * 1000);
   const sessionFiles: string[] = [];
 
   try {
@@ -237,13 +237,13 @@ export function scanCodexSessions(homeDir: string, sinceDays: number = 7): strin
 /**
  * Scan for Kimi session files within a date range
  */
-export function scanKimiSessions(homeDir: string, sinceDays: number = 7): string[] {
+export function scanKimiSessions(homeDir: string, sinceDays: number = 7, cutoffEpochMs?: number): string[] {
   const kimiDir = join(homeDir, ".kimi", "sessions");
   if (!existsSync(kimiDir)) {
     return [];
   }
 
-  const cutoffTime = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
+  const cutoffTime = cutoffEpochMs ?? (Date.now() - sinceDays * 24 * 60 * 60 * 1000);
   const sessionFiles: string[] = [];
 
   try {
@@ -339,13 +339,13 @@ interface OpencodePart {
  * Scan for OpenCode session files within a date range
  * Location: ~/.local/share/opencode/storage/session/{project_hash}/ses_*.json
  */
-export function scanOpencodeSessions(homeDir: string, sinceDays: number = 7): string[] {
+export function scanOpencodeSessions(homeDir: string, sinceDays: number = 7, cutoffEpochMs?: number): string[] {
   const opencodeDir = join(homeDir, ".local", "share", "opencode", "storage", "session");
   if (!existsSync(opencodeDir)) {
     return [];
   }
 
-  const cutoffTime = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
+  const cutoffTime = cutoffEpochMs ?? (Date.now() - sinceDays * 24 * 60 * 60 * 1000);
   const sessionFiles: string[] = [];
 
   try {
@@ -401,13 +401,13 @@ interface ClaudeSessionLine {
  * Scan for Claude Code sessions within a date range
  * Reads ~/.claude/history.jsonl for session metadata, then finds matching JSONL transcripts
  */
-export function scanClaudeSessions(homeDir: string, sinceDays: number = 7): string[] {
+export function scanClaudeSessions(homeDir: string, sinceDays: number = 7, cutoffEpochMs?: number): string[] {
   const historyPath = join(homeDir, ".claude", "history.jsonl");
   if (!existsSync(historyPath)) {
     return [];
   }
 
-  const cutoffTime = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
+  const cutoffTime = cutoffEpochMs ?? (Date.now() - sinceDays * 24 * 60 * 60 * 1000);
   const sessionFiles: string[] = [];
   const seenSessions = new Set<string>();
 

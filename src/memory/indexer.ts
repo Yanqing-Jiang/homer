@@ -470,17 +470,26 @@ export class MemoryIndexer {
       // Merge using RRF (both arrays are already sorted by their respective scores)
       const merged = mergeRRF(vectorResults, ftsItems, 60, limit);
 
-      // Map back to result format
-      const results = merged.map(m => ({
-        filePath: m.filePath,
-        chunkIndex: m.chunkIndex,
-        content: m.content,
-        context: m.context,
-        entryDate: m.entryDate,
-        rank: 0,
-        score: m.rrfScore,
-        source: m.source,
-      }));
+      // Map back to result format + deduplicate by content snippet
+      const seen = new Set<string>();
+      const results = merged
+        .map(m => ({
+          filePath: m.filePath,
+          chunkIndex: m.chunkIndex,
+          content: m.content,
+          context: m.context,
+          entryDate: m.entryDate,
+          rank: 0,
+          score: m.rrfScore,
+          source: m.source,
+        }))
+        .filter(r => {
+          // Deduplicate results that share the same content across memory_fts and session_summaries
+          const snippet = r.content.replace(/\s+/g, " ").trim().toLowerCase().slice(0, 120);
+          if (seen.has(snippet)) return false;
+          seen.add(snippet);
+          return true;
+        });
 
       logger.debug({
         query,

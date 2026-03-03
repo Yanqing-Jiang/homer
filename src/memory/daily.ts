@@ -1,3 +1,10 @@
+/**
+ * @deprecated Legacy daily log system. Session data now lives in session_summaries table
+ * (FTS5 indexed). Use stateManager.insertDaemonEvent() for writes and
+ * session_summaries queries for reads. Kept for backward compatibility with
+ * readDailyLog() callers; will be removed in a future release.
+ */
+
 import { appendFile, readFile, mkdir } from "fs/promises";
 import { existsSync } from "fs";
 import { logger } from "../utils/logger.js";

@@ -1019,7 +1019,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const time = new Date().toTimeString().slice(0, 5);
         const title = `[${context || "general"}] ${content.slice(0, 80)}`;
         const sm = getSharedStateManager();
-        sm.insertDaemonEvent(title, content);
+        sm.insertDaemonEvent(title, content, context || "general"); // context maps to project column
         // FTS5 triggers handle indexing automatically — no MemoryIndexer call needed
 
         return {
@@ -1038,6 +1038,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           file: "me" | "work" | "life" | "preferences" | "tools";
           section?: string;
         };
+
+        // CAS dedup check
+        const promoteSm = getSharedStateManager();
+        if (promoteSm.checkFactExists(content, file)) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Skipped — duplicate (already promoted to ${file}.md)`,
+              },
+            ],
+          };
+        }
+
         const filePath = `${MEMORY_BASE}/${file}.md`;
 
         let toAppend = "\n";
@@ -1047,6 +1061,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         toAppend += `${content}\n`;
 
         await appendFile(filePath, toAppend, "utf-8");
+        promoteSm.recordPromotedFact(content, file, section ?? null, "mcp");
 
         // Reindex the updated file
         await indexer.indexFile(filePath, file === "work" ? "work" : file === "life" ? "life" : "general");
@@ -1088,6 +1103,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         if (file === "daily") {
+          // Prefer session_summaries over legacy filesystem daily logs
+          const dateStr = date ?? new Date().toISOString().slice(0, 10);
+          const sm = getSharedStateManager();
+          try {
+            const sessions = sm.getDb().prepare(`
+              SELECT agent, title, summary, started_at, project
+              FROM session_summaries
+              WHERE date(COALESCE(started_at, created_at)) = ?
+                AND status = 'active'
+              ORDER BY COALESCE(started_at, created_at) ASC
+            `).all(dateStr) as Array<{ agent: string; title: string; summary: string; started_at: string | null; project: string | null }>;
+
+            if (sessions.length > 0) {
+              const formatted = sessions.map(s => {
+                const time = s.started_at?.slice(11, 16) || "??:??";
+                return `[${time}] [${s.agent}] ${s.title}\n${s.summary}`;
+              }).join("\n\n");
+              return {
+                content: [{ type: "text", text: `# ${dateStr} (from session_summaries)\n\n${formatted}` }],
+              };
+            }
+          } catch {
+            // session_summaries query failed — fall through to legacy
+          }
+
+          // Legacy fallback: filesystem daily log
           const d = date ? new Date(date) : new Date();
           const log = await readDailyLog(d);
           return {

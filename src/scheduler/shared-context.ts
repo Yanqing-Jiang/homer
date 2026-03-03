@@ -16,16 +16,12 @@ import { PATHS } from "../config/paths.js";
 // Re-export for backward compatibility (function lives in job-outputs.ts)
 export { getRecentJobOutputs } from "./job-outputs.js";
 
-const CLAUDE_MD_PATH = PATHS.claudeMd;
-const MEMORY_DIR = PATHS.memory;
-const ARCHITECTURE_MD_PATH = "/Users/yj/homer/architecture.md";
-
 const CONTEXT_FILES: Array<{ path: string; label: string }> = [
-  { path: `${MEMORY_DIR}/me.md`, label: "me.md (Identity, Goals, Ambition)" },
-  { path: `${MEMORY_DIR}/work.md`, label: "work.md (Career, Projects, Org)" },
-  { path: `${MEMORY_DIR}/life.md`, label: "life.md (Personal Context)" },
-  { path: `${MEMORY_DIR}/tools.md`, label: "tools.md (Tool Configs, Subscriptions)" },
-  { path: `${MEMORY_DIR}/preferences.md`, label: "preferences.md (Communication & Technical Preferences)" },
+  { path: PATHS.me, label: "me.md (Identity, Goals, Ambition)" },
+  { path: PATHS.work, label: "work.md (Career, Projects, Org)" },
+  { path: PATHS.life, label: "life.md (Personal Context)" },
+  { path: PATHS.tools, label: "tools.md (Tool Configs, Subscriptions)" },
+  { path: PATHS.preferences, label: "preferences.md (Communication & Technical Preferences)" },
 ];
 
 async function readFileIfExists(path: string): Promise<string | null> {
@@ -106,7 +102,7 @@ export async function buildSchedulerContext(
   } = options ?? {};
 
   // Core: CLAUDE.md (Homer's soul)
-  const claudeMd = await readFileIfExists(CLAUDE_MD_PATH);
+  const claudeMd = await readFileIfExists(PATHS.claudeMd);
   if (!claudeMd) {
     throw new Error("Cannot build scheduler context: CLAUDE.md missing");
   }
@@ -130,7 +126,7 @@ ${claudeMd}`);
   }
 
   // Architecture
-  const architectureMd = await readFileIfExists(ARCHITECTURE_MD_PATH);
+  const architectureMd = await readFileIfExists(PATHS.architectureMd);
   if (architectureMd) {
     sections.push(`# architecture.md (Homer System Design)\n\n${architectureMd}`);
   }
@@ -162,7 +158,7 @@ ${claudeMd}`);
  * Returns the raw markdown so prompts can reference live goals instead of hardcoded ones.
  */
 export async function extractCurrentGoals(): Promise<string> {
-  const meMd = await readFileIfExists(`${MEMORY_DIR}/me.md`);
+  const meMd = await readFileIfExists(PATHS.me);
   if (!meMd) return "(Goals not available — me.md missing)";
 
   // Find ## Goals and capture everything until the next ## that isn't a sub-heading of Goals
@@ -177,7 +173,7 @@ export async function extractCurrentGoals(): Promise<string> {
  * Returns the raw markdown for project-aware prompts.
  */
 export async function extractActiveProjects(): Promise<string> {
-  const workMd = await readFileIfExists(`${MEMORY_DIR}/work.md`);
+  const workMd = await readFileIfExists(PATHS.work);
   if (!workMd) return "(Active projects not available — work.md missing)";
 
   const projectsMatch = workMd.match(/## Active Projects\n([\s\S]*?)(?=\n## (?!#)|\n---|$)/);
@@ -200,7 +196,7 @@ export async function buildCondensedContext(): Promise<string> {
   ]);
 
   // Extract role from me.md first line or ## Career section
-  const meMd = await readFileIfExists(`${MEMORY_DIR}/me.md`);
+  const meMd = await readFileIfExists(PATHS.me);
   let roleSnippet = "Yanqing Jiang";
   if (meMd) {
     const roleMatch = meMd.match(/(?:^|\n)(.+?(?:Senior|Director|Manager|Engineer|Lead).+?)(?:\n|$)/i);
@@ -208,7 +204,7 @@ export async function buildCondensedContext(): Promise<string> {
   }
 
   // Extract key preferences
-  const prefsMd = await readFileIfExists(`${MEMORY_DIR}/preferences.md`);
+  const prefsMd = await readFileIfExists(PATHS.preferences);
   let prefsSnippet = "";
   if (prefsMd) {
     const techPrefs = prefsMd.match(/## Technical[^\n]*\n([\s\S]*?)(?=\n## |$)/);
