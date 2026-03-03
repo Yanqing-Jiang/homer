@@ -3,7 +3,7 @@
  *
  * Runs Gemini 3.1 Pro (opencode build agent) + Codex (gpt-5.3-codex xhigh) in parallel.
  * Each writes a .md analysis file to ~/homer/output/{gemini,codex}/.
- * Gemini Flash consolidates both into a single improvement idea.
+ * Gemini 3.1 Pro consolidates both into a single improvement idea.
  *
  * Prompt priority: critical issues/fixes → impactful optimizations → Yanqing's goals.
  * Archived ideas (feedback.md) are injected to avoid repeat suggestions.
@@ -324,7 +324,7 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
       return { success: false, output: "", error: "Both agents failed to produce output files" };
     }
 
-    // Consolidate via Gemini Flash API
+    // Consolidate via Gemini 3.1 Pro API
     const consolidationPrompt = `You are consolidating two codebase improvement analyses into a single best recommendation.
 
 ${outputs.map(o => `## ${o.agent} Analysis\n\n${o.content.slice(0, 20000)}`).join("\n\n---\n\n")}
@@ -346,7 +346,7 @@ Return ONLY a JSON object (no markdown, no explanation):
 }`;
 
     const consolidation = await executeGeminiAPI(consolidationPrompt, {
-      model: "flash3",
+      model: "pro31",  // gemini-3.1-pro-preview — falls back to flash3 if unavailable
       temperature: 0.2,
       maxTokens: 4096,
     });

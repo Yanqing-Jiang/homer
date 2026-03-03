@@ -22,6 +22,8 @@ interface ImportOptions {
   sinceDays?: number;
   agent?: AgentType;
   dryRun?: boolean;
+  /** Per-agent cutoff epoch (ms). Overrides sinceDays for agents that have a watermark. */
+  cutoffPerAgent?: Record<string, number>;
 }
 
 interface ImportStats {
@@ -103,7 +105,7 @@ export class CLISessionImporter {
    * Import sessions from all or specific CLI
    */
   async import(options: ImportOptions = {}): Promise<ImportStats> {
-    const { sinceDays = 7, agent = "all", dryRun = false } = options;
+    const { sinceDays = 7, agent = "all", dryRun = false, cutoffPerAgent } = options;
 
     const stats: ImportStats = {
       scanned: 0,
@@ -113,28 +115,28 @@ export class CLISessionImporter {
       errors: 0,
     };
 
-    logger.info({ sinceDays, agent, dryRun }, "Starting CLI session import");
+    logger.info({ sinceDays, agent, dryRun, hasCutoffs: !!cutoffPerAgent }, "Starting CLI session import");
 
     // Scan for session files
     const sessionFiles: Array<{ agent: string; path: string }> = [];
 
     if (agent === "all" || agent === "codex") {
-      const codexFiles = scanCodexSessions(this.homeDir, sinceDays);
+      const codexFiles = scanCodexSessions(this.homeDir, sinceDays, cutoffPerAgent?.codex);
       sessionFiles.push(...codexFiles.map((path) => ({ agent: "codex", path })));
     }
 
     if (agent === "all" || agent === "kimi") {
-      const kimiFiles = scanKimiSessions(this.homeDir, sinceDays);
+      const kimiFiles = scanKimiSessions(this.homeDir, sinceDays, cutoffPerAgent?.kimi);
       sessionFiles.push(...kimiFiles.map((path) => ({ agent: "kimi", path })));
     }
 
     if (agent === "all" || agent === "claude") {
-      const claudeFiles = scanClaudeSessions(this.homeDir, sinceDays);
+      const claudeFiles = scanClaudeSessions(this.homeDir, sinceDays, cutoffPerAgent?.claude);
       sessionFiles.push(...claudeFiles.map((path) => ({ agent: "claude", path })));
     }
 
     if (agent === "all" || agent === "opencode") {
-      const opencodeFiles = scanOpencodeSessions(this.homeDir, sinceDays);
+      const opencodeFiles = scanOpencodeSessions(this.homeDir, sinceDays, cutoffPerAgent?.opencode);
       sessionFiles.push(...opencodeFiles.map((path) => ({ agent: "opencode", path })));
     }
 

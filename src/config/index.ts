@@ -22,6 +22,8 @@ const configSchema = z.object({
     memory: z.string().default("/Users/yj/memory"),
     claudeDir: z.string().default("/Users/yj/.claude"),
     homerData: z.string().default("/Users/yj/homer/data"),
+    homerRoot: z.string().default("/Users/yj/homer"),
+    archive: z.string().default("/Users/yj/archive"),
   }),
   web: z.object({
     enabled: z.boolean().default(true),
@@ -87,6 +89,8 @@ function loadConfig(): Config {
       memory: process.env.MEMORY_PATH ?? "/Users/yj/memory",
       claudeDir: process.env.CLAUDE_DIR ?? "/Users/yj/.claude",
       homerData: process.env.HOMER_DATA_PATH ?? "/Users/yj/homer/data",
+      homerRoot: process.env.HOMER_ROOT ?? "/Users/yj/homer",
+      archive: process.env.ARCHIVE_PATH ?? "/Users/yj/archive",
     },
     web: {
       enabled: process.env.WEB_ENABLED !== "false",
