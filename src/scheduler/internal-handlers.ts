@@ -17,6 +17,9 @@ import { getClaudeAuthStatus } from "../utils/claude-auth.js";
 import { checkGeminiAPIHealth } from "../executors/gemini.js";
 import { readFileSync, existsSync } from "fs";
 import { createHash } from "crypto";
+import { execFile } from "child_process";
+import { getConnectivityMonitor } from "../heartbeat/index.js";
+import { processRegistry } from "../process/registry.js";
 
 interface InternalJobContext {
   stateManager: StateManager;
@@ -312,6 +315,38 @@ async function runHealthCheck(
     issues.push("🔴 Gemini API: health check threw");
   }
 
+  // Connectivity check (absorbed from standalone ConnectivityMonitor timer)
+  try {
+    const connectivityMonitor = getConnectivityMonitor();
+    if (connectivityMonitor) {
+      const statuses = await connectivityMonitor.checkAll();
+      for (const status of statuses) {
+        if (!status.healthy) {
+          issues.push(`🔴 Connectivity: ${status.name} unreachable${status.error ? ` (${status.error})` : ""}`);
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn({ error: err }, "Connectivity check in health handler failed");
+  }
+
+  // Process monitoring: check for active process count and long-running processes
+  try {
+    const activeProcesses = processRegistry.getActive();
+    if (activeProcesses.length > 5) {
+      issues.push(`🟡 Process count high: ${activeProcesses.length} active processes`);
+    }
+    for (const proc of activeProcesses) {
+      const ageMs = now - proc.spawnedAt;
+      if (ageMs > 30 * 60 * 1000 && !proc.settled) {
+        const ageMin = Math.round(ageMs / 60000);
+        issues.push(`🟡 Long process: PID ${proc.pid} (${proc.command.slice(0, 50)}) running ${ageMin}m`);
+      }
+    }
+  } catch (err) {
+    logger.warn({ error: err }, "Process monitoring in health handler failed");
+  }
+
   if (issues.length === 0) {
     const state = loadHealthAlertState(db);
     let output = "All systems healthy";
@@ -381,10 +416,108 @@ async function runHealthCheck(
     saveHealthAlertState(db, state);
   }
 
+  // LLM triage for recurring health issues (circuit breaker: max 5 per day)
+  let triageOutput = "";
+  try {
+    const triageCountRow = db.prepare(
+      "SELECT COUNT(*) as cnt FROM process_cleanup_runs WHERE trigger = 'health-triage' AND datetime(created_at) > datetime('now', '-24 hours')"
+    ).get() as { cnt: number } | undefined;
+    const triageCount = triageCountRow?.cnt ?? 0;
+
+    // Only triage if: issues are critical, alert was sent, and under daily limit
+    if (hasCritical && alertSent && triageCount < 5) {
+      const triageResult = await runHealthLLMTriage(issues, ctx);
+      if (triageResult) {
+        triageOutput = `, triage: ${triageResult.action}`;
+        // Log triage to audit table
+        db.prepare(
+          `INSERT INTO process_cleanup_runs (trigger, processes_scanned, processes_killed, processes_spared, details)
+           VALUES ('health-triage', ?, 0, 0, ?)`
+        ).run(issues.length, JSON.stringify({ action: triageResult.action, reason: triageResult.reason, issues }));
+
+        // Execute triage decision
+        if (triageResult.action === "restart_job" && triageResult.jobId) {
+          try {
+            // Reset consecutive failures for the stuck job
+            const resetStmt = db.prepare(
+              "UPDATE scheduled_job_state SET is_running = 0, consecutive_failures = 0 WHERE job_id = ?"
+            );
+            resetStmt.run(triageResult.jobId);
+            logger.info({ jobId: triageResult.jobId }, "Health triage: reset job state");
+          } catch (resetErr) {
+            logger.warn({ error: resetErr, jobId: triageResult.jobId }, "Health triage: failed to reset job");
+          }
+        }
+      }
+    }
+  } catch (triageErr) {
+    logger.warn({ error: triageErr }, "Health check LLM triage failed");
+  }
+
   return {
     success: true,
-    output: `${issues.length} issue(s) found${alertSent ? ", alert sent" : ", alert FAILED to send; retry scheduled"}`,
+    output: `${issues.length} issue(s) found${alertSent ? ", alert sent" : ", alert FAILED to send; retry scheduled"}${triageOutput}`,
   };
+}
+
+interface HealthTriageResult {
+  action: "fix" | "restart_job" | "disable_job" | "escalate";
+  reason: string;
+  jobId?: string;
+}
+
+async function runHealthLLMTriage(
+  issues: string[],
+  _ctx: InternalJobContext
+): Promise<HealthTriageResult | null> {
+  const claudeBin = process.env.CLAUDE_BIN || "/Users/yj/.local/bin/claude";
+  const prompt = `Homer health check found these issues:
+
+${issues.join("\n")}
+
+Decide ONE action. Return ONLY a raw JSON object (no markdown, no explanation):
+{"action": "escalate", "reason": "...", "jobId": "optional-job-id"}
+
+Valid actions:
+- "restart_job" — Reset a specific stuck/failing job's state so it runs next cycle. Include "jobId".
+- "disable_job" — Disable a specific job that keeps failing. Include "jobId".
+- "escalate" — Send Telegram alert only (already done). Use when uncertain or issue is external.
+- "fix" — You identified a clear issue that needs code changes. Use sparingly.
+
+Rules:
+- Prefer "escalate" for credential issues (user must fix manually)
+- Prefer "restart_job" for stuck jobs with < 5 consecutive failures
+- Prefer "escalate" for connectivity issues (transient)
+- Default to "escalate" if uncertain`;
+
+  return new Promise((resolve) => {
+    execFile(
+      claudeBin,
+      ["-p", prompt, "--output-format", "text", "-m", "sonnet"],
+      { timeout: 30_000, maxBuffer: 1024 * 64 },
+      (error, stdout) => {
+        if (error || !stdout) {
+          resolve(null);
+          return;
+        }
+
+        try {
+          const match = stdout.match(/\{[^{}]*\}/);
+          if (match) {
+            const parsed = JSON.parse(match[0]) as HealthTriageResult;
+            if (["fix", "restart_job", "disable_job", "escalate"].includes(parsed.action)) {
+              resolve(parsed);
+              return;
+            }
+          }
+        } catch {
+          // Parse failed
+        }
+
+        resolve(null);
+      }
+    );
+  });
 }
 
 async function runHandler(

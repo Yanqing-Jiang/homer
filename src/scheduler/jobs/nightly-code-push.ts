@@ -11,11 +11,11 @@
 import { execSync } from "child_process";
 import { existsSync } from "fs";
 import { logger } from "../../utils/logger.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
 
 const PROJECT_DIR = "/Users/yj/homer";
 const PUSH_RETRIES = 3;
 const PUSH_RETRY_DELAY_MS = 5_000;
-const CLAUDE_BIN = "/Users/yj/.local/bin/claude";
 const GH_BIN = "/opt/homebrew/bin/gh";
 const MAX_DIFF_CHARS = 12_000;
 
@@ -62,30 +62,22 @@ Write a commit message with:
 
 Output ONLY the commit message. No preamble, no explanation, no markdown fences.`;
 
-    // Unset CLAUDECODE so the daemon can spawn Claude without "nested session" error
-    // Strip GH_TOKEN to avoid leaking credentials to the LLM subprocess
-    const env = { ...process.env };
-    delete env["CLAUDECODE"];
-    delete env["GH_TOKEN"];
+    // Use async executeClaudeCommand (detached process group) to avoid
+    // blocking the event loop and prevent signal propagation to the daemon.
+    const result = await executeClaudeCommand(prompt, {
+      model: "sonnet",
+      cwd: PROJECT_DIR,
+      timeout: 60_000,
+    });
 
-    const result = execSync(
-      `${CLAUDE_BIN} -p --model sonnet --tools "" --no-session-persistence`,
-      {
-        cwd: PROJECT_DIR,
-        encoding: "utf-8",
-        timeout: 60_000,
-        input: prompt,
-        env,
-      }
-    ).trim();
-
-    if (!result || result.length < 10) {
+    const output = result.output?.trim() ?? "";
+    if (!output || output.length < 10) {
       logger.warn(`${logPrefix()} Claude returned empty response, using fallback`);
       return fallback;
     }
 
     logger.info(`${logPrefix()} Generated commit message via Claude Sonnet`);
-    return result;
+    return output;
   } catch (err: any) {
     logger.warn(`${logPrefix()} Claude commit generation failed: ${err.message ?? err}, using fallback`);
     return fallback;

@@ -18,6 +18,7 @@ import {
 } from "../../ideas/parser.js";
 import * as dao from "../../ideas/dao.js";
 import { PATHS } from "../../config/paths.js";
+import { staleMapCleaner } from "../../utils/stale-map-cleaner.js";
 
 const IDEAS_FILE = PATHS.ideasMd;
 const FEEDBACK_FILE = PATHS.feedback;
@@ -51,29 +52,13 @@ const pendingImpressions = new Map<string, ImpressionRecord>();
 
 let stateManagerRef: StateManager | null = null;
 
-// Cleanup stale entries every 5 minutes (entries older than 1 hour)
-setInterval(() => {
-  const staleThreshold = Date.now() - 3600000; // 1 hour
-  for (const [msgId, pending] of pendingDenyReasons.entries()) {
-    if (pending.createdAt < staleThreshold) {
-      pendingDenyReasons.delete(msgId);
-      logger.info({ ideaId: pending.ideaId, msgId }, "Cleaned up stale deny request");
-    }
-  }
-  for (const [msgId, pending] of pendingInstructionRequests.entries()) {
-    if (pending.createdAt < staleThreshold) {
-      pendingInstructionRequests.delete(msgId);
-      logger.info({ type: pending.type, id: pending.id, msgId }, "Cleaned up stale instruction request");
-    }
-  }
-  // Expire impression records older than 24 hours
-  const impressionStaleThreshold = Date.now() - 86400000; // 24 hours
-  for (const [ideaId, record] of pendingImpressions.entries()) {
-    if (record.displayedAt < impressionStaleThreshold) {
-      pendingImpressions.delete(ideaId);
-    }
-  }
-}, 300000); // Every 5 minutes
+// Register Maps for cleanup via shared StaleMapCleaner (30min interval, replaces per-module setInterval)
+staleMapCleaner.register(pendingDenyReasons, "approval:deny");
+staleMapCleaner.register(pendingInstructionRequests, "approval:instructions");
+staleMapCleaner.register(pendingImpressions, "approval:impressions", {
+  maxAgeMs: 86400000, // 24 hours
+  timestampKey: "displayedAt",
+});
 
 /**
  * Format an idea for ideas.md (LEGACY — only used for ideas.md write-back)

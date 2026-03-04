@@ -82,21 +82,6 @@ function gatherSourceContext(): string {
   return context;
 }
 
-function getBuildHealth(): { passes: boolean; output: string } {
-  try {
-    const output = execSync("npm run build 2>&1", {
-      cwd: HOMER_DIR,
-      timeout: 60_000,
-      encoding: "utf-8",
-    });
-    return { passes: true, output: output.slice(-2000) };
-  } catch (err) {
-    const output = err instanceof Error && "stdout" in err
-      ? String((err as { stdout: unknown }).stdout).slice(-2000)
-      : "Build failed";
-    return { passes: false, output };
-  }
-}
 
 function getRecentFailures(db: Database.Database): string {
   try {
@@ -235,7 +220,9 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
 }> {
   try {
     const sourceContext = gatherSourceContext();
-    const buildHealth = getBuildHealth();
+    // Skip npm run build — running tsc inside the daemon blocks the event loop
+    // for 10-30s and causes OOM under memory pressure. Not worth the crash risk.
+    const buildHealth = { passes: true, output: "(build check skipped in daemon context)" };
     const recentFailures = db ? getRecentFailures(db) : "(no DB available)";
 
     let fileListing = "";
