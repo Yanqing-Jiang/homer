@@ -34,21 +34,31 @@ export interface ProcessRecord {
 
 // Throttle activity updates to every 10s per process
 const ACTIVITY_THROTTLE_MS = 10_000;
-const SNAPSHOT_INTERVAL_MS = 60_000;
 
 class ProcessRegistryImpl {
   private processes = new Map<number, ProcessRecord>();
   private activityTimers = new Map<number, number>(); // pid -> last update ts
   private db: Database.Database | null = null;
-  private snapshotTimer: ReturnType<typeof setInterval> | null = null;
+  private tickCount = 0;
 
   /**
    * Initialize with DB reference for snapshot/recovery.
    * Call once after StateManager is ready.
+   * Note: snapshot timer is driven externally via tickSnapshot() from SessionTimeoutManager.
    */
   init(db: Database.Database): void {
     this.db = db;
-    this.snapshotTimer = setInterval(() => this.snapshot(), SNAPSHOT_INTERVAL_MS);
+  }
+
+  /**
+   * Called externally (by SessionTimeoutManager) on each check cycle (~30s).
+   * Snapshots every 2nd call to maintain ~60s interval.
+   */
+  tickSnapshot(): void {
+    this.tickCount++;
+    if (this.tickCount % 2 === 0) {
+      this.snapshot();
+    }
   }
 
   /**
@@ -315,14 +325,9 @@ class ProcessRegistryImpl {
   }
 
   /**
-   * Stop the snapshot timer.
+   * Run a final snapshot on shutdown.
    */
   stop(): void {
-    if (this.snapshotTimer) {
-      clearInterval(this.snapshotTimer);
-      this.snapshotTimer = null;
-    }
-    // Final snapshot
     this.snapshot();
   }
 }

@@ -23,6 +23,7 @@ import { executeClaudeCommand } from "./executors/claude.js";
 import { CLIRunManager } from "./executors/cli-runner.js";
 import { runMigrations } from "./state/migrations/index.js";
 import { initConnectivityMonitor } from "./heartbeat/index.js";
+import { staleMapCleaner } from "./utils/stale-map-cleaner.js";
 import { processRegistry } from "./process/registry.js";
 import { SessionTimeoutManager } from "./process/timeout-manager.js";
 import { cleanupScheduler } from "./process/cleanup-scheduler.js";
@@ -133,6 +134,12 @@ async function main(): Promise<void> {
     logger.warn({ count: clearedFlags }, "Cleared stale scheduled job run flags");
   }
 
+  // Mark orphaned job runs (started but never completed) as failed
+  const orphanedRuns = stateManager.cleanupOrphanedJobRuns();
+  if (orphanedRuns > 0) {
+    logger.warn({ count: orphanedRuns }, "Marked orphaned job runs as failed (daemon restart)");
+  }
+
   // Initialize queue manager
   const queueManager = new QueueManager(stateManager);
 
@@ -198,14 +205,16 @@ async function main(): Promise<void> {
   setScheduler(scheduler);
   await scheduler.start();
 
-  // Initialize connectivity monitor (30-minute health checks)
+  // Initialize connectivity monitor (no self-ticking timer — called by health check job)
   const connectivityMonitor = initConnectivityMonitor({
     bot,
     chatId: config.telegram.allowedChatId,
     alertOnFailure: true,
-    checkIntervalMs: 30 * 60 * 1000, // 30 minutes
   });
-  connectivityMonitor.start();
+  // One-time initial connectivity check after startup
+  connectivityMonitor.checkAll().catch((err) => {
+    logger.warn({ error: err }, "Initial connectivity check failed");
+  });
 
   // Initialize queue worker
   const queueWorker = new QueueWorker(queueManager, stateManager, bot);
@@ -264,8 +273,9 @@ async function main(): Promise<void> {
     processRegistry.stop();
   });
   registerShutdownTask(() => {
-    logger.info("Shutting down connectivity monitor...");
+    logger.info("Stopping connectivity monitor and stale map cleaner...");
     connectivityMonitor.stop();
+    staleMapCleaner.stop();
   });
   registerShutdownTask(() => {
     logger.info("Shutting down scheduler...");

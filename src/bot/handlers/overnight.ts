@@ -31,6 +31,7 @@ import {
   recordImpression,
 } from "../../feedback/events.js";
 import { updatePreferences, type PreferenceSignal } from "../../preferences/engine.js";
+import { staleMapCleaner } from "../../utils/stale-map-cleaner.js";
 
 // ============================================
 // STATE
@@ -60,23 +61,12 @@ interface ImpressionRecord {
 }
 const pendingImpressions = new Map<string, ImpressionRecord>();
 
-// Cleanup stale clarifications every 5 minutes
-setInterval(() => {
-  const staleThreshold = Date.now() - 3600000; // 1 hour
-  for (const [msgId, pending] of pendingClarifications.entries()) {
-    if (pending.createdAt < staleThreshold) {
-      pendingClarifications.delete(msgId);
-      logger.debug({ chatId: pending.chatId }, "Cleaned up stale overnight clarification");
-    }
-  }
-  // Expire impression records older than 24 hours
-  const impressionStaleThreshold = Date.now() - 86400000;
-  for (const [taskId, record] of pendingImpressions.entries()) {
-    if (record.displayedAt < impressionStaleThreshold) {
-      pendingImpressions.delete(taskId);
-    }
-  }
-}, 300000);
+// Register Maps for cleanup via shared StaleMapCleaner (30min interval, replaces per-module setInterval)
+staleMapCleaner.register(pendingClarifications, "overnight:clarifications");
+staleMapCleaner.register(pendingImpressions, "overnight:impressions", {
+  maxAgeMs: 86400000, // 24 hours
+  timestampKey: "displayedAt",
+});
 
 // ============================================
 // TASK SPLITTING

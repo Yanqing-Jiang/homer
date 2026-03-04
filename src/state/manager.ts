@@ -1146,6 +1146,21 @@ export class StateManager {
     return result.changes;
   }
 
+  /**
+   * Mark orphaned job runs (started but never completed) as failed.
+   * Call on startup after clearing is_running flags.
+   */
+  cleanupOrphanedJobRuns(): number {
+    const result = this._db.prepare(`
+      UPDATE scheduled_job_runs
+      SET completed_at = CURRENT_TIMESTAMP,
+          success = 0,
+          error = 'Daemon restarted before job completed'
+      WHERE completed_at IS NULL
+    `).run();
+    return result.changes;
+  }
+
   // ============================================
   // Pending Plans (Implementation Approval)
   // ============================================
