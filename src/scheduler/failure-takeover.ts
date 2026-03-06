@@ -45,12 +45,36 @@ const MAX_PER_JOB_DAILY = 2;
 /** Minimum backoff delay (ms) before retrying a job that has failed recently */
 const BASE_BACKOFF_MS = 30_000; // 30 seconds
 
+/** StateManager ref for recovering takeover counts from DB */
+let _stateManagerRef: StateManager | null = null;
+
 function resetDailyCountIfNeeded(): void {
   const today = new Date().toISOString().slice(0, 10);
   if (today !== lastCountResetDate) {
     takeoverCountToday = 0;
     perJobCountToday.clear();
     lastCountResetDate = today;
+
+    // Recover today's counts from DB (survives daemon restart)
+    if (_stateManagerRef) {
+      try {
+        const db = _stateManagerRef.getDb();
+        const rows = db.prepare(
+          `SELECT job_id, COUNT(*) as cnt FROM failure_takeover_runs
+           WHERE date(created_at) = ?
+           GROUP BY job_id`
+        ).all(today) as Array<{ job_id: string; cnt: number }>;
+        for (const row of rows) {
+          perJobCountToday.set(row.job_id, row.cnt);
+          takeoverCountToday += row.cnt;
+        }
+        if (takeoverCountToday > 0) {
+          logger.info({ takeoverCountToday }, "Recovered takeover counts from DB");
+        }
+      } catch {
+        // Best effort — start from 0 if DB query fails (table may not exist yet)
+      }
+    }
   }
 }
 
@@ -295,6 +319,7 @@ export async function runFailureTakeover(params: {
   chatId: number;
 }): Promise<TakeoverResult | null> {
   const { job, failedResult, runId, stateManager, bot, chatId } = params;
+  _stateManagerRef = stateManager;
   const jobId = job.config.id;
   const startTime = Date.now();
 
@@ -462,6 +487,15 @@ export async function runFailureTakeover(params: {
           exitCode: 1,
           duration: 0,
         };
+      } finally {
+        // Always release is_running lock after takeover retry
+        try {
+          stateManager.getDb().prepare(
+            "UPDATE scheduled_job_state SET is_running = 0 WHERE job_id = ?"
+          ).run(jobId);
+        } catch {
+          // Table may not exist or job state row may be missing
+        }
       }
     }
 

@@ -7,6 +7,7 @@ import type Database from "better-sqlite3";
 import type { Bot } from "grammy";
 import { InlineKeyboard } from "grammy";
 import { geminiUrl } from "../../job-hunt/config.js";
+import { routeTelegramNotification } from "../../notifications/telegram-router.js";
 import { logger } from "../../utils/logger.js";
 
 interface FollowUpCandidate {
@@ -31,6 +32,8 @@ export async function runJobHuntFollowup(
   success: boolean;
   output: string;
   error?: string;
+  draftsGenerated: number;
+  sentToTelegram: number;
 }> {
   try {
     // Find applications needing follow-up
@@ -45,10 +48,16 @@ export async function runJobHuntFollowup(
     `).all() as FollowUpCandidate[];
 
     if (candidates.length === 0) {
-      return { success: true, output: "No follow-ups due today" };
+      return {
+        success: true,
+        output: "No follow-ups due today",
+        draftsGenerated: 0,
+        sentToTelegram: 0,
+      };
     }
 
-    const drafts: string[] = [];
+    let draftsGenerated = 0;
+    let sentToTelegram = 0;
 
     for (const candidate of candidates) {
       // Check if we already sent a follow-up recently
@@ -64,7 +73,7 @@ export async function runJobHuntFollowup(
       // Generate follow-up email draft using Gemini
       const draft = await generateFollowUpDraft(candidate);
       if (draft) {
-        drafts.push(`${candidate.company} - ${candidate.title}:\n${draft.slice(0, 200)}...`);
+        draftsGenerated++;
 
         // Look up recruiter email from recent inbound emails for this job
         const emailRow = db.prepare(`
@@ -102,10 +111,25 @@ export async function runJobHuntFollowup(
               .text("Edit", `a:fu:${draftId}:edit`)
               .text("Discard", `a:fu:${draftId}:discard`);
 
-            await bot.api.sendMessage(chatId, msg, {
-              parse_mode: "HTML",
-              reply_markup: keyboard,
+            const delivery = await routeTelegramNotification({
+              db,
+              sourceType: "job_handler",
+              sourceId: `followup_draft:${draftId}`,
+              intent: "decision_request",
+              title: `${candidate.company} — ${candidate.title}`,
+              messageText: msg,
+              metadata: {
+                applicationId: candidate.app_id,
+                jobId: candidate.job_id,
+              },
+              deliver: async () => bot.api.sendMessage(chatId, msg, {
+                parse_mode: "HTML",
+                reply_markup: keyboard,
+              }),
             });
+            if (delivery.decision === "sent") {
+              sentToTelegram++;
+            }
           } catch (err) {
             logger.warn({ error: err, draftId }, "Failed to send follow-up to Telegram");
           }
@@ -119,16 +143,27 @@ export async function runJobHuntFollowup(
       }
     }
 
-    const output = drafts.length > 0
-      ? `Generated ${drafts.length} follow-up drafts (awaiting Telegram approval):\n${drafts.join("\n\n")}`
-      : "No follow-ups needed";
+    const parts: string[] = [];
+    if (draftsGenerated > 0) parts.push(`${draftsGenerated} follow-up drafts generated`);
+    if (sentToTelegram > 0) parts.push(`${sentToTelegram} sent for approval`);
+    if (draftsGenerated > sentToTelegram) {
+      const undelivered = draftsGenerated - sentToTelegram;
+      parts.push(`${undelivered} approval prompt${undelivered === 1 ? "" : "s"} not delivered`);
+    }
+    const output = parts.join(", ") || "No follow-ups needed";
 
-    logger.info({ count: drafts.length }, "Follow-up generation completed");
-    return { success: true, output };
+    logger.info({ count: draftsGenerated, sentToTelegram }, "Follow-up generation completed");
+    return { success: true, output, draftsGenerated, sentToTelegram };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     logger.error({ error }, "Follow-up generation failed");
-    return { success: false, output: "", error: msg };
+    return {
+      success: false,
+      output: "",
+      error: msg,
+      draftsGenerated: 0,
+      sentToTelegram: 0,
+    };
   }
 }
 

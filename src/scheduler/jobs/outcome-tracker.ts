@@ -10,7 +10,8 @@
 import type Database from "better-sqlite3";
 import type { Bot } from "grammy";
 import { InlineKeyboard } from "grammy";
-import { executeGeminiAPI } from "../../executors/gemini.js";
+import { executeFlashViaOpenCode } from "../../executors/gemini.js";
+import { routeTelegramNotification } from "../../notifications/telegram-router.js";
 import { logger } from "../../utils/logger.js";
 
 interface OutcomeCheck {
@@ -139,15 +140,17 @@ Based on the evidence, determine the outcome:
 Return JSON: { "outcome": "yes|no|partial|ambiguous", "confidence": 0.0-1.0, "evidence": "one sentence summary" }`;
 
   try {
-    const result = await executeGeminiAPI(prompt, {
-      model: "flash3",
-      maxTokens: 200,
-      responseMimeType: "application/json",
-    });
+    const result = await executeFlashViaOpenCode(
+      prompt + "\n\nReturn ONLY valid JSON, no markdown fences.",
+      { timeout: 60_000 },
+    );
 
     if (result.exitCode === 0 && result.output) {
-      const parsed = JSON.parse(result.output) as EvidenceResult;
-      return parsed;
+      const jsonMatch = result.output.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]) as EvidenceResult;
+        return parsed;
+      }
     }
   } catch (err) {
     logger.warn({ error: err, checkId: check.id }, "Failed to evaluate outcome with LLM");
@@ -160,7 +163,14 @@ export async function runOutcomeTracker(
   db: Database.Database,
   bot?: Bot,
   chatId?: number,
-): Promise<{ success: boolean; output: string; error?: string }> {
+): Promise<{
+  success: boolean;
+  output: string;
+  error?: string;
+  autoResolved: number;
+  sentToTelegram: number;
+  errors: number;
+}> {
   try {
     // Get due outcome checks (up to 5)
     const dueChecks = db.prepare(`
@@ -171,7 +181,13 @@ export async function runOutcomeTracker(
     `).all() as OutcomeCheck[];
 
     if (dueChecks.length === 0) {
-      return { success: true, output: "No outcome checks due" };
+      return {
+        success: true,
+        output: "No outcome checks due",
+        autoResolved: 0,
+        sentToTelegram: 0,
+        errors: 0,
+      };
     }
 
     let autoResolved = 0;
@@ -207,11 +223,26 @@ export async function runOutcomeTracker(
             `Did this lead to a positive outcome?`;
 
           try {
-            await bot.api.sendMessage(chatId, msg, {
-              parse_mode: "HTML",
-              reply_markup: createOutcomeKeyboard(check.id),
+            const delivery = await routeTelegramNotification({
+              db,
+              sourceType: "job_handler",
+              sourceId: `outcome_check:${check.id}`,
+              intent: "decision_request",
+              title: check.source_title,
+              messageText: msg,
+              metadata: {
+                outcomeCheckId: check.id,
+                sourceType: check.source_type,
+                sourceId: check.source_id,
+              },
+              deliver: async () => bot.api.sendMessage(chatId, msg, {
+                parse_mode: "HTML",
+                reply_markup: createOutcomeKeyboard(check.id),
+              }),
             });
-            sentToTelegram++;
+            if (delivery.decision === "sent") {
+              sentToTelegram++;
+            }
           } catch (err) {
             logger.warn({ error: err, checkId: check.id }, "Failed to send outcome check to Telegram");
             errors++;
@@ -234,9 +265,19 @@ export async function runOutcomeTracker(
     return {
       success: true,
       output: `${dueChecks.length} checks processed: ${parts.join(", ") || "none actionable"}`,
+      autoResolved,
+      sentToTelegram,
+      errors,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { success: false, output: "", error: message };
+    return {
+      success: false,
+      output: "",
+      error: message,
+      autoResolved: 0,
+      sentToTelegram: 0,
+      errors: 1,
+    };
   }
 }

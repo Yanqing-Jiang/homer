@@ -5,7 +5,9 @@
  * Integrates with ideas and plans systems for lifecycle management.
  */
 
+import type Database from "better-sqlite3";
 import { Bot, InlineKeyboard } from "grammy";
+import { routeTelegramNotification } from "../../notifications/telegram-router.js";
 import { logger } from "../../utils/logger.js";
 import { config } from "../../config/index.js";
 import type { StateManager } from "../../state/manager.js";
@@ -815,10 +817,22 @@ export async function sendProposalForApproval(
 export async function sendProposalBatch(
   bot: Bot,
   chatId: number,
-  proposals: Proposal[]
+  proposals: Proposal[],
+  options: {
+    db?: Database.Database;
+    sourceId?: string;
+  } = {}
 ): Promise<void> {
   if (proposals.length === 0) {
-    await bot.api.sendMessage(chatId, "No new proposals to review.");
+    await routeTelegramNotification({
+      db: options.db,
+      sourceType: "bot_handler",
+      sourceId: options.sourceId ?? "proposal_batch",
+      intent: "operational_status",
+      title: "Proposal Batch",
+      messageText: "No new proposals to review.",
+      reason: "no_new_proposals",
+    });
     return;
   }
 
@@ -996,7 +1010,10 @@ export async function checkSnoozedProposals(
       parse_mode: "Markdown",
     });
 
-    await sendProposalBatch(bot, chatId, proposals);
+    await sendProposalBatch(bot, chatId, proposals, {
+      db: stateManager.db,
+      sourceId: "proposal_batch:resurfaced",
+    });
 
     logger.info({ count: proposals.length }, "Resurfaced snoozed proposals");
   } catch (error) {

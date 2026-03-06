@@ -1,5 +1,5 @@
 import type { ParsedSession } from "./parsers.js";
-import { executeGeminiAPI } from "../executors/gemini.js";
+import { executeFlashViaOpenCode } from "../executors/gemini.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -67,15 +67,12 @@ Messages: ${session.messageCount}
 
 ${conversationText}`;
 
-  const result = await executeGeminiAPI(prompt, {
-    model: "gemini-3-flash-preview",
-    temperature: 0.2,
-    timeout: 30000,
-    useGrounding: false,
+  const result = await executeFlashViaOpenCode(prompt, {
+    timeout: 60_000,
   });
 
   if (result.exitCode !== 0) {
-    throw new Error(`Gemini API error: ${result.output}`);
+    throw new Error(`OpenCode Flash error: ${result.output}`);
   }
 
   return result.output.trim();

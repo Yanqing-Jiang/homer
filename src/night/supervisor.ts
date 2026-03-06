@@ -7,7 +7,7 @@
 
 import { writeFile, mkdir } from "fs/promises";
 import { join } from "path";
-import { existsSync } from "fs";
+import { existsSync, mkdirSync } from "fs";
 import { randomUUID } from "crypto";
 import type {
   NightSession,
@@ -17,13 +17,14 @@ import type {
 } from "./types.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import { buildContextPack } from "./context.js";
-import { JobQueue, shouldAutoExecute, formatJobsForBriefing } from "./jobs.js";
+import { JobQueue } from "./jobs.js";
 import { executeGeminiWithFallback } from "../executors/opencode-cli.js";
-import { executeClaudeCommand } from "../executors/claude.js";
 import { logger } from "../utils/logger.js";
 import { OvernightTaskStore, PipelineOrchestrator } from "../overnight/index.js";
 import type { OvernightTask, YouTubeSummaryMetadata } from "../overnight/types.js";
 import type Database from "better-sqlite3";
+import type { Bot } from "grammy";
+import { InlineKeyboard } from "grammy";
 import { storeJobArtifact } from "../scheduler/jobs/artifact-store.js";
 // dedupeIdeasFile import removed — dedup handled by dedicated idea-dedup cron job
 import {
@@ -45,16 +46,22 @@ export class NightSupervisor {
   private jobRunId: number | null = null;
   private overnightStore: OvernightTaskStore | null = null;
   private onOvernightMilestone?: (chatId: number, milestone: string, message: string) => Promise<void>;
+  private bot: Bot | null = null;
+  private chatId: number = 0;
 
   constructor(config: Partial<NightModeConfig> = {}, options?: {
     db?: Database.Database;
     jobRunId?: number;
+    bot?: Bot;
+    chatId?: number;
     onOvernightMilestone?: (chatId: number, milestone: string, message: string) => Promise<void>;
   }) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.jobQueue = new JobQueue();
     this.db = options?.db ?? null;
     this.jobRunId = options?.jobRunId ?? null;
+    this.bot = options?.bot ?? null;
+    this.chatId = options?.chatId ?? 0;
     this.onOvernightMilestone = options?.onOvernightMilestone;
     if (this.db) {
       this.overnightStore = new OvernightTaskStore(this.db);
@@ -115,7 +122,7 @@ export class NightSupervisor {
       const jobs = this.jobQueue.createJobsFromPlan(plan);
       this.session.jobs = jobs;
 
-      // Save the plan
+      // Save the plan to disk
       await this.savePlan(plan);
 
       // Store plan as artifact for lineage tracking
@@ -124,34 +131,19 @@ export class NightSupervisor {
           JSON.stringify(plan, null, 2), { jobCount: jobs.length });
       }
 
+      // Save plan to DB for approval flow
+      const planId = await this.savePlanToDB(plan);
+
       if (dryRun) {
         logger.info({ jobCount: jobs.length }, "Dry run - skipping job execution");
         return this.endSession();
       }
 
-      // Phase 3: Execute jobs
-      await this.executeJobs();
+      // Send plan to Telegram for approval (wait-for-approval mode)
+      await this.sendPlanToTelegram(planId, plan);
 
-      // Store execution results as artifact
-      if (this.db && this.jobRunId) {
-        storeJobArtifact(this.db, this.jobRunId, "night-supervisor", "execution-results", "json",
-          JSON.stringify({
-            jobsCompleted: this.session.jobsCompleted,
-            jobsFailed: this.session.jobsFailed,
-            findings: this.session.findings,
-            proposals: this.session.proposals,
-          }, null, 2));
-      }
-
-      // Phase 4: Synthesis - optional morning briefing generation
-      if (this.config.generateMorningBriefing) {
-        await this.setPhase("synthesis");
-        await this.generateBriefing(contextPack.dailyLog);
-      } else {
-        this.session.findings.push("Morning briefing skipped by Night Supervisor (scheduled morning-brief job is source of truth).");
-      }
-
-      // Phase 5: Finalize
+      // STOP — no execution, no briefing. User approves via Telegram.
+      this.session.findings.push("Night plan saved and sent to Telegram for approval. Execution deferred until user approval.");
       await this.setPhase("briefing");
       await this.saveSessionState();
 
@@ -478,241 +470,16 @@ Be selective - quality over quantity.`;
   }
 
   // ----------------------------------------
-  // Job Execution
-  // ----------------------------------------
-
-  private async executeJobs(): Promise<void> {
-    const startTime = Date.now();
-    const maxDuration = this.config.totalTimeout;
-
-    while (Date.now() - startTime < maxDuration) {
-      const job = this.jobQueue.getNextExecutableJob();
-      if (!job) {
-        // No more executable jobs
-        break;
-      }
-
-      // Check if we should auto-execute
-      if (!shouldAutoExecute(job, { autoApproveGreen: this.config.autoApproveGreen })) {
-        logger.debug({ jobId: job.id }, "Job requires approval, skipping");
-        continue;
-      }
-
-      // Execute the job
-      this.jobQueue.updateJobStatus(job.id, "running");
-      logger.info({ jobId: job.id, type: job.type, name: job.name }, "Executing job");
-
-      try {
-        const result = await this.executeJob(job);
-        this.jobQueue.setJobResult(job.id, result);
-
-        if (result.success) {
-          this.session!.jobsCompleted++;
-          this.session!.findings.push(`✅ ${job.name}: ${result.output.slice(0, 200)}`);
-        } else {
-          this.session!.jobsFailed++;
-          this.session!.findings.push(`❌ ${job.name}: ${result.error}`);
-        }
-      } catch (error) {
-        this.session!.jobsFailed++;
-        this.jobQueue.setJobResult(job.id, {
-          success: false,
-          output: "",
-          error: error instanceof Error ? error.message : String(error),
-          duration: 0,
-        });
-      }
-    }
-
-    logger.info(
-      { completed: this.session!.jobsCompleted, failed: this.session!.jobsFailed },
-      "Job execution completed"
-    );
-  }
-
-  private async executeJob(job: typeof this.jobQueue extends JobQueue ? ReturnType<JobQueue["getJob"]> : never): Promise<{ success: boolean; output: string; error?: string; duration: number; artifacts?: string[] }> {
-    const startTime = Date.now();
-
-    // Type guard
-    if (!job) {
-      return { success: false, output: "", error: "Job not found", duration: 0 };
-    }
-
-    try {
-      switch (job.type) {
-        case "web_research": {
-          const query = job.payload.query as string;
-          const result = await executeGeminiWithFallback(
-            `Research the following topic thoroughly and provide key insights:\n\n${query}`,
-            "",
-            {
-              model: "gemini-3-flash-preview",
-              sandbox: true,
-              timeout: this.config.jobTimeout,
-            }
-          );
-
-          const outputPath = await this.saveResearch(job.id, query, result.output);
-
-          return {
-            success: result.exitCode === 0,
-            output: result.output,
-            error: result.exitCode !== 0 ? result.output : undefined,
-            duration: Date.now() - startTime,
-            artifacts: [outputPath],
-          };
-        }
-
-        case "idea_exploration": {
-          const topic = job.payload.topic as string;
-          const connection = job.payload.connection as string | undefined;
-
-          const prompt = connection
-            ? `Explore this idea and how it connects to the project:\n\nIdea: ${topic}\nProject: ${connection}`
-            : `Explore this idea and identify potential applications:\n\n${topic}`;
-
-          const result = await executeGeminiWithFallback(prompt, "", {
-            model: "gemini-3-flash-preview",
-            sandbox: true,
-            timeout: this.config.jobTimeout,
-          });
-
-          return {
-            success: result.exitCode === 0,
-            output: result.output,
-            error: result.exitCode !== 0 ? result.output : undefined,
-            duration: Date.now() - startTime,
-          };
-        }
-
-        case "code_proposal": {
-          // Code proposals are logged but not executed
-          const description = job.payload.description as string;
-          const targetProject = job.payload.targetProject as string;
-
-          const proposalPath = await this.saveProposal(job.id, description, targetProject);
-          this.session!.proposals.push(proposalPath);
-
-          return {
-            success: true,
-            output: `Proposal saved to ${proposalPath}`,
-            duration: Date.now() - startTime,
-            artifacts: [proposalPath],
-          };
-        }
-
-        case "idea_consolidation": {
-          // Dedup is handled by dedicated idea-dedup cron job — skip if supervisor triggers it
-          logger.info("Skipping idea_consolidation — handled by dedicated cron job");
-          return {
-            success: true,
-            output: "Skipped: handled by dedicated idea-dedup cron job",
-            duration: Date.now() - startTime,
-          };
-        }
-
-        default:
-          return {
-            success: false,
-            output: "",
-            error: `Unknown job type: ${job.type}`,
-            duration: Date.now() - startTime,
-          };
-      }
-    } catch (error) {
-      return {
-        success: false,
-        output: "",
-        error: error instanceof Error ? error.message : String(error),
-        duration: Date.now() - startTime,
-      };
-    }
-  }
-
-  // ----------------------------------------
-  // Morning Briefing
-  // ----------------------------------------
-
-  private async generateBriefing(dailyLog: string): Promise<void> {
-    logger.info("Generating morning briefing");
-
-    const findings = this.session!.findings.join("\n");
-    const jobsSummary = formatJobsForBriefing(this.session!.jobs);
-
-    try {
-      const prompt = `Generate a concise, actionable morning briefing.
-
-## Overnight Findings
-${findings}
-
-## Overnight Job Summary
-${jobsSummary}
-
-## Yesterday Daily Log
-${dailyLog}
-
-Output sections:
-1. The Big 3
-2. Overnight Findings
-3. Needs Attention
-4. Context for Today
-
-Rules:
-- concise and actionable
-- no approval requests
-- markdown only`;
-
-      const result = await executeClaudeCommand(prompt, {
-        cwd: process.env.HOME ?? "/Users/yj",
-        model: "sonnet",
-        timeout: this.config.jobTimeout,
-      });
-
-      if (result.exitCode !== 0 || !result.output?.trim()) {
-        throw new Error(result.output || "Morning briefing generation failed");
-      }
-
-      const briefing = result.output.trim();
-
-      this.session!.morningBriefing = briefing;
-      await this.saveBriefing(briefing);
-
-      logger.info("Morning briefing generated and saved");
-    } catch (error) {
-      logger.error({ error }, "Failed to generate morning briefing");
-
-      // Generate a simple fallback briefing
-      const fallback = this.generateFallbackBriefing();
-      this.session!.morningBriefing = fallback;
-      await this.saveBriefing(fallback);
-    }
-  }
-
-  private generateFallbackBriefing(): string {
-    const stats = this.jobQueue.getStats();
-
-    return `## Morning Briefing: ${new Date().toISOString().split("T")[0]}
-
-### Overnight Summary
-- Jobs completed: ${stats.completed}
-- Jobs failed: ${stats.failed}
-- Pending approval: ${stats.pendingApproval}
-
-### Findings
-${this.session!.findings.slice(0, 5).map(f => `- ${f}`).join("\n")}
-
-### Proposals
-${this.session!.proposals.map(p => `- ${p}`).join("\n") || "None"}
-
----
-*Generated by Night Supervisor*`;
-  }
-
-  // ----------------------------------------
   // File Operations
   // ----------------------------------------
 
   private async ensureDirectories(): Promise<void> {
+    // Ensure night output directory for .md deliverables
+    const nightOutputDir = join(process.env.HOME ?? "/Users/yj", "homer", "output", "night");
+    if (!existsSync(nightOutputDir)) {
+      mkdirSync(nightOutputDir, { recursive: true });
+    }
+
     const dirs = [
       this.config.outputDir,
       join(this.config.outputDir, "research"),
@@ -734,59 +501,101 @@ ${this.session!.proposals.map(p => `- ${p}`).join("\n") || "None"}
     logger.debug({ path }, "Plan saved");
   }
 
-  private async saveResearch(jobId: string, query: string, content: string): Promise<string> {
-    const date = new Date().toISOString().split("T")[0];
-    const path = join(this.config.outputDir, "research", `${date}_${jobId}.md`);
+  private async savePlanToDB(plan: NightPlan): Promise<string> {
+    if (!this.db || !this.session) {
+      return "";
+    }
 
-    const markdown = `# Research: ${query.slice(0, 100)}
+    const planId = `nplan_${randomUUID().slice(0, 8)}`;
 
-**Date:** ${new Date().toISOString()}
-**Job ID:** ${jobId}
+    try {
+      this.db.prepare(`
+        INSERT INTO night_plans (id, session_id, plan_json, status, created_at)
+        VALUES (?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+      `).run(planId, this.session.id, JSON.stringify(plan));
+      logger.info({ planId, sessionId: this.session.id }, "Night plan saved to DB");
+    } catch (err) {
+      // Table may not exist yet — log but don't fail
+      logger.warn({ error: err instanceof Error ? err.message : String(err) }, "Failed to save night plan to DB");
+    }
 
----
-
-${content}
-`;
-
-    await writeFile(path, markdown);
-    return path;
+    return planId;
   }
 
-  private async saveProposal(jobId: string, description: string, targetProject: string): Promise<string> {
+  private async sendPlanToTelegram(planId: string, plan: NightPlan): Promise<void> {
+    if (!this.bot || !this.chatId) {
+      logger.debug("No bot/chatId configured, skipping Telegram plan notification");
+      return;
+    }
+
     const date = new Date().toISOString().split("T")[0];
-    const path = join(this.config.outputDir, "drafts", `${date}_${jobId}.plan`);
+    const lines: string[] = [`<b>Night Plan — ${date}</b>\n`];
 
-    const proposal = `# Code Proposal
+    if (plan.research_tasks.length > 0) {
+      lines.push(`<b>Research (${plan.research_tasks.length}):</b>`);
+      for (const t of plan.research_tasks.slice(0, 5)) {
+        lines.push(`  • ${escapeHtml(t.query.slice(0, 80))}`);
+      }
+      if (plan.research_tasks.length > 5) {
+        lines.push(`  ... +${plan.research_tasks.length - 5} more`);
+      }
+      lines.push("");
+    }
 
-**Date:** ${new Date().toISOString()}
-**Job ID:** ${jobId}
-**Target Project:** ${targetProject}
-**Status:** PENDING_VERIFICATION
+    if (plan.ideas_to_explore.length > 0) {
+      lines.push(`<b>Ideas (${plan.ideas_to_explore.length}):</b>`);
+      for (const t of plan.ideas_to_explore.slice(0, 5)) {
+        lines.push(`  • ${escapeHtml(t.topic.slice(0, 80))}`);
+      }
+      lines.push("");
+    }
 
-## Description
+    if (plan.code_proposals.length > 0) {
+      lines.push(`<b>Proposals (${plan.code_proposals.length}):</b>`);
+      for (const t of plan.code_proposals.slice(0, 3)) {
+        lines.push(`  • ${escapeHtml(t.description.slice(0, 80))}`);
+      }
+      lines.push("");
+    }
 
-${description}
+    if (plan.priority_actions.length > 0) {
+      lines.push(`<b>Priority Actions:</b>`);
+      for (const a of plan.priority_actions.slice(0, 5)) {
+        lines.push(`  • ${escapeHtml(a.slice(0, 80))}`);
+      }
+      lines.push("");
+    }
 
-## Implementation Notes
+    if (plan.summary) {
+      lines.push(`<i>${escapeHtml(plan.summary.slice(0, 200))}</i>`);
+    }
 
-*To be filled by Codex/Opus verification*
+    const keyboard = new InlineKeyboard()
+      .text("Execute All", `night_plan:execute:${planId}`)
+      .text("Edit Plan", `night_plan:edit:${planId}`)
+      .text("Skip Tonight", `night_plan:skip:${planId}`);
 
-## Risk Assessment
+    try {
+      const msg = await this.bot.api.sendMessage(this.chatId, lines.join("\n"), {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
 
-*To be assessed during verification*
+      // Update the plan with the Telegram message ID
+      if (this.db) {
+        try {
+          this.db.prepare(
+            "UPDATE night_plans SET telegram_message_id = ? WHERE id = ?"
+          ).run(msg.message_id, planId);
+        } catch {
+          // Best effort
+        }
+      }
 
----
-*Generated by Night Supervisor - Requires verification before execution*
-`;
-
-    await writeFile(path, proposal);
-    return path;
-  }
-
-  private async saveBriefing(content: string): Promise<void> {
-    const path = join(this.config.outputDir, "handoffs", "morning_briefing.md");
-    await writeFile(path, content);
-    logger.debug({ path }, "Morning briefing saved");
+      logger.info({ planId, messageId: msg.message_id }, "Night plan sent to Telegram");
+    } catch (err) {
+      logger.error({ error: err instanceof Error ? err.message : String(err) }, "Failed to send night plan to Telegram");
+    }
   }
 
   private async saveSessionState(): Promise<void> {
@@ -874,6 +683,14 @@ async function main() {
   if (dryRun) {
     console.log("\n🔍 Dry run complete - no jobs were executed");
   }
+}
+
+// ============================================
+// HELPERS
+// ============================================
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 // Run if executed directly

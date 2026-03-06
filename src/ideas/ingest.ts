@@ -7,6 +7,7 @@ import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { executeBrowserScrape } from "../executors/browser-scrape.js";
 import { buildBookmarkScrapePrompt, buildTweetReadPrompt, SCRAPE_OPTIONS, DEEP_FETCH_OPTIONS } from "../scraping/browser-prompts.js";
+import { ensureCDP } from "../scraping/chrome-launcher.js";
 import { cleanAgentOutput } from "../scraping/clean-output.js";
 import { insertScrape } from "../scraping/scrape-store.js";
 import { PATHS } from "../config/paths.js";
@@ -83,19 +84,55 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
       return [];
     }
 
-    // Extract JSON array from output
+    // Extract JSON array from output with structured fallback
     const output = result.output ?? "";
+    let bookmarks: TwitterBookmark[] = [];
+
+    // Attempt 1: Direct JSON array match
     const arrayMatch = output.match(/\[[\s\S]*\]/);
-    if (!arrayMatch) {
-      logger.warn({ outputLen: output.length }, "No JSON array found in browser bookmark output");
-      return [];
+    if (arrayMatch) {
+      try {
+        bookmarks = JSON.parse(arrayMatch[0]);
+      } catch {
+        // Attempt 2: Extract from markdown code block
+        const codeBlockMatch = output.match(/```json\n?([\s\S]*?)\n?```/);
+        if (codeBlockMatch?.[1]) {
+          try {
+            bookmarks = JSON.parse(codeBlockMatch[1]);
+          } catch {
+            logger.warn("Failed to parse bookmark JSON from code block");
+          }
+        }
+      }
     }
 
-    let bookmarks: TwitterBookmark[];
-    try {
-      bookmarks = JSON.parse(arrayMatch[0]);
-    } catch {
-      logger.warn("Failed to parse browser bookmark output as JSON");
+    // Attempt 3: Regex extraction fallback — extract URLs + surrounding text
+    if (bookmarks.length === 0 && output.length > 100) {
+      const urlPattern = /https?:\/\/(?:twitter\.com|x\.com)\/(\w+)\/status\/(\d+)/g;
+      let match;
+      while ((match = urlPattern.exec(output)) !== null) {
+        const author = match[1] ?? "unknown";
+        const tweetId = match[2] ?? "";
+        // Extract surrounding text as content (50 chars before/after URL)
+        const idx = match.index;
+        const contextStart = Math.max(0, idx - 100);
+        const contextEnd = Math.min(output.length, idx + match[0].length + 100);
+        const surrounding = output.slice(contextStart, contextEnd).replace(/["\n\r]/g, " ").trim();
+
+        bookmarks.push({
+          id: tweetId,
+          text: surrounding,
+          author,
+          created_at: new Date().toISOString(),
+        });
+      }
+      if (bookmarks.length > 0) {
+        logger.warn({ count: bookmarks.length }, "Used regex fallback for bookmark extraction");
+      }
+    }
+
+    if (bookmarks.length === 0) {
+      logger.warn({ outputLen: output.length }, "No bookmarks extracted from browser output");
       return [];
     }
 
@@ -278,6 +315,17 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
     errors: [],
   };
 
+  // Ensure Chrome CDP is available for bookmark scraping
+  let chromeHandle: { pid: number; cleanup: () => void } | null = null;
+  try {
+    chromeHandle = await ensureCDP();
+    logger.info({ pid: chromeHandle.pid }, "Chrome CDP ready for idea ingest");
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Chrome CDP launch failed — bookmark scrape may fail");
+  }
+
+  try {
+
   // Load existing ideas from DB (fallback to files)
   const existingIdeas = dao.getAllIdeas(db);
   const existingIds = new Set(existingIdeas.map((i) => i.id));
@@ -445,4 +493,12 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
   }, "Idea ingestion complete");
 
   return result;
+
+  } finally {
+    // Clean up Chrome CDP if we launched it
+    if (chromeHandle && chromeHandle.pid > 0) {
+      chromeHandle.cleanup();
+      logger.debug("Chrome CDP cleaned up after idea ingest");
+    }
+  }
 }

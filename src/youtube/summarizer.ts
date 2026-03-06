@@ -10,7 +10,7 @@
 
 import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
-import { executeGeminiAPI } from "../executors/gemini.js";
+import { executeGeminiAPI, executeFlashViaOpenCode } from "../executors/gemini.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { extractTranscript, buildTranscriptSampleForPass1, buildTranscriptForPass2, getLocalTranscriptPath } from "./transcript.js";
 import { logger } from "../utils/logger.js";
@@ -287,11 +287,8 @@ Rules:
 - shouldCheckRecentSessions: true if connects to recent work context
 - Return ONLY valid JSON, no markdown fences`;
 
-  const result = await executeGeminiAPI(prompt, {
-    model: "gemini-3-flash-preview",
-    responseMimeType: "application/json",
-    maxTokens: 2048,
-    temperature: 0.2,
+  const result = await executeFlashViaOpenCode(prompt, {
+    timeout: 60_000,
   });
 
   if (result.exitCode !== 0) {
@@ -299,7 +296,9 @@ Rules:
   }
 
   try {
-    return JSON.parse(result.output) as Pass1Result;
+    const jsonMatch = result.output.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON object found");
+    return JSON.parse(jsonMatch[0]) as Pass1Result;
   } catch {
     throw new Error(`Pass 1 JSON parse failed: ${result.output.slice(0, 200)}`);
   }

@@ -244,6 +244,53 @@ export class JobQueue {
     return null;
   }
 
+  /**
+   * Get all pending jobs whose dependencies are satisfied (not just the first one).
+   * Used for parallel wave execution.
+   */
+  getAllExecutableJobs(): NightJob[] {
+    const executable: NightJob[] = [];
+
+    for (const id of this.executionOrder) {
+      const job = this.jobs.get(id);
+      if (!job) continue;
+      if (job.status !== "pending") continue;
+
+      // Check dependencies
+      if (job.dependsOn && job.dependsOn.length > 0) {
+        const allDepsComplete = job.dependsOn.every(depId => {
+          const depJob = this.jobs.get(depId);
+          return depJob && depJob.status === "completed";
+        });
+
+        if (!allDepsComplete) {
+          const anyDepFailed = job.dependsOn.some(depId => {
+            const depJob = this.jobs.get(depId);
+            return depJob && depJob.status === "failed";
+          });
+
+          if (anyDepFailed) {
+            job.status = "blocked";
+            job.blockedBy = job.dependsOn.filter(depId => {
+              const depJob = this.jobs.get(depId);
+              return depJob && depJob.status === "failed";
+            });
+          }
+          continue;
+        }
+      }
+
+      // Red jobs need explicit approval
+      if (job.approval === "red" && job.status === "pending") {
+        continue;
+      }
+
+      executable.push(job);
+    }
+
+    return executable;
+  }
+
   getBlockedJobs(): NightJob[] {
     return this.getAllJobs().filter(j => j.status === "blocked");
   }

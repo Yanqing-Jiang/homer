@@ -333,5 +333,5 @@ export const SCRAPE_OPTIONS: ClaudeExecutorOptions = {
 export const DEEP_FETCH_OPTIONS: ClaudeExecutorOptions = {
   cwd: "/tmp/homer-scrape",
   model: "sonnet",
-  timeout: 120_000, // 2 min — sleep 5+2+2=9s + 3 snapshots + scroll + render time
+  timeout: 300_000, // 5 min — CDP startup + sleep 5+2+2=9s + 3 snapshots + scroll + LLM processing
 };

@@ -23,7 +23,7 @@ import { createHash } from "crypto";
 import type Database from "better-sqlite3";
 import { executeClaudeCommand } from "../../executors/claude.js";
 import { BROWSER_ONLY_PREFIX } from "../../executors/opencode-cli.js";
-import { executeGeminiAPI } from "../../executors/gemini.js";
+import { executeFlashViaOpenCode } from "../../executors/gemini.js";
 import {
   SCRAPE_OPTIONS,
   DEEP_FETCH_OPTIONS,
@@ -32,6 +32,7 @@ import {
   buildArticleDeepFetchPrompt,
 } from "../../scraping/browser-prompts.js";
 import { cleanAgentOutput } from "../../scraping/clean-output.js";
+import { ensureCDP } from "../../scraping/chrome-launcher.js";
 import { insertScrape } from "../../scraping/scrape-store.js";
 import { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
@@ -724,9 +725,8 @@ async function analyzeAndUpdatePatterns(
   const prompt = buildViralityPrompt(digest);
 
   try {
-    const result = await executeGeminiAPI(prompt, {
-      model: "gemini-3-flash-preview",
-      maxTokens: 1400,
+    const result = await executeFlashViaOpenCode(prompt, {
+      timeout: 120_000,
     });
 
     if (result.exitCode !== 0 || !result.output?.trim()) {
@@ -840,8 +840,17 @@ export async function runContentScraper(db: Database.Database): Promise<{
   let ownLinkedInPosts: ScrapedPost[] = [];
   let mediumTrendingPosts: ScrapedPost[] = [];
   let scrapeSucceeded = false;
+  let chromeHandle: { pid: number; cleanup: () => void } | null = null;
 
   try {
+    // Ensure Chrome CDP is available for browser-based scraping
+    try {
+      chromeHandle = await ensureCDP();
+      logger.info({ pid: chromeHandle.pid }, "Chrome CDP ready for content scraper");
+    } catch (err) {
+      logger.warn({ error: String(err) }, "Chrome CDP launch failed — browser scrapes may fail");
+    }
+
     // =========================================================
     // PHASE 0: Pre-write snapshots of files we're about to overwrite
     // =========================================================
@@ -890,7 +899,7 @@ export async function runContentScraper(db: Database.Database): Promise<{
       // LinkedIn: agent-browser CDP, 90s timeout
       (async () => {
         logger.info("Starting LinkedIn scrape");
-        return executeClaudeCommand(BROWSER_ONLY_PREFIX + buildLinkedInScrapePrompt(), { ...scrapeOpts, timeout: 90_000 });
+        return executeClaudeCommand(BROWSER_ONLY_PREFIX + buildLinkedInScrapePrompt(), { ...scrapeOpts, timeout: 300_000 });
       })(),
     ]);
 
@@ -1080,6 +1089,12 @@ export async function runContentScraper(db: Database.Database): Promise<{
     results.push(`FATAL ERROR: ${msg}`);
     logger.error({ error: msg }, "Content scraper fatal error");
   } finally {
+    // Clean up Chrome CDP if we launched it
+    if (chromeHandle && chromeHandle.pid > 0) {
+      chromeHandle.cleanup();
+      logger.debug("Chrome CDP cleaned up");
+    }
+
     // =========================================================
     // PHASE 4: Run summary — ALWAYS written (finally block)
     // =========================================================
