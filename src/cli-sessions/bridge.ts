@@ -439,6 +439,7 @@ async function main() {
 
   const dbPath = join(homedir(), "homer", "data", "homer.db");
   const db = new Database(dbPath);
+  db.pragma("busy_timeout = 5000");
 
   try {
     runMigrations(db);

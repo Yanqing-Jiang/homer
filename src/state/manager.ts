@@ -41,6 +41,8 @@ export class StateManager {
   }
 
   private init(): void {
+    // Prevent SQLITE_BUSY when daemon and MCP server write concurrently
+    this._db.pragma("busy_timeout = 5000");
     // Enable foreign key enforcement (SQLite defaults to OFF per-connection)
     this._db.pragma("foreign_keys = ON");
 
