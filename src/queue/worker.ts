@@ -5,6 +5,7 @@ import { executeClaudeCommand } from "../executors/claude.js";
 import { executeGeminiCLI } from "../executors/opencode-cli.js";
 import { executeCodexCLI } from "../executors/codex-cli.js";
 import { executeKimiCLI } from "../executors/kimi-cli.js";
+import { acquireSlot } from "../executors/concurrency.js";
 import { runCompletionCheckup } from "../executors/completion-checkup.js";
 import {
   runWithFallbackChain,
@@ -87,6 +88,7 @@ export class QueueWorker {
     // Start heartbeat interval
     const heartbeatInterval = this.queueManager.startJobHeartbeat(job.id);
 
+    let releaseSlot: (() => void) | null = null;
     try {
       const memoryJob = isMemoryJob(job);
       const chain: ExecutorKind[] = memoryJob ? [...MEMORY_CHAIN] : [...DEFAULT_CHAIN];
@@ -178,6 +180,7 @@ export class QueueWorker {
         };
       };
 
+      releaseSlot = await acquireSlot();
       const fallbackResult = await runWithFallbackChain({
         primary,
         chain,
@@ -273,6 +276,7 @@ export class QueueWorker {
 
       this.queueManager.failJob(job.id, errorMessage);
     } finally {
+      if (releaseSlot) releaseSlot();
       this.queueManager.stopJobHeartbeat(heartbeatInterval);
     }
   }
