@@ -5,9 +5,8 @@ installFatalHandlers();
 // Import daemon lock
 import { acquireDaemonLock, releaseDaemonLock } from "./daemon/lock.js";
 
-import { createBot, startBot, setScheduler, getReminderManager, setMeetingManager } from "./bot/index.js";
+import { createBot, startBot, setScheduler, setMeetingManager } from "./bot/index.js";
 import { logger } from "./utils/logger.js";
-import cron from "node-cron";
 import { StateManager } from "./state/manager.js";
 import { config } from "./config/index.js";
 import { QueueManager } from "./queue/manager.js";
@@ -16,7 +15,6 @@ import { createWebServer, startWebServer, stopWebServer } from "./web/server.js"
 import { setWebMeetingsManager, setWebBot, setWebCLIRunManager } from "./web/routes.js";
 import { MeetingManager } from "./meetings/index.js";
 import { Scheduler } from "./scheduler/index.js";
-import { checkAndFlushExpiringSessions } from "./memory/flush.js";
 import { setWriterStateManager } from "./memory/writer.js";
 import { getMemoryIndexer, closeMemoryIndexer } from "./memory/indexer.js";
 import { executeClaudeCommand } from "./executors/claude.js";
@@ -29,34 +27,8 @@ import { SessionTimeoutManager } from "./process/timeout-manager.js";
 import { cleanupScheduler } from "./process/cleanup-scheduler.js";
 import { initFallbackChain } from "./process/fallback-chain.js";
 import type { FastifyInstance } from "fastify";
-import type { Bot } from "grammy";
 import type { VoiceConfig } from "./voice/types.js";
 
-/**
- * Check for pending reminders and send notifications
- */
-async function checkAndSendReminders(bot: Bot): Promise<void> {
-  const reminderManager = getReminderManager();
-  if (!reminderManager) return;
-
-  const pending = reminderManager.getPendingDue();
-
-  for (const reminder of pending) {
-    try {
-      await bot.api.sendMessage(
-        reminder.chatId,
-        `⏰ *Reminder*\n\n${reminder.message}`,
-        { parse_mode: "Markdown" }
-      );
-      reminderManager.markSent(reminder.id);
-      logger.info({ reminderId: reminder.id }, "Reminder sent");
-    } catch (error) {
-      logger.error({ error, reminderId: reminder.id }, "Failed to send reminder");
-      // Mark as sent anyway to prevent infinite retries
-      reminderManager.markSent(reminder.id);
-    }
-  }
-}
 
 async function main(): Promise<void> {
   // Log build version for stale-daemon detection
@@ -110,12 +82,8 @@ async function main(): Promise<void> {
   initFallbackChain(stateManager.getDb());
   logger.info("Process lifecycle management initialized");
 
-  // Schedule cleanup every 4 hours
-  cron.schedule("0 */4 * * *", () => {
-    cleanupScheduler.run("scheduled").catch((err) => {
-      logger.error({ error: err }, "Cleanup scheduler failed");
-    });
-  });
+  // Cleanup scheduler init (the cron is now in scheduler as "daemon-cleanup")
+  // Note: cleanupScheduler.init() was called above
 
   // Recover stale jobs from previous crashed instances
   logger.info("Checking for stale jobs from previous runs...");
@@ -128,39 +96,17 @@ async function main(): Promise<void> {
     } catch { /* best-effort */ }
   }
 
-  // Clear stale scheduled_job_state is_running flags from crashed runs
-  const clearedFlags = stateManager.resetScheduledJobRunFlags();
-  if (clearedFlags > 0) {
-    logger.warn({ count: clearedFlags }, "Cleared stale scheduled job run flags");
-  }
-
-  // Mark orphaned job runs (started but never completed) as failed
-  const orphanedRuns = stateManager.cleanupOrphanedJobRuns();
-  if (orphanedRuns > 0) {
-    logger.warn({ count: orphanedRuns }, "Marked orphaned job runs as failed (daemon restart)");
+  // Clean up zombie cli_runs left from crashed/restarted daemon
+  // Note: scheduled_job_state flags and orphaned runs are cleaned in Scheduler.start()
+  const zombieCliRuns = stateManager.failAllRunningCliRuns();
+  if (zombieCliRuns > 0) {
+    logger.warn({ count: zombieCliRuns }, "Cleaned up zombie CLI runs from previous daemon instance");
   }
 
   // Initialize queue manager
   const queueManager = new QueueManager(stateManager);
 
-  // Schedule session cleanup and memory flush every hour
-  const ttlMs = config.session.ttlHours * 60 * 60 * 1000;
-  cron.schedule("0 * * * *", async () => {
-    logger.debug("Running scheduled session cleanup and flush");
-    stateManager.cleanupExpiredSessions();
-    stateManager.cleanupOldJobs();
-    stateManager.cleanupOldReminders();
-
-    const cleanedRuns = stateManager.cleanupOldScheduledJobRuns();
-    if (cleanedRuns > 0) logger.info({ cleaned: cleanedRuns }, "Cleaned up old scheduled job runs");
-
-    // Check for sessions about to expire and flush their context
-    try {
-      await checkAndFlushExpiringSessions(stateManager, ttlMs);
-    } catch (error) {
-      logger.error({ error }, "Failed to flush expiring sessions");
-    }
-  });
+  // Session maintenance cron is now in scheduler as "session-maintenance"
 
   // Initialize memory indexer (creates FTS5 tables if needed)
   try {
@@ -195,10 +141,7 @@ async function main(): Promise<void> {
   setWebMeetingsManager(meetingManager);
   logger.info("Meeting manager initialized");
 
-  // Schedule reminder checker every minute
-  cron.schedule("* * * * *", async () => {
-    await checkAndSendReminders(bot);
-  });
+  // Reminder checker cron is now in scheduler as "reminder-check"
 
   // Initialize scheduler
   const scheduler = new Scheduler(bot, config.telegram.allowedChatId, stateManager);
@@ -257,51 +200,101 @@ async function main(): Promise<void> {
     await startWebServer(webServer);
   }
 
-  // Register shutdown tasks with fatal-handlers
-  // These will be called during graceful shutdown (SIGINT/SIGTERM)
-  registerShutdownTask(async () => {
-    logger.info("Killing all managed processes...");
-    timeoutManager.stop();
-    processRegistry.killAll("SIGTERM");
-    // Give 5s for graceful exit, then SIGKILL
-    await new Promise<void>((resolve) => {
-      setTimeout(() => {
-        processRegistry.killAll("SIGKILL");
-        resolve();
-      }, 5000);
-    });
-    processRegistry.stop();
-  });
+  // Graceful shutdown — two-phase approach:
+  // Phase 1: Stop accepting new work (immediate)
+  // Phase 2: Drain active processes (configurable timeout, default 5min)
+  // Drain timeout for active executor processes. Must be < SHUTDOWN_TIMEOUT_MS (330s)
+  // to leave room for Phase 1 (stop accepting) and Phase 3 (cleanup).
+  // Budget: Phase 1 (~5s) + Phase 2 drain (270s) + force-kill (10s) + Phase 3 (~5s) = ~290s < 330s
+  const DRAIN_TIMEOUT_MS = parseInt(process.env.DRAIN_TIMEOUT_MS ?? "270000", 10);
+
+  // Phase 1: Stop accepting new work
   registerShutdownTask(() => {
-    logger.info("Stopping connectivity monitor and stale map cleaner...");
+    logger.info("Phase 1: Stopping new work acceptance...");
+    scheduler.stop();
+    queueWorker.stop();
     connectivityMonitor.stop();
     staleMapCleaner.stop();
-  });
-  registerShutdownTask(() => {
-    logger.info("Shutting down scheduler...");
-    scheduler.stop();
-  });
-  registerShutdownTask(() => {
-    logger.info("Shutting down queue worker...");
-    queueWorker.stop();
+    timeoutManager.stop();
   });
   registerShutdownTask(async () => {
-    logger.info("Shutting down bot...");
+    logger.info("Phase 1: Stopping bot and web server...");
     await bot.stop();
+    if (webServer) {
+      await stopWebServer(webServer);
+    }
   });
-  if (webServer) {
-    registerShutdownTask(async () => {
-      logger.info("Shutting down web server...");
-      await stopWebServer(webServer!);
-    });
-  }
+
+  // Phase 2: Drain active executor processes
+  registerShutdownTask(async () => {
+    const activeExecutors = processRegistry.getByType("executor").length;
+    const activeCliRuns = cliRunManager.activeCount;
+    const totalActive = activeExecutors + activeCliRuns;
+
+    if (totalActive === 0) {
+      logger.info("Phase 2: No active processes to drain");
+    } else {
+      logger.info(
+        { activeExecutors, activeCliRuns, drainTimeoutMs: DRAIN_TIMEOUT_MS },
+        "Phase 2: Draining active processes..."
+      );
+
+      const drainStart = Date.now();
+      const pollInterval = 2000;
+
+      while (Date.now() - drainStart < DRAIN_TIMEOUT_MS) {
+        const currentExecutors = processRegistry.getByType("executor").length;
+        const currentCliRuns = cliRunManager.activeCount;
+
+        if (currentExecutors === 0 && currentCliRuns === 0) {
+          logger.info(
+            { drainDuration: Date.now() - drainStart },
+            "Phase 2: All processes drained cleanly"
+          );
+          break;
+        }
+
+        logger.debug(
+          { activeExecutors: currentExecutors, activeCliRuns: currentCliRuns },
+          "Phase 2: Waiting for processes to complete..."
+        );
+        await new Promise<void>((r) => setTimeout(r, pollInterval));
+      }
+
+      // If still active after drain timeout, force kill
+      const remainingExecutors = processRegistry.getByType("executor").length;
+      const remainingCliRuns = cliRunManager.activeCount;
+
+      if (remainingExecutors > 0 || remainingCliRuns > 0) {
+        logger.warn(
+          { remainingExecutors, remainingCliRuns },
+          "Phase 2: Drain timeout — force-killing remaining processes"
+        );
+        processRegistry.killAll("SIGTERM");
+        await new Promise<void>((resolve) => {
+          setTimeout(() => {
+            processRegistry.killAll("SIGKILL");
+            resolve();
+          }, 5000);
+        });
+      }
+    }
+
+    processRegistry.stop();
+  });
+
+  // Phase 3: Cleanup and close
   registerShutdownTask(() => {
     logger.info("Closing memory indexer...");
     closeMemoryIndexer();
   });
   registerShutdownTask(() => {
-    logger.info("Marking running jobs as failed...");
+    logger.info("Marking running jobs and CLI runs as failed...");
     stateManager.failAllRunningJobs();
+    const failedRuns = stateManager.failAllRunningCliRuns();
+    if (failedRuns > 0) {
+      logger.info({ count: failedRuns }, "Marked running CLI runs as failed (daemon shutdown)");
+    }
   });
   registerShutdownTask(() => {
     logger.info("Closing state manager...");

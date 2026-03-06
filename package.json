@@ -17,7 +17,7 @@
     "test:router": "tsx scripts/test-router.ts",
     "test:swarm": "npx tsx --test src/executors/__tests__/parse-swarm-json.test.ts",
     "restart": "launchctl bootout gui/$(id -u)/com.homer.daemon 2>/dev/null; sleep 3 && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.homer.daemon.plist",
-    "deploy": "npm run build && node scripts/smoke-test.mjs && npm run restart"
+    "deploy": "npm run build && node scripts/smoke-test.mjs && bash scripts/pre-restart-check.sh && npm run restart"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",
@@ -32,13 +32,12 @@
     "blessed": "^0.1.81",
     "chokidar": "^5.0.0",
     "chrono-node": "^2.9.0",
-    "cron-parser": "^4.9.0",
+    "croner": "^10.0.1",
     "dotenv": "^16.4.5",
     "fastify": "^4.28.0",
     "fs-ext": "^2.1.1",
     "grammy": "^1.21.1",
     "jsonwebtoken": "^9.0.3",
-    "node-cron": "^3.0.3",
     "openai": "^4.24.0",
     "pg": "^8.17.2",
     "pidlock": "^0.1.0",
@@ -54,7 +53,6 @@
     "@types/blessed": "^0.1.25",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.5.0",
-    "@types/node-cron": "^3.0.11",
     "tsx": "^4.19.0",
     "typescript": "^5.9.3"
   }

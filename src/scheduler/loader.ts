@@ -71,6 +71,10 @@ function validateJob(job: unknown, sourceFile: string): ScheduledJobConfig | nul
     streamProgress: j.streamProgress === true,
     notifyOnSuccess: j.notifyOnSuccess !== false, // default to true
     notifyOnFailure: j.notifyOnFailure !== false, // default to true
+    failureTakeover: j.failureTakeover !== false, // default to true
+    allowAutoFix: j.allowAutoFix === true, // default to false
+    autoCompensate: j.autoCompensate === true, // default to false
+    triggers: Array.isArray(j.triggers) ? j.triggers.filter((t: unknown) => typeof t === "string") : undefined,
   };
 }
 

@@ -1,4 +1,5 @@
 import { PATHS } from "../config/paths.js";
+import type { NotificationIntent } from "../notifications/types.js";
 
 /**
  * Schedule file structure (schedule.json)
@@ -21,13 +22,15 @@ export interface ScheduledJobConfig {
   timeout?: number; // ms, defaults to 600000 (10 min)
   model?: string; // e.g. "sonnet", "haiku", "opus" - defaults to sonnet
   executor?: "claude" | "kimi" | "gemini" | "internal"; // defaults to claude; internal for daemon handlers
-  handler?: "ideas_review" | "night_supervisor" | "overnight_review" | "idea_ingest" | "idea_dedup" | "session_summaries" | "session_harvester" | "memory_embeddings" | "memory_reindex" | "weekly_consolidation" | "memory_cleanup" | "ideas_explore" | "nightly_memory" | "homer_improvements" | "learning_engine" | "planning_reminder" | "job_hunt_discover" | "job_hunt_daily_approval" | "job_hunt_weekly_report" | "job_hunt_email_monitor" | "job_hunt_followup" | "job_hunt_stalled_check" | "memory_git_commit" | "nightly_code_push" | "db_backup" | "outcome_tracker" | "preference_updater" | "content_scraper" | "idea_synthesizer" | "archive_verify" | "health_check" | "context_bridge" | "architecture_updater";
+  handler?: "ideas_review" | "night_supervisor" | "overnight_review" | "idea_ingest" | "idea_dedup" | "session_summaries" | "session_harvester" | "memory_embeddings" | "memory_reindex" | "weekly_consolidation" | "memory_cleanup" | "ideas_explore" | "nightly_memory" | "homer_improvements" | "learning_engine" | "planning_reminder" | "job_hunt_discover" | "job_hunt_daily_approval" | "job_hunt_weekly_report" | "job_hunt_email_monitor" | "job_hunt_followup" | "job_hunt_stalled_check" | "memory_git_commit" | "nightly_code_push" | "db_backup" | "outcome_tracker" | "preference_updater" | "content_scraper" | "idea_synthesizer" | "archive_verify" | "health_check" | "context_bridge" | "architecture_updater" | "daemon_cleanup" | "session_maintenance" | "reminder_check";
   contextFiles?: string[]; // files to load and inject as system prompt context
   streamProgress?: boolean; // stream tool usage to Telegram (default: false)
   notifyOnSuccess?: boolean; // defaults to true
   notifyOnFailure?: boolean; // defaults to true
   failureTakeover?: boolean; // spawn Claude Code to diagnose+retry on failure (default: true)
   allowAutoFix?: boolean; // let takeover edit handler code on fix_and_retry (default: false)
+  autoCompensate?: boolean; // allow health check to re-trigger if overdue (default: false)
+  triggers?: string[]; // downstream job IDs to trigger on success
 }
 
 /**
@@ -58,6 +61,8 @@ export interface JobExecutionResult {
   duration: number; // ms
   executorUsed?: string;
   fallbackUsed?: boolean;
+  notificationIntent?: NotificationIntent;
+  sideEffectDelivered?: boolean;
 }
 
 /**

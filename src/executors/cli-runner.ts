@@ -112,6 +112,10 @@ export class CLIRunManager {
   private stateManager: StateManager;
   private activeRuns: Map<string, ActiveRun> = new Map();
 
+  get activeCount(): number {
+    return this.activeRuns.size;
+  }
+
   constructor(stateManager: StateManager) {
     this.stateManager = stateManager;
   }

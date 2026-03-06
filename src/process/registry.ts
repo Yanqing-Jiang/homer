@@ -30,6 +30,7 @@ export interface ProcessRecord {
   jobId?: string;
   settled: boolean;
   settledAt?: number;
+  extendedUntil?: number; // Set by triage "extend" action instead of mutating spawnedAt
 }
 
 // Throttle activity updates to every 10s per process
