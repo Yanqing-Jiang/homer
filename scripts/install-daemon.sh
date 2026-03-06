@@ -12,7 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOMER_DIR="/Users/yj/homer"
-PLIST_SRC="$HOMER_DIR/com.homer.daemon.plist"
+PLIST_SRC="$HOMER_DIR/config/com.homer.daemon.plist"
 LOGS_DIR="$HOMER_DIR/logs"
 
 # Colors

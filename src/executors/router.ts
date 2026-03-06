@@ -100,6 +100,7 @@ function getRouterState(): RouterState {
     const defaultPath = process.env.HOMER_DB_PATH || `${process.env.HOME}/homer/data/homer.db`;
     logger.warn({ dbPath: defaultPath }, "Router auto-initializing with default database path");
     _db = new Database(defaultPath);
+    _db.pragma("busy_timeout = 5000");
     _routerState = createRouterState(_db);
   }
   return _routerState;

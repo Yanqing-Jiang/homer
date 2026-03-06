@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { readFileSync, existsSync } from "fs";
 import { logger } from "../utils/logger.js";
+import { acquireSlot } from "./concurrency.js";
 import { StateManager, type CLIRunStatus, type ExecutorStateType } from "../state/manager.js";
 import { executeClaudeCommand } from "./claude.js";
 import { executeGeminiCLI, executeOpenCodeCLI } from "./opencode-cli.js";
@@ -229,6 +230,7 @@ ${pendingContext.context}
     });
 
     const runPromise = (async (): Promise<CLIRunResult> => {
+      const releaseSlot = await acquireSlot();
       try {
         let output = "";
         let exitCode = 0;
@@ -516,6 +518,7 @@ ${pendingContext.context}
           sessionId: null,
         };
       } finally {
+        releaseSlot();
         this.activeRuns.delete(params.lane);
       }
     })();

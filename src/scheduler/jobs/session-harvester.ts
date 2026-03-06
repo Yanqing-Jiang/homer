@@ -24,7 +24,7 @@ export async function runSessionHarvester(
   db?: Database.Database
 ): Promise<{ success: boolean; output: string; error?: string }> {
   const ownDb = !db;
-  const database = db ?? new Database(DB_PATH);
+  const database = db ?? (() => { const d = new Database(DB_PATH); d.pragma("busy_timeout = 5000"); return d; })();
 
   try {
     const sm = new StateManager(DB_PATH);
