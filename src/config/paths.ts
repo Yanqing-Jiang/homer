@@ -47,7 +47,7 @@ export const PATHS = {
 
   // ── Homer root ─────────────────────────────────────────────
   homerRoot: homer,
-  architectureMd: `${homer}/architecture.md`,
+  architectureMd: `${homer}/docs/architecture.md`,
 
   // ── Homer data ──────────────────────────────────────────────
   homerData: data,

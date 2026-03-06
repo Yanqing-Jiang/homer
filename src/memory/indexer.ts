@@ -33,6 +33,7 @@ export class MemoryIndexer {
   }
 
   private init(): void {
+    this.db.pragma("busy_timeout = 5000");
     this.db.pragma("foreign_keys = ON");
 
     // Create FTS5 virtual table for memory search with chunk support

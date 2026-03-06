@@ -19,7 +19,7 @@ import { StateManager } from "../../state/manager.js";
 import { PATHS } from "../../config/paths.js";
 
 const DB_PATH = PATHS.db;
-const BACKUP_DIR = "/Users/yj/homer/backups";
+const BACKUP_DIR = join(PATHS.homerRoot, "backups");
 
 // GFS retention policies
 const DAILY_RETENTION_DAYS = 90;

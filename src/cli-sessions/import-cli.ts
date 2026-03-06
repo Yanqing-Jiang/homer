@@ -64,6 +64,7 @@ async function main() {
   // Open database
   const dbPath = `${homedir()}/homer/data/homer.db`;
   const db = new Database(dbPath);
+  db.pragma("busy_timeout = 5000");
 
   // Run migrations
   try {
