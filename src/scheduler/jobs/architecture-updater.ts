@@ -12,9 +12,10 @@ import { existsSync, readdirSync, readFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { logger } from "../../utils/logger.js";
+import { PATHS } from "../../config/paths.js";
 
-const HOMER_DIR = "/Users/yj/homer";
-const ARCH_FILE = join(HOMER_DIR, "architecture.md");
+const HOMER_DIR = PATHS.homerRoot;
+const ARCH_FILE = PATHS.architectureMd;
 const CODEX_OUTPUT_DIR = join(HOMER_DIR, "output/codex");
 
 // Key source files for Codex to understand current architecture
