@@ -51,6 +51,7 @@ export async function runPlanningReminder(): Promise<{
   success: boolean;
   output: string;
   error?: string;
+  hasActionableContent?: boolean;
 }> {
   try {
     const today = new Date().toISOString().slice(0, 10);
@@ -97,7 +98,9 @@ export async function runPlanningReminder(): Promise<{
     const output = parts.join("\n");
     logger.info({ plans: plans.length, reviewIdeas: reviewIdeas.length }, "Planning reminder generated");
 
-    return { success: true, output };
+    const hasActionableContent = plans.length > 0 || reviewIdeas.length > 0;
+
+    return { success: true, output, hasActionableContent };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     logger.error({ error: msg }, "Planning reminder failed");

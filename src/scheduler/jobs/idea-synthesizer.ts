@@ -16,7 +16,7 @@ import { readFileSync, existsSync } from "fs";
 import { z } from "zod";
 import type Database from "better-sqlite3";
 import { executeClaudeCommand } from "../../executors/claude.js";
-import { executeGeminiAPI } from "../../executors/gemini.js";
+import { executeFlashViaOpenCode } from "../../executors/gemini.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { getUnprocessedScrapes, markProcessed, type StoredScrape } from "../../scraping/scrape-store.js";
 import type { ParsedIdea } from "../../ideas/parser.js";
@@ -133,12 +133,10 @@ Return ONLY a JSON array (no markdown):
 [{"scrapeId": "...", "score": 7, "summary": "...", "dimensions": ["topic:X", "source:Y"]}]`;
 
   try {
-    const result = await executeGeminiAPI(prompt, {
-      model: "flash3",
-      maxTokens: 4096,
-      responseMimeType: "application/json",
-      temperature: 0.2,
-    });
+    const result = await executeFlashViaOpenCode(
+      prompt + "\n\nReturn ONLY a valid JSON array, no markdown fences.",
+      { timeout: 120_000 },
+    );
 
     if (result.exitCode !== 0 || !result.output) {
       logger.warn({ source: sourceName, exitCode: result.exitCode }, "Flash scoring failed");
@@ -277,12 +275,10 @@ Return ONLY a JSON array:
 [{"title": "...", "novelty": 8, "goalAlignment": 9, "feasibility": 7, "keep": true}]`;
 
   try {
-    const result = await executeGeminiAPI(prompt, {
-      model: "flash3",
-      maxTokens: 2048,
-      responseMimeType: "application/json",
-      temperature: 0.1,
-    });
+    const result = await executeFlashViaOpenCode(
+      prompt + "\n\nReturn ONLY a valid JSON array, no markdown fences.",
+      { timeout: 60_000 },
+    );
 
     if (result.exitCode !== 0 || !result.output) return new Set(ideas.map(i => i.title));
 

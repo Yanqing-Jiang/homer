@@ -155,6 +155,10 @@ export async function buildConversationContext(
     preserveAnchors = true,
   } = options;
 
+  if (!stateManager.isOpen) {
+    return { formatted: "", messageCount: 0, anchorCount: 0, truncated: false };
+  }
+
   let messages: ContextMessage[] = [];
 
   // Both lane and thread sources use ThreadMessage - getLaneMessages wraps getThreadMessages

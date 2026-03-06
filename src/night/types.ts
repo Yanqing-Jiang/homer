@@ -223,6 +223,9 @@ export interface NightModeConfig {
   jobTimeout: number;  // Per job, in ms
   totalTimeout: number;  // Total night run, in ms
 
+  // Concurrency
+  maxParallelJobs: number;  // Max jobs per wave
+
   // Paths
   outputDir: string;  // ~/homer/night_mode/
   memoryDir: string;  // ~/memory/
@@ -238,8 +241,9 @@ export const DEFAULT_CONFIG: NightModeConfig = {
   maxJobsPerNight: 50,
   maxResearchTasks: 10,
   maxCodeProposals: 3,
-  jobTimeout: 300000,  // 5 min per job
-  totalTimeout: 18000000,  // 5 hours total
+  jobTimeout: 1_800_000,  // 30 min per job
+  totalTimeout: 3_600_000,  // 1 hour total
+  maxParallelJobs: 4,  // Max concurrent jobs per wave
   outputDir: `${process.env.HOME}/homer/night_mode`,
   memoryDir: `${process.env.HOME}/memory`,
 };

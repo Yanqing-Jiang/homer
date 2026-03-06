@@ -11,7 +11,7 @@
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "fs";
 import { z } from "zod";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
-import { executeGeminiAPI } from "../../executors/gemini.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
 import { buildCondensedContext, extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
 import { getRecentJobOutputs } from "../job-outputs.js";
 import { logger } from "../../utils/logger.js";
@@ -255,18 +255,20 @@ If nothing to promote, use an empty array.`;
       promptLength: unifiedPrompt.length,
       date: yesterday,
       sessionCount: sessions.length,
-    }, "Running nightly memory via Gemini Flash API");
+    }, "Running nightly memory via Claude Sonnet");
 
-    // Use Gemini Flash (free, input is pre-summarized)
-    const result = await executeGeminiAPI(unifiedPrompt, {
-      model: "gemini-3-flash-preview",
-      temperature: 0.2,
-      timeout: 300_000,
-      responseMimeType: "application/json",
-    });
+    // Use Claude Sonnet for high-stakes memory promotion decisions
+    const result = await executeClaudeCommand(
+      unifiedPrompt + "\n\nReturn ONLY valid JSON, no markdown fences.",
+      {
+        cwd: process.env.HOME ?? "/Users/yj",
+        model: "sonnet",
+        timeout: 300_000,
+      },
+    );
 
     if (result.exitCode !== 0 || !result.output) {
-      return { success: false, output: "", error: `Gemini Flash API error: ${(result.output ?? "").slice(0, 200)}` };
+      return { success: false, output: "", error: `Claude Sonnet error: ${(result.output ?? "").slice(0, 200)}` };
     }
 
     // Valid empty responses (e.g. [] or {"promotions":[]}) are not errors

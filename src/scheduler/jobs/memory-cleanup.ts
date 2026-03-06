@@ -13,7 +13,7 @@
 
 import { readFile, writeFile } from "fs/promises";
 import { existsSync } from "fs";
-import { executeGeminiAPI } from "../../executors/gemini.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
 import { logger } from "../../utils/logger.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
 import { buildSchedulerContext } from "../shared-context.js";
@@ -254,13 +254,14 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
     logger.info({ file: file.name, originalLines, sizeKB: Math.round(fileContent.length / 1024) }, "Cleaning memory file");
 
     try {
-      const result = await executeGeminiAPI(prompt, {
-        model: "gemini-3-flash-preview",
-        systemPrompt: agentContext,
-        temperature: 0.2,
-        timeout: 180000, // 3 min per file
-        useGrounding: false,
-      });
+      const result = await executeClaudeCommand(
+        agentContext + "\n\n---\n\n" + prompt,
+        {
+          cwd: process.env.HOME ?? "/Users/yj",
+          model: "sonnet",
+          timeout: 180_000,
+        },
+      );
 
       if (result.exitCode !== 0) {
         results.push({
@@ -269,7 +270,7 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
           originalLines,
           cleanedLines: 0,
           changelog: "",
-          error: `Gemini API error: ${result.output}`,
+          error: `Claude Sonnet error: ${result.output}`,
         });
         continue;
       }

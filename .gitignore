@@ -39,6 +39,9 @@ Thumbs.db
 coverage/
 .nyc_output/
 
+# Overnight workspaces (nested git repos)
+workspaces/
+
 # Temporary files
 *.tmp
 *.temp
