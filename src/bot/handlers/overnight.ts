@@ -8,8 +8,14 @@
  * - Milestone notifications
  */
 
+import type Database from "better-sqlite3";
 import { Bot, InlineKeyboard, type Context } from "grammy";
 import { logger } from "../../utils/logger.js";
+import {
+  routeTelegramNotification,
+  sendChunkedTelegramMessage,
+} from "../../notifications/telegram-router.js";
+import type { NotificationIntent } from "../../notifications/types.js";
 import type { StateManager } from "../../state/manager.js";
 import {
   parseOvernightIntent,
@@ -590,17 +596,48 @@ export async function sendMilestoneNotification(
   bot: Bot,
   chatId: number,
   milestone: string,
-  message: string
+  message: string,
+  options: {
+    db?: Database.Database;
+    sourceId?: string;
+    jobRunId?: number | null;
+  } = {}
 ): Promise<number | undefined> {
-  try {
-    const result = await bot.api.sendMessage(chatId, message, {
-      parse_mode: "Markdown",
-    });
-    return result.message_id;
-  } catch (error) {
-    logger.error({ chatId, milestone, error }, "Failed to send milestone notification");
+  const intent: NotificationIntent = milestone === "ready"
+    ? "user_info"
+    : milestone === "failed"
+      ? "failure_alert"
+      : "operational_status";
+
+  const result = await routeTelegramNotification({
+    db: options.db,
+    sourceType: "overnight",
+    sourceId: options.sourceId ?? `overnight_milestone:${milestone}`,
+    jobRunId: options.jobRunId,
+    intent,
+    title: `Overnight ${milestone}`,
+    messageText: message,
+    deliver: async () => {
+      try {
+        return await sendChunkedTelegramMessage({
+          bot,
+          chatId,
+          message,
+          parseMode: "Markdown",
+          enableLinkPreview: false,
+        });
+      } catch (error) {
+        logger.error({ chatId, milestone, error }, "Failed to send milestone notification");
+        throw error;
+      }
+    },
+  });
+
+  if (result.decision !== "sent") {
     return undefined;
   }
+
+  return result.telegramMessageId;
 }
 
 // ============================================

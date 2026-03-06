@@ -48,6 +48,11 @@ export interface ParsedCommand {
   isNewSession: boolean;
 
   /**
+   * True if message starts with / but command is unknown
+   */
+  unknownCommand?: boolean;
+
+  /**
    * Deprecation warning message (if command is deprecated)
    */
   deprecationWarning?: string;
@@ -88,7 +93,8 @@ export function parseCommand(message: string): ParsedCommand | null {
   const cmdDef = getCommand(commandPart);
 
   if (!cmdDef) {
-    // Unknown command - treat as regular message
+    // Unknown slash command — flag it
+    result.unknownCommand = true;
     return result;
   }
 

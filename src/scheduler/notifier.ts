@@ -1,9 +1,11 @@
+import type Database from "better-sqlite3";
 import type { Bot } from "grammy";
 import { logger } from "../utils/logger.js";
-import { chunkMessage } from "../utils/chunker.js";
+import {
+  routeTelegramNotification,
+  sendChunkedTelegramMessage,
+} from "../notifications/telegram-router.js";
 import type { JobExecutionResult, RegisteredJob } from "./types.js";
-
-const MAX_OUTPUT_LENGTH = 4000; // Telegram limit is 4096
 
 /**
  * Escape HTML special characters
@@ -22,74 +24,69 @@ function escapeHtml(text: string): string {
 export async function notifyJobResult(
   bot: Bot,
   chatId: number,
+  db: Database.Database,
   result: JobExecutionResult,
-  job: RegisteredJob
+  job: RegisteredJob,
+  jobRunId?: number
 ): Promise<void> {
-  const shouldNotify = result.success
+  const isSuccess = result.success;
+  const shouldNotify = isSuccess
     ? job.config.notifyOnSuccess !== false
     : job.config.notifyOnFailure !== false;
+
+  const intent = result.notificationIntent ?? (isSuccess ? "user_info" : "failure_alert");
+  const message = isSuccess
+    ? result.output
+    : `❌ <b>${escapeHtml(job.config.name)}</b> failed\n\n${escapeHtml(result.error || "Unknown error")}`;
 
   if (!shouldNotify) {
     logger.debug(
       { jobId: result.jobId, success: result.success },
       "Skipping notification per job config"
     );
+    await routeTelegramNotification({
+      db,
+      sourceType: "scheduler_job",
+      sourceId: result.jobId,
+      jobRunId,
+      intent,
+      title: job.config.name,
+      messageText: message,
+      reason: isSuccess ? "success_notifications_disabled" : "failure_notifications_disabled",
+    });
     return;
   }
 
-  // For successful jobs, send output directly (already formatted by Claude)
-  // For failed jobs, add error context
-  if (result.success) {
-    await sendMessage(bot, chatId, result.output, true);
-  } else {
-    const errorMsg = `❌ <b>${escapeHtml(job.config.name)}</b> failed\n\n${escapeHtml(result.error || "Unknown error")}`;
-    await sendMessage(bot, chatId, errorMsg, false);
-  }
-}
-
-/**
- * Send a message to Telegram with HTML formatting
- */
-async function sendMessage(
-  bot: Bot,
-  chatId: number,
-  message: string,
-  enableLinkPreview: boolean
-): Promise<void> {
-  // Truncate if needed
-  let text = message;
-  if (text.length > MAX_OUTPUT_LENGTH) {
-    text = text.slice(0, MAX_OUTPUT_LENGTH - 20) + "\n\n<i>(truncated)</i>";
+  if (result.sideEffectDelivered) {
+    await routeTelegramNotification({
+      db,
+      sourceType: "scheduler_job",
+      sourceId: result.jobId,
+      jobRunId,
+      intent,
+      title: job.config.name,
+      messageText: message,
+      reason: "handled_by_direct_side_effect",
+    });
+    return;
   }
 
-  const chunks = chunkMessage(text);
-
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i] ?? "";
-    if (!chunk) continue;
-
-    // Only enable link preview for last chunk
-    const showPreview = enableLinkPreview && i === chunks.length - 1;
-
-    try {
-      await bot.api.sendMessage(chatId, chunk, {
-        parse_mode: "HTML",
-        link_preview_options: showPreview
-          ? { is_disabled: false, prefer_large_media: true }
-          : { is_disabled: true },
-      });
-    } catch (error) {
-      // Retry without HTML if parsing fails
-      logger.debug({ error }, "HTML failed, trying plain");
-      try {
-        await bot.api.sendMessage(chatId, chunk.replace(/<[^>]*>/g, ""), {
-          link_preview_options: { is_disabled: true },
-        });
-      } catch (plainError) {
-        logger.error({ error: plainError }, "Failed to send notification");
-      }
-    }
-  }
+  await routeTelegramNotification({
+    db,
+    sourceType: "scheduler_job",
+    sourceId: result.jobId,
+    jobRunId,
+    intent,
+    title: job.config.name,
+    messageText: message,
+    deliver: async () => sendChunkedTelegramMessage({
+      bot,
+      chatId,
+      message,
+      parseMode: "HTML",
+      enableLinkPreview: isSuccess,
+    }),
+  });
 }
 
 /**
@@ -100,5 +97,11 @@ export async function sendNotification(
   chatId: number,
   message: string
 ): Promise<void> {
-  await sendMessage(bot, chatId, message, false);
+  await sendChunkedTelegramMessage({
+    bot,
+    chatId,
+    message,
+    parseMode: "HTML",
+    enableLinkPreview: false,
+  });
 }

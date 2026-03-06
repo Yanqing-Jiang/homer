@@ -1,6 +1,7 @@
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { ExecutorResult } from "./types.js";
+import { executeOpenCodeCLI } from "./opencode-cli.js";
 import { logger } from "../utils/logger.js";
 
 // ============================================
@@ -258,6 +259,43 @@ export async function executeGeminiAPI(
 }
 
 // ============================================
+// OPENCODE FLASH WRAPPER
+// ============================================
+
+/**
+ * Route Flash text-gen through OpenCode CLI (forceOpenCode: true)
+ * to offload from the constrained Gemini API key to unlimited OpenCode accounts.
+ *
+ * Compatible return type with executeGeminiAPI for easy swapping.
+ */
+export async function executeFlashViaOpenCode(
+  prompt: string,
+  options: { systemPrompt?: string; timeout?: number; signal?: AbortSignal; researchOnly?: boolean } = {}
+): Promise<GeminiAPIResult> {
+  const fullPrompt = options.systemPrompt
+    ? `${options.systemPrompt}\n\n---\n\n${prompt}`
+    : prompt;
+
+  const result = await executeOpenCodeCLI(fullPrompt, "", {
+    model: "google/gemini-3-flash-preview",
+    forceOpenCode: true,
+    researchOnly: options.researchOnly ?? true,
+    timeout: options.timeout ?? 300_000,
+    signal: options.signal,
+  });
+
+  return {
+    output: result.output,
+    exitCode: result.exitCode,
+    duration: result.duration,
+    executor: "opencode-flash",
+    model: "gemini-3-flash-preview",
+    inputTokens: result.stats?.input_tokens,
+    outputTokens: result.stats?.output_tokens,
+  };
+}
+
+// ============================================
 // CONVENIENCE FUNCTIONS
 // ============================================
 
@@ -300,13 +338,11 @@ export async function summarizeWithGemini(
 ): Promise<string> {
   const defaultInstruction = "Summarize the following content, highlighting key points and actionable items.";
 
-  const result = await executeGeminiAPI(
+  const result = await executeFlashViaOpenCode(
     `${instruction || defaultInstruction}\n\n---\n\n${content}`,
     {
-      model: "flash3",
-      useGrounding: false, // Don't need search for summarization
       systemPrompt: "You are an expert at analyzing and summarizing content. Extract key insights concisely.",
-      temperature: 0.2,
+      timeout: 120_000,
     }
   );
 
@@ -361,7 +397,7 @@ export async function generateMorningBriefing(
   findings: string,
   dailyLog: string
 ): Promise<string> {
-  const result = await executeGeminiAPI(
+  const result = await executeFlashViaOpenCode(
     `Generate a morning briefing based on overnight findings and yesterday's log.
 
 ## Overnight Findings
@@ -380,10 +416,8 @@ Create a briefing with:
 
 Keep it actionable and concise.`,
     {
-      model: "flash",
-      useGrounding: false,
       systemPrompt: "You are a personal assistant creating a morning briefing. Be concise, prioritized, and actionable.",
-      temperature: 0.3,
+      timeout: 120_000,
     }
   );
 

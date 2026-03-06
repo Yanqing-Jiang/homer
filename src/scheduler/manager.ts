@@ -1,7 +1,7 @@
-import cron, { type ScheduledTask } from "node-cron";
+import { Cron } from "croner";
 import { EventEmitter } from "events";
 import { logger } from "../utils/logger.js";
-import { CronUtils } from "../utils/cron.js";
+import { recordFire, recordJobFire } from "./observability.js";
 import type { ScheduledJobConfig, RegisteredJob } from "./types.js";
 
 interface JobTriggerEvent {
@@ -13,7 +13,7 @@ interface JobTriggerEvent {
  * Manages cron job scheduling and state
  */
 export class CronManager extends EventEmitter {
-  private tasks: Map<string, ScheduledTask> = new Map();
+  private tasks: Map<string, Cron> = new Map();
   private jobs: Map<string, RegisteredJob> = new Map();
 
   constructor() {
@@ -42,12 +42,22 @@ export class CronManager extends EventEmitter {
     this.emit("job:updated", registeredJob);
 
     if (config.enabled) {
-      const task = cron.schedule(config.cron, () => {
+      const task = new Cron(config.cron, { protect: true, catch: true }, () => {
+        const now = Date.now();
+        const prev = task.previousRun();
+        if (prev) {
+          const delta = now - prev.getTime();
+          if (delta > 2000) {
+            logger.warn({ jobId: config.id, deltaMs: delta }, "Cron callback fired late");
+          }
+        }
+        recordFire();
+        recordJobFire(config.id);
         this.triggerJob(config.id, false);
       });
       this.tasks.set(config.id, task);
       logger.info(
-        { jobId: config.id, name: config.name, cron: config.cron },
+        { jobId: config.id, name: config.name, cron: config.cron, nextRun: task.nextRun()?.toISOString() },
         "Registered scheduled job"
       );
     } else {
@@ -114,7 +124,9 @@ export class CronManager extends EventEmitter {
     if (!job) return;
 
     job.lastRun = new Date();
-    job.nextRun = job.config.enabled ? this.getNextRun(job.config.cron) : null;
+    // Use croner's native nextRun for accuracy
+    const task = this.tasks.get(jobId);
+    job.nextRun = task ? (task.nextRun() ?? null) : this.getNextRun(job.config.cron);
 
     if (success) {
       job.lastSuccess = new Date();
@@ -127,9 +139,10 @@ export class CronManager extends EventEmitter {
   }
 
   /**
-   * Disable a job at runtime (stops its cron task, marks config as disabled)
+   * Disable a job at runtime (stops its cron task, marks config as disabled).
+   * Accepts optional StateManager to persist the disable to DB.
    */
-  disableJob(jobId: string): boolean {
+  disableJob(jobId: string, stateManager?: { syncScheduledJobEnabled: (jobs: { jobId: string; enabled: boolean }[]) => void }): boolean {
     const job = this.jobs.get(jobId);
     if (!job) return false;
 
@@ -140,6 +153,11 @@ export class CronManager extends EventEmitter {
     if (task) {
       task.stop();
       this.tasks.delete(jobId);
+    }
+
+    // Persist to DB so disable survives restart
+    if (stateManager) {
+      stateManager.syncScheduledJobEnabled([{ jobId, enabled: false }]);
     }
 
     this.emit("job:updated", job);
@@ -169,10 +187,22 @@ export class CronManager extends EventEmitter {
   }
 
   /**
+   * Get the croner Cron instance for a job (for observability)
+   */
+  getCronTask(jobId: string): Cron | undefined {
+    return this.tasks.get(jobId);
+  }
+
+  /**
    * Calculate next run time for a cron expression
    */
   private getNextRun(cronExpr: string): Date | null {
-    return CronUtils.getNextRun(cronExpr);
+    try {
+      const job = new Cron(cronExpr, { paused: true });
+      return job.nextRun() ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /**

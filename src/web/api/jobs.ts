@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, existsSync } from "fs";
 import { CronUtils } from "../../utils/cron.js";
 import type { StateManager } from "../../state/manager.js";
 import type { Scheduler } from "../../scheduler/index.js";
+import { loadAllSchedules, getAllJobs } from "../../scheduler/loader.js";
 import { logger } from "../../utils/logger.js";
 import { PATHS } from "../../config/paths.js";
 
@@ -65,12 +66,13 @@ export function registerJobsRoutes(
   server: FastifyInstance,
   stateManager: StateManager
 ): void {
-  // List all jobs with their next scheduled runs
+  // List all jobs with their next scheduled runs (from ALL schedule files)
   server.get("/api/jobs/scheduled", async () => {
-    const scheduleConfig = loadScheduleConfig();
+    const schedules = await loadAllSchedules();
+    const allJobs = getAllJobs(schedules);
     const registeredJobs = schedulerRef?.getJobs() ?? [];
 
-    const jobs: JobWithSchedule[] = scheduleConfig.jobs.map((job) => {
+    const jobs: JobWithSchedule[] = allJobs.map((job) => {
       const registered = registeredJobs.find((r) => r.config.id === job.id);
       const state = stateManager.getScheduledJobState(job.id);
 
@@ -93,11 +95,12 @@ export function registerJobsRoutes(
     return { jobs };
   });
 
-  // Get single job details
+  // Get single job details (searches all schedule files)
   server.get("/api/jobs/scheduled/:id", async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = request.params as { id: string };
-    const scheduleConfig = loadScheduleConfig();
-    const job = scheduleConfig.jobs.find((j) => j.id === id);
+    const schedules = await loadAllSchedules();
+    const allJobs = getAllJobs(schedules);
+    const job = allJobs.find((j) => j.id === id);
 
     if (!job) {
       reply.status(404);
@@ -124,17 +127,29 @@ export function registerJobsRoutes(
     };
   });
 
-  // Update job configuration
+  // Update job configuration (finds the correct source file for the job)
   server.patch("/api/jobs/scheduled/:id", async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = request.params as { id: string };
     const body = request.body as UpdateJobBody;
 
-    const scheduleConfig = loadScheduleConfig();
-    const jobIndex = scheduleConfig.jobs.findIndex((j) => j.id === id);
+    // Find which schedule file contains this job
+    const schedules = await loadAllSchedules();
+    const allJobs = getAllJobs(schedules);
+    const targetJob = allJobs.find((j) => j.id === id);
+
+    if (!targetJob) {
+      reply.status(404);
+      return { error: "Job not found" };
+    }
+
+    // Load the specific source file to modify
+    const sourceFile = targetJob.sourceFile;
+    const scheduleConfig = loadScheduleConfigFrom(sourceFile);
+    const jobIndex = scheduleConfig.jobs.findIndex((j: { id: string }) => j.id === id);
 
     if (jobIndex === -1) {
       reply.status(404);
-      return { error: "Job not found" };
+      return { error: "Job not found in source file" };
     }
 
     // Apply updates
@@ -148,8 +163,8 @@ export function registerJobsRoutes(
     if (body.query !== undefined) job.query = body.query;
     if (body.name !== undefined) job.name = body.name;
 
-    // Save config (file watcher handles hot reload automatically)
-    saveScheduleConfig(scheduleConfig);
+    // Save config to the correct source file (file watcher handles hot reload automatically)
+    saveScheduleConfigTo(sourceFile, scheduleConfig);
 
     return {
       ...job,
@@ -300,34 +315,42 @@ export function registerJobsRoutes(
 }
 
 /**
- * Load schedule configuration from file
+ * Load schedule configuration from a specific file
  */
-function loadScheduleConfig(): ScheduleConfig {
-  if (!existsSync(SCHEDULE_FILE)) {
+function loadScheduleConfigFrom(filePath: string): ScheduleConfig {
+  if (!existsSync(filePath)) {
     return { version: "1.0", jobs: [] };
   }
 
   try {
-    const content = readFileSync(SCHEDULE_FILE, "utf-8");
+    const content = readFileSync(filePath, "utf-8");
     return JSON.parse(content) as ScheduleConfig;
   } catch (error) {
-    logger.error({ error, file: SCHEDULE_FILE }, "Failed to load schedule config");
+    logger.error({ error, file: filePath }, "Failed to load schedule config");
     return { version: "1.0", jobs: [] };
   }
 }
 
 /**
- * Save schedule configuration to file
+ * Load schedule configuration from default file
  */
-function saveScheduleConfig(config: ScheduleConfig): void {
+function loadScheduleConfig(): ScheduleConfig {
+  return loadScheduleConfigFrom(SCHEDULE_FILE);
+}
+
+/**
+ * Save schedule configuration to a specific file
+ */
+function saveScheduleConfigTo(filePath: string, config: ScheduleConfig): void {
   try {
-    writeFileSync(SCHEDULE_FILE, JSON.stringify(config, null, 2), "utf-8");
-    logger.info({ file: SCHEDULE_FILE }, "Saved schedule config");
+    writeFileSync(filePath, JSON.stringify(config, null, 2), "utf-8");
+    logger.info({ file: filePath }, "Saved schedule config");
   } catch (error) {
-    logger.error({ error, file: SCHEDULE_FILE }, "Failed to save schedule config");
+    logger.error({ error, file: filePath }, "Failed to save schedule config");
     throw error;
   }
 }
+
 
 /**
  * Convert cron expression to human-readable string

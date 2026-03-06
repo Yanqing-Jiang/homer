@@ -30,7 +30,7 @@ LOCK_OWNER_PATTERN="${LOCK_OWNER_PATTERN:-homer|claude|node}"
 # Timing — 30min interval to avoid wasteful polling (resource-aware)
 INTERVAL="${INTERVAL:-1800}"                    # Check every 30min (was 60s)
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-15}"          # Probe timeout 15s
-FAILURES_BEFORE_ACTION="${FAILURES_BEFORE_ACTION:-2}"  # 2 consecutive failures = 1h before action
+FAILURES_BEFORE_ACTION="${FAILURES_BEFORE_ACTION:-2}"  # 2 consecutive failures = ~30min observed before action
 TRIAGE_COOLDOWN="${TRIAGE_COOLDOWN:-300}"       # Wait 5min after triage action before next check
 
 # Resource checks
@@ -254,8 +254,23 @@ lock_holder_pids() {
 # Action executors (called ONLY by CC decision)
 # ============================================
 
+# Check if active CLI runs are in progress (protect user requests)
+has_active_runs() {
+  local db="$HOME/homer/data/homer.db"
+  if ! command -v sqlite3 &>/dev/null || [ ! -f "$db" ]; then
+    return 1  # Can't check, assume no active runs
+  fi
+  local count
+  count=$(sqlite3 "$db" "SELECT COUNT(*) FROM cli_runs WHERE status = 'running'" 2>/dev/null || echo "0")
+  [ "$count" -gt 0 ]
+}
+
 # Gentle restart: launchctl kickstart (no kill)
 action_restart() {
+  if has_active_runs; then
+    log "ACTION: restart deferred — active CLI runs in progress, will retry next cycle"
+    return 0  # Return success to avoid escalation, watchdog will re-check next cycle
+  fi
   log "ACTION: gentle restart via launchctl"
   /bin/launchctl kickstart -k "${LAUNCHD_DOMAIN}/${HOMER_LABEL}" >/dev/null 2>&1 && return 0
   /bin/launchctl start "${HOMER_LABEL}" >/dev/null 2>&1 && return 0

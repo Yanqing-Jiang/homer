@@ -3,6 +3,12 @@ import { logger } from "../utils/logger.js";
 
 const THINKING_INDICATOR = "🤔 Thinking...";
 
+/** Escape characters that break Telegram Markdown v1 parsing */
+function escapeMarkdown(text: string): string {
+  // Only escape characters that Telegram treats as Markdown control chars
+  return text.replace(/([_*`\[])/g, "\\$1");
+}
+
 /**
  * Progressive Telegram message updater — replaces "Thinking..." with
  * incremental content as CLI executor streams tokens.
@@ -144,12 +150,15 @@ export async function editWithResponse(
     }
   } catch (error) {
     logger.error({ error }, "Failed to edit message with response");
-    // Fallback: try to send as a new message
+    // Fallback: escape Markdown and retry, then plain text as last resort
     try {
-      await ctx.reply(response.slice(0, MAX_MESSAGE_LENGTH), { parse_mode: "Markdown" });
+      await ctx.reply(escapeMarkdown(response).slice(0, MAX_MESSAGE_LENGTH), { parse_mode: "Markdown" });
     } catch {
-      // Last resort: send without markdown
-      await ctx.reply(response.slice(0, MAX_MESSAGE_LENGTH));
+      try {
+        await ctx.reply(response.slice(0, MAX_MESSAGE_LENGTH));
+      } catch (finalErr) {
+        logger.error({ error: finalErr }, "All attempts to send response failed");
+      }
     }
   }
 }

@@ -21,6 +21,7 @@ export interface ExecutorSession {
 
 export class StateManager {
   private _db: Database.Database;
+  private _closed = false;
   private ttlMs: number;
 
   constructor(dbPath: string) {
@@ -109,6 +110,32 @@ export class StateManager {
         consecutive_failures INTEGER DEFAULT 0,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
       );
+
+      -- Notification audit trail
+      CREATE TABLE IF NOT EXISTS notification_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel TEXT NOT NULL DEFAULT 'telegram',
+        source_type TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        job_run_id INTEGER REFERENCES scheduled_job_runs(id) ON DELETE SET NULL,
+        intent TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        title TEXT,
+        message_text TEXT NOT NULL,
+        reason TEXT,
+        metadata_json TEXT,
+        telegram_message_id INTEGER,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_notification_events_source
+        ON notification_events(source_type, source_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_notification_events_job_run_id
+        ON notification_events(job_run_id);
+      CREATE INDEX IF NOT EXISTS idx_notification_events_decision
+        ON notification_events(decision);
+      CREATE INDEX IF NOT EXISTS idx_notification_events_created_at
+        ON notification_events(created_at);
 
       -- Reminders
       CREATE TABLE IF NOT EXISTS reminders (
@@ -248,7 +275,12 @@ export class StateManager {
     return result.changes;
   }
 
+  get isOpen(): boolean {
+    return !this._closed;
+  }
+
   close(): void {
+    this._closed = true;
     this._db.close();
   }
 
@@ -572,12 +604,43 @@ export class StateManager {
    */
   updateScheduledJobNextRun(jobId: string, nextRunAt: Date | null): void {
     const nextRunStr = nextRunAt ? nextRunAt.toISOString() : null;
+    const nextRunMs = nextRunAt ? nextRunAt.getTime() : null;
     this._db.prepare(
         `UPDATE scheduled_job_state
-         SET next_run_at = ?, updated_at = ?
+         SET next_run_at = ?, next_run_at_ms = ?, updated_at = ?
          WHERE job_id = ?`
       )
-      .run(nextRunStr, new Date().toISOString(), jobId);
+      .run(nextRunStr, nextRunMs, new Date().toISOString(), jobId);
+  }
+
+  /**
+   * Update next_run_at_ms for DB-driven catch-up
+   */
+  updateNextRunAtMs(jobId: string, ms: number | null): void {
+    this._db.prepare(
+      `UPDATE scheduled_job_state SET next_run_at_ms = ?, updated_at = ? WHERE job_id = ?`
+    ).run(ms, new Date().toISOString(), jobId);
+  }
+
+  /**
+   * Get jobs that are overdue (next_run_at_ms in the past, not running, enabled)
+   */
+  getDueJobs(): Array<{ jobId: string; nextRunAtMs: number; lastTriggeredAt: string | null }> {
+    return this._db.prepare(
+      `SELECT job_id as jobId, next_run_at_ms as nextRunAtMs, last_triggered_at as lastTriggeredAt
+       FROM scheduled_job_state
+       WHERE next_run_at_ms < ? AND is_running = 0 AND enabled = 1
+       ORDER BY next_run_at_ms ASC`
+    ).all(Date.now()) as Array<{ jobId: string; nextRunAtMs: number; lastTriggeredAt: string | null }>;
+  }
+
+  /**
+   * Record that a job was triggered by the compensation system
+   */
+  recordCompensationTrigger(jobId: string): void {
+    this._db.prepare(
+      `UPDATE scheduled_job_state SET last_triggered_at = ?, updated_at = ? WHERE job_id = ?`
+    ).run(new Date().toISOString(), new Date().toISOString(), jobId);
   }
 
   getScheduledJobState(jobId: string): ScheduledJobState | null {
@@ -614,6 +677,24 @@ export class StateManager {
          ORDER BY updated_at DESC`
       )
       .all() as ScheduledJobState[];
+  }
+
+  /**
+   * Ensure DB rows exist for all known jobs at boot.
+   * Uses INSERT OR IGNORE so existing rows are untouched.
+   */
+  ensureJobStateRows(jobs: Array<{ jobId: string; sourceFile: string; enabled: boolean }>): void {
+    const stmt = this._db.prepare(
+      `INSERT OR IGNORE INTO scheduled_job_state (job_id, source_file, enabled, updated_at)
+       VALUES (?, ?, ?, ?)`
+    );
+    const now = new Date().toISOString();
+    const tx = this._db.transaction(() => {
+      for (const j of jobs) {
+        stmt.run(j.jobId, j.sourceFile, j.enabled ? 1 : 0, now);
+      }
+    });
+    tx();
   }
 
   /**
@@ -900,6 +981,7 @@ export class StateManager {
     lane: string,
     options?: { title?: string; provider?: string; model?: string | null }
   ): Thread {
+    if (this._closed) throw new Error("StateManager is closed");
     const existing = this.getThread(lane);
     if (existing) return existing;
 
@@ -1133,6 +1215,14 @@ export class StateManager {
     this._db.prepare(
       `UPDATE job_queue SET status = 'failed', completed_at = ?, error = 'Daemon shutdown' WHERE status = 'running'`
     ).run(now);
+  }
+
+  failAllRunningCliRuns(): number {
+    const now = Date.now();
+    const result = this._db.prepare(
+      `UPDATE cli_runs SET status = 'failed', completed_at = ?, error = 'Daemon shutdown' WHERE status = 'running'`
+    ).run(now);
+    return result.changes;
   }
 
   /**
@@ -2255,4 +2345,3 @@ export interface JobArtifact {
   metadataJson: string | null;
   createdAt: string;
 }
-

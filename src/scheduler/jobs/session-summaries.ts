@@ -11,7 +11,7 @@
 
 import { readFile, writeFile } from "fs/promises";
 import { existsSync } from "fs";
-import { executeGeminiAPI } from "../../executors/gemini.js";
+import { executeFlashViaOpenCode } from "../../executors/gemini.js";
 import { logger } from "../../utils/logger.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
 import { StateManager } from "../../state/manager.js";
@@ -230,25 +230,22 @@ export async function runSessionSummary(
 
     logger.info(
       { date, sessions: sessions.length, dailyLogKB: Math.round(dailyLogContent.length / 1024) },
-      "Running session summary via Gemini API"
+      "Running session summary via OpenCode Flash"
     );
 
-    const result = await executeGeminiAPI(fullPrompt, {
-      model: "gemini-3-flash-preview",
+    const result = await executeFlashViaOpenCode(fullPrompt, {
       systemPrompt,
-      temperature: 0.3,
-      timeout: 180000,
-      useGrounding: false,
+      timeout: 180_000,
     });
 
     if (result.exitCode !== 0) {
-      return { success: false, output: "", error: `Gemini API error: ${result.output}` };
+      return { success: false, output: "", error: `OpenCode Flash error: ${result.output}` };
     }
 
     const summaryText = result.output.trim();
 
     // Append summary to daily log (preserve raw content instead of overwriting)
-    const summarySection = `\n\n---\n\n## Daily Summary\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via Gemini API (${sessions.length} sessions)*\n\n${summaryText}\n`;
+    const summarySection = `\n\n---\n\n## Daily Summary\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via OpenCode Flash (${sessions.length} sessions)*\n\n${summaryText}\n`;
 
     if (existsSync(logPath)) {
       const existing = await readFile(logPath, "utf-8");

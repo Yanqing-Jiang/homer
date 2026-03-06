@@ -22,7 +22,10 @@ const FATAL_LOG = path.join(LOG_DIR, "fatal.log");
 // const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID ?? process.env.ALLOWED_CHAT_ID ?? "";
 
 const EXIT_TIMEOUT_MS = 2000;
-const SHUTDOWN_TIMEOUT_MS = 8000;
+// Global shutdown timeout: total budget for all shutdown phases.
+// Must be larger than DRAIN_TIMEOUT_MS (used in index.ts) to allow for Phase 1 + Phase 3.
+// Default 330s (5.5 min). LaunchD ExitTimeOut (360s) > this > DRAIN_TIMEOUT_MS (270s).
+const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS ?? "330000", 10);
 
 // SMS constants — read from env directly (no config import, this runs before init)
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID ?? "";
@@ -108,11 +111,24 @@ function sendTelegramBestEffort(_message: string, _timeoutMs = 2000): void {
 }
 
 async function runShutdownTasks(timeoutMs = SHUTDOWN_TIMEOUT_MS): Promise<void> {
-  const tasks = shutdownTasks.map((fn) => Promise.resolve().then(fn).catch(() => undefined));
-  await Promise.race([
-    Promise.allSettled(tasks).then(() => undefined),
-    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
-  ]);
+  const deadline = Date.now() + timeoutMs;
+  for (const fn of shutdownTasks) {
+    if (Date.now() >= deadline) {
+      logLine("WARN", "Shutdown deadline reached, skipping remaining tasks");
+      break;
+    }
+    try {
+      const remaining = deadline - Date.now();
+      await Promise.race([
+        Promise.resolve(fn()),
+        new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error("shutdown task timeout")), remaining)
+        ),
+      ]);
+    } catch {
+      // continue to next task
+    }
+  }
 }
 
 async function fatalExit(kind: string, err: unknown): Promise<void> {
@@ -125,6 +141,9 @@ async function fatalExit(kind: string, err: unknown): Promise<void> {
 
   logLine("ERROR", msg);
   sendSmsSyncViaCurl(msg);
+
+  // Best-effort shutdown with tight 10s cap
+  try { await runShutdownTasks(10_000); } catch { /* best effort */ }
 
   process.exitCode = 1;
   setTimeout(() => process.exit(1), EXIT_TIMEOUT_MS).unref();

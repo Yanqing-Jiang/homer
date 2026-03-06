@@ -1,18 +1,18 @@
-import cronParser from "cron-parser";
+import { Cron } from "croner";
 
 /**
  * Unified cron utility for HOMER
+ * Uses croner as the underlying engine (replaces cron-parser)
  */
 export const CronUtils = {
   /**
    * Validates a cron expression.
    * Supports 5-part (minute-based) and 6-part (second-based) expressions.
-   * Also supports common macros like @daily, @hourly, etc.
    */
   isValid(cron: string): boolean {
     if (!cron) return false;
     try {
-      cronParser.parseExpression(cron);
+      new Cron(cron, { paused: true });
       return true;
     } catch {
       return false;
@@ -21,14 +21,14 @@ export const CronUtils = {
 
   /**
    * Gets the next run time for a cron expression.
-   * @param cron The cron expression or macro
+   * @param cron The cron expression
    * @param fromDate The starting date for calculation (defaults to now)
    * @returns Date object or null if expression is invalid
    */
   getNextRun(cron: string, fromDate: Date = new Date()): Date | null {
     try {
-      const interval = cronParser.parseExpression(cron, { currentDate: fromDate });
-      return interval.next().toDate();
+      const job = new Cron(cron, { paused: true });
+      return job.nextRun(fromDate);
     } catch {
       return null;
     }
@@ -36,27 +36,23 @@ export const CronUtils = {
 
   /**
    * Gets multiple upcoming run times for a cron expression.
-   * @param cron The cron expression or macro
+   * @param cron The cron expression
    * @param count Number of runs to return
    * @param fromDate The starting date for calculation (defaults to now)
    * @returns Array of Date objects
    */
   getNextRuns(cron: string, count: number, fromDate: Date = new Date()): Date[] {
-    const runs: Date[] = [];
     try {
-      const interval = cronParser.parseExpression(cron, { currentDate: fromDate });
-      for (let i = 0; i < count; i++) {
-        runs.push(interval.next().toDate());
-      }
+      const job = new Cron(cron, { paused: true });
+      return job.nextRuns(count, fromDate);
     } catch {
-      // Return whatever we managed to calculate
+      return [];
     }
-    return runs;
   },
 
   /**
    * Gets all runs between two dates for a cron expression.
-   * @param cron The cron expression or macro
+   * @param cron The cron expression
    * @param start Start date
    * @param end End date
    * @param maxResults Maximum number of runs to return (safety limit)
@@ -64,11 +60,12 @@ export const CronUtils = {
   getRunsBetween(cron: string, start: Date, end: Date, maxResults: number = 1000): Date[] {
     const runs: Date[] = [];
     try {
-      const interval = cronParser.parseExpression(cron, { currentDate: start });
-      let next = interval.next().toDate();
-      while (next <= end && runs.length < maxResults) {
+      const job = new Cron(cron, { paused: true });
+      let next = job.nextRun(start);
+      while (next && next <= end && runs.length < maxResults) {
         runs.push(next);
-        next = interval.next().toDate();
+        // Advance 1ms past the current match to get the next one
+        next = job.nextRun(new Date(next.getTime() + 1));
       }
     } catch {
       // Return whatever we managed to calculate

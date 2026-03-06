@@ -9,6 +9,7 @@ import { executeKimiCLI } from "../executors/kimi-cli.js";
 import { executeCodexCLI } from "../executors/codex-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { RESEARCH_ONLY_PREFIX } from "../executors/opencode-cli.js";
+import { executeFlashViaOpenCode } from "../executors/gemini.js";
 import {
   runWithFallbackChain,
   DEFAULT_CHAIN,
@@ -174,7 +175,9 @@ async function executeKimiJob(
 }
 
 /**
- * Execute a Gemini-lane job via Claude Sonnet (migrated from OpenCode CLI)
+ * Execute a Gemini-lane job.
+ * Flash models route through OpenCode CLI (built-in search grounding, free tokens).
+ * Non-flash models fall back to Claude Sonnet.
  */
 async function executeGeminiJob(
   job: RegisteredJob,
@@ -184,33 +187,52 @@ async function executeGeminiJob(
 ): Promise<JobExecutionResult> {
   const { config, sourceFile } = job;
   const timeout = options?.timeoutOverride ?? config.timeout ?? 1200000;
-  const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
   const emitCompleted = options?.emitCompletedEvent !== false;
   const query = options?.queryOverride ?? config.query;
+  const model = options?.modelOverride ?? config.model ?? "sonnet";
+  const isFlash = model.includes("flash");
 
   const contextPrompt = config.contextFiles?.length
     ? loadContextFiles(config.contextFiles)
     : "";
 
-  const fullQuery = contextPrompt
-    ? RESEARCH_ONLY_PREFIX + `Context:\n${contextPrompt}\n\n---\n\nTask:\n${query}`
-    : RESEARCH_ONLY_PREFIX + query;
+  const executorLabel = isFlash ? "opencode-flash" : "claude-sonnet";
 
   logger.info(
-    { jobId: config.id, executor: "claude-sonnet", queryLength: query.length },
-    "Executing Gemini-lane job via Claude Sonnet"
+    { jobId: config.id, executor: executorLabel, model, queryLength: query.length },
+    `Executing Gemini-lane job via ${executorLabel}`
   );
 
   try {
-    const result = await executeClaudeCommand(fullQuery, {
-      timeout,
-      cwd,
-      model: options?.modelOverride ?? "sonnet",
-    });
+    let output: string;
+    let exitCode: number;
+
+    if (isFlash) {
+      // Route Flash models through OpenCode CLI for built-in search grounding
+      const fullPrompt = contextPrompt
+        ? `Context:\n${contextPrompt}\n\n---\n\nTask:\n${query}`
+        : query;
+      const result = await executeFlashViaOpenCode(fullPrompt, { timeout });
+      output = result.output;
+      exitCode = result.exitCode;
+    } else {
+      // Non-flash models still route to Claude Sonnet (existing behavior)
+      const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
+      const fullQuery = contextPrompt
+        ? RESEARCH_ONLY_PREFIX + `Context:\n${contextPrompt}\n\n---\n\nTask:\n${query}`
+        : RESEARCH_ONLY_PREFIX + query;
+      const result = await executeClaudeCommand(fullQuery, {
+        timeout,
+        cwd,
+        model: "sonnet",
+      });
+      output = result.output;
+      exitCode = result.exitCode;
+    }
 
     const completedAt = new Date();
     const duration = completedAt.getTime() - startedAt.getTime();
-    const success = result.exitCode === 0;
+    const success = exitCode === 0;
 
     if (emitCompleted) {
       onProgress?.({
@@ -219,15 +241,15 @@ async function executeGeminiJob(
         jobName: config.name,
         timestamp: completedAt,
         message: success
-          ? `✅ Completed: ${config.name} (${Math.round(duration / 1000)}s, Sonnet)`
+          ? `✅ Completed: ${config.name} (${Math.round(duration / 1000)}s, ${executorLabel})`
           : `❌ Failed: ${config.name}`,
         details: { duration, success },
       });
     }
 
     logger.info(
-      { jobId: config.id, success, duration, exitCode: result.exitCode },
-      "Gemini-lane job completed via Sonnet"
+      { jobId: config.id, success, duration, exitCode },
+      `Gemini-lane job completed via ${executorLabel}`
     );
 
     return {
@@ -237,9 +259,9 @@ async function executeGeminiJob(
       startedAt,
       completedAt,
       success,
-      output: result.output || "(No output)",
-      error: success ? undefined : result.output,
-      exitCode: result.exitCode,
+      output: output || "(No output)",
+      error: success ? undefined : output,
+      exitCode,
       duration,
     };
   } catch (error) {
@@ -258,7 +280,7 @@ async function executeGeminiJob(
       });
     }
 
-    logger.error({ jobId: config.id, error: errorMessage }, "Gemini-lane job failed");
+    logger.error({ jobId: config.id, error: errorMessage }, `Gemini-lane job failed (${executorLabel})`);
 
     return {
       jobId: config.id,

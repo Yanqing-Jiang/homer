@@ -15,11 +15,19 @@ import { logger } from "../utils/logger.js";
 import { CronUtils } from "../utils/cron.js";
 import { getClaudeAuthStatus } from "../utils/claude-auth.js";
 import { checkGeminiAPIHealth } from "../executors/gemini.js";
+import {
+  routeTelegramNotification,
+  sendChunkedTelegramMessage,
+} from "../notifications/telegram-router.js";
+import type { NotificationIntent } from "../notifications/types.js";
 import { readFileSync, existsSync } from "fs";
 import { createHash } from "crypto";
 import { execFile } from "child_process";
 import { getConnectivityMonitor } from "../heartbeat/index.js";
 import { processRegistry } from "../process/registry.js";
+import { cleanupScheduler } from "../process/cleanup-scheduler.js";
+import { checkAndFlushExpiringSessions } from "../memory/flush.js";
+import { config } from "../config/index.js";
 
 interface InternalJobContext {
   stateManager: StateManager;
@@ -43,6 +51,11 @@ const HEALTH_ALERT_REMINDER_MS = 6 * 60 * 60 * 1000; // 6h
 const HEALTH_ALERT_RETRY_BASE_MS = 60 * 1000; // 1m
 const HEALTH_ALERT_RETRY_MAX_MS = 30 * 60 * 1000; // 30m
 const HEALTH_ALERT_SEND_ATTEMPTS = 2;
+
+interface BuildResultOptions {
+  notificationIntent?: NotificationIntent;
+  sideEffectDelivered?: boolean;
+}
 
 function toMillis(value: string | null | undefined): number | null {
   if (!value) return null;
@@ -138,23 +151,48 @@ function saveHealthAlertState(db: ReturnType<StateManager["getDb"]>, state: Heal
   );
 }
 
-async function sendHealthMessage(ctx: InternalJobContext, message: string): Promise<boolean> {
-  for (let attempt = 1; attempt <= HEALTH_ALERT_SEND_ATTEMPTS; attempt++) {
-    try {
-      await ctx.bot.api.sendMessage(ctx.chatId, message, {
-        parse_mode: "HTML",
-        link_preview_options: { is_disabled: true },
-      });
-      return true;
-    } catch (error) {
-      logger.error({ error, attempt }, "Failed to send health check notification");
-      if (attempt < HEALTH_ALERT_SEND_ATTEMPTS) {
-        const waitMs = attempt * 2000;
-        await new Promise((resolve) => setTimeout(resolve, waitMs));
+async function sendHealthMessage(
+  ctx: InternalJobContext,
+  message: string,
+  options: { intent: NotificationIntent; sourceId: string }
+): Promise<boolean> {
+  const result = await routeTelegramNotification({
+    db: ctx.stateManager.getDb(),
+    sourceType: "scheduler_job",
+    sourceId: options.sourceId,
+    jobRunId: ctx.jobRunId,
+    intent: options.intent,
+    title: "Health Check",
+    messageText: message,
+    deliver: async () => {
+      let lastError: unknown;
+
+      for (let attempt = 1; attempt <= HEALTH_ALERT_SEND_ATTEMPTS; attempt++) {
+        try {
+          return await sendChunkedTelegramMessage({
+            bot: ctx.bot,
+            chatId: ctx.chatId,
+            message,
+            parseMode: "HTML",
+            enableLinkPreview: false,
+          });
+        } catch (error) {
+          lastError = error;
+          logger.error({ error, attempt }, "Failed to send health check notification");
+          if (attempt < HEALTH_ALERT_SEND_ATTEMPTS) {
+            const waitMs = attempt * 2000;
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+          }
+        }
       }
-    }
-  }
-  return false;
+
+      throw lastError instanceof Error
+        ? lastError
+        : new Error("Failed to send health check notification");
+    },
+  });
+
+  return result.decision === "sent";
 }
 
 // Handlers safe to retry (idempotent, no user-facing side effects)
@@ -164,7 +202,7 @@ const RETRYABLE_HANDLERS = new Set([
   "memory_cleanup", "planning_reminder", "content_scraper", "outcome_tracker",
   "preference_updater", "idea_dedup", "memory_git_commit", "nightly_code_push", "db_backup",
   "idea_synthesizer", "archive_verify", "health_check", "context_bridge",
-  "architecture_updater",
+  "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
 ]);
 
 const TRANSIENT_PATTERNS = [
@@ -179,12 +217,50 @@ function isTransientError(error?: string): boolean {
   return TRANSIENT_PATTERNS.some(p => lower.includes(p.toLowerCase()));
 }
 
+function getPlanningReminderIntent(result: {
+  success: boolean;
+  hasActionableContent?: boolean;
+}): NotificationIntent | undefined {
+  if (!result.success) {
+    return undefined;
+  }
+  return result.hasActionableContent ? "user_info" : "operational_status";
+}
+
+function getHealthResultOptions(output: string): BuildResultOptions {
+  if (output.includes("recovery alert sent")) {
+    return {
+      notificationIntent: "user_info",
+      sideEffectDelivered: true,
+    };
+  }
+
+  if (output.includes("alert sent")) {
+    return {
+      notificationIntent: "failure_alert",
+      sideEffectDelivered: true,
+    };
+  }
+
+  if (output.includes("FAILED to send")) {
+    return {
+      notificationIntent: "failure_alert",
+    };
+  }
+
+  return {
+    notificationIntent: "operational_status",
+  };
+}
+
+
 function buildResult(
   job: RegisteredJob,
   startedAt: Date,
   success: boolean,
   output: string,
-  error?: string
+  error?: string,
+  options: BuildResultOptions = {}
 ): JobExecutionResult {
   const completedAt = new Date();
   return {
@@ -198,6 +274,8 @@ function buildResult(
     error,
     exitCode: success ? 0 : 1,
     duration: completedAt.getTime() - startedAt.getTime(),
+    notificationIntent: options.notificationIntent,
+    sideEffectDelivered: options.sideEffectDelivered,
   };
 }
 
@@ -353,7 +431,10 @@ async function runHealthCheck(
 
     if (state.active_fingerprint) {
       const recovery = `✅ <b>Health Check</b>\n\nRecovered from previous alert:\n${state.active_issues ?? "Unknown issue"}`;
-      const recoverySent = await sendHealthMessage(ctx, recovery);
+      const recoverySent = await sendHealthMessage(ctx, recovery, {
+        intent: "user_info",
+        sourceId: "health_check:recovery",
+      });
       if (recoverySent) {
         output = "All systems healthy, recovery alert sent";
         state.last_recovery_sent_at = new Date(now).toISOString();
@@ -401,7 +482,10 @@ async function runHealthCheck(
     };
   }
 
-  const alertSent = await sendHealthMessage(ctx, message);
+  const alertSent = await sendHealthMessage(ctx, message, {
+    intent: "failure_alert",
+    sourceId: `health_check:${issueFingerprint.slice(0, 16)}`,
+  });
   if (alertSent) {
     state.last_sent_fingerprint = issueFingerprint;
     state.last_sent_at = nowIso;
@@ -420,7 +504,7 @@ async function runHealthCheck(
   let triageOutput = "";
   try {
     const triageCountRow = db.prepare(
-      "SELECT COUNT(*) as cnt FROM process_cleanup_runs WHERE trigger = 'health-triage' AND datetime(created_at) > datetime('now', '-24 hours')"
+      "SELECT COUNT(*) as cnt FROM process_cleanup_runs WHERE trigger = 'health-triage' AND datetime(run_at) > datetime('now', '-24 hours')"
     ).get() as { cnt: number } | undefined;
     const triageCount = triageCountRow?.cnt ?? 0;
 
@@ -438,7 +522,6 @@ async function runHealthCheck(
         // Execute triage decision
         if (triageResult.action === "restart_job" && triageResult.jobId) {
           try {
-            // Reset consecutive failures for the stuck job
             const resetStmt = db.prepare(
               "UPDATE scheduled_job_state SET is_running = 0, consecutive_failures = 0 WHERE job_id = ?"
             );
@@ -446,6 +529,16 @@ async function runHealthCheck(
             logger.info({ jobId: triageResult.jobId }, "Health triage: reset job state");
           } catch (resetErr) {
             logger.warn({ error: resetErr, jobId: triageResult.jobId }, "Health triage: failed to reset job");
+          }
+        } else if (triageResult.action === "disable_job" && triageResult.jobId) {
+          try {
+            db.prepare(
+              "UPDATE scheduled_job_state SET is_running = 0, enabled = 0, consecutive_failures = 999, updated_at = ? WHERE job_id = ?"
+            ).run(new Date().toISOString(), triageResult.jobId);
+            triageOutput += ` (disabled ${triageResult.jobId})`;
+            logger.warn({ jobId: triageResult.jobId, reason: triageResult.reason }, "Health triage: disabled job");
+          } catch (disableErr) {
+            logger.warn({ error: disableErr, jobId: triageResult.jobId }, "Health triage: failed to disable job");
           }
         }
       }
@@ -461,7 +554,7 @@ async function runHealthCheck(
 }
 
 interface HealthTriageResult {
-  action: "fix" | "restart_job" | "disable_job" | "escalate";
+  action: "restart_job" | "disable_job" | "escalate";
   reason: string;
   jobId?: string;
 }
@@ -482,7 +575,6 @@ Valid actions:
 - "restart_job" — Reset a specific stuck/failing job's state so it runs next cycle. Include "jobId".
 - "disable_job" — Disable a specific job that keeps failing. Include "jobId".
 - "escalate" — Send Telegram alert only (already done). Use when uncertain or issue is external.
-- "fix" — You identified a clear issue that needs code changes. Use sparingly.
 
 Rules:
 - Prefer "escalate" for credential issues (user must fix manually)
@@ -505,7 +597,7 @@ Rules:
           const match = stdout.match(/\{[^{}]*\}/);
           if (match) {
             const parsed = JSON.parse(match[0]) as HealthTriageResult;
-            if (["fix", "restart_job", "disable_job", "escalate"].includes(parsed.action)) {
+            if (["restart_job", "disable_job", "escalate"].includes(parsed.action)) {
               resolve(parsed);
               return;
             }
@@ -533,15 +625,30 @@ async function runHandler(
           job,
           startedAt,
           true,
-          count > 0 ? `Sent ${count} ideas for review` : "No new ideas to review"
+          count > 0 ? `Sent ${count} ideas for review` : "No new ideas to review",
+          undefined,
+          count > 0
+            ? {
+                notificationIntent: "decision_request",
+                sideEffectDelivered: true,
+              }
+            : {
+                notificationIntent: "operational_status",
+              }
         );
       }
       case "night_supervisor": {
         const supervisor = new NightSupervisor({}, {
           db: ctx.stateManager.getDb(),
           jobRunId: ctx.jobRunId,
+          bot: ctx.bot,
+          chatId: ctx.chatId,
           onOvernightMilestone: async (chatId, milestone, message) => {
-            await sendMilestoneNotification(ctx.bot, chatId, milestone, message);
+            await sendMilestoneNotification(ctx.bot, chatId, milestone, message, {
+              db: ctx.stateManager.getDb(),
+              jobRunId: ctx.jobRunId,
+              sourceId: `night_supervisor:${ctx.jobRunId ?? "manual"}:${chatId}:${milestone}`,
+            });
           },
         });
         const session = await supervisor.run(false);
@@ -552,14 +659,37 @@ async function runHandler(
         const summary = `Night supervisor completed in ${durationMin}m. Jobs: ${session.jobsCompleted} ok, ${session.jobsFailed} failed.${findingsSnippet}`;
         const success = !(session.jobsCompleted === 0 && session.jobsFailed > 0);
         const error = !success ? `All ${session.jobsFailed} jobs failed` : undefined;
-        return buildResult(job, startedAt, success, summary, error);
+        return buildResult(
+          job,
+          startedAt,
+          success,
+          summary,
+          error,
+          success
+            ? { notificationIntent: "operational_status" }
+            : {}
+        );
       }
       case "overnight_review": {
         const count = await presentOvernightSummaries(ctx.bot, ctx.stateManager, ctx.chatId);
         const output = count > 0
           ? `Presented ${count} overnight task summaries`
           : "No overnight tasks ready for review";
-        return buildResult(job, startedAt, true, output);
+        return buildResult(
+          job,
+          startedAt,
+          true,
+          output,
+          undefined,
+          count > 0
+            ? {
+                notificationIntent: "decision_request",
+                sideEffectDelivered: true,
+              }
+            : {
+                notificationIntent: "operational_status",
+              }
+        );
       }
       case "idea_ingest": {
         const result = await ingestIdeasFromLegacy(ctx.stateManager.getDb());
@@ -572,76 +702,183 @@ async function runHandler(
         if (result.archivedToDeny > 0) parts.push(`${result.archivedToDeny} archived to deny-history`);
         if (result.skipped > 0) parts.push(`${result.skipped} skipped`);
         const output = parts.length > 0 ? parts.join(", ") : "No new ideas found";
-        return buildResult(job, startedAt, true, output);
+        return buildResult(
+          job,
+          startedAt,
+          true,
+          output,
+          undefined,
+          { notificationIntent: "operational_status" }
+        );
       }
       case "idea_dedup": {
         const result = await dedupeIdeasDir(ctx.stateManager.getDb(), ctx.jobRunId);
         const output = result.deleted > 0
           ? `Dedup complete: ${result.deleted} duplicates deleted, ${result.kept} ideas retained`
           : `No duplicates found (${result.kept} ideas checked)`;
-        return buildResult(job, startedAt, true, output);
+        return buildResult(
+          job,
+          startedAt,
+          true,
+          output,
+          undefined,
+          { notificationIntent: "operational_status" }
+        );
       }
       case "session_summaries": {
         const result = await runSessionSummary(undefined, ctx.stateManager);
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "weekly_consolidation": {
         const result = await runWeeklyConsolidation();
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "user_info" } : {}
+        );
       }
       case "memory_cleanup": {
         const result = await runWeeklyMemoryCleanup(ctx.stateManager);
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "user_info" } : {}
+        );
       }
       case "ideas_explore": {
         const { runIdeasExplore } = await import("./jobs/ideas-explore.js");
         const result = await runIdeasExplore(ctx.stateManager.getDb());
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "nightly_memory": {
         const { runNightlyMemory } = await import("./jobs/nightly-memory.js");
         const result = await runNightlyMemory(ctx.stateManager);
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "homer_improvements": {
         const { runHomerImprovements } = await import("./jobs/homer-improvements.js");
         const result = await runHomerImprovements(ctx.stateManager.getDb(), ctx.jobRunId);
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "user_info" } : {}
+        );
       }
       case "learning_engine": {
         const { runLearningEngine } = await import("./jobs/learning-engine.js");
         const result = await runLearningEngine(ctx.stateManager.getDb(), ctx.jobRunId);
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "session_harvester": {
         const { runSessionHarvester } = await import("./jobs/session-harvester.js");
         const result = await runSessionHarvester(ctx.stateManager.getDb());
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "context_bridge": {
         const { runContextBridge } = await import("./jobs/context-bridge.js");
         const result = await runContextBridge(ctx.stateManager);
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "memory_embeddings": {
         const { runMemoryEmbeddings } = await import("./jobs/memory-embeddings.js");
         const result = await runMemoryEmbeddings();
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "memory_reindex": {
         const { runMemoryReindex } = await import("./jobs/memory-reindex.js");
         const result = await runMemoryReindex();
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "planning_reminder": {
         const { runPlanningReminder } = await import("./jobs/planning-reminder.js");
         const result = await runPlanningReminder();
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success
+            ? { notificationIntent: getPlanningReminderIntent(result) }
+            : {}
+        );
       }
       case "job_hunt_discover": {
         const { runJobHuntDiscover } = await import("./jobs/job-hunt-discover.js");
         const result = await runJobHuntDiscover(ctx.stateManager.getDb());
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "job_hunt_daily_approval": {
         const { expireStaleApprovals, getHeldJobsToResurface } = await import("../bot/handlers/job-approval.js");
@@ -666,22 +903,70 @@ async function runHandler(
         if (applyResult.skipped > 0) parts.push(`${applyResult.skipped} escalated`);
         if (expired > 0) parts.push(`${expired} expired`);
         if (resurfaced.length > 0) parts.push(`${resurfaced.length} resurfaced from hold`);
-        return buildResult(job, startedAt, true, parts.join(", ") || "No jobs pending in queue");
+        const hadApplicationActivity = (applyResult.applied + applyResult.failed + applyResult.skipped) > 0;
+        return buildResult(
+          job,
+          startedAt,
+          true,
+          parts.join(", ") || "No jobs pending in queue",
+          undefined,
+          hadApplicationActivity
+            ? {
+                notificationIntent: "user_info",
+                sideEffectDelivered: true,
+              }
+            : {
+                notificationIntent: "operational_status",
+              }
+        );
       }
       case "job_hunt_weekly_report": {
         const { runJobHuntWeeklyReport } = await import("./jobs/job-hunt-report.js");
         const result = await runJobHuntWeeklyReport(ctx.stateManager.getDb());
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "user_info" } : {}
+        );
       }
       case "job_hunt_email_monitor": {
         const { runJobHuntEmailMonitor } = await import("./jobs/job-hunt-email-monitor.js");
         const result = await runJobHuntEmailMonitor(ctx.stateManager.getDb());
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "user_info" } : {}
+        );
       }
       case "job_hunt_followup": {
         const { runJobHuntFollowup } = await import("./jobs/job-hunt-followup.js");
         const result = await runJobHuntFollowup(ctx.stateManager.getDb(), ctx.bot, ctx.chatId);
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        const undeliveredDrafts = result.draftsGenerated > result.sentToTelegram;
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success
+            ? undeliveredDrafts
+              ? { notificationIntent: "failure_alert" }
+              : result.sentToTelegram > 0
+                ? {
+                    notificationIntent: "decision_request",
+                    sideEffectDelivered: true,
+                  }
+                : {
+                    notificationIntent: "operational_status",
+                  }
+            : {}
+        );
       }
       case "job_hunt_stalled_check": {
         const db = ctx.stateManager.getDb();
@@ -690,66 +975,253 @@ async function runHandler(
           FROM applications a JOIN job_postings jp ON a.job_id = jp.id
           WHERE a.status = 'applying' AND datetime(a.updated_at) < datetime('now', '-24 hours')
         `).all() as Array<{ id: string; job_id: string; company: string; title: string; status: string; updated_at: string }>;
+        let alertSent = false;
         if (stalled.length > 0) {
           for (const app of stalled) {
             db.prepare("UPDATE applications SET status = 'stalled', updated_at = datetime('now') WHERE id = ?").run(app.id);
           }
           const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
           const lines = stalled.map(a => `${esc(a.company)} — ${esc(a.title)}`).join("\n");
-          try {
-            await ctx.bot.api.sendMessage(ctx.chatId, `⚠️ <b>Stalled Applications</b>\n\n${lines}\n\nThese were stuck in "applying" for 24h+ and have been flagged.`, { parse_mode: "HTML" });
-          } catch { /* notification best-effort */ }
+          const message = `⚠️ <b>Stalled Applications</b>\n\n${lines}\n\nThese were stuck in "applying" for 24h+ and have been flagged.`;
+          const delivery = await routeTelegramNotification({
+            db,
+            sourceType: "job_handler",
+            sourceId: `job_hunt_stalled:${ctx.jobRunId ?? "manual"}`,
+            jobRunId: ctx.jobRunId,
+            intent: "failure_alert",
+            title: "Stalled Applications",
+            messageText: message,
+            deliver: async () => sendChunkedTelegramMessage({
+              bot: ctx.bot,
+              chatId: ctx.chatId,
+              message,
+              parseMode: "HTML",
+              enableLinkPreview: false,
+            }),
+          });
+          alertSent = delivery.decision === "sent";
         }
-        return buildResult(job, startedAt, true, stalled.length > 0 ? `${stalled.length} stalled applications flagged` : "No stalled applications");
+        return buildResult(
+          job,
+          startedAt,
+          true,
+          stalled.length > 0 ? `${stalled.length} stalled applications flagged` : "No stalled applications",
+          undefined,
+          stalled.length > 0
+            ? alertSent
+              ? {
+                  notificationIntent: "failure_alert",
+                  sideEffectDelivered: true,
+                }
+              : {
+                  notificationIntent: "failure_alert",
+                }
+            : {
+                notificationIntent: "operational_status",
+              }
+        );
       }
       case "outcome_tracker": {
         const { runOutcomeTracker } = await import("./jobs/outcome-tracker.js");
         const result = await runOutcomeTracker(ctx.stateManager.getDb(), ctx.bot, ctx.chatId);
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success
+            ? result.errors > 0
+              ? { notificationIntent: "failure_alert" }
+              : result.sentToTelegram > 0
+                ? {
+                    notificationIntent: "decision_request",
+                    sideEffectDelivered: true,
+                  }
+                : {
+                    notificationIntent: "operational_status",
+                  }
+            : {}
+        );
       }
       case "preference_updater": {
         const { runPreferenceUpdater } = await import("./jobs/preference-updater.js");
         const result = await runPreferenceUpdater(ctx.stateManager.getDb());
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "memory_git_commit": {
         const { runMemoryGitCommit } = await import("./jobs/memory-git-commit.js");
         const result = await runMemoryGitCommit();
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "nightly_code_push": {
         const { runNightlyCodePush } = await import("./jobs/nightly-code-push.js");
         const result = await runNightlyCodePush();
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "db_backup": {
         const { runDbBackup } = await import("./jobs/db-backup.js");
         const result = await runDbBackup();
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "content_scraper": {
         const { runContentScraper } = await import("./jobs/content-scraper.js");
         const result = await runContentScraper(ctx.stateManager.getDb());
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "idea_synthesizer": {
         const { runIdeaSynthesizer } = await import("./jobs/idea-synthesizer.js");
         const result = await runIdeaSynthesizer(ctx.stateManager.getDb(), ctx.jobRunId);
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "archive_verify": {
         const { runArchiveVerify } = await import("./jobs/archive-verify.js");
         const result = await runArchiveVerify(ctx.stateManager.getDb());
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
       }
       case "health_check": {
         const result = await runHealthCheck(ctx);
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? getHealthResultOptions(result.output) : {}
+        );
       }
       case "architecture_updater": {
         const { runArchitectureUpdater } = await import("./jobs/architecture-updater.js");
         const result = await runArchitectureUpdater();
-        return buildResult(job, startedAt, result.success, result.output, result.error);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
+      }
+      case "daemon_cleanup": {
+        await cleanupScheduler.run("scheduled");
+        return buildResult(
+          job,
+          startedAt,
+          true,
+          "Daemon cleanup completed",
+          undefined,
+          { notificationIntent: "operational_status" }
+        );
+      }
+      case "session_maintenance": {
+        ctx.stateManager.cleanupExpiredSessions();
+        ctx.stateManager.cleanupOldJobs();
+        ctx.stateManager.cleanupOldReminders();
+        const cleanedRuns = ctx.stateManager.cleanupOldScheduledJobRuns();
+        const ttlMs = config.session.ttlHours * 60 * 60 * 1000;
+        await checkAndFlushExpiringSessions(ctx.stateManager, ttlMs);
+        return buildResult(
+          job,
+          startedAt,
+          true,
+          `Session maintenance done${cleanedRuns > 0 ? `, cleaned ${cleanedRuns} old runs` : ""}`,
+          undefined,
+          { notificationIntent: "operational_status" }
+        );
+      }
+      case "reminder_check": {
+        const { getReminderManager } = await import("../bot/index.js");
+        const reminderManager = getReminderManager();
+        if (!reminderManager) {
+          return buildResult(
+            job,
+            startedAt,
+            true,
+            "Reminder manager not initialized",
+            undefined,
+            { notificationIntent: "operational_status" }
+          );
+        }
+        const pending = reminderManager.getPendingDue();
+        let sent = 0;
+        for (const reminder of pending) {
+          try {
+            await ctx.bot.api.sendMessage(
+              reminder.chatId,
+              `⏰ *Reminder*\n\n${reminder.message}`,
+              { parse_mode: "Markdown" }
+            );
+            reminderManager.markSent(reminder.id);
+            sent++;
+          } catch (error) {
+            logger.error({ error, reminderId: reminder.id }, "Failed to send reminder");
+            reminderManager.markSent(reminder.id);
+          }
+        }
+        return buildResult(
+          job,
+          startedAt,
+          true,
+          sent > 0 ? `Sent ${sent} reminders` : "No pending reminders",
+          undefined,
+          sent > 0
+            ? {
+                notificationIntent: "user_info",
+                sideEffectDelivered: true,
+              }
+            : {
+                notificationIntent: "operational_status",
+              }
+        );
       }
       default: {
         return buildResult(job, startedAt, false, "", `Unknown internal handler: ${job.config.handler}`);
@@ -779,7 +1251,14 @@ export async function executeInternalJob(
 
   // Check global pause for job_hunt handlers
   if (job.config.handler?.startsWith("job_hunt_") && isJobHuntPaused(ctx)) {
-    return buildResult(job, startedAt, true, "Skipped — job hunt is paused");
+    return buildResult(
+      job,
+      startedAt,
+      true,
+      "Skipped — job hunt is paused",
+      undefined,
+      { notificationIntent: "operational_status" }
+    );
   }
 
   const result = await runHandler(job, ctx, startedAt);

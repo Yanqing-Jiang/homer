@@ -9,6 +9,8 @@ import type { RegisteredJob, ProgressEvent, JobExecutionResult } from "./types.j
 import { isPlanRequiringApproval, createPlanApprovalKeyboard } from "../bot/handlers/approval.js";
 import { executeInternalJob } from "./internal-handlers.js";
 import { runCompletionCheckup } from "../executors/completion-checkup.js";
+import { routeTelegramNotification } from "../notifications/telegram-router.js";
+import { startHeartbeat, stopHeartbeat, startWatchdog, stopWatchdog } from "./observability.js";
 
 function escapeHtml(text: string): string {
   return text
@@ -42,6 +44,7 @@ export class Scheduler {
   private cronManager: CronManager;
   private watcher: ScheduleWatcher;
   private isRunning = false;
+  private compensateInterval: ReturnType<typeof setInterval> | null = null;
   private progressMessageId: Map<string, number> = new Map(); // jobId -> messageId
   private lastProgressTime: Map<string, number> = new Map(); // jobId -> timestamp
 
@@ -74,25 +77,77 @@ export class Scheduler {
 
     logger.info("Starting scheduler...");
 
-    // Load all schedules
+    // Phase 0: Clean up stale state from previous daemon crashes
+    const clearedFlags = this.stateManager.resetScheduledJobRunFlags();
+    if (clearedFlags > 0) {
+      logger.warn({ count: clearedFlags }, "Cleared stale scheduled job run flags");
+    }
+    const orphanedRuns = this.stateManager.cleanupOrphanedJobRuns();
+    if (orphanedRuns > 0) {
+      logger.warn({ count: orphanedRuns }, "Marked orphaned job runs as failed (scheduler boot)");
+    }
+
+    // Phase 1: Snapshot due jobs from DB BEFORE registration overwrites next_run_at_ms
+    const dueJobIds = this.stateManager.getDueJobs().map(j => j.jobId);
+
+    // Phase 2: Load and register all jobs (overwrites next_run_at_ms to future)
     const schedules = await loadAllSchedules();
     const jobs = getAllJobs(schedules);
 
-    // Register all jobs with cron manager
+    // Add system jobs (not in schedule.json — internal daemon tasks)
+    jobs.push(...Scheduler.SYSTEM_JOBS);
+
+    // Phase 3: Seed DB rows BEFORE registration so job:updated → updateScheduledJobNextRun works
+    this.stateManager.ensureJobStateRows(
+      jobs.map(j => ({ jobId: j.id, sourceFile: j.sourceFile, enabled: j.enabled }))
+    );
+
+    // Phase 4: Merge DB disabled state (circuit breaker) with config enabled state.
+    // If DB says disabled (circuit breaker set it), override config to keep it disabled.
+    const dbStates = this.stateManager.getAllScheduledJobStates();
+    const dbDisabled = new Set(
+      dbStates.filter(s => !s.enabled).map(s => s.jobId)
+    );
+    for (const job of jobs) {
+      if (dbDisabled.has(job.id) && job.enabled) {
+        logger.warn({ jobId: job.id }, "Job kept disabled from DB state (circuit breaker)");
+        job.enabled = false;
+        // registerJob will skip cron creation for disabled jobs
+      }
+    }
+
+    // Phase 4b: Register all jobs with cron manager (after DB state merge)
     for (const job of jobs) {
       this.cronManager.registerJob(job, job.sourceFile);
     }
 
+    this.stateManager.syncScheduledJobEnabled(
+      jobs.map(j => ({ jobId: j.id, enabled: j.enabled }))
+    );
+
+    // Phase 5: Trigger catch-up — jobs are registered, getJob() works now
+    this.triggerDueJobs(dueJobIds);
+
     // Start file watcher for hot reload
     await this.watcher.start();
-
-    // Sync enabled state from config to DB
-    const jobStates = jobs.map(j => ({ jobId: j.id, enabled: j.enabled }));
-    this.stateManager.syncScheduledJobEnabled(jobStates);
 
     this.isRunning = true;
     const enabledCount = this.cronManager.getEnabledJobs().length;
     logger.info({ totalJobs: jobs.length, enabledJobs: enabledCount }, "Scheduler started");
+
+    // Periodic catch-up every 10 minutes
+    this.compensateInterval = setInterval(() => this.compensateMissedFires(), 10 * 60 * 1000);
+
+    // Start observability (heartbeat + zombie watchdog)
+    startHeartbeat(this.cronManager);
+    startWatchdog(this.cronManager, (jobId) => {
+      // Re-register zombie job
+      const job = this.cronManager.getJob(jobId);
+      if (job) {
+        logger.warn({ jobId }, "Re-registering zombie cron job");
+        this.cronManager.registerJob(job.config, job.sourceFile);
+      }
+    });
   }
 
   /**
@@ -102,6 +157,12 @@ export class Scheduler {
     if (!this.isRunning) return;
 
     logger.info("Stopping scheduler...");
+    if (this.compensateInterval) {
+      clearInterval(this.compensateInterval);
+      this.compensateInterval = null;
+    }
+    stopHeartbeat();
+    stopWatchdog();
     this.watcher.stop();
     this.cronManager.stop();
     this.isRunning = false;
@@ -109,16 +170,81 @@ export class Scheduler {
   }
 
   /**
+   * DB-driven catch-up: compensate for missed cron fires
+   */
+  private compensateMissedFires(): void {
+    try {
+      const dueJobs = this.stateManager.getDueJobs();
+      const DEDUP_WINDOW_MS = 5 * 60 * 1000;
+      const MAX_COMPENSATIONS_PER_CYCLE = 5;
+      const now = Date.now();
+      let compensated = 0;
+
+      for (const dueJob of dueJobs) {
+        if (compensated >= MAX_COMPENSATIONS_PER_CYCLE) break;
+        // Skip if triggered within last 5 minutes (dedup)
+        if (dueJob.lastTriggeredAt) {
+          const last = new Date(dueJob.lastTriggeredAt).getTime();
+          if (now - last < DEDUP_WINDOW_MS) continue;
+        }
+
+        const job = this.cronManager.getJob(dueJob.jobId);
+        if (!job || !job.config.enabled) continue;
+
+        logger.warn({ jobId: dueJob.jobId }, "DB catch-up: compensating missed fire");
+        this.stateManager.recordCompensationTrigger(dueJob.jobId);
+        this.cronManager.triggerJob(dueJob.jobId, false);
+        compensated++;
+      }
+    } catch (err) {
+      logger.error({ error: err }, "compensateMissedFires failed");
+    }
+  }
+
+  /**
+   * Trigger previously snapshotted due jobs after registration completes.
+   * Used at boot to compensate missed fires without racing against getJob().
+   */
+  private triggerDueJobs(dueJobIds: string[]): void {
+    const DEDUP_WINDOW_MS = 5 * 60 * 1000;
+    const now = Date.now();
+    let compensated = 0;
+
+    for (const jobId of dueJobIds) {
+      if (compensated >= 5) break;
+
+      const job = this.cronManager.getJob(jobId);
+      if (!job || !job.config.enabled) continue;
+
+      // Dedup: skip if triggered recently
+      const state = this.stateManager.getScheduledJobState(jobId);
+      if (state?.lastRunAt) {
+        const last = new Date(state.lastRunAt).getTime();
+        if (now - last < DEDUP_WINDOW_MS) continue;
+      }
+
+      logger.warn({ jobId }, "Boot catch-up: compensating missed fire");
+      this.stateManager.recordCompensationTrigger(jobId);
+      this.cronManager.triggerJob(jobId, false);
+      compensated++;
+    }
+
+    if (compensated > 0) {
+      logger.info({ count: compensated }, "Boot catch-up complete");
+    }
+  }
+
+  /**
    * Manually trigger a job by ID
    */
-  triggerJob(jobId: string): boolean {
+  triggerJob(jobId: string, manual: boolean = true): boolean {
     const job = this.cronManager.getJob(jobId);
     if (!job) {
       logger.warn({ jobId }, "Job not found");
       return false;
     }
 
-    this.cronManager.triggerJob(jobId, true);
+    this.cronManager.triggerJob(jobId, manual);
     return true;
   }
 
@@ -142,21 +268,60 @@ export class Scheduler {
   private async handleScheduleChange(schedules: Awaited<ReturnType<typeof loadAllSchedules>>): Promise<void> {
     logger.info("Reloading schedules...");
 
+    // Snapshot nextRun for all enabled jobs before tearing down
+    const snapshots = new Map<string, Date>();
+    for (const job of this.cronManager.getEnabledJobs()) {
+      const task = this.cronManager.getCronTask(job.config.id);
+      const next = task?.nextRun();
+      if (next) snapshots.set(job.config.id, next);
+    }
+
+    const reloadStart = Date.now();
+
     // Unregister all existing jobs
     this.cronManager.unregisterAll();
 
-    // Register new jobs
+    // Register new jobs + system jobs
     const jobs = getAllJobs(schedules);
+    jobs.push(...Scheduler.SYSTEM_JOBS);
+
     for (const job of jobs) {
       this.cronManager.registerJob(job, job.sourceFile);
     }
 
-    // Sync enabled state from config to DB
-    const jobStates = jobs.map(j => ({ jobId: j.id, enabled: j.enabled }));
-    this.stateManager.syncScheduledJobEnabled(jobStates);
+    const reloadDuration = Date.now() - reloadStart;
+
+    // Gap protection: if reload took > 1s, check if any expected fires fell into the gap
+    if (reloadDuration > 1000) {
+      const now = Date.now();
+      for (const [jobId, nextExpected] of snapshots) {
+        if (nextExpected.getTime() <= now && nextExpected.getTime() >= reloadStart) {
+          logger.warn({ jobId, reloadDurationMs: reloadDuration }, "Hot-reload gap: compensating missed fire");
+          this.cronManager.triggerJob(jobId, false);
+        }
+      }
+    }
+
+    // Seed DB rows for any new jobs, then merge DB-disabled state
+    this.stateManager.ensureJobStateRows(
+      jobs.map(j => ({ jobId: j.id, sourceFile: j.sourceFile, enabled: j.enabled }))
+    );
+    const dbStates = this.stateManager.getAllScheduledJobStates();
+    const dbDisabled = new Set(
+      dbStates.filter(s => !s.enabled).map(s => s.jobId)
+    );
+    for (const job of jobs) {
+      if (dbDisabled.has(job.id) && job.enabled) {
+        job.enabled = false;
+        this.cronManager.disableJob(job.id);
+      }
+    }
+    this.stateManager.syncScheduledJobEnabled(
+      jobs.map(j => ({ jobId: j.id, enabled: j.enabled }))
+    );
 
     const enabledCount = this.cronManager.getEnabledJobs().length;
-    logger.info({ totalJobs: jobs.length, enabledJobs: enabledCount }, "Schedules reloaded");
+    logger.info({ totalJobs: jobs.length, enabledJobs: enabledCount, reloadDurationMs: reloadDuration }, "Schedules reloaded");
   }
 
   /**
@@ -178,38 +343,20 @@ export class Scheduler {
     this.lastProgressTime.set(jobId, now);
 
     try {
-      const existingMsgId = this.progressMessageId.get(jobId);
-
-      if (event.type === "started") {
-        // Send new progress message
-        const msg = await this.bot.api.sendMessage(this.chatId, event.message, {
-          parse_mode: "Markdown",
-        });
-        this.progressMessageId.set(jobId, msg.message_id);
-        logger.info({ jobId, messageId: msg.message_id }, "Sent progress start message");
-      } else if (event.type === "completed") {
-        // Delete progress message on completion (final result will be sent separately)
-        if (existingMsgId) {
-          try {
-            await this.bot.api.deleteMessage(this.chatId, existingMsgId);
-          } catch {
-            // Message may already be deleted
-          }
-          this.progressMessageId.delete(jobId);
-        }
+      if (event.type === "completed") {
         this.lastProgressTime.delete(jobId);
-      } else if (existingMsgId) {
-        // Update existing progress message
-        const progressText = `🔄 *${event.jobName}*\n\n${event.message}`;
-        try {
-          await this.bot.api.editMessageText(this.chatId, existingMsgId, progressText, {
-            parse_mode: "Markdown",
-          });
-          logger.info({ jobId, eventType: event.type }, "Updated progress message");
-        } catch (editError) {
-          logger.debug({ editError, jobId }, "Message edit failed (likely unchanged)");
-        }
+        this.progressMessageId.delete(jobId);
       }
+
+      await routeTelegramNotification({
+        db: this.stateManager.getDb(),
+        sourceType: "scheduler_job",
+        sourceId: `${jobId}:progress:${event.type}`,
+        intent: "operational_status",
+        title: event.jobName,
+        messageText: event.message,
+        reason: "progress_event",
+      });
     } catch (error) {
       logger.warn({ error, jobId, eventType: event.type }, "Failed to send progress update");
     }
@@ -222,7 +369,7 @@ export class Scheduler {
     const job = this.cronManager.getJob(jobId);
     if (!job || job.consecutiveFailures < 5) return;
 
-    this.cronManager.disableJob(jobId);
+    this.cronManager.disableJob(jobId, this.stateManager);
     logger.warn({ jobId, consecutiveFailures: job.consecutiveFailures }, "Circuit breaker: job auto-disabled after 5 consecutive failures");
 
     try {
@@ -255,8 +402,39 @@ export class Scheduler {
     "outcome-tracker": ["preference-updater"],
   };
 
+  // System jobs — internal daemon tasks registered at boot and on hot reload
+  private static readonly SYSTEM_JOBS: Array<import("./types.js").ScheduledJobConfig & { sourceFile: string }> = [
+    {
+      id: "daemon-cleanup", name: "Daemon Cleanup", cron: "0 */4 * * *",
+      query: "", lane: "default", enabled: true, executor: "internal",
+      handler: "daemon_cleanup", timeout: 120_000,
+      notifyOnSuccess: false, notifyOnFailure: true, failureTakeover: false,
+      sourceFile: "system",
+    },
+    {
+      id: "session-maintenance", name: "Session Maintenance", cron: "0 * * * *",
+      query: "", lane: "default", enabled: true, executor: "internal",
+      handler: "session_maintenance", timeout: 60_000,
+      notifyOnSuccess: false, notifyOnFailure: true, failureTakeover: false,
+      sourceFile: "system",
+    },
+    {
+      id: "reminder-check", name: "Reminder Check", cron: "* * * * *",
+      query: "", lane: "default", enabled: true, executor: "internal",
+      handler: "reminder_check", timeout: 30_000,
+      notifyOnSuccess: false, notifyOnFailure: false, failureTakeover: false,
+      sourceFile: "system",
+    },
+  ];
+
   private fireDependencyTriggers(jobId: string): void {
-    const downstream = Scheduler.DEPENDENCY_TRIGGERS[jobId];
+    // Check config-based triggers first, fall back to hardcoded map
+    const job = this.cronManager.getJob(jobId);
+    const configTriggers = job?.config.triggers;
+    const downstream = configTriggers && configTriggers.length > 0
+      ? configTriggers
+      : Scheduler.DEPENDENCY_TRIGGERS[jobId];
+
     if (downstream) {
       for (const targetId of downstream) {
         logger.info({ jobId: targetId, triggeredBy: jobId }, "Triggering downstream job");
@@ -286,12 +464,18 @@ export class Scheduler {
       const isInternal = job.config.executor === "internal" || !!job.config.handler;
       const takeoverEnabled = job.config.failureTakeover !== false;
 
-      // Execute the job (internal handler or CLI executor) with 20-min hang watchdog
-      const HANG_TIMEOUT_MS = 20 * 60 * 1000;
+      // Execute the job (internal handler or CLI executor) with hang watchdog
+      // Use per-job configured timeout (+ 30s buffer) or fall back to 20 minutes
+      const DEFAULT_HANG_TIMEOUT_MS = 20 * 60 * 1000;
+      const configuredTimeout = typeof job.config.timeout === "number" && job.config.timeout > 0
+        ? job.config.timeout + 30_000
+        : DEFAULT_HANG_TIMEOUT_MS;
+      const HANG_TIMEOUT_MS = configuredTimeout;
+      const hangTimeoutMinutes = Math.round(HANG_TIMEOUT_MS / 60_000);
       let hangTimerId: ReturnType<typeof setTimeout> | null = null;
       const hangPromise = new Promise<never>((_, reject) => {
         hangTimerId = setTimeout(
-          () => reject(new Error("Job hung: exceeded 20-minute timeout")),
+          () => reject(new Error(`Job hung: exceeded ${hangTimeoutMinutes}-minute timeout`)),
           HANG_TIMEOUT_MS
         );
       });
@@ -353,7 +537,7 @@ export class Scheduler {
             );
             this.cronManager.updateJobState(job.config.id, false);
             await this.checkCircuitBreaker(job.config.id, job.config.name);
-            await notifyJobResult(this.bot, this.chatId, result, job);
+            await notifyJobResult(this.bot, this.chatId, this.stateManager.getDb(), result, job, runId);
             return;
           }
 
@@ -409,7 +593,7 @@ export class Scheduler {
           );
           this.cronManager.updateJobState(job.config.id, false);
           await this.checkCircuitBreaker(job.config.id, job.config.name);
-          await notifyJobResult(this.bot, this.chatId, result, job);
+          await notifyJobResult(this.bot, this.chatId, this.stateManager.getDb(), result, job, runId);
           return;
         }
       }
@@ -463,18 +647,19 @@ export class Scheduler {
       }
 
       // Notify via Telegram (final result)
-      await notifyJobResult(this.bot, this.chatId, result, job);
+      await notifyJobResult(this.bot, this.chatId, this.stateManager.getDb(), result, job, runId);
 
       if (result.fallbackUsed && result.executorUsed) {
-        try {
-          await this.bot.api.sendMessage(
-            this.chatId,
-            `⚠️ Fallback used for *${job.config.name}*\\nExecutor: ${result.executorUsed}`,
-            { parse_mode: "Markdown" }
-          );
-        } catch (err) {
-          logger.warn({ error: err, jobId: job.config.id }, "Failed to notify fallback usage");
-        }
+        await routeTelegramNotification({
+          db: this.stateManager.getDb(),
+          sourceType: "scheduler_job",
+          sourceId: `${job.config.id}:fallback`,
+          jobRunId: runId,
+          intent: "operational_status",
+          title: job.config.name,
+          messageText: `Fallback used for ${job.config.name}\nExecutor: ${result.executorUsed}`,
+          reason: "fallback_used",
+        });
       }
 
       // Run completion checkup for manual triggers

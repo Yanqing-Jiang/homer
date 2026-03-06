@@ -21,6 +21,7 @@ import { handleCallRequest } from "./handlers/phone-call.js";
 import { handleSmsRequest } from "./handlers/sms.js";
 import { registerCallFollowupHandlers } from "./handlers/call-followup.js";
 import { registerSmsReplyHandlers } from "./handlers/sms-reply.js";
+import { registerNightPlanCallbacks } from "./handlers/night-plan.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { StateManager } from "../state/manager.js";
 import { sendThinkingIndicator, editWithResponse, TelegramDraftStream, sendFinalResponse } from "./streaming.js";
@@ -42,7 +43,8 @@ import { MeetingManager, formatDuration } from "../meetings/index.js";
 import { CLIRunManager } from "../executors/cli-runner.js";
 import { telegramLane } from "../utils/lanes.js";
 import { buildConversationContext } from "../executors/context-builder.js";
-import { mkdirSync, writeFileSync, existsSync } from "fs";
+import { mkdirSync, existsSync } from "fs";
+import { writeFile } from "fs/promises";
 import { join, extname } from "path";
 import { randomUUID } from "crypto";
 
@@ -70,6 +72,9 @@ async function saveTelegramFile(
   const file = await ctx.api.getFile(fileId);
   const fileUrl = `https://api.telegram.org/file/bot${config.telegram.botToken}/${file.file_path}`;
   const response = await fetch(fileUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to download file: ${response.status} ${response.statusText}`);
+  }
   const buffer = Buffer.from(await response.arrayBuffer());
 
   const baseDir = join(config.paths.uploadLanding, "tg", String(chatId));
@@ -78,7 +83,7 @@ async function saveTelegramFile(
   const ext = extname(filename) || "";
   const safeName = filename.replace(/[^\w.\-]/g, "_");
   const targetPath = join(baseDir, safeName || `${fileId}${ext}`);
-  writeFileSync(targetPath, buffer);
+  await writeFile(targetPath, buffer);
 
   return targetPath;
 }
@@ -146,6 +151,9 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
   // Register call follow-up and SMS reply inline button callbacks
   registerCallFollowupHandlers(bot);
   registerSmsReplyHandlers(bot);
+
+  // Register night plan review callbacks
+  registerNightPlanCallbacks(bot, stateManager);
 
   // Initialize YouTube URL handler
   initializeYouTubeHandler(stateManager);
@@ -392,7 +400,12 @@ ${checksStr}`;
   bot.command("restart", async (ctx) => {
     await ctx.reply("Initiating graceful restart...");
     logger.info("Manual restart requested via Telegram");
-    setTimeout(() => process.exit(0), 1000);
+    // Send SIGTERM to self so fatal-handlers run the full graceful shutdown sequence
+    // Exit code 3 (non-zero) ensures launchd restarts
+    setTimeout(() => {
+      process.exitCode = 3;
+      process.kill(process.pid, "SIGTERM");
+    }, 1000);
   });
 
   // /meeting - process audio document
@@ -905,6 +918,12 @@ ${checksStr}`;
       return;
     }
 
+    // Reject unknown slash commands
+    if (parsed.unknownCommand) {
+      await ctx.reply("Unknown command. Type /start for help.");
+      return;
+    }
+
     // Handle deprecation warnings
     if (parsed.deprecationWarning) {
       await ctx.reply(`⚠️ ${parsed.deprecationWarning}`);
@@ -1044,6 +1063,11 @@ async function handleNewExecution(
     if (returnResponse) return "Error: chat context unavailable.";
     return;
   }
+  if (!stateManager.isOpen) {
+    logger.warn("handleNewExecution called after DB closed (shutdown race), ignoring");
+    if (returnResponse) return "Error: system is shutting down.";
+    return;
+  }
   const lane = telegramLane(ctx.chat.id);
   const session = stateManager.getOrCreateSession(lane);
 
@@ -1099,6 +1123,12 @@ async function handleNewExecution(
       model: executorState?.model ?? null,
     });
 
+    // Check BEFORE persisting to avoid orphaned thread messages
+    if (runManager.getActiveRun(lane)) {
+      await ctx.reply("A run is already in progress for this chat. Please wait.");
+      return;
+    }
+
     let userMessageId: string | null = null;
     if (parsed.query && parsed.query.trim()) {
       userMessageId = randomUUID();
@@ -1109,11 +1139,6 @@ async function handleNewExecution(
         content: parsed.query,
         metadata: attachments.length > 0 ? { attachments } : undefined,
       });
-    }
-
-    if (runManager.getActiveRun(lane)) {
-      await ctx.reply("A run is already in progress for this chat. Please wait.");
-      return;
     }
 
     const finalQuery = memoryContext + (voiceMode ? `${VOICE_MODE_INSTRUCTION}\n\n${parsed.query}` : parsed.query);
@@ -1150,6 +1175,13 @@ async function handleNewExecution(
     if (draftStream) await draftStream.stop();
 
     logger.error({ error, query: parsed.query }, "Execution failed");
+
+    // Don't attempt Telegram responses if DB/bot is shutting down
+    if (!stateManager.isOpen) {
+      logger.info("Suppressing error response — DB closed during shutdown");
+      return;
+    }
+
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
     if (returnResponse) {

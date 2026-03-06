@@ -82,8 +82,10 @@ export class SessionTimeoutManager {
       // Use the smaller of the record's own timeout and the type backstop
       const backstopTimeout = TYPE_TIMEOUTS[record.type] ?? TYPE_TIMEOUTS.executor;
       const effectiveTimeout = Math.min(record.timeoutMs, backstopTimeout);
-      const age = now - record.spawnedAt;
+      // If triage extended the process, skip until extension expires
+      if (record.extendedUntil && now < record.extendedUntil) continue;
 
+      const age = now - record.spawnedAt;
       if (age > effectiveTimeout) {
         this.handleTimeout(record, age, effectiveTimeout);
       }
@@ -201,16 +203,16 @@ Rules:
 
       switch (decision.action) {
         case "extend":
-          // Extend by 15 minutes: update the spawn time to push timeout forward
-          record.spawnedAt = Date.now() - (record.timeoutMs - 15 * 60 * 1000);
-          this.logCleanup(record, `triage-extend: ${decision.reason}`);
+          // Extend by 15 minutes
+          record.extendedUntil = Date.now() + 15 * 60 * 1000;
+          this.logCleanup(record, `triage-extend: ${decision.reason}`, false);
           break;
         case "escalate":
           logger.warn(
             { pid: record.pid, reason: decision.reason },
             "LLM triage escalated — not killing, will re-evaluate next cycle"
           );
-          this.logCleanup(record, `triage-escalate: ${decision.reason}`);
+          this.logCleanup(record, `triage-escalate: ${decision.reason}`, false);
           break;
         case "kill":
         default:
@@ -300,20 +302,22 @@ Rules:
     }, grace);
   }
 
-  private logCleanup(record: ProcessRecord, reason: string): void {
+  private logCleanup(record: ProcessRecord, reason: string, isKill = true): void {
     try {
       const db = processRegistry.getDb();
       if (!db) return;
       db.prepare(
         `INSERT INTO process_cleanup_runs (trigger, processes_scanned, processes_killed, processes_spared, details)
-         VALUES (?, 1, 1, 0, ?)`
+         VALUES (?, 1, ?, ?, ?)`
       ).run(
         "timeout-manager",
+        isKill ? 1 : 0,
+        isKill ? 0 : 1,
         JSON.stringify([
           {
             pid: record.pid,
             command: record.command,
-            action: reason.startsWith("triage-extend") || reason.startsWith("triage-escalate") ? "spared" : "killed",
+            action: isKill ? "killed" : "spared",
             reason,
             type: record.type,
             ageMs: Date.now() - record.spawnedAt,
