@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 import { readFileSync, existsSync } from "fs";
 import { logger } from "../utils/logger.js";
+import { withSlot } from "../executors/concurrency.js";
 import { processRegistry } from "../process/registry.js";
 import type { RegisteredJob, JobExecutionResult, ProgressCallback, ProgressEvent } from "./types.js";
 import { LANE_CWD, DEFAULT_JOB_TIMEOUT } from "./types.js";
@@ -764,6 +765,9 @@ export async function executeScheduledJob(
     ? config.model
     : undefined;
 
+  // Acquire concurrency slot before spawning CLI processes
+  return withSlot(async () => {
+
   const defaultChain: ExecutorKind[] = memoryJob ? [...MEMORY_CHAIN] : [...DEFAULT_CHAIN];
   const chain: ExecutorKind[] = configuredExecutor
     ? [configuredExecutor, ...defaultChain.filter((e) => e !== configuredExecutor)]
@@ -891,4 +895,6 @@ export async function executeScheduledJob(
     executorUsed: fallbackResult.executorUsed,
     fallbackUsed: fallbackResult.fallbackUsed,
   } as JobExecutionResult;
+
+  }); // withSlot
 }
