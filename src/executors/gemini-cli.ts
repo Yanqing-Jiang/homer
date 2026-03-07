@@ -2,31 +2,84 @@
  * Gemini CLI Executor
  *
  * Calls the `gemini` CLI binary (OAuth, Google account) directly via Code Assist backend.
- * Model: gemini-2.5-flash (latest Flash available via subscription OAuth)
- * System prompt: ~/.gemini/GEMINI.md (loaded automatically by CLI)
+ * Model: gemini-3-flash-preview (latest Flash available via subscription OAuth)
+ * System prompt: ~/.gemini/GEMINI.md
  *
- * Account rotation: swaps ~/.gemini/oauth_creds.json before each call.
- * Creds stored per-account in ~/homer/config/auth/gemini-creds/{email}.json
+ * This version persists account health and cooldown state in SQLite and performs
+ * proactive account selection (least used account, skip cooling/disabled accounts).
+ *
+ * Credential flow:
+ * - Canonical creds: ~/homer/config/auth/gemini-creds/{email}.json
+ * - Runtime homes:   ~/homer/config/auth/gemini-runtime-homes/{email}/.gemini/*
+ *
+ * Each account uses an isolated HOME at runtime so multiple accounts can execute
+ * concurrently without racing on ~/.gemini/oauth_creds.json.
  */
 
+import Database from "better-sqlite3";
 import { spawn } from "child_process";
 import fs from "fs/promises";
 import path from "path";
+import { config } from "../config/index.js";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
 
-export const GEMINI_CLI_FLASH_MODEL = "gemini-2.5-flash";
+export const GEMINI_CLI_FLASH_MODEL = "gemini-3-flash-preview";
+export const GEMINI_CLI_PRO_MODEL = "gemini-3.1-pro-preview";
 
-const GEMINI_CREDS_FILE = path.join(process.env.HOME || "", ".gemini/oauth_creds.json");
-const GEMINI_ACCOUNTS_FILE = path.join(process.env.HOME || "", ".gemini/google_accounts.json");
-const GEMINI_CREDS_DIR = path.join(process.env.HOME || "", "homer/config/auth/gemini-creds");
+const HOME = process.env.HOME || "";
+const GEMINI_CREDS_DIR = path.join(HOME, "homer/config/auth/gemini-creds");
+const GEMINI_RUNTIME_HOMES_DIR = path.join(HOME, "homer/config/auth/gemini-runtime-homes");
+const GEMINI_GLOBAL_DIR = path.join(HOME, ".gemini");
+const GEMINI_GLOBAL_ACCOUNTS_FILE = path.join(GEMINI_GLOBAL_DIR, "google_accounts.json");
+const GEMINI_SYSTEM_PROMPT_FILE = path.join(GEMINI_GLOBAL_DIR, "GEMINI.md");
+const ONE_HOUR_MS = 60 * 60 * 1000;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
-// Simple mutex so concurrent calls don't race on creds swap
-let credSwapLock = false;
-async function waitForLock(): Promise<void> {
-  while (credSwapLock) {
-    await new Promise((r) => setTimeout(r, 50));
-  }
+type FailureKind = "rate_limit" | "auth" | "runtime" | "timeout" | "spawn";
+
+interface GeminiAccountRow {
+  email: string;
+  creds_path: string;
+  is_enabled: number;
+  disabled_reason: string | null;
+  disabled_at: number | null;
+  reenable_after: number | null;
+  cooldown_until: number | null;
+  cooldown_reason: string | null;
+  consecutive_failures: number;
+  last_failure_at: number | null;
+  last_failure_reason: string | null;
+  last_success_at: number | null;
+  last_selected_at: number | null;
+  last_used_at: number | null;
+  hour_window_start: number;
+  hour_usage_count: number;
+  day_window_start: number;
+  day_usage_count: number;
+  total_requests: number;
+  total_successes: number;
+  total_failures: number;
+  total_rate_limits: number;
+}
+
+interface AccountSelection {
+  account: GeminiAccountRow | null;
+  waitMs: number;
+  reason: "available" | "all_cooldown" | "disabled_probe" | "disabled_wait" | "no_accounts";
+}
+
+interface GeminiProcessResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  aborted: boolean;
+  spawnError?: string;
+}
+
+interface ExecuteAttemptResult extends GeminiCLIDirectResult {
+  retryable: boolean;
 }
 
 export interface GeminiCLIDirectOptions {
@@ -34,6 +87,7 @@ export interface GeminiCLIDirectOptions {
   timeout?: number;
   signal?: AbortSignal;
   cwd?: string;
+  outputFormat?: "text" | "json" | "stream-json";
 }
 
 export interface GeminiCLIDirectResult extends ExecutorResult {
@@ -41,101 +95,648 @@ export interface GeminiCLIDirectResult extends ExecutorResult {
   accountEmail?: string;
 }
 
-async function getAvailableAccounts(): Promise<string[]> {
-  try {
-    const files = await fs.readdir(GEMINI_CREDS_DIR);
-    return files.filter((f) => f.endsWith(".json")).map((f) => f.replace(".json", ""));
-  } catch {
-    return [];
+export interface GeminiAccountManagerOptions {
+  rateLimitCooldownMs?: number;
+  authFailureCooldownMs?: number;
+  runtimeFailureCooldownMs?: number;
+  disableAfterFailures?: number;
+  disabledRecheckMs?: number;
+  lockAcquireTimeoutMs?: number;
+  syncIntervalMs?: number;
+}
+
+const DEFAULT_MANAGER_OPTIONS: Required<GeminiAccountManagerOptions> = {
+  rateLimitCooldownMs: 60_000,
+  authFailureCooldownMs: 300_000,
+  runtimeFailureCooldownMs: 15_000,
+  disableAfterFailures: 5,
+  disabledRecheckMs: 30 * 60 * 1000,
+  lockAcquireTimeoutMs: 15_000,
+  syncIntervalMs: 5_000,
+};
+
+function sanitizeGeminiOutput(text: string): string {
+  return text
+    .replace(/^YOLO mode is enabled\.\s*/gm, "")
+    .replace(/^Loaded cached credentials\.\s*/gm, "")
+    .trim();
+}
+
+function isRateLimitError(text: string): boolean {
+  return /(?:\b429\b|quota|rate.?limit|resource_exhausted|exhausted)/i.test(text);
+}
+
+function isAuthError(text: string): boolean {
+  return /(?:\b401\b|\b403\b|unauthorized|forbidden|invalid.?credential|auth)/i.test(text);
+}
+
+function failureKindToExitCode(kind: FailureKind): number {
+  switch (kind) {
+    case "timeout":
+      return 4;
+    case "auth":
+      return 3;
+    case "rate_limit":
+      return 2;
+    default:
+      return 1;
   }
 }
 
-async function getActiveEmail(): Promise<string | null> {
-  try {
-    const data = JSON.parse(await fs.readFile(GEMINI_ACCOUNTS_FILE, "utf-8"));
-    return data.active || null;
-  } catch {
-    return null;
-  }
-}
-
-async function swapToAccount(email: string): Promise<boolean> {
-  const credsFile = path.join(GEMINI_CREDS_DIR, `${email}.json`);
-  try {
-    const creds = await fs.readFile(credsFile, "utf-8");
-    await fs.writeFile(GEMINI_CREDS_FILE, creds, "utf-8");
-    try {
-      const accountsData = JSON.parse(await fs.readFile(GEMINI_ACCOUNTS_FILE, "utf-8"));
-      accountsData.active = email;
-      await fs.writeFile(GEMINI_ACCOUNTS_FILE, JSON.stringify(accountsData, null, 2), "utf-8");
-    } catch {
-      // Non-fatal
-    }
-    logger.info({ email }, "Swapped Gemini CLI account");
-    return true;
-  } catch (err) {
-    logger.warn({ email, err }, "Failed to swap Gemini CLI account — creds file missing");
-    return false;
-  }
-}
-
-export async function rotateGeminiAccount(): Promise<string | null> {
-  const available = await getAvailableAccounts();
-  if (available.length <= 1) return null;
-
-  const current = await getActiveEmail();
-  const currentIdx = available.indexOf(current || "");
-  const nextIdx = (currentIdx + 1) % available.length;
-  const nextEmail = available[nextIdx];
-
-  if (nextEmail && (await swapToAccount(nextEmail))) {
-    return nextEmail;
-  }
+function detectFailureKind(run: GeminiProcessResult, cleanedOutput: string, cleanedErr: string): FailureKind | null {
+  if (run.timedOut) return "timeout";
+  if (run.spawnError) return "spawn";
+  const combined = `${cleanedOutput}\n${cleanedErr}`;
+  if (isRateLimitError(combined)) return "rate_limit";
+  if (isAuthError(combined)) return "auth";
+  if ((run.code ?? 1) !== 0 || !cleanedOutput) return "runtime";
   return null;
 }
 
-export async function executeGeminiCLIDirect(
+async function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise<void>((resolve, reject) => {
+    const t = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(t);
+      cleanup();
+      reject(new Error("Aborted"));
+    };
+    const cleanup = () => {
+      if (signal) {
+        signal.removeEventListener("abort", onAbort);
+      }
+    };
+
+    if (signal) {
+      if (signal.aborted) {
+        clearTimeout(t);
+        reject(new Error("Aborted"));
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+}
+
+async function waitWithTimeout(promise: Promise<void>, timeoutMs: number, message: string): Promise<void> {
+  await Promise.race([
+    promise,
+    new Promise<void>((_, reject) => {
+      const id = setTimeout(() => {
+        clearTimeout(id);
+        reject(new Error(message));
+      }, timeoutMs);
+    }),
+  ]);
+}
+
+export function initGeminiAccounts(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gemini_accounts (
+      email TEXT PRIMARY KEY,
+      creds_path TEXT NOT NULL,
+      is_enabled INTEGER NOT NULL DEFAULT 1,
+      disabled_reason TEXT,
+      disabled_at INTEGER,
+      reenable_after INTEGER,
+      cooldown_until INTEGER,
+      cooldown_reason TEXT,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      last_failure_at INTEGER,
+      last_failure_reason TEXT,
+      last_success_at INTEGER,
+      last_selected_at INTEGER,
+      last_used_at INTEGER,
+      hour_window_start INTEGER NOT NULL DEFAULT 0,
+      hour_usage_count INTEGER NOT NULL DEFAULT 0,
+      day_window_start INTEGER NOT NULL DEFAULT 0,
+      day_usage_count INTEGER NOT NULL DEFAULT 0,
+      total_requests INTEGER NOT NULL DEFAULT 0,
+      total_successes INTEGER NOT NULL DEFAULT 0,
+      total_failures INTEGER NOT NULL DEFAULT 0,
+      total_rate_limits INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_gemini_accounts_enabled
+      ON gemini_accounts(is_enabled, cooldown_until, reenable_after);
+    CREATE INDEX IF NOT EXISTS idx_gemini_accounts_usage
+      ON gemini_accounts(hour_usage_count, day_usage_count, last_used_at);
+    CREATE INDEX IF NOT EXISTS idx_gemini_accounts_cooldown
+      ON gemini_accounts(cooldown_until);
+  `);
+}
+
+function getRuntimeHomeForEmail(email: string): string {
+  return path.join(GEMINI_RUNTIME_HOMES_DIR, encodeURIComponent(email));
+}
+
+function ensureWindow(start: number, count: number, now: number, windowMs: number): { start: number; count: number } {
+  if (!start || now - start >= windowMs) {
+    return { start: now, count: 0 };
+  }
+  return { start, count };
+}
+
+export class GeminiAccountManager {
+  private db: Database.Database;
+  private options: Required<GeminiAccountManagerOptions>;
+  private accountLocks = new Map<string, Promise<void>>();
+  private lastDiskSyncAt = 0;
+  private stmts: {
+    listAccounts: Database.Statement;
+    getAccount: Database.Statement;
+    upsertAccount: Database.Statement;
+    disableMissingCreds: Database.Statement;
+    recordUsage: Database.Statement;
+    markSuccess: Database.Statement;
+    markFailure: Database.Statement;
+    scheduleDisabledProbe: Database.Statement;
+  };
+
+  constructor(db: Database.Database, options: GeminiAccountManagerOptions = {}) {
+    this.db = db;
+    this.options = { ...DEFAULT_MANAGER_OPTIONS, ...options };
+    initGeminiAccounts(this.db);
+    this.stmts = {
+      listAccounts: this.db.prepare(`
+        SELECT
+          email, creds_path, is_enabled, disabled_reason, disabled_at, reenable_after,
+          cooldown_until, cooldown_reason, consecutive_failures, last_failure_at,
+          last_failure_reason, last_success_at, last_selected_at, last_used_at,
+          hour_window_start, hour_usage_count, day_window_start, day_usage_count,
+          total_requests, total_successes, total_failures, total_rate_limits
+        FROM gemini_accounts
+        ORDER BY email
+      `),
+      getAccount: this.db.prepare(`
+        SELECT
+          email, creds_path, is_enabled, disabled_reason, disabled_at, reenable_after,
+          cooldown_until, cooldown_reason, consecutive_failures, last_failure_at,
+          last_failure_reason, last_success_at, last_selected_at, last_used_at,
+          hour_window_start, hour_usage_count, day_window_start, day_usage_count,
+          total_requests, total_successes, total_failures, total_rate_limits
+        FROM gemini_accounts
+        WHERE email = ?
+      `),
+      upsertAccount: this.db.prepare(`
+        INSERT INTO gemini_accounts (
+          email, creds_path, is_enabled, created_at, updated_at
+        ) VALUES (?, ?, 1, ?, ?)
+        ON CONFLICT(email) DO UPDATE SET
+          creds_path = excluded.creds_path,
+          is_enabled = CASE
+            WHEN gemini_accounts.disabled_reason = 'missing_creds' THEN 1
+            ELSE gemini_accounts.is_enabled
+          END,
+          disabled_reason = CASE
+            WHEN gemini_accounts.disabled_reason = 'missing_creds' THEN NULL
+            ELSE gemini_accounts.disabled_reason
+          END,
+          disabled_at = CASE
+            WHEN gemini_accounts.disabled_reason = 'missing_creds' THEN NULL
+            ELSE gemini_accounts.disabled_at
+          END,
+          reenable_after = CASE
+            WHEN gemini_accounts.disabled_reason = 'missing_creds' THEN NULL
+            ELSE gemini_accounts.reenable_after
+          END,
+          updated_at = excluded.updated_at
+      `),
+      disableMissingCreds: this.db.prepare(`
+        UPDATE gemini_accounts
+        SET
+          is_enabled = 0,
+          disabled_reason = 'missing_creds',
+          disabled_at = ?,
+          reenable_after = ?,
+          updated_at = ?
+        WHERE email = ?
+      `),
+      recordUsage: this.db.prepare(`
+        UPDATE gemini_accounts
+        SET
+          hour_window_start = ?,
+          hour_usage_count = ?,
+          day_window_start = ?,
+          day_usage_count = ?,
+          total_requests = total_requests + 1,
+          last_selected_at = ?,
+          last_used_at = ?,
+          updated_at = ?
+        WHERE email = ?
+      `),
+      markSuccess: this.db.prepare(`
+        UPDATE gemini_accounts
+        SET
+          consecutive_failures = 0,
+          cooldown_until = NULL,
+          cooldown_reason = NULL,
+          last_success_at = ?,
+          last_used_at = ?,
+          total_successes = total_successes + 1,
+          is_enabled = 1,
+          disabled_reason = NULL,
+          disabled_at = NULL,
+          reenable_after = NULL,
+          updated_at = ?
+        WHERE email = ?
+      `),
+      markFailure: this.db.prepare(`
+        UPDATE gemini_accounts
+        SET
+          consecutive_failures = consecutive_failures + 1,
+          cooldown_until = ?,
+          cooldown_reason = ?,
+          last_failure_at = ?,
+          last_failure_reason = ?,
+          total_failures = total_failures + 1,
+          total_rate_limits = total_rate_limits + ?,
+          is_enabled = CASE
+            WHEN consecutive_failures + 1 >= ? THEN 0
+            ELSE is_enabled
+          END,
+          disabled_reason = CASE
+            WHEN consecutive_failures + 1 >= ? THEN ?
+            ELSE disabled_reason
+          END,
+          disabled_at = CASE
+            WHEN consecutive_failures + 1 >= ? THEN ?
+            ELSE disabled_at
+          END,
+          reenable_after = CASE
+            WHEN consecutive_failures + 1 >= ? THEN ?
+            ELSE reenable_after
+          END,
+          updated_at = ?
+        WHERE email = ?
+      `),
+      scheduleDisabledProbe: this.db.prepare(`
+        UPDATE gemini_accounts
+        SET
+          reenable_after = ?,
+          updated_at = ?
+        WHERE email = ?
+      `),
+    };
+  }
+
+  async syncAccountsFromDisk(force: boolean = false): Promise<void> {
+    const now = Date.now();
+    if (!force && now - this.lastDiskSyncAt < this.options.syncIntervalMs) {
+      return;
+    }
+
+    this.lastDiskSyncAt = now;
+    let files: string[] = [];
+    try {
+      files = await fs.readdir(GEMINI_CREDS_DIR);
+    } catch {
+      files = [];
+    }
+
+    const emails = files
+      .filter((file) => file.endsWith(".json"))
+      .map((file) => file.replace(/\.json$/i, ""));
+
+    for (const email of emails) {
+      const credsPath = path.join(GEMINI_CREDS_DIR, `${email}.json`);
+      this.stmts.upsertAccount.run(email, credsPath, now, now);
+    }
+
+    const knownSet = new Set(emails);
+    const existing = this.stmts.listAccounts.all() as GeminiAccountRow[];
+    for (const row of existing) {
+      if (!knownSet.has(row.email)) {
+        this.stmts.disableMissingCreds.run(
+          now,
+          now + this.options.disabledRecheckMs,
+          now,
+          row.email
+        );
+      }
+    }
+  }
+
+  listAccounts(): GeminiAccountRow[] {
+    return this.stmts.listAccounts.all() as GeminiAccountRow[];
+  }
+
+  getAccountCount(): number {
+    const rows = this.stmts.listAccounts.all() as GeminiAccountRow[];
+    return rows.length;
+  }
+
+  selectBestAccount(now: number): AccountSelection {
+    const rows = this.listAccounts();
+    if (rows.length === 0) {
+      return { account: null, waitMs: 0, reason: "no_accounts" };
+    }
+
+    type ScoredRow = GeminiAccountRow & {
+      _hourUsage: number;
+      _dayUsage: number;
+      _locked: number;
+    };
+
+    const available: ScoredRow[] = [];
+    const cooldownRows: Array<{ row: GeminiAccountRow; waitMs: number }> = [];
+    const disabledDue: ScoredRow[] = [];
+    const disabledWaiting: Array<{ row: GeminiAccountRow; waitMs: number }> = [];
+
+    for (const row of rows) {
+      const cooldownUntil = row.cooldown_until ?? 0;
+      const reenableAfter = row.reenable_after ?? 0;
+      const isLocked = this.accountLocks.has(row.email) ? 1 : 0;
+      const hour = ensureWindow(row.hour_window_start, row.hour_usage_count, now, ONE_HOUR_MS);
+      const day = ensureWindow(row.day_window_start, row.day_usage_count, now, ONE_DAY_MS);
+      const scored: ScoredRow = { ...row, _hourUsage: hour.count, _dayUsage: day.count, _locked: isLocked };
+
+      if (row.is_enabled === 1) {
+        if (cooldownUntil > now) {
+          cooldownRows.push({ row, waitMs: cooldownUntil - now });
+          continue;
+        }
+        available.push(scored);
+        continue;
+      }
+
+      if (row.disabled_reason === "missing_creds") {
+        continue;
+      }
+
+      if (reenableAfter <= now) {
+        disabledDue.push(scored);
+      } else {
+        disabledWaiting.push({ row, waitMs: reenableAfter - now });
+      }
+    }
+
+    const scoreSort = (a: ScoredRow, b: ScoredRow): number =>
+      a._locked - b._locked
+      || a._hourUsage - b._hourUsage
+      || a._dayUsage - b._dayUsage
+      || (a.last_used_at ?? 0) - (b.last_used_at ?? 0)
+      || a.email.localeCompare(b.email);
+
+    if (available.length > 0) {
+      available.sort(scoreSort);
+      return { account: available[0] ?? null, waitMs: 0, reason: "available" };
+    }
+
+    if (disabledDue.length > 0) {
+      disabledDue.sort(scoreSort);
+      return { account: disabledDue[0] ?? null, waitMs: 0, reason: "disabled_probe" };
+    }
+
+    if (cooldownRows.length > 0) {
+      cooldownRows.sort((a, b) => a.waitMs - b.waitMs);
+      const best = cooldownRows[0];
+      return { account: best?.row ?? null, waitMs: best?.waitMs ?? 0, reason: "all_cooldown" };
+    }
+
+    if (disabledWaiting.length > 0) {
+      disabledWaiting.sort((a, b) => a.waitMs - b.waitMs);
+      const best = disabledWaiting[0];
+      return { account: best?.row ?? null, waitMs: best?.waitMs ?? 0, reason: "disabled_wait" };
+    }
+
+    return { account: null, waitMs: 0, reason: "no_accounts" };
+  }
+
+  async withAccountLock<T>(email: string, fn: () => Promise<T>, timeoutMs?: number): Promise<T> {
+    const previous = this.accountLocks.get(email) ?? Promise.resolve();
+    let releaseCurrent: () => void = () => {};
+    const current = new Promise<void>((resolve) => {
+      releaseCurrent = resolve;
+    });
+    const queueTail = previous.catch(() => undefined).then(() => current);
+    this.accountLocks.set(email, queueTail);
+
+    try {
+      await waitWithTimeout(
+        previous.catch(() => undefined),
+        timeoutMs ?? this.options.lockAcquireTimeoutMs,
+        `Timed out waiting for Gemini account lock: ${email}`
+      );
+      return await fn();
+    } finally {
+      releaseCurrent();
+      if (this.accountLocks.get(email) === queueTail) {
+        this.accountLocks.delete(email);
+      }
+    }
+  }
+
+  private getCooldownMsForFailure(kind: FailureKind): number {
+    switch (kind) {
+      case "rate_limit":
+        return this.options.rateLimitCooldownMs;
+      case "auth":
+        return this.options.authFailureCooldownMs;
+      default:
+        return this.options.runtimeFailureCooldownMs;
+    }
+  }
+
+  recordSelection(email: string, now: number): void {
+    const row = this.stmts.getAccount.get(email) as GeminiAccountRow | undefined;
+    if (!row) return;
+    const hour = ensureWindow(row.hour_window_start, row.hour_usage_count, now, ONE_HOUR_MS);
+    const day = ensureWindow(row.day_window_start, row.day_usage_count, now, ONE_DAY_MS);
+    this.stmts.recordUsage.run(
+      hour.start,
+      hour.count + 1,
+      day.start,
+      day.count + 1,
+      now,
+      now,
+      now,
+      email
+    );
+  }
+
+  recordSuccess(email: string, now: number): void {
+    this.stmts.markSuccess.run(now, now, now, email);
+  }
+
+  recordFailure(email: string, kind: FailureKind, now: number, message: string): void {
+    const cooldownMs = this.getCooldownMsForFailure(kind);
+    const cooldownUntil = cooldownMs > 0 ? now + cooldownMs : null;
+    const isRateLimit = kind === "rate_limit" ? 1 : 0;
+    const disabledReason = `auto_disabled:${kind}`;
+    const reenableAt = now + this.options.disabledRecheckMs;
+    this.stmts.markFailure.run(
+      cooldownUntil,
+      kind,
+      now,
+      message.slice(0, 500),
+      isRateLimit,
+      this.options.disableAfterFailures,
+      this.options.disableAfterFailures,
+      disabledReason,
+      this.options.disableAfterFailures,
+      now,
+      this.options.disableAfterFailures,
+      reenableAt,
+      now,
+      email
+    );
+  }
+
+  scheduleDisabledProbe(email: string, now: number): void {
+    this.stmts.scheduleDisabledProbe.run(now + this.options.disabledRecheckMs, now, email);
+  }
+
+  async prepareRuntimeHome(email: string): Promise<string> {
+    const runtimeHome = getRuntimeHomeForEmail(email);
+    const runtimeGeminiDir = path.join(runtimeHome, ".gemini");
+    const runtimeCredsFile = path.join(runtimeGeminiDir, "oauth_creds.json");
+    const runtimeAccountsFile = path.join(runtimeGeminiDir, "google_accounts.json");
+    const runtimeSystemPromptFile = path.join(runtimeGeminiDir, "GEMINI.md");
+    const sourceCredsFile = path.join(GEMINI_CREDS_DIR, `${email}.json`);
+
+    await fs.mkdir(runtimeGeminiDir, { recursive: true });
+    const creds = await fs.readFile(sourceCredsFile, "utf-8");
+    await fs.writeFile(runtimeCredsFile, creds, "utf-8");
+    await fs.writeFile(runtimeAccountsFile, JSON.stringify({ active: email }, null, 2), "utf-8");
+
+    try {
+      const promptText = await fs.readFile(GEMINI_SYSTEM_PROMPT_FILE, "utf-8");
+      await fs.writeFile(runtimeSystemPromptFile, promptText, "utf-8");
+    } catch {
+      // Non-fatal: Gemini CLI can run without GEMINI.md.
+    }
+
+    // Best effort: keep global active account visible for observability.
+    try {
+      await fs.mkdir(GEMINI_GLOBAL_DIR, { recursive: true });
+      let globalAccounts: Record<string, unknown> = {};
+      try {
+        globalAccounts = JSON.parse(await fs.readFile(GEMINI_GLOBAL_ACCOUNTS_FILE, "utf-8")) as Record<string, unknown>;
+      } catch {
+        globalAccounts = {};
+      }
+      globalAccounts.active = email;
+      await fs.writeFile(GEMINI_GLOBAL_ACCOUNTS_FILE, JSON.stringify(globalAccounts, null, 2), "utf-8");
+    } catch {
+      // Non-fatal.
+    }
+
+    return runtimeHome;
+  }
+
+  async persistRefreshedCreds(email: string, runtimeHome: string): Promise<void> {
+    const runtimeCredsFile = path.join(runtimeHome, ".gemini/oauth_creds.json");
+    const targetCredsFile = path.join(GEMINI_CREDS_DIR, `${email}.json`);
+    try {
+      const refreshed = await fs.readFile(runtimeCredsFile, "utf-8");
+      await fs.writeFile(targetCredsFile, refreshed, "utf-8");
+    } catch {
+      // Non-fatal.
+    }
+  }
+}
+
+let accountManager: GeminiAccountManager | null = null;
+let ownedDb: Database.Database | null = null;
+
+export function initializeGeminiCLIAccountManager(
+  db: Database.Database,
+  options: GeminiAccountManagerOptions = {}
+): GeminiAccountManager {
+  accountManager = new GeminiAccountManager(db, options);
+  return accountManager;
+}
+
+function getGeminiAccountManager(): GeminiAccountManager {
+  if (accountManager) return accountManager;
+  const db = new Database(config.paths.database);
+  db.pragma("busy_timeout = 5000");
+  db.pragma("foreign_keys = ON");
+  ownedDb = db;
+  accountManager = new GeminiAccountManager(db);
+  logger.warn(
+    { dbPath: config.paths.database, hasSharedDb: false },
+    "Gemini account manager auto-initialized with standalone DB connection"
+  );
+  return accountManager;
+}
+
+export function closeGeminiCLIAccountManager(): void {
+  if (ownedDb) {
+    ownedDb.close();
+    ownedDb = null;
+  }
+  accountManager = null;
+}
+
+export async function rotateGeminiAccount(): Promise<string | null> {
+  const manager = getGeminiAccountManager();
+  await manager.syncAccountsFromDisk(true);
+  const pick = manager.selectBestAccount(Date.now());
+  if (!pick.account || pick.waitMs > 0) return null;
+  return pick.account.email;
+}
+
+async function runGeminiProcess(
   prompt: string,
-  options: GeminiCLIDirectOptions = {}
-): Promise<GeminiCLIDirectResult> {
-  const {
-    model = GEMINI_CLI_FLASH_MODEL,
-    timeout = 120_000,
-    signal,
-    cwd = "/tmp",
-  } = options;
-
-  const startTime = Date.now();
-
-  await waitForLock();
-  const accountEmail = await getActiveEmail();
-
+  model: string,
+  cwd: string,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+  runtimeHome: string,
+  outputFormat?: "text" | "json" | "stream-json"
+): Promise<GeminiProcessResult> {
   return new Promise((resolve) => {
-    credSwapLock = true;
-    const args = ["-m", model, "-y", "-p", prompt];
-
-    logger.debug({ model, accountEmail, promptLength: prompt.length }, "Executing Gemini CLI");
-
+    const args = ["-m", model, "-y", ...(outputFormat ? ["-o", outputFormat] : []), "-p", prompt];
     const child = spawn("gemini", args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd,
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        HOME: runtimeHome,
+      },
     });
 
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let aborted = false;
+    let settled = false;
+    let abortListener: (() => void) | null = null;
+
+    const finish = (result: GeminiProcessResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      if (signal && abortListener) {
+        signal.removeEventListener("abort", abortListener);
+      }
+      resolve(result);
+    };
 
     const timeoutId = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
-    }, timeout);
+    }, timeoutMs);
 
     if (signal) {
-      signal.addEventListener("abort", () => {
-        clearTimeout(timeoutId);
+      abortListener = () => {
+        aborted = true;
         child.kill("SIGTERM");
-      });
+      };
+      if (signal.aborted) {
+        aborted = true;
+        child.kill("SIGTERM");
+      } else {
+        signal.addEventListener("abort", abortListener, { once: true });
+      }
     }
 
     child.stdout?.on("data", (chunk: Buffer) => {
@@ -146,63 +747,232 @@ export async function executeGeminiCLIDirect(
       stderr += chunk.toString();
     });
 
-    child.on("close", async (code) => {
-      clearTimeout(timeoutId);
-      credSwapLock = false;
-      const duration = Date.now() - startTime;
-
-      const output = stdout
-        .replace(/^YOLO mode is enabled\.\s*/gm, "")
-        .replace(/^Loaded cached credentials\.\s*/gm, "")
-        .trim();
-
-      if (timedOut) {
-        logger.warn({ model, accountEmail, duration }, "Gemini CLI timed out");
-        resolve({ output: "Error: Gemini CLI timed out", exitCode: 1, duration, executor: "gemini-cli", model, accountEmail: accountEmail || undefined });
-        return;
-      }
-
-      // Detect rate limit — rotate account and retry once
-      const isRateLimit = stderr.includes("429") || stderr.includes("quota") || (code !== 0 && stderr.includes("exhausted"));
-      if (isRateLimit) {
-        const nextEmail = await rotateGeminiAccount();
-        if (nextEmail) {
-          logger.warn({ currentEmail: accountEmail, nextEmail }, "Gemini rate limited — rotated to next account, retrying");
-          const retryResult = await executeGeminiCLIDirect(prompt, options);
-          resolve(retryResult);
-          return;
-        }
-      }
-
-      if (code !== 0 || !output) {
-        const errMsg = stderr
-          .replace(/^YOLO mode is enabled\.\s*/gm, "")
-          .replace(/^Loaded cached credentials\.\s*/gm, "")
-          .trim();
-        logger.warn({ code, model, accountEmail, duration, stderr: errMsg.slice(0, 300) }, "Gemini CLI failed or empty output");
-        resolve({ output: `Error: exit ${code}. ${errMsg.slice(0, 300)}`, exitCode: code ?? 1, duration, executor: "gemini-cli", model, accountEmail: accountEmail || undefined });
-        return;
-      }
-
-      // Save refreshed creds back to per-account file
-      try {
-        const activeCreds = await fs.readFile(GEMINI_CREDS_FILE, "utf-8");
-        if (accountEmail) {
-          await fs.writeFile(path.join(GEMINI_CREDS_DIR, `${accountEmail}.json`), activeCreds, "utf-8");
-        }
-      } catch {
-        // Non-fatal
-      }
-
-      logger.debug({ model, accountEmail, duration, outputLength: output.length }, "Gemini CLI completed");
-
-      resolve({ output, exitCode: 0, duration, executor: "gemini-cli", model, accountEmail: accountEmail || undefined });
+    child.on("close", (code) => {
+      finish({
+        code,
+        stdout,
+        stderr,
+        timedOut,
+        aborted,
+      });
     });
 
     child.on("error", (err) => {
-      clearTimeout(timeoutId);
-      credSwapLock = false;
-      resolve({ output: `Error: ${err.message}`, exitCode: 1, duration: Date.now() - startTime, executor: "gemini-cli", model, accountEmail: accountEmail || undefined });
+      finish({
+        code: null,
+        stdout,
+        stderr,
+        timedOut,
+        aborted,
+        spawnError: err.message,
+      });
     });
   });
+}
+
+export async function executeGeminiCLIDirect(
+  prompt: string,
+  options: GeminiCLIDirectOptions = {}
+): Promise<GeminiCLIDirectResult> {
+  const { model = GEMINI_CLI_FLASH_MODEL, timeout = 120_000, signal, cwd = "/tmp", outputFormat } = options;
+
+  const startTime = Date.now();
+  const deadline = startTime + timeout;
+  const manager = getGeminiAccountManager();
+  await manager.syncAccountsFromDisk(true);
+
+  const knownAccounts = manager.getAccountCount();
+  if (knownAccounts === 0) {
+    return {
+      output: `Error: No Gemini account credentials found in ${GEMINI_CREDS_DIR}`,
+      exitCode: 1,
+      duration: Date.now() - startTime,
+      executor: "gemini-cli",
+      model,
+    };
+  }
+
+  const maxAttempts = Math.max(knownAccounts, 2);
+  let attempts = 0;
+  let lastFailure: GeminiCLIDirectResult | null = null;
+
+  while (attempts < maxAttempts && Date.now() < deadline) {
+    await manager.syncAccountsFromDisk();
+
+    const pick = manager.selectBestAccount(Date.now());
+    if (!pick.account) {
+      break;
+    }
+
+    if (pick.reason === "disabled_probe") {
+      manager.scheduleDisabledProbe(pick.account.email, Date.now());
+    }
+
+    if (pick.waitMs > 0) {
+      const remaining = deadline - Date.now();
+      if (remaining <= pick.waitMs) {
+        const duration = Date.now() - startTime;
+        return {
+          output: `Error: All Gemini accounts unavailable (next in ${pick.waitMs}ms, timeout remaining ${remaining}ms)`,
+          exitCode: 1,
+          duration,
+          executor: "gemini-cli",
+          model,
+          accountEmail: pick.account.email,
+        };
+      }
+      logger.debug(
+        { waitMs: pick.waitMs, reason: pick.reason, accountEmail: pick.account.email },
+        "Waiting for Gemini account availability"
+      );
+      try {
+        await delay(pick.waitMs, signal);
+      } catch {
+        return {
+          output: "Cancelled",
+          exitCode: 130,
+          duration: Date.now() - startTime,
+          executor: "gemini-cli",
+          model,
+          accountEmail: pick.account.email,
+        };
+      }
+      continue;
+    }
+
+    const email = pick.account.email;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    attempts += 1;
+
+    logger.debug(
+      { model, accountEmail: email, attempt: attempts, maxAttempts, promptLength: prompt.length },
+      "Executing Gemini CLI with selected account"
+    );
+
+    let attemptResult: ExecuteAttemptResult;
+    try {
+      attemptResult = await manager.withAccountLock(
+        email,
+        async () => {
+          const attemptStart = Date.now();
+          manager.recordSelection(email, attemptStart);
+          let runtimeHome: string;
+
+          try {
+            runtimeHome = await manager.prepareRuntimeHome(email);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            manager.recordFailure(email, "runtime", Date.now(), `prepare_home_failed: ${msg}`);
+            return {
+              output: `Error: failed preparing runtime home for ${email}: ${msg}`,
+              exitCode: 1,
+              duration: Date.now() - startTime,
+              executor: "gemini-cli",
+              model,
+              accountEmail: email,
+              retryable: true,
+            };
+          }
+
+          const run = await runGeminiProcess(prompt, model, cwd, Math.max(1_000, remaining), signal, runtimeHome, outputFormat);
+          const cleanedOutput = sanitizeGeminiOutput(run.stdout);
+          const cleanedErr = sanitizeGeminiOutput(run.stderr);
+          const duration = Date.now() - startTime;
+
+          if (run.aborted) {
+            return {
+              output: "Cancelled",
+              exitCode: 130,
+              duration,
+              executor: "gemini-cli",
+              model,
+              accountEmail: email,
+              retryable: false,
+            };
+          }
+
+          const failureKind = detectFailureKind(run, cleanedOutput, cleanedErr);
+          if (!failureKind) {
+            manager.recordSuccess(email, Date.now());
+            await manager.persistRefreshedCreds(email, runtimeHome);
+            logger.debug(
+              { model, accountEmail: email, duration, outputLength: cleanedOutput.length },
+              "Gemini CLI completed"
+            );
+            return {
+              output: cleanedOutput,
+              exitCode: 0,
+              duration,
+              executor: "gemini-cli",
+              model,
+              accountEmail: email,
+              retryable: false,
+            };
+          }
+
+          const errorSnippet = (cleanedErr || cleanedOutput || run.spawnError || "").slice(0, 400);
+          manager.recordFailure(email, failureKind, Date.now(), errorSnippet);
+
+          const retryable = failureKind === "rate_limit" || failureKind === "auth" || failureKind === "runtime";
+          const failExitCode = run.code ?? failureKindToExitCode(failureKind);
+          logger.warn(
+            {
+              model,
+              accountEmail: email,
+              failureKind,
+              retryable,
+              exitCode: failExitCode,
+              stderr: errorSnippet.slice(0, 200),
+            },
+            "Gemini CLI attempt failed"
+          );
+
+          return {
+            output: `Error [${failureKind}] exit ${failExitCode}: ${errorSnippet}`,
+            exitCode: failExitCode,
+            duration,
+            executor: "gemini-cli",
+            model,
+            accountEmail: email,
+            retryable,
+          };
+        },
+        Math.min(remaining, 30_000)
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      lastFailure = {
+        output: `Error: ${msg}`,
+        exitCode: 1,
+        duration: Date.now() - startTime,
+        executor: "gemini-cli",
+        model,
+        accountEmail: email,
+      };
+      logger.warn({ accountEmail: email, err: msg }, "Gemini account lock acquisition failed");
+      continue;
+    }
+
+    if (attemptResult.exitCode === 0) {
+      return attemptResult;
+    }
+
+    lastFailure = attemptResult;
+    if (!attemptResult.retryable) {
+      return attemptResult;
+    }
+  }
+
+  if (lastFailure) {
+    return lastFailure;
+  }
+
+  return {
+    output: "Error: Gemini CLI exhausted all available accounts",
+    exitCode: 1,
+    duration: Date.now() - startTime,
+    executor: "gemini-cli",
+    model,
+  };
 }

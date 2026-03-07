@@ -13,6 +13,7 @@
 
 import { z } from "zod";
 import { executeOpenCodeCLI } from "./opencode-cli.js";
+import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { executeClaudeCommand } from "./claude.js";
@@ -93,7 +94,7 @@ async function executeAgent(
     if (agent.executor === "opencode") {
       const timeout = agent.timeout ?? DEFAULT_AGENT_TIMEOUT;
       const result = await executeOpenCodeCLI(agent.prompt, agent.context ?? "", {
-        model: agent.model ?? "google/gemini-3-flash-preview",
+        model: agent.model ?? `google/${GEMINI_CLI_FLASH_MODEL}`,
         timeout,
         researchOnly: true,
         signal,
@@ -110,7 +111,7 @@ async function executeAgent(
       const result = await executeCodexCLI(fullPrompt, {
         cwd: SWARM_CWD,
         timeout,
-        model: agent.model ?? "gpt-5.3-codex",
+        model: agent.model ?? "gpt-5.4",
         reasoningEffort: "high",
         signal,
       });

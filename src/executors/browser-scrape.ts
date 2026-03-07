@@ -2,7 +2,7 @@
  * Browser scrape executor.
  *
  * Primary:  Claude Code Sonnet (via `claude` CLI with --dangerously-skip-permissions)
- * Fallback: OpenCode Flash 3.0 (google-aistudio/gemini-3-flash-preview)
+ * Fallback: Gemini Flash 3.0 (gemini-3-flash-preview via Gemini CLI)
  *
  * Callers pass the same prompt and OpenCodeCLIOptions as before — the model
  * field in options is only used if we reach the opencode fallback.
@@ -11,9 +11,10 @@
 import { mkdirSync } from "fs";
 import { executeClaudeCommand } from "./claude.js";
 import { executeOpenCodeCLI, type OpenCodeCLIOptions, type OpenCodeCLIResult } from "./opencode-cli.js";
+import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { logger } from "../utils/logger.js";
 
-const FLASH_FALLBACK_MODEL = "google-aistudio/gemini-3-flash-preview";
+const FLASH_FALLBACK_MODEL = `google-aistudio/${GEMINI_CLI_FLASH_MODEL}`;
 
 // Give Claude 80% of the total budget so there's time left for the fallback.
 const CLAUDE_TIMEOUT_RATIO = 0.8;
@@ -60,15 +61,15 @@ export async function executeBrowserScrape(
 
     logger.warn(
       { exitCode: result.exitCode, outputLen: result.output?.length },
-      "Browser scrape: Claude produced no useful output, falling back to OpenCode Flash"
+      "Browser scrape: Claude produced no useful output, falling back to Gemini Flash"
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    logger.warn({ err: msg }, "Browser scrape: Claude failed, falling back to OpenCode Flash");
+    logger.warn({ err: msg }, "Browser scrape: Claude failed, falling back to Gemini Flash");
   }
 
-  // ── Fallback: OpenCode Flash 3.0 ─────────────────────────────────────────
-  logger.info("Browser scrape: using OpenCode Flash 3.0 fallback");
+  // ── Fallback: Gemini Flash 3.0 ───────────────────────────────────────────
+  logger.info("Browser scrape: using Gemini Flash 3.0 fallback");
   return executeOpenCodeCLI(prompt, _context, {
     ...options,
     model: FLASH_FALLBACK_MODEL,
