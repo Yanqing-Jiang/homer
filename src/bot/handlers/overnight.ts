@@ -670,9 +670,9 @@ export async function presentMorningChoices(
   const message = formatTaskSummary(task.subject, task.type, iteration?.output, task.id);
 
   const keyboard = new InlineKeyboard();
-  keyboard.text("✅ Approve", `overnight:approve:${task.id}`);
-  keyboard.text("🗂 Archive", `overnight:archive:${task.id}`);
-  keyboard.text("💬 Talk", `overnight:talk:${task.id}`);
+  keyboard.text("✅ 采纳", `overnight:approve:${task.id}`);
+  keyboard.text("🗂 归档", `overnight:archive:${task.id}`);
+  keyboard.text("💬 聊聊", `overnight:talk:${task.id}`);
 
   try {
     const result = await bot.api.sendMessage(chatId, message, {
@@ -825,20 +825,20 @@ async function presentYouTubeSummary(
 
   // Build message (keep under Telegram's 4096 char limit)
   const scoreEmoji = relevanceScore >= 7 ? "🔥" : relevanceScore >= 4 ? "📊" : "📎";
-  let message = `${scoreEmoji} <b>YouTube Summary</b>\n\n`;
+  let message = `${scoreEmoji} <b>YouTube 摘要</b>\n\n`;
   message += `<b>${escapeHtml(videoTitle)}</b>\n`;
-  message += `Relevance: ${relevanceScore}/10\n\n`;
+  message += `相关性: ${relevanceScore}/10\n\n`;
 
   if (summary) {
-    message += `<b>Summary:</b>\n${escapeHtml(summary.slice(0, 600))}\n\n`;
+    message += `<b>概要:</b>\n${escapeHtml(summary.slice(0, 600))}\n\n`;
   }
 
   if (careerRelevance) {
-    message += `<b>Career Relevance:</b>\n${escapeHtml(careerRelevance.slice(0, 400))}\n\n`;
+    message += `<b>职业相关:</b>\n${escapeHtml(careerRelevance.slice(0, 400))}\n\n`;
   }
 
   if (suggestions.length > 0) {
-    message += `<b>Actions:</b>\n`;
+    message += `<b>行动建议:</b>\n`;
     for (const s of suggestions) {
       message += `• ${escapeHtml(s.slice(0, 200))}\n`;
     }
@@ -850,8 +850,8 @@ async function presentYouTubeSummary(
   }
 
   const keyboard = new InlineKeyboard();
-  keyboard.text("💡 Save to Ideas", `yt:save:${task.id}`);
-  keyboard.text("🗑 Dismiss", `yt:dismiss:${task.id}`);
+  keyboard.text("💡 保存为想法", `yt:save:${task.id}`);
+  keyboard.text("🗑 忽略", `yt:dismiss:${task.id}`);
 
   try {
     const result = await bot.api.sendMessage(chatId, message, {
@@ -1127,13 +1127,13 @@ function getLatestIteration(taskId: string): { output?: string } | undefined {
 }
 
 function formatTaskSummary(subject: string, type: string, output: string | undefined, taskId: string): string {
-  const typeLabel = type === "prototype_work" ? "Coding" : type === "research_dive" ? "Research" : type;
+  const typeLabel = type === "prototype_work" ? "编码" : type === "research_dive" ? "研究" : type;
   const header =
-    `🌙 <b>Overnight Task Complete</b>\n\n` +
-    `<b>Subject:</b> ${escapeHtml(subject)}\n` +
-    `<b>Type:</b> ${escapeHtml(typeLabel)}\n` +
-    `<b>Task ID:</b> <code>${escapeHtml(taskId)}</code>\n\n`;
-  const body = output ? escapeHtml(output.slice(0, 1500)) : "No output recorded.";
+    `🌙 <b>隔夜任务完成</b>\n\n` +
+    `<b>主题:</b> ${escapeHtml(subject)}\n` +
+    `<b>类型:</b> ${escapeHtml(typeLabel)}\n` +
+    `<b>任务ID:</b> <code>${escapeHtml(taskId)}</code>\n\n`;
+  const body = output ? escapeHtml(output.slice(0, 1500)) : "无输出记录";
   return header + body;
 }
 
