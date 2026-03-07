@@ -192,7 +192,7 @@ Return a 2-sentence summary of what changed.`;
 
     const result = await executeCodexCLI(prompt, {
       cwd: HOMER_DIR,
-      model: "gpt-5.3-codex",
+      model: "gpt-5.4",
       reasoningEffort: "high",
       timeout: 1_200_000, // 20 min
     });
