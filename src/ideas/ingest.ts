@@ -4,6 +4,7 @@ import { parseIdeasMd, type ParsedIdea } from "./parser.js";
 import * as dao from "./dao.js";
 import { logger } from "../utils/logger.js";
 import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
+import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { executeBrowserScrape } from "../executors/browser-scrape.js";
 import { buildBookmarkScrapePrompt, buildTweetReadPrompt, SCRAPE_OPTIONS, DEEP_FETCH_OPTIONS } from "../scraping/browser-prompts.js";
@@ -226,7 +227,7 @@ Return ONLY the analysis, no preamble.`;
   try {
     // Primary: OpenCode Gemini Flash
     const result = await executeOpenCodeCLI(prompt, "", {
-      model: "google/gemini-3-flash-preview",
+      model: `google/${GEMINI_CLI_FLASH_MODEL}`,
       researchOnly: true,
       timeout: 60000,
     });

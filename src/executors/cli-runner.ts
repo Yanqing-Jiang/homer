@@ -5,6 +5,7 @@ import { acquireSlot } from "./concurrency.js";
 import { StateManager, type CLIRunStatus, type ExecutorStateType } from "../state/manager.js";
 import { executeClaudeCommand } from "./claude.js";
 import { executeGeminiCLI, executeOpenCodeCLI } from "./opencode-cli.js";
+import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { runWithFallbackChain, DEFAULT_CHAIN, type ExecutorKind } from "./fallback-orchestrator.js";
@@ -328,7 +329,7 @@ ${pendingContext.context}
 
           if (executorKind === "opencode") {
             const result = await executeOpenCodeCLI(prompt, "", {
-              model: model || "google/gemini-3-flash-preview",
+              model: model || `google/${GEMINI_CLI_FLASH_MODEL}`,
               yolo: true,
               sandbox: true,
               signal: abortController.signal,

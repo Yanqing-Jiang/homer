@@ -18,6 +18,7 @@
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from "fs";
 import { logger } from "../utils/logger.js";
 import { executeGeminiWithFallback } from "../executors/opencode-cli.js";
+import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 import { loadIdeasFromDir, type ParsedIdea } from "./parser.js";
 import * as dao from "./dao.js";
 import { canonicalizeUrl, extractRepoId } from "./canonical-url.js";
@@ -199,7 +200,7 @@ If none found: {"groups":[]}`;
 
   try {
     const result = await executeGeminiWithFallback(prompt, "", {
-      model: "gemini-3-flash-preview",
+      model: GEMINI_CLI_FLASH_MODEL,
       sandbox: true,
       timeout: 120000,
     });

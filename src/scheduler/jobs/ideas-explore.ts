@@ -13,7 +13,7 @@ import { z } from "zod";
 import type Database from "better-sqlite3";
 import { executeClaudeCommand } from "../../executors/claude.js";
 import { RESEARCH_ONLY_PREFIX } from "../../executors/opencode-cli.js";
-import { executeGeminiAPI } from "../../executors/gemini.js";
+import { executeGeminiCLIDirect, GEMINI_CLI_PRO_MODEL } from "../../executors/gemini-cli.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import * as ideaDao from "../../ideas/dao.js";
 import { insertScrape } from "../../scraping/scrape-store.js";
@@ -113,15 +113,14 @@ If nothing relevant, return: []`;
     let gapAnalysisInserted = 0;
     const opusPromise = (async () => {
       try {
-        const proResult = await executeGeminiAPI(
+        const proResult = await executeGeminiCLIDirect(
           `Perform a focused competitive analysis: identify 3-5 personal AI assistant projects similar to Homer (a personal AI with Telegram bot, memory system, and job scheduler). For each, describe 1-2 feature gaps Homer doesn't have. Return ONLY a JSON array, no markdown:
 [{"name": "owner/repo", "url": "https://github.com/owner/repo", "description": "feature gap description", "relevance": "why Homer should have this"}]
 
 Base your analysis on your knowledge of open-source personal AI assistant projects. Focus on actionable gaps like: voice interfaces, proactive goal tracking, calendar integration, smart notifications, context-aware reminders, multi-modal inputs.`,
           {
-            model: "pro31",  // gemini-3.1-pro-preview via API key
-            useGrounding: false,
-            reasoningEffort: "medium",
+            model: GEMINI_CLI_PRO_MODEL,  // gemini-3.1-pro-preview via CLI with account rotation
+            timeout: 180_000,
           },
         );
 

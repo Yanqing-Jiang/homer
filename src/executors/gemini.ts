@@ -2,6 +2,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { ExecutorResult } from "./types.js";
 import { executeOpenCodeCLI } from "./opencode-cli.js";
+import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { logger } from "../utils/logger.js";
 
 // ============================================
@@ -15,12 +16,12 @@ const GEMINI_CONFIG = {
     pro: "gemini-2.0-pro",
     flashLite: "gemini-2.0-flash-lite-preview-02-05",
     // Future models
-    flash3: "gemini-3-flash-preview",
+    flash3: GEMINI_CLI_FLASH_MODEL,
     pro3: "gemini-3-pro-preview",
     pro31: "gemini-3.1-pro-preview",
   },
-  defaultModel: "gemini-3-flash-preview",
-  fallbackModel: "gemini-3-flash-preview",
+  defaultModel: GEMINI_CLI_FLASH_MODEL,
+  fallbackModel: GEMINI_CLI_FLASH_MODEL,
 } as const;
 
 type GeminiModel = keyof typeof GEMINI_CONFIG.models | string;
@@ -259,12 +260,12 @@ export async function executeGeminiAPI(
 }
 
 // ============================================
-// OPENCODE FLASH WRAPPER
+// GEMINI CLI FLASH WRAPPER
 // ============================================
 
 /**
- * Route Flash text-gen through OpenCode CLI (forceOpenCode: true)
- * to offload from the constrained Gemini API key to unlimited OpenCode accounts.
+ * Route Flash text-gen through Gemini CLI (via OpenCode routing layer).
+ * Uses multi-account rotation for rate limit resilience.
  *
  * Compatible return type with executeGeminiAPI for easy swapping.
  */
@@ -277,7 +278,7 @@ export async function executeFlashViaOpenCode(
     : prompt;
 
   const result = await executeOpenCodeCLI(fullPrompt, "", {
-    model: "google/gemini-3-flash-preview",
+    model: `google/${GEMINI_CLI_FLASH_MODEL}`,
     forceOpenCode: true,
     researchOnly: options.researchOnly ?? true,
     timeout: options.timeout ?? 300_000,
@@ -288,8 +289,8 @@ export async function executeFlashViaOpenCode(
     output: result.output,
     exitCode: result.exitCode,
     duration: result.duration,
-    executor: "opencode-flash",
-    model: "gemini-3-flash-preview",
+    executor: "gemini-flash",
+    model: GEMINI_CLI_FLASH_MODEL,
     inputTokens: result.stats?.input_tokens,
     outputTokens: result.stats?.output_tokens,
   };

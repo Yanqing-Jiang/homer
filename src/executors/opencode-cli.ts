@@ -5,6 +5,7 @@ import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { executeClaudeCommand } from "./claude.js";
+import { executeGeminiCLIDirect, GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { processRegistry } from "../process/registry.js";
 
 // ============================================
@@ -139,7 +140,7 @@ export async function executeOpenCodeCLI(
   options: OpenCodeCLIOptions = {}
 ): Promise<OpenCodeCLIResult> {
   const {
-    model: rawModel = "google/gemini-3-flash-preview",
+    model: rawModel = `google/${GEMINI_CLI_FLASH_MODEL}`,
     timeout = 1200000, // 20 minutes default
     signal,
     researchOnly = true,
@@ -151,17 +152,31 @@ export async function executeOpenCodeCLI(
   // Normalize model name: callers may pass "gemini-3-flash-preview" without provider prefix
   const model = rawModel.includes("/") ? rawModel : `google/${rawModel}`;
 
-  // Route Flash calls to Claude Sonnet (Claude Code CLI)
-  if (model.includes("flash") && !options.forceOpenCode) {
+  // Route Google/Flash/Pro models to Gemini CLI (OpenCode Google account ToS-blocked)
+  if (model.includes("flash") || model.includes("pro") || model.startsWith("google/") || model.startsWith("google-aistudio/")) {
+    const geminiModel = model.replace(/^google(-aistudio)?\//, "");
+    const rolePrefix = browserOnly ? "[ROLE: EXPLORE]\n\n"
+      : researchOnly ? "[ROLE: RESEARCH]\n\n"
+      : "";
     const prefix = browserOnly ? BROWSER_ONLY_PREFIX : researchOnly ? RESEARCH_ONLY_PREFIX : "";
-    const effectivePrompt = prefix + prompt;
-    const result = await executeClaudeCommand(effectivePrompt, {
-      model: "sonnet",
+    const effectivePrompt = rolePrefix + prefix + (context
+      ? `${context}\n\n---\n\n${prompt}`
+      : prompt);
+    const result = await executeGeminiCLIDirect(effectivePrompt, {
+      model: geminiModel,
       timeout,
       signal,
-      cwd: cwd ?? process.env.HOME ?? "/Users/yj",
+      cwd: cwd || (browserOnly ? "/tmp/homer-scrape" : process.env.HOME || "/Users/yj"),
     });
-    return { ...result, sessionId: result.claudeSessionId ?? "", model: "claude-sonnet-4-6", accountId: 0 } as OpenCodeCLIResult;
+    return {
+      output: result.output,
+      exitCode: result.exitCode,
+      duration: result.duration,
+      executor: "gemini-cli",
+      sessionId: "",
+      model: geminiModel,
+      accountId: 0,
+    } as OpenCodeCLIResult;
   }
 
   const prefix = browserOnly ? BROWSER_ONLY_PREFIX : researchOnly ? RESEARCH_ONLY_PREFIX : "";
@@ -525,7 +540,7 @@ export async function* streamOpenCodeCLI(
   options: OpenCodeCLIOptions = {}
 ): AsyncGenerator<OpenCodeStreamEvent> {
   const {
-    model = "google-aistudio/gemini-3-flash-preview",
+    model = `google-aistudio/${GEMINI_CLI_FLASH_MODEL}`,
     cwd,
   } = options;
 

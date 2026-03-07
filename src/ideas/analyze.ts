@@ -11,6 +11,7 @@ import { mkdirSync, existsSync } from "fs";
 import { writeFile, readFile } from "fs/promises";
 import { join } from "path";
 import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
+import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 import { buildCondensedContext } from "../scheduler/shared-context.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { logger } from "../utils/logger.js";
@@ -224,7 +225,7 @@ Reference specific file paths and module names from the architecture.
 ${outputInstructions}`;
 
   const result = await executeOpenCodeCLI(prompt, context, {
-    model: "google/gemini-3-flash-preview",
+    model: `google/${GEMINI_CLI_FLASH_MODEL}`,
     timeout: 180_000,
   });
 
@@ -257,7 +258,7 @@ Provide specific URLs and names, not vague references.
 ${outputInstructions}`;
 
   const result = await executeOpenCodeCLI(prompt, condensedContext, {
-    model: "google/gemini-3-flash-preview",
+    model: `google/${GEMINI_CLI_FLASH_MODEL}`,
     timeout: 180_000,
   });
 
