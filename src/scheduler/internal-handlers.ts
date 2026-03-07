@@ -3,8 +3,7 @@ import type { RegisteredJob, JobExecutionResult } from "./types.js";
 import { DEFAULT_JOB_TIMEOUT } from "./types.js";
 import type { StateManager } from "../state/manager.js";
 import { sendBatchIdeasForReview } from "../bot/handlers/approval.js";
-import { NightSupervisor } from "../night/supervisor.js";
-import { sendMilestoneNotification, presentOvernightSummaries } from "../bot/handlers/overnight.js";
+import { presentOvernightSummaries } from "../bot/handlers/overnight.js";
 import { ingestIdeasFromLegacy } from "../ideas/ingest.js";
 import { dedupeIdeasDir } from "../ideas/dedup.js";
 import { runSessionSummary } from "./jobs/session-summaries.js";
@@ -635,39 +634,6 @@ async function runHandler(
             : {
                 notificationIntent: "operational_status",
               }
-        );
-      }
-      case "night_supervisor": {
-        const supervisor = new NightSupervisor({}, {
-          db: ctx.stateManager.getDb(),
-          jobRunId: ctx.jobRunId,
-          bot: ctx.bot,
-          chatId: ctx.chatId,
-          onOvernightMilestone: async (chatId, milestone, message) => {
-            await sendMilestoneNotification(ctx.bot, chatId, milestone, message, {
-              db: ctx.stateManager.getDb(),
-              jobRunId: ctx.jobRunId,
-              sourceId: `night_supervisor:${ctx.jobRunId ?? "manual"}:${chatId}:${milestone}`,
-            });
-          },
-        });
-        const session = await supervisor.run(false);
-        const durationMin = (session.totalDuration / 1000 / 60).toFixed(1);
-        const findingsSnippet = session.findings.length > 0
-          ? "\n" + session.findings.slice(0, 10).join("\n")
-          : "";
-        const summary = `Night supervisor completed in ${durationMin}m. Jobs: ${session.jobsCompleted} ok, ${session.jobsFailed} failed.${findingsSnippet}`;
-        const success = !(session.jobsCompleted === 0 && session.jobsFailed > 0);
-        const error = !success ? `All ${session.jobsFailed} jobs failed` : undefined;
-        return buildResult(
-          job,
-          startedAt,
-          success,
-          summary,
-          error,
-          success
-            ? { notificationIntent: "operational_status" }
-            : {}
         );
       }
       case "overnight_review": {

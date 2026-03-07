@@ -46,20 +46,6 @@ function canExecuteToday(db: ReturnType<StateManager["getDb"]>): boolean {
 }
 
 /**
- * Check night-supervisor is not running (mutex — not LLM decision)
- */
-function isNightSupervisorRunning(db: ReturnType<StateManager["getDb"]>): boolean {
-  try {
-    const row = db.prepare(
-      "SELECT is_running FROM scheduled_job_state WHERE job_id = 'night-supervisor'"
-    ).get() as { is_running: number } | undefined;
-    return row?.is_running === 1;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Execute an approved plan via Claude Code on an isolated branch.
  */
 export async function executePlan(params: {
@@ -94,16 +80,6 @@ export async function executePlan(params: {
       );
     } catch { /* best effort */ }
     return { success: false, branch: "", filesChanged: [], buildPassed: false, output: "Daily limit reached" };
-  }
-
-  // Safety: night-supervisor mutex
-  if (isNightSupervisorRunning(db)) {
-    try {
-      await bot.api.sendMessage(chatId,
-        "⏸️ Night supervisor is running. Plan execution deferred."
-      );
-    } catch { /* best effort */ }
-    return { success: false, branch: "", filesChanged: [], buildPassed: false, output: "Night supervisor active" };
   }
 
   // Create branch (unique suffix prevents same-day collisions)
