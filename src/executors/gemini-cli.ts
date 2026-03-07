@@ -33,6 +33,11 @@ const GEMINI_RUNTIME_HOMES_DIR = path.join(HOME, "homer/config/auth/gemini-runti
 const GEMINI_GLOBAL_DIR = path.join(HOME, ".gemini");
 const GEMINI_GLOBAL_ACCOUNTS_FILE = path.join(GEMINI_GLOBAL_DIR, "google_accounts.json");
 const GEMINI_SYSTEM_PROMPT_FILE = path.join(GEMINI_GLOBAL_DIR, "GEMINI.md");
+const AGENT_FILES: Record<string, string> = {
+  research: path.join(GEMINI_GLOBAL_DIR, "agents", "homer-researcher.md"),
+  scraper: path.join(GEMINI_GLOBAL_DIR, "agents", "homer-scraper.md"),
+  general: path.join(GEMINI_GLOBAL_DIR, "agents", "homer-general.md"),
+};
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -88,6 +93,7 @@ export interface GeminiCLIDirectOptions {
   signal?: AbortSignal;
   cwd?: string;
   outputFormat?: "text" | "json" | "stream-json";
+  role?: "research" | "scraper" | "general";
 }
 
 export interface GeminiCLIDirectResult extends ExecutorResult {
@@ -103,16 +109,20 @@ export interface GeminiAccountManagerOptions {
   disabledRecheckMs?: number;
   lockAcquireTimeoutMs?: number;
   syncIntervalMs?: number;
+  maxConcurrentPerAccount?: number;
+  minInterSpawnMs?: number;
 }
 
 const DEFAULT_MANAGER_OPTIONS: Required<GeminiAccountManagerOptions> = {
-  rateLimitCooldownMs: 60_000,
+  rateLimitCooldownMs: 90_000,
   authFailureCooldownMs: 300_000,
   runtimeFailureCooldownMs: 15_000,
   disableAfterFailures: 5,
   disabledRecheckMs: 30 * 60 * 1000,
   lockAcquireTimeoutMs: 15_000,
   syncIntervalMs: 5_000,
+  maxConcurrentPerAccount: 2,
+  minInterSpawnMs: 15_000,
 };
 
 function sanitizeGeminiOutput(text: string): string {
@@ -247,6 +257,7 @@ export class GeminiAccountManager {
   private db: Database.Database;
   private options: Required<GeminiAccountManagerOptions>;
   private accountLocks = new Map<string, Promise<void>>();
+  private accountSemaphores = new Map<string, { active: number; waiting: Array<{ resolve: () => void; timer: NodeJS.Timeout }> }>();
   private lastDiskSyncAt = 0;
   private stmts: {
     listAccounts: Database.Statement;
@@ -441,7 +452,7 @@ export class GeminiAccountManager {
     type ScoredRow = GeminiAccountRow & {
       _hourUsage: number;
       _dayUsage: number;
-      _locked: number;
+      _activeCount: number;
     };
 
     const available: ScoredRow[] = [];
@@ -452,10 +463,11 @@ export class GeminiAccountManager {
     for (const row of rows) {
       const cooldownUntil = row.cooldown_until ?? 0;
       const reenableAfter = row.reenable_after ?? 0;
-      const isLocked = this.accountLocks.has(row.email) ? 1 : 0;
+      const sem = this.accountSemaphores.get(row.email);
+      const activeCount = sem?.active ?? 0;
       const hour = ensureWindow(row.hour_window_start, row.hour_usage_count, now, ONE_HOUR_MS);
       const day = ensureWindow(row.day_window_start, row.day_usage_count, now, ONE_DAY_MS);
-      const scored: ScoredRow = { ...row, _hourUsage: hour.count, _dayUsage: day.count, _locked: isLocked };
+      const scored: ScoredRow = { ...row, _hourUsage: hour.count, _dayUsage: day.count, _activeCount: activeCount };
 
       if (row.is_enabled === 1) {
         if (cooldownUntil > now) {
@@ -478,7 +490,7 @@ export class GeminiAccountManager {
     }
 
     const scoreSort = (a: ScoredRow, b: ScoredRow): number =>
-      a._locked - b._locked
+      a._activeCount - b._activeCount
       || a._hourUsage - b._hourUsage
       || a._dayUsage - b._dayUsage
       || (a.last_used_at ?? 0) - (b.last_used_at ?? 0)
@@ -529,6 +541,46 @@ export class GeminiAccountManager {
       releaseCurrent();
       if (this.accountLocks.get(email) === queueTail) {
         this.accountLocks.delete(email);
+      }
+    }
+  }
+
+  getActiveCount(email: string): number {
+    return this.accountSemaphores.get(email)?.active ?? 0;
+  }
+
+  async withAccountSemaphore<T>(email: string, fn: () => Promise<T>, timeoutMs?: number): Promise<T> {
+    const limit = this.options.maxConcurrentPerAccount;
+    let sem = this.accountSemaphores.get(email);
+    if (!sem) {
+      sem = { active: 0, waiting: [] };
+      this.accountSemaphores.set(email, sem);
+    }
+
+    if (sem.active >= limit) {
+      // Queue and wait
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          const idx = sem!.waiting.findIndex((w) => w.resolve === resolve);
+          if (idx !== -1) sem!.waiting.splice(idx, 1);
+          reject(new Error(`Timed out waiting for Gemini account semaphore: ${email}`));
+        }, timeoutMs ?? this.options.lockAcquireTimeoutMs);
+        sem!.waiting.push({ resolve, timer });
+      });
+    }
+
+    sem.active += 1;
+    try {
+      return await fn();
+    } finally {
+      sem.active -= 1;
+      const next = sem.waiting.shift();
+      if (next) {
+        clearTimeout(next.timer);
+        next.resolve();
+      }
+      if (sem.active === 0 && sem.waiting.length === 0) {
+        this.accountSemaphores.delete(email);
       }
     }
   }
@@ -593,12 +645,13 @@ export class GeminiAccountManager {
     this.stmts.scheduleDisabledProbe.run(now + this.options.disabledRecheckMs, now, email);
   }
 
-  async prepareRuntimeHome(email: string): Promise<string> {
+  async prepareRuntimeHome(email: string, role?: "research" | "scraper" | "general"): Promise<string> {
     const runtimeHome = getRuntimeHomeForEmail(email);
     const runtimeGeminiDir = path.join(runtimeHome, ".gemini");
     const runtimeCredsFile = path.join(runtimeGeminiDir, "oauth_creds.json");
     const runtimeAccountsFile = path.join(runtimeGeminiDir, "google_accounts.json");
     const runtimeSystemPromptFile = path.join(runtimeGeminiDir, "GEMINI.md");
+    const runtimeSettingsFile = path.join(runtimeGeminiDir, "settings.json");
     const sourceCredsFile = path.join(GEMINI_CREDS_DIR, `${email}.json`);
 
     await fs.mkdir(runtimeGeminiDir, { recursive: true });
@@ -606,8 +659,21 @@ export class GeminiAccountManager {
     await fs.writeFile(runtimeCredsFile, creds, "utf-8");
     await fs.writeFile(runtimeAccountsFile, JSON.stringify({ active: email }, null, 2), "utf-8");
 
+    // Write billing settings to prevent overage charges from daemon jobs
+    await fs.writeFile(runtimeSettingsFile, JSON.stringify({ billing: { overageStrategy: "never" } }, null, 2), "utf-8");
+
+    // Load system prompt: prefer role-specific agent file, fall back to global GEMINI.md
     try {
-      const promptText = await fs.readFile(GEMINI_SYSTEM_PROMPT_FILE, "utf-8");
+      let promptSource = GEMINI_SYSTEM_PROMPT_FILE;
+      if (role && AGENT_FILES[role]) {
+        try {
+          await fs.access(AGENT_FILES[role]);
+          promptSource = AGENT_FILES[role];
+        } catch {
+          // Agent file missing, fall back to global
+        }
+      }
+      const promptText = await fs.readFile(promptSource, "utf-8");
       await fs.writeFile(runtimeSystemPromptFile, promptText, "utf-8");
     } catch {
       // Non-fatal: Gemini CLI can run without GEMINI.md.
@@ -774,10 +840,13 @@ export async function executeGeminiCLIDirect(
   prompt: string,
   options: GeminiCLIDirectOptions = {}
 ): Promise<GeminiCLIDirectResult> {
-  const { model = GEMINI_CLI_FLASH_MODEL, timeout = 120_000, signal, cwd = "/tmp", outputFormat } = options;
+  const { model = GEMINI_CLI_FLASH_MODEL, timeout = 120_000, signal, cwd = "/tmp", outputFormat, role } = options;
+
+  // Auto-elevate timeout for Pro model (needs more time for deep analysis)
+  const effectiveTimeout = model === GEMINI_CLI_PRO_MODEL ? Math.max(timeout, 300_000) : timeout;
 
   const startTime = Date.now();
-  const deadline = startTime + timeout;
+  const deadline = startTime + effectiveTimeout;
   const manager = getGeminiAccountManager();
   await manager.syncAccountsFromDisk(true);
 
@@ -845,6 +914,29 @@ export async function executeGeminiCLIDirect(
     if (remaining <= 0) break;
     attempts += 1;
 
+    // Inter-spawn stagger: avoid hammering the same account when multiple sessions are active
+    const now = Date.now();
+    if (
+      manager.getActiveCount(email) > 0 &&
+      pick.account.last_used_at &&
+      now - pick.account.last_used_at < manager["options"].minInterSpawnMs
+    ) {
+      const staggerMs = manager["options"].minInterSpawnMs - (now - pick.account.last_used_at);
+      logger.debug({ staggerMs, accountEmail: email }, "Staggering Gemini spawn");
+      try {
+        await delay(staggerMs, signal);
+      } catch {
+        return {
+          output: "Cancelled",
+          exitCode: 130,
+          duration: Date.now() - startTime,
+          executor: "gemini-cli",
+          model,
+          accountEmail: email,
+        };
+      }
+    }
+
     logger.debug(
       { model, accountEmail: email, attempt: attempts, maxAttempts, promptLength: prompt.length },
       "Executing Gemini CLI with selected account"
@@ -852,7 +944,7 @@ export async function executeGeminiCLIDirect(
 
     let attemptResult: ExecuteAttemptResult;
     try {
-      attemptResult = await manager.withAccountLock(
+      attemptResult = await manager.withAccountSemaphore(
         email,
         async () => {
           const attemptStart = Date.now();
@@ -860,7 +952,7 @@ export async function executeGeminiCLIDirect(
           let runtimeHome: string;
 
           try {
-            runtimeHome = await manager.prepareRuntimeHome(email);
+            runtimeHome = await manager.prepareRuntimeHome(email, role);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             manager.recordFailure(email, "runtime", Date.now(), `prepare_home_failed: ${msg}`);
@@ -976,3 +1068,8 @@ export async function executeGeminiCLIDirect(
     model,
   };
 }
+
+export function estimateTokenCount(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+export const PRO_TOKEN_SOFT_LIMIT = 800_000;
