@@ -3,6 +3,7 @@ import { join } from "path";
 import { logger } from "../utils/logger.js";
 import { executeClaudeCommand } from "./claude.js";
 import { executeGeminiCLI } from "./opencode-cli.js";
+import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { buildConversationContext, CONTEXT_DEFAULTS } from "./context-builder.js";
@@ -256,7 +257,7 @@ async function runDiagnosis(
       const res = await executeGeminiCLI(prompt, "", {
         timeout: 300000,
         sandbox: true,
-        model: "gemini-3-flash-preview",
+        model: GEMINI_CLI_FLASH_MODEL,
       });
       return res.exitCode === 0 ? res.output : null;
     }

@@ -5,6 +5,8 @@
  * Supports persistent executor switching across conversation sessions.
  */
 
+import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
+
 export type ExecutorType = "claude" | "gemini" | "codex" | "kimi" | "chatgpt" | "opencode";
 
 export type CommandCategory =
@@ -32,10 +34,10 @@ export interface CommandDefinition {
 export const EXECUTOR_MODELS: Record<ExecutorType, string | undefined> = {
   claude: "sonnet",                  // Default: Sonnet 4.6 (fast + smart)
   codex: undefined,                 // Codex CLI (model handled by CLI)
-  gemini: "gemini-3-flash-preview", // Fast, cheap
+  gemini: GEMINI_CLI_FLASH_MODEL, // Fast, cheap
   kimi: "kimi-k2-5",                // Kimi K2.5 via NVIDIA NIM
   chatgpt: undefined,               // Uses Claude + browser skill to access ChatGPT
-  opencode: "google/gemini-3-flash-preview", // OpenCode CLI (default: Gemini Flash)
+  opencode: GEMINI_CLI_FLASH_MODEL, // Gemini CLI (was OpenCode CLI)
 };
 
 /**
@@ -62,7 +64,7 @@ export const COMMANDS: CommandDefinition[] = [
     category: "executor",
     description: "Switch to Gemini CLI (research, front-end)",
     executor: "gemini",
-    model: "gemini-3-flash-preview",
+    model: GEMINI_CLI_FLASH_MODEL,
     deprecated: true,
     deprecatedMessage: "Use /open_flash instead. /gemini still works but will be removed.",
   },
@@ -100,11 +102,12 @@ export const COMMANDS: CommandDefinition[] = [
     model: "kimi-k2-5",
   },
   {
-    name: "/open_flash",
+    name: "/gemini_flash",
     category: "executor",
-    description: "OpenCode with Gemini Flash",
+    description: "Gemini Flash via Gemini CLI",
     executor: "opencode",
-    model: "google/gemini-3-flash-preview",
+    model: GEMINI_CLI_FLASH_MODEL,
+    aliases: ["/open_flash"],
   },
   {
     name: "/open_opus",

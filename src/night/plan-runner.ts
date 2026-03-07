@@ -11,6 +11,7 @@ import type { Bot } from "grammy";
 import type { NightPlan } from "./types.js";
 import { JobQueue, shouldAutoExecute } from "./jobs.js";
 import { executeGeminiWithFallback } from "../executors/opencode-cli.js";
+import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 import { logger } from "../utils/logger.js";
 import { join } from "path";
 import { writeFile } from "fs/promises";
@@ -187,7 +188,7 @@ async function executeJobForPlan(
         const result = await executeGeminiWithFallback(
           `Research the following topic thoroughly and provide key insights:\n\n${query}${mdOutputInstruction}`,
           "",
-          { model: "gemini-3-flash-preview", sandbox: true, timeout, signal }
+          { model: GEMINI_CLI_FLASH_MODEL, sandbox: true, timeout, signal }
         );
         const output = await readOutputFile(mdOutputPath, result.output);
         return {
@@ -205,7 +206,7 @@ async function executeJobForPlan(
           ? `Explore this idea and how it connects to the project:\n\nIdea: ${topic}\nProject: ${connection}${mdOutputInstruction}`
           : `Explore this idea and identify potential applications:\n\n${topic}${mdOutputInstruction}`;
         const result = await executeGeminiWithFallback(prompt, "", {
-          model: "gemini-3-flash-preview", sandbox: true, timeout, signal,
+          model: GEMINI_CLI_FLASH_MODEL, sandbox: true, timeout, signal,
         });
         const output = await readOutputFile(mdOutputPath, result.output);
         return {
