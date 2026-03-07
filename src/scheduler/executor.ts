@@ -11,6 +11,7 @@ import { executeCodexCLI } from "../executors/codex-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { RESEARCH_ONLY_PREFIX } from "../executors/opencode-cli.js";
 import { executeFlashViaOpenCode } from "../executors/gemini.js";
+import { executeGeminiCLIDirect, GEMINI_CLI_PRO_MODEL } from "../executors/gemini-cli.js";
 import {
   runWithFallbackChain,
   DEFAULT_CHAIN,
@@ -177,7 +178,7 @@ async function executeKimiJob(
 
 /**
  * Execute a Gemini-lane job.
- * Flash models route through OpenCode CLI (built-in search grounding, free tokens).
+ * Flash models route through Gemini CLI (multi-account rotation).
  * Non-flash models fall back to Claude Sonnet.
  */
 async function executeGeminiJob(
@@ -191,13 +192,15 @@ async function executeGeminiJob(
   const emitCompleted = options?.emitCompletedEvent !== false;
   const query = options?.queryOverride ?? config.query;
   const model = options?.modelOverride ?? config.model ?? "sonnet";
-  const isFlash = model.includes("flash");
+  const isGeminiNative = model.includes("flash") || model.includes("gemini") || model.includes("pro");
 
   const contextPrompt = config.contextFiles?.length
     ? loadContextFiles(config.contextFiles)
     : "";
 
-  const executorLabel = isFlash ? "opencode-flash" : "claude-sonnet";
+  const executorLabel = isGeminiNative
+    ? (model.includes("pro") ? "gemini-pro" : "gemini-flash")
+    : "claude-sonnet";
 
   logger.info(
     { jobId: config.id, executor: executorLabel, model, queryLength: query.length },
@@ -208,16 +211,28 @@ async function executeGeminiJob(
     let output: string;
     let exitCode: number;
 
-    if (isFlash) {
-      // Route Flash models through OpenCode CLI for built-in search grounding
+    if (isGeminiNative) {
       const fullPrompt = contextPrompt
         ? `Context:\n${contextPrompt}\n\n---\n\nTask:\n${query}`
         : query;
-      const result = await executeFlashViaOpenCode(fullPrompt, { timeout });
-      output = result.output;
-      exitCode = result.exitCode;
+
+      if (model.includes("pro")) {
+        // Route Pro models directly through Gemini CLI
+        const result = await executeGeminiCLIDirect(fullPrompt, {
+          model: GEMINI_CLI_PRO_MODEL,
+          timeout,
+          role: "research",
+        });
+        output = result.output;
+        exitCode = result.exitCode;
+      } else {
+        // Route Flash models through OpenCode routing layer
+        const result = await executeFlashViaOpenCode(fullPrompt, { timeout });
+        output = result.output;
+        exitCode = result.exitCode;
+      }
     } else {
-      // Non-flash models still route to Claude Sonnet (existing behavior)
+      // Non-Gemini models route to Claude Sonnet (existing behavior)
       const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
       const fullQuery = contextPrompt
         ? RESEARCH_ONLY_PREFIX + `Context:\n${contextPrompt}\n\n---\n\nTask:\n${query}`
@@ -862,6 +877,7 @@ export async function executeScheduledJob(
     runExecutor,
     notify,
     skipDiagnosis: options?.skipDiagnosis,
+    jobMeta: { deep: config.deep },
   });
 
   const result = fallbackResult.result ?? {

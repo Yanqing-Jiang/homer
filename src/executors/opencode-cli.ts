@@ -93,6 +93,7 @@ export function isAuthError(text: string): boolean {
 // RESEARCH-ONLY PROMPT INJECTION
 // ============================================
 
+/** @deprecated Use role-based agent files for Gemini CLI */
 export const RESEARCH_ONLY_PREFIX = `CRITICAL CONSTRAINTS - You MUST follow these rules:
 
 ALLOWED:
@@ -114,6 +115,7 @@ Now proceed with the task:
 
 `;
 
+/** @deprecated Use role-based agent files for Gemini CLI */
 export const BROWSER_ONLY_PREFIX = `CRITICAL CONSTRAINTS:
 
 ALLOWED:
@@ -155,18 +157,14 @@ export async function executeOpenCodeCLI(
   // Route Google/Flash/Pro models to Gemini CLI (OpenCode Google account ToS-blocked)
   if (model.includes("flash") || model.includes("pro") || model.startsWith("google/") || model.startsWith("google-aistudio/")) {
     const geminiModel = model.replace(/^google(-aistudio)?\//, "");
-    const rolePrefix = browserOnly ? "[ROLE: EXPLORE]\n\n"
-      : researchOnly ? "[ROLE: RESEARCH]\n\n"
-      : "";
-    const prefix = browserOnly ? BROWSER_ONLY_PREFIX : researchOnly ? RESEARCH_ONLY_PREFIX : "";
-    const effectivePrompt = rolePrefix + prefix + (context
-      ? `${context}\n\n---\n\n${prompt}`
-      : prompt);
+    const geminiRole = browserOnly ? "scraper" as const : researchOnly ? "research" as const : "general" as const;
+    const effectivePrompt = context ? `${context}\n\n---\n\n${prompt}` : prompt;
     const result = await executeGeminiCLIDirect(effectivePrompt, {
       model: geminiModel,
       timeout,
       signal,
       cwd: cwd || (browserOnly ? "/tmp/homer-scrape" : process.env.HOME || "/Users/yj"),
+      role: geminiRole,
     });
     return {
       output: result.output,

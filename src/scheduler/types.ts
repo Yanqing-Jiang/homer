@@ -27,6 +27,7 @@ export interface ScheduledJobConfig {
   streamProgress?: boolean; // stream tool usage to Telegram (default: false)
   notifyOnSuccess?: boolean; // defaults to true
   notifyOnFailure?: boolean; // defaults to true
+  deep?: boolean; // Use Pro model for Gemini executor (skip Flash)
   failureTakeover?: boolean; // spawn Claude Code to diagnose+retry on failure (default: true)
   allowAutoFix?: boolean; // let takeover edit handler code on fix_and_retry (default: false)
   autoCompensate?: boolean; // allow health check to re-trigger if overdue (default: false)
