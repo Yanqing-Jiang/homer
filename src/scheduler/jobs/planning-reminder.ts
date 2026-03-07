@@ -74,25 +74,25 @@ export async function runPlanningReminder(): Promise<{
 
     // Format message
     const parts: string[] = [];
-    parts.push(`Planning Status - ${today}`);
+    parts.push(`📋 计划状态 — ${today}`);
     parts.push("");
 
     if (plans.length > 0) {
-      parts.push("Active Plans:");
+      parts.push("进行中的计划:");
       for (const plan of plans) {
         const phase = plan.currentPhase ? ` (${plan.currentPhase})` : "";
-        parts.push(`- ${plan.title} [${plan.status}]${phase}`);
+        parts.push(`• ${plan.title} [${plan.status}]${phase}`);
       }
     } else {
-      parts.push("No active plans.");
+      parts.push("暂无进行中的计划");
     }
 
     parts.push("");
 
     if (reviewIdeas.length > 0) {
-      parts.push(`Pending Decisions: ${reviewIdeas.length} idea${reviewIdeas.length > 1 ? "s" : ""} in review`);
+      parts.push(`待决定: ${reviewIdeas.length} 个想法待审阅`);
     } else {
-      parts.push("All clear! No pending decisions.");
+      parts.push("一切就绪，无待处理事项");
     }
 
     const output = parts.join("\n");

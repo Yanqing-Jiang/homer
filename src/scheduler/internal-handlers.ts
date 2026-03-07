@@ -223,7 +223,9 @@ function getPlanningReminderIntent(result: {
   if (!result.success) {
     return undefined;
   }
-  return result.hasActionableContent ? "user_info" : "operational_status";
+  // Always suppress — morning brief already covers plans/follow-ups,
+  // and ideas review sends actionable items with buttons separately.
+  return "operational_status";
 }
 
 function getHealthResultOptions(output: string): BuildResultOptions {

@@ -336,9 +336,9 @@ export function createIdeaKeyboard(ideaId: string): InlineKeyboard {
   }
 
   return new InlineKeyboard()
-    .text("💬 Talk", `a:i:${id}:talk`)
-    .text("💤 Snooze", `a:i:${id}:snooze`)
-    .text("🗂 Archive", `a:i:${id}:archive`);
+    .text("💬 聊聊", `a:i:${id}:talk`)
+    .text("💤 暂缓", `a:i:${id}:snooze`)
+    .text("🗂 归档", `a:i:${id}:archive`);
 }
 
 /**
@@ -383,7 +383,7 @@ export function formatIdeaForTelegram(idea: ParsedIdea, index: number): string {
   msg += `${source}${tagsStr}\n\n`;
   msg += `${summaryHtml}\n`;
   if (idea.link) {
-    msg += `\n<a href="${escapeHtml(idea.link)}">Source link</a>\n`;
+    msg += `\n<a href="${escapeHtml(idea.link)}">来源链接</a>\n`;
   }
   msg += `\n<code>${id}</code>`;
   return msg;
@@ -808,7 +808,7 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
   // Send header
   await bot.api.sendMessage(
     chatId,
-    `📋 <b>Ideas for Review</b> (${selected.length})`,
+    `📋 <b>想法审阅</b> (${selected.length})`,
     { parse_mode: "HTML" }
   );
 
