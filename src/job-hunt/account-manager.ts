@@ -6,6 +6,7 @@ import { createHash, randomInt } from "crypto";
 import type Database from "better-sqlite3";
 import { encrypt, decrypt, type EncryptedValue } from "../utils/encryption.js";
 import { logger } from "../utils/logger.js";
+import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 
 export interface CareerAccount {
   id: string;
@@ -103,7 +104,7 @@ Report COOKIE_SUCCESS if login succeeds and you land on a dashboard or profile p
 Report COOKIE_FAILED if login fails (wrong credentials, CAPTCHA, etc).`;
 
       const result = await executeOpenCodeCLI(prompt, "", {
-        model: "google/gemini-3-flash-preview",
+        model: `google/${GEMINI_CLI_FLASH_MODEL}`,
         researchOnly: false,
         cwd: "/Users/yj/job-hunt",
         timeout: 120_000,

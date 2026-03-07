@@ -13,6 +13,7 @@ import Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import { logger } from "../utils/logger.js";
 import { executeGeminiCLI, getAccountStatus, type GeminiCLIOptions } from "./opencode-cli.js";
+import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { executeGeminiAPI, type GeminiAPIOptions, type GeminiAPIResult } from "./gemini.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI, type KimiCLIOptions } from "./kimi-cli.js";
@@ -593,7 +594,7 @@ export async function executeWithRouting(
 
     if (executor === "gemini") {
       const res = await executeGeminiCLI(query, "", {
-        model: request.model || "gemini-3-flash-preview",
+        model: request.model || GEMINI_CLI_FLASH_MODEL,
         sandbox: true,
         yolo: true,
       } as GeminiCLIOptions);
@@ -695,7 +696,7 @@ async function executeOnExecutor(
   switch (executor) {
     case "opencode":
       return executeGeminiCLI(query, context, {
-        model: model || "gemini-3-flash-preview",
+        model: model || GEMINI_CLI_FLASH_MODEL,
         yolo: true,
         sandbox: true,
       } as GeminiCLIOptions);

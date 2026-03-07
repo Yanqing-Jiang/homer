@@ -10,6 +10,7 @@ import type Database from "better-sqlite3";
 import type { ApplyResult, ApplicationStep } from "./apply-engine.js";
 import { AccountManager, type CareerAccount } from "./account-manager.js";
 import { executeOpenCodeCLI, isAuthError } from "../executors/opencode-cli.js";
+import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 import { waitForVerificationEmail } from "./gmail-client.js";
 import { logger } from "../utils/logger.js";
 
@@ -273,7 +274,7 @@ export async function careerSiteApply(
     logger.info({ jobId: job.id, company: job.company }, "Starting Gemini career-site agent");
 
     const agentOptions = {
-      model: "google/gemini-3-flash-preview",
+      model: `google/${GEMINI_CLI_FLASH_MODEL}`,
       researchOnly: false,
       timeout: CAREER_APPLY_TIMEOUT,
       cwd: "/Users/yj/job-hunt",
@@ -333,7 +334,7 @@ Use the same resume at ${application.resume_version ?? "/Users/yj/job-hunt/resum
 Complete the form and submit. Return the same JSON format as before.`;
 
       const verifyResult = await executeOpenCodeCLI(verifyPrompt, "", {
-        model: "google/gemini-3-flash-preview",
+        model: `google/${GEMINI_CLI_FLASH_MODEL}`,
         researchOnly: false,
         timeout: 480_000, // 8 min remaining
         cwd: "/Users/yj/job-hunt",

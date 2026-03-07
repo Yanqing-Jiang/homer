@@ -11,6 +11,7 @@
 import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { executeGeminiAPI, executeFlashViaOpenCode } from "../executors/gemini.js";
+import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { extractTranscript, buildTranscriptSampleForPass1, buildTranscriptForPass2, getLocalTranscriptPath } from "./transcript.js";
 import { logger } from "../utils/logger.js";
@@ -514,7 +515,7 @@ Rules:
 
   // Fallback: Flash via Gemini API
   const flashResult = await executeGeminiAPI(prompt, {
-    model: "gemini-3-flash-preview",
+    model: GEMINI_CLI_FLASH_MODEL,
     responseMimeType: "application/json",
     maxTokens: 8192,
     temperature: 0.3,
@@ -526,7 +527,7 @@ Rules:
 
   const parsed = JSON.parse(flashResult.output) as Pass2Result;
   parsed.degraded = true;
-  logger.info({ model: "gemini-3-flash-preview", degraded: true }, "Pass 2 analysis complete (Flash fallback)");
+  logger.info({ model: GEMINI_CLI_FLASH_MODEL, degraded: true }, "Pass 2 analysis complete (Flash fallback)");
   return parsed;
 }
 
@@ -651,7 +652,7 @@ function upsertYouTubeVideo(
       JSON.stringify(pass1),
       JSON.stringify(pass2),
       topicsText,
-      modelPass1 ?? "gemini-3-flash-preview",
+      modelPass1 ?? GEMINI_CLI_FLASH_MODEL,
       modelPass2 ?? "claude-sonnet-4.6",
       queuedAt ?? null,
       processingMs,
@@ -910,8 +911,8 @@ export async function summarizeYouTubeVideo(
         transcriptText, transcriptMethod,
         processingMs,
         metadata.queuedAt,
-        "gemini-3-flash-preview",
-        pass2.degraded ? "gemini-3-flash-preview" : "claude-sonnet-4.6",
+        GEMINI_CLI_FLASH_MODEL,
+        pass2.degraded ? GEMINI_CLI_FLASH_MODEL : "claude-sonnet-4.6",
       );
     }
 

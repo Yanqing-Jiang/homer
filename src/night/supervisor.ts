@@ -19,6 +19,7 @@ import { DEFAULT_CONFIG } from "./types.js";
 import { buildContextPack } from "./context.js";
 import { JobQueue } from "./jobs.js";
 import { executeGeminiWithFallback } from "../executors/opencode-cli.js";
+import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 import { logger } from "../utils/logger.js";
 import { OvernightTaskStore, PipelineOrchestrator } from "../overnight/index.js";
 import type { OvernightTask, YouTubeSummaryMetadata } from "../overnight/types.js";
@@ -415,7 +416,7 @@ Be selective - quality over quantity.`;
 
     try {
       const result = await executeGeminiWithFallback(prompt, context, {
-        model: "gemini-3-flash-preview",
+        model: GEMINI_CLI_FLASH_MODEL,
         sandbox: true,
         timeout: this.config.jobTimeout,
       });
