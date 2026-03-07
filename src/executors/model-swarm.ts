@@ -13,11 +13,10 @@
 
 import { z } from "zod";
 import { executeOpenCodeCLI } from "./opencode-cli.js";
-import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
+import { GEMINI_CLI_FLASH_MODEL, executeGeminiCLIDirect } from "./gemini-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { executeClaudeCommand } from "./claude.js";
-import { executeGeminiAPI } from "./gemini.js";
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { logger } from "../utils/logger.js";
@@ -442,15 +441,11 @@ export async function consolidateResults(
     "Consolidating swarm results via Gemini API"
   );
 
-  const result = await executeGeminiAPI(fullPrompt, {
-    model: options?.model ?? "flash3",
-    useGrounding: false,
-    systemPrompt: options?.systemPrompt ?? "You are a precise consolidation engine. Follow instructions exactly. Output valid JSON when requested.",
-    maxTokens: options?.maxTokens ?? 65536,
-    reasoningEffort: options?.reasoningEffort,
-    temperature: options?.temperature ?? 0.2,
-    responseMimeType: options?.responseMimeType ?? "application/json",
-  });
+  const sysPrompt = options?.systemPrompt ?? "You are a precise consolidation engine. Follow instructions exactly. Output valid JSON when requested.";
+  const result = await executeGeminiCLIDirect(
+    sysPrompt + "\n\n---\n\n" + fullPrompt,
+    { timeout: 300_000 },
+  );
 
   if (result.exitCode !== 0) {
     throw new Error(`Consolidation API failed: ${result.output}`);

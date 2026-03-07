@@ -13,8 +13,8 @@ import Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import { logger } from "../utils/logger.js";
 import { executeGeminiCLI, getAccountStatus, type GeminiCLIOptions } from "./opencode-cli.js";
-import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
-import { executeGeminiAPI, type GeminiAPIOptions, type GeminiAPIResult } from "./gemini.js";
+import { GEMINI_CLI_FLASH_MODEL, executeGeminiCLIDirect } from "./gemini-cli.js";
+import { type GeminiAPIResult } from "./gemini.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI, type KimiCLIOptions } from "./kimi-cli.js";
 import { executeClaudeCommand, type ClaudeExecutorOptions } from "./claude.js";
@@ -421,7 +421,7 @@ export async function makeSmartRoutingDecision(request: RoutingRequest): Promise
   } catch { /* preferences may not exist yet */ }
 
   try {
-    const result = await executeGeminiAPI(
+    const result = await executeGeminiCLIDirect(
       buildRoutingPrompt({
         taskType,
         promptLength,
@@ -429,7 +429,7 @@ export async function makeSmartRoutingDecision(request: RoutingRequest): Promise
         timeOfDay: new Date().getHours(),
         preferences: prefContext,
       }),
-      { model: "flash3", maxTokens: 200, responseMimeType: "application/json" }
+      { timeout: 30_000 }
     );
 
     if (result.exitCode === 0 && result.output) {
@@ -702,9 +702,9 @@ async function executeOnExecutor(
       } as GeminiCLIOptions);
 
     case "gemini-api":
-      return executeGeminiAPI(context ? `${context}\n\n---\n\n${query}` : query, {
-        model: model || "flash",
-      } as GeminiAPIOptions);
+      return executeGeminiCLIDirect(context ? `${context}\n\n---\n\n${query}` : query, {
+        timeout: 120_000,
+      });
 
     case "kimi":
       return executeKimiCLI(context ? `${context}\n\n---\n\n${query}` : query, "", {
