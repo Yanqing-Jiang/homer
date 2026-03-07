@@ -3,7 +3,7 @@ import { join } from "path";
 import { logger } from "../utils/logger.js";
 import { executeClaudeCommand } from "./claude.js";
 import { executeGeminiCLI } from "./opencode-cli.js";
-import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
+import { GEMINI_CLI_FLASH_MODEL, GEMINI_CLI_PRO_MODEL } from "./gemini-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { buildConversationContext, CONTEXT_DEFAULTS } from "./context-builder.js";
@@ -75,6 +75,18 @@ export interface FallbackRunResult<T extends ExecutorAttemptResult> {
   fallbackUsed: boolean;
   attempts: AttemptInfo[];
   failed: boolean;
+}
+
+export function shouldEscalateToPro(
+  result: ExecutorAttemptResult,
+  jobMeta?: { deep?: boolean }
+): boolean {
+  if (jobMeta?.deep) return true;
+  if (result.exitCode === 2) return true; // rate limit — Pro has separate quota
+  const output = result.output ?? "";
+  if (result.exitCode === 0 && output.length > 0 && output.length < 200) return true;
+  if (/insufficient.*context|need.*deeper|cannot.*analyze/i.test(output)) return true;
+  return false;
 }
 
 export function isExecutorDisabled(executor: ExecutorKind): boolean {
@@ -374,11 +386,14 @@ export async function runWithFallbackChain<T extends ExecutorAttemptResult>(
     stateManager?: StateManager;
     /** Skip per-executor LLM diagnosis calls — just switch_next on failure */
     skipDiagnosis?: boolean;
+    /** Job metadata for escalation decisions */
+    jobMeta?: { deep?: boolean };
   }
 ): Promise<FallbackRunResult<T>> {
-  const { primary, chain, job, runExecutor, notify, maxAttempts, stateManager, skipDiagnosis } = params;
+  const { primary, chain, job, runExecutor, notify, maxAttempts, stateManager, skipDiagnosis, jobMeta } = params;
   const attempts: AttemptInfo[] = [];
   let current: ExecutorKind | null = primary;
+  let escalatedToProThisRun = false;
   let queryOverride: string | undefined;
   let lastResult: T | null = null;
   let fallbackUsed = false;
@@ -438,6 +453,24 @@ export async function runWithFallbackChain<T extends ExecutorAttemptResult>(
       logPath: failure.logPath,
       durationMs: result.duration,
     });
+
+    // Flash→Pro escalation: try Pro before falling through to next executor
+    if (current === "gemini" && !escalatedToProThisRun && shouldEscalateToPro(result, jobMeta)) {
+      escalatedToProThisRun = true;
+      logger.info({ jobId: job.id, reason: jobMeta?.deep ? "deep_flag" : "auto_escalation" }, "Escalating Gemini Flash → Pro");
+      const proResult = await runExecutor("gemini", queryOverride, GEMINI_CLI_PRO_MODEL);
+      if (proResult.exitCode === 0) {
+        recordSuccess("gemini");
+        return { result: proResult, executorUsed: "gemini", fallbackUsed: false, attempts, failed: false };
+      }
+      attempts.push({
+        executor: "gemini",
+        exitCode: proResult.exitCode,
+        errorType: classifyError(proResult.exitCode, proResult.output ?? ""),
+        errorSummary: truncate(`${proResult.error ?? ""}\n${proResult.output ?? ""}`.trim(), 800) || `Exit code ${proResult.exitCode}`,
+        durationMs: proResult.duration,
+      });
+    }
 
     const rawDecision = skipDiagnosis
       ? { action: "switch_next" as const }
