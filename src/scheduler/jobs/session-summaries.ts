@@ -230,7 +230,7 @@ export async function runSessionSummary(
 
     logger.info(
       { date, sessions: sessions.length, dailyLogKB: Math.round(dailyLogContent.length / 1024) },
-      "Running session summary via OpenCode Flash"
+      "Running session summary via Gemini Flash"
     );
 
     const result = await executeFlashViaOpenCode(fullPrompt, {
@@ -239,13 +239,13 @@ export async function runSessionSummary(
     });
 
     if (result.exitCode !== 0) {
-      return { success: false, output: "", error: `OpenCode Flash error: ${result.output}` };
+      return { success: false, output: "", error: `Gemini Flash error: ${result.output}` };
     }
 
     const summaryText = result.output.trim();
 
     // Append summary to daily log (preserve raw content instead of overwriting)
-    const summarySection = `\n\n---\n\n## Daily Summary\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via OpenCode Flash (${sessions.length} sessions)*\n\n${summaryText}\n`;
+    const summarySection = `\n\n---\n\n## Daily Summary\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via Gemini Flash (${sessions.length} sessions)*\n\n${summaryText}\n`;
 
     if (existsSync(logPath)) {
       const existing = await readFile(logPath, "utf-8");

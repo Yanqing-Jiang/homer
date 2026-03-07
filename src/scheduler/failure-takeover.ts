@@ -98,7 +98,6 @@ const HANDLER_SOURCE_MAP: Record<string, string> = {
   job_hunt_weekly_report: "src/scheduler/jobs/job-hunt-report.ts",
   job_hunt_email_monitor: "src/scheduler/jobs/job-hunt-email-monitor.ts",
   job_hunt_followup: "src/scheduler/jobs/job-hunt-followup.ts",
-  night_supervisor: "src/night/supervisor.ts",
   idea_ingest: "src/ideas/ingest.ts",
   idea_dedup: "src/ideas/dedup.ts",
   ideas_review: "src/bot/handlers/approval.ts",

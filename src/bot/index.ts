@@ -21,7 +21,6 @@ import { handleCallRequest } from "./handlers/phone-call.js";
 import { handleSmsRequest } from "./handlers/sms.js";
 import { registerCallFollowupHandlers } from "./handlers/call-followup.js";
 import { registerSmsReplyHandlers } from "./handlers/sms-reply.js";
-import { registerNightPlanCallbacks } from "./handlers/night-plan.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { StateManager } from "../state/manager.js";
 import { sendThinkingIndicator, editWithResponse, TelegramDraftStream, sendFinalResponse } from "./streaming.js";
@@ -151,9 +150,6 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
   // Register call follow-up and SMS reply inline button callbacks
   registerCallFollowupHandlers(bot);
   registerSmsReplyHandlers(bot);
-
-  // Register night plan review callbacks
-  registerNightPlanCallbacks(bot, stateManager);
 
   // Initialize YouTube URL handler
   initializeYouTubeHandler(stateManager);

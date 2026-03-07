@@ -184,6 +184,41 @@ export class StateManager {
 
       CREATE INDEX IF NOT EXISTS idx_executor_session_map_lane ON executor_session_map(lane);
       CREATE INDEX IF NOT EXISTS idx_executor_session_map_activity ON executor_session_map(last_used_at);
+
+      -- Gemini CLI account rotation/health state
+      CREATE TABLE IF NOT EXISTS gemini_accounts (
+        email TEXT PRIMARY KEY,
+        creds_path TEXT NOT NULL,
+        is_enabled INTEGER NOT NULL DEFAULT 1,
+        disabled_reason TEXT,
+        disabled_at INTEGER,
+        reenable_after INTEGER,
+        cooldown_until INTEGER,
+        cooldown_reason TEXT,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        last_failure_at INTEGER,
+        last_failure_reason TEXT,
+        last_success_at INTEGER,
+        last_selected_at INTEGER,
+        last_used_at INTEGER,
+        hour_window_start INTEGER NOT NULL DEFAULT 0,
+        hour_usage_count INTEGER NOT NULL DEFAULT 0,
+        day_window_start INTEGER NOT NULL DEFAULT 0,
+        day_usage_count INTEGER NOT NULL DEFAULT 0,
+        total_requests INTEGER NOT NULL DEFAULT 0,
+        total_successes INTEGER NOT NULL DEFAULT 0,
+        total_failures INTEGER NOT NULL DEFAULT 0,
+        total_rate_limits INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_gemini_accounts_enabled
+        ON gemini_accounts(is_enabled, cooldown_until, reenable_after);
+      CREATE INDEX IF NOT EXISTS idx_gemini_accounts_usage
+        ON gemini_accounts(hour_usage_count, day_usage_count, last_used_at);
+      CREATE INDEX IF NOT EXISTS idx_gemini_accounts_cooldown
+        ON gemini_accounts(cooldown_until);
     `);
 
     logger.debug("State manager initialized");
