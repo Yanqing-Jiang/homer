@@ -1,6 +1,6 @@
 import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
-import { executeGeminiAPI } from "../executors/gemini.js";
+import { executeGeminiCLIDirect } from "../executors/gemini-cli.js";
 import type { Bot } from "grammy";
 
 const ELEVENLABS_API_BASE = "https://api.elevenlabs.io/v1";
@@ -95,9 +95,8 @@ Transcript:
 ${transcriptText.slice(0, 10000)}`;
 
   try {
-    const result = await executeGeminiAPI(prompt, {
-      maxTokens: 500,
-      temperature: 0.3,
+    const result = await executeGeminiCLIDirect(prompt, {
+      timeout: 60_000,
     });
     return result.output.trim();
   } catch (error) {

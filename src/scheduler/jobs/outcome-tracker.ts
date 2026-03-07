@@ -10,7 +10,7 @@
 import type Database from "better-sqlite3";
 import type { Bot } from "grammy";
 import { InlineKeyboard } from "grammy";
-import { executeFlashViaOpenCode } from "../../executors/gemini.js";
+import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
 import { routeTelegramNotification } from "../../notifications/telegram-router.js";
 import { logger } from "../../utils/logger.js";
 
@@ -140,7 +140,7 @@ Based on the evidence, determine the outcome:
 Return JSON: { "outcome": "yes|no|partial|ambiguous", "confidence": 0.0-1.0, "evidence": "one sentence summary" }`;
 
   try {
-    const result = await executeFlashViaOpenCode(
+    const result = await executeGeminiCLIDirect(
       prompt + "\n\nReturn ONLY valid JSON, no markdown fences.",
       { timeout: 60_000 },
     );

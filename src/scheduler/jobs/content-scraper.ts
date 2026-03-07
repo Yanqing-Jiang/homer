@@ -23,7 +23,7 @@ import { createHash } from "crypto";
 import type Database from "better-sqlite3";
 import { executeClaudeCommand } from "../../executors/claude.js";
 import { BROWSER_ONLY_PREFIX } from "../../executors/opencode-cli.js";
-import { executeFlashViaOpenCode } from "../../executors/gemini.js";
+import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
 import {
   SCRAPE_OPTIONS,
   DEEP_FETCH_OPTIONS,
@@ -725,7 +725,7 @@ async function analyzeAndUpdatePatterns(
   const prompt = buildViralityPrompt(digest);
 
   try {
-    const result = await executeFlashViaOpenCode(prompt, {
+    const result = await executeGeminiCLIDirect(prompt, {
       timeout: 120_000,
     });
 

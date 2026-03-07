@@ -11,7 +11,7 @@
 
 import { readFile, writeFile } from "fs/promises";
 import { existsSync } from "fs";
-import { executeFlashViaOpenCode } from "../../executors/gemini.js";
+import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
 import { logger } from "../../utils/logger.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
 import { StateManager } from "../../state/manager.js";
@@ -233,10 +233,10 @@ export async function runSessionSummary(
       "Running session summary via Gemini Flash"
     );
 
-    const result = await executeFlashViaOpenCode(fullPrompt, {
-      systemPrompt,
-      timeout: 180_000,
-    });
+    const result = await executeGeminiCLIDirect(
+      systemPrompt ? `${systemPrompt}\n\n---\n\n${fullPrompt}` : fullPrompt,
+      { timeout: 180_000 },
+    );
 
     if (result.exitCode !== 0) {
       return { success: false, output: "", error: `Gemini Flash error: ${result.output}` };
@@ -269,18 +269,14 @@ export async function runSessionSummary(
       logger.warn({ error: indexErr, date }, "Failed to reindex stripped daily log");
     }
 
-    const tokenInfo = result.inputTokens
-      ? ` (${result.inputTokens} in / ${result.outputTokens} out tokens)`
-      : "";
-
     logger.info(
-      { date, sessions: sessions.length, duration: result.duration, inputTokens: result.inputTokens },
+      { date, sessions: sessions.length, duration: result.duration },
       "Daily narrative generated from session_summaries + daily log"
     );
 
     return {
       success: true,
-      output: `Summary for ${date} in ${Math.round(result.duration / 1000)}s${tokenInfo} — ${sessions.length} sessions + daily log`,
+      output: `Summary for ${date} in ${Math.round(result.duration / 1000)}s — ${sessions.length} sessions + daily log`,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
