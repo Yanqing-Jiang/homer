@@ -72,7 +72,7 @@ ${conversationText}`;
   });
 
   if (result.exitCode !== 0) {
-    throw new Error(`OpenCode Flash error: ${result.output}`);
+    throw new Error(`Gemini Flash error: ${result.output}`);
   }
 
   return result.output.trim();

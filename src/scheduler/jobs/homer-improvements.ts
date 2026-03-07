@@ -1,7 +1,7 @@
 /**
  * HOMER Improvements — Dual-model codebase analysis + executable plan generation.
  *
- * Runs Gemini 3.1 Pro (opencode build agent) + Codex (gpt-5.3-codex xhigh) in parallel.
+ * Runs Gemini 3.1 Pro (gemini CLI) + Codex (gpt-5.4 xhigh) in parallel.
  * Each writes a .md analysis file to ~/homer/output/{gemini,codex}/.
  * Gemini 3.1 Pro consolidates both into a single improvement idea.
  *
@@ -282,7 +282,7 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
       }),
       executeCodexCLI(codexPrompt, {
         cwd: HOMER_DIR,
-        model: "gpt-5.3-codex",
+        model: "gpt-5.4",
         reasoningEffort: "high",
         timeout: 1_200_000, // 20 min
       }),

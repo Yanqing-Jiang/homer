@@ -18,6 +18,7 @@ import { Scheduler } from "./scheduler/index.js";
 import { setWriterStateManager } from "./memory/writer.js";
 import { getMemoryIndexer, closeMemoryIndexer } from "./memory/indexer.js";
 import { executeClaudeCommand } from "./executors/claude.js";
+import { initializeGeminiCLIAccountManager, closeGeminiCLIAccountManager } from "./executors/gemini-cli.js";
 import { CLIRunManager } from "./executors/cli-runner.js";
 import { runMigrations } from "./state/migrations/index.js";
 import { initConnectivityMonitor } from "./heartbeat/index.js";
@@ -29,6 +30,13 @@ import { initFallbackChain } from "./process/fallback-chain.js";
 import type { FastifyInstance } from "fastify";
 import type { VoiceConfig } from "./voice/types.js";
 
+function parseIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
+}
 
 async function main(): Promise<void> {
   // Log build version for stale-daemon detection
@@ -72,6 +80,17 @@ async function main(): Promise<void> {
   // Run database migrations
   logger.info("Running database migrations...");
   runMigrations(stateManager.getDb());
+
+  // Initialize Gemini CLI account manager with shared DB state.
+  initializeGeminiCLIAccountManager(stateManager.getDb(), {
+    rateLimitCooldownMs: parseIntEnv("GEMINI_RATE_LIMIT_COOLDOWN_MS", 60_000),
+    authFailureCooldownMs: parseIntEnv("GEMINI_AUTH_FAILURE_COOLDOWN_MS", 300_000),
+    runtimeFailureCooldownMs: parseIntEnv("GEMINI_RUNTIME_FAILURE_COOLDOWN_MS", 15_000),
+    disableAfterFailures: parseIntEnv("GEMINI_DISABLE_AFTER_FAILURES", 5),
+    disabledRecheckMs: parseIntEnv("GEMINI_DISABLED_RECHECK_MS", 30 * 60 * 1000),
+    lockAcquireTimeoutMs: parseIntEnv("GEMINI_LOCK_TIMEOUT_MS", 15_000),
+    syncIntervalMs: parseIntEnv("GEMINI_ACCOUNT_SYNC_INTERVAL_MS", 5_000),
+  });
 
   // Initialize process lifecycle management
   processRegistry.init(stateManager.getDb());
@@ -287,6 +306,10 @@ async function main(): Promise<void> {
   registerShutdownTask(() => {
     logger.info("Closing memory indexer...");
     closeMemoryIndexer();
+  });
+  registerShutdownTask(() => {
+    logger.info("Closing Gemini CLI account manager...");
+    closeGeminiCLIAccountManager();
   });
   registerShutdownTask(() => {
     logger.info("Marking running jobs and CLI runs as failed...");

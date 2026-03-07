@@ -398,7 +398,6 @@ export class Scheduler {
     "session-harvester": ["memory-reindex"],
     "memory-reindex": ["memory-embeddings"],
     "nightly-memory": ["memory-embeddings", "memory-git-commit"],
-    "night-supervisor": ["memory-embeddings"],
     "outcome-tracker": ["preference-updater"],
   };
 

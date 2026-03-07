@@ -48,7 +48,7 @@ export function parseCodexSession(filePath: string): ParsedSession | null {
         // Extract session metadata from first entry
         if (entry.type === "session_meta" && !sessionId) {
           sessionId = entry.session_id || "";
-          model = entry.model_provider || "gpt-5.2-codex";
+          model = entry.model_provider || "gpt-5.4";
           startTime = entry.timestamp || "";
         }
 
