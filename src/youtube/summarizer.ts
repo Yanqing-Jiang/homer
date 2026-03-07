@@ -10,8 +10,7 @@
 
 import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
-import { executeGeminiAPI, executeFlashViaOpenCode } from "../executors/gemini.js";
-import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
+import { executeGeminiCLIDirect, GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { extractTranscript, buildTranscriptSampleForPass1, buildTranscriptForPass2, getLocalTranscriptPath } from "./transcript.js";
 import { logger } from "../utils/logger.js";
@@ -288,7 +287,7 @@ Rules:
 - shouldCheckRecentSessions: true if connects to recent work context
 - Return ONLY valid JSON, no markdown fences`;
 
-  const result = await executeFlashViaOpenCode(prompt, {
+  const result = await executeGeminiCLIDirect(prompt, {
     timeout: 60_000,
   });
 
@@ -513,12 +512,9 @@ Rules:
     logger.warn({ error: err }, "Pass 2 Sonnet attempt failed, falling back to Flash");
   }
 
-  // Fallback: Flash via Gemini API
-  const flashResult = await executeGeminiAPI(prompt, {
-    model: GEMINI_CLI_FLASH_MODEL,
-    responseMimeType: "application/json",
-    maxTokens: 8192,
-    temperature: 0.3,
+  // Fallback: Flash via Gemini CLI
+  const flashResult = await executeGeminiCLIDirect(prompt, {
+    timeout: 120_000,
   });
 
   if (flashResult.exitCode !== 0) {

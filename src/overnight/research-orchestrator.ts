@@ -13,7 +13,7 @@
 import { logger } from "../utils/logger.js";
 import { executeWithRouting } from "../executors/router.js";
 import { executeKimiCommand } from "../executors/kimi.js";
-import { executeGeminiAPI } from "../executors/gemini.js";
+import { executeGeminiCLIDirect } from "../executors/gemini-cli.js";
 import { OvernightTaskStore } from "./task-store.js";
 import type {
   OvernightTask,
@@ -185,11 +185,10 @@ Respond in JSON:
 }
 \`\`\``;
 
-    const result = await executeGeminiAPI(prompt, {
-      model: "flash",
-      useGrounding: true,
-      systemPrompt: "You are a research planner. Expand topics into specific, high-value queries.",
-    });
+    const result = await executeGeminiCLIDirect(
+      "You are a research planner. Expand topics into specific, high-value queries.\n\n---\n\n" + prompt,
+      { timeout: 120_000, role: "research" },
+    );
 
     if (result.exitCode !== 0) {
       // Fallback to basic queries
@@ -282,11 +281,10 @@ Provide a structured response with:
 - Sources (URLs if available)
 - Confidence level (0-1)`;
 
-    const result = await executeGeminiAPI(prompt, {
-      model: "flash",
-      useGrounding: true,
-      systemPrompt: "You are an expert researcher. Provide comprehensive, accurate information with citations when available.",
-    });
+    const result = await executeGeminiCLIDirect(
+      "You are an expert researcher. Provide comprehensive, accurate information with citations when available.\n\n---\n\n" + prompt,
+      { timeout: 120_000, role: "research" },
+    );
 
     return {
       query: query.query,

@@ -16,7 +16,7 @@ import { readFileSync, existsSync } from "fs";
 import { z } from "zod";
 import type Database from "better-sqlite3";
 import { executeClaudeCommand } from "../../executors/claude.js";
-import { executeFlashViaOpenCode } from "../../executors/gemini.js";
+import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { getUnprocessedScrapes, markProcessed, type StoredScrape } from "../../scraping/scrape-store.js";
 import type { ParsedIdea } from "../../ideas/parser.js";
@@ -133,7 +133,7 @@ Return ONLY a JSON array (no markdown):
 [{"scrapeId": "...", "score": 7, "summary": "...", "dimensions": ["topic:X", "source:Y"]}]`;
 
   try {
-    const result = await executeFlashViaOpenCode(
+    const result = await executeGeminiCLIDirect(
       prompt + "\n\nReturn ONLY a valid JSON array, no markdown fences.",
       { timeout: 120_000 },
     );
@@ -275,7 +275,7 @@ Return ONLY a JSON array:
 [{"title": "...", "novelty": 8, "goalAlignment": 9, "feasibility": 7, "keep": true}]`;
 
   try {
-    const result = await executeFlashViaOpenCode(
+    const result = await executeGeminiCLIDirect(
       prompt + "\n\nReturn ONLY a valid JSON array, no markdown fences.",
       { timeout: 60_000 },
     );
