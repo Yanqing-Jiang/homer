@@ -16,6 +16,7 @@ import { buildCondensedContext, extractCurrentGoals, extractActiveProjects } fro
 import { getRecentJobOutputs } from "../job-outputs.js";
 import { logger } from "../../utils/logger.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
+import { getCanonicalMemoryService } from "../../memory/canonical-service.js";
 import type { StateManager } from "../../state/manager.js";
 import { trackPromotion } from "../../outcomes/hooks.js";
 import { PATHS } from "../../config/paths.js";
@@ -56,35 +57,6 @@ function loadPermanentFiles(): Record<string, string> {
     }
   }
   return contents;
-}
-
-function appendToSection(filePath: string, section: string, content: string): boolean {
-  if (!existsSync(filePath)) {
-    logger.warn({ filePath }, "Target file does not exist");
-    return false;
-  }
-
-  const fileContent = readFileSync(filePath, "utf-8");
-
-  // Find the section header
-  const sectionPattern = new RegExp(`(## ${section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^\n]*\n)`, "i");
-  const match = fileContent.match(sectionPattern);
-
-  if (match && match.index !== undefined) {
-    // Insert after the section header
-    const insertPoint = match.index + match[0].length;
-    const updated =
-      fileContent.slice(0, insertPoint) +
-      `\n- ${content}\n` +
-      fileContent.slice(insertPoint);
-
-    writeFileSync(filePath, updated, "utf-8");
-    return true;
-  }
-
-  // Section not found — append at end with new section header
-  appendFileSync(filePath, `\n\n## ${section}\n\n- ${content}\n`);
-  return true;
 }
 
 // ============================================
@@ -309,7 +281,8 @@ If nothing to promote, use an empty array.`;
       }
     }
 
-    // Write promotions
+    // Write promotions via CanonicalMemoryService
+    const canonicalMemory = getCanonicalMemoryService(stateManager, getMemoryIndexer());
     let writtenPromos = 0;
     const writeErrors: string[] = [];
 
@@ -320,23 +293,14 @@ If nothing to promote, use an empty array.`;
         continue;
       }
 
-      // CAS dedup: skip if already promoted
-      if (stateManager.checkFactExists(promo.content, promo.file)) {
-        logger.debug({ file: promo.file, content: promo.content.slice(0, 60) }, "Skipping duplicate promoted fact");
-        continue;
-      }
-
       try {
-        const ok = appendToSection(filePath, promo.section, promo.content);
+        const ok = await canonicalMemory.promoteToFile(promo.content, promo.file, promo.section, "nightly");
         if (ok) {
           writtenPromos++;
-          stateManager.recordPromotedFact(promo.content, promo.file, promo.section, "nightly");
           logger.info({ file: promo.file, section: promo.section, content: promo.content.slice(0, 80) }, "Promoted fact to permanent memory");
           try {
             trackPromotion(stateManager.getDb(), promo.content.slice(0, 80), promo.file);
           } catch { /* outcome tracking best-effort */ }
-        } else {
-          writeErrors.push(`Failed to write to ${promo.file}/${promo.section}`);
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -356,18 +320,8 @@ If nothing to promote, use an empty array.`;
       logger.warn({ writeErrors: writeErrors.length }, "Skipping processed mark — write errors occurred, sessions will be retried");
     }
 
-    // Reindex FTS5
-    try {
-      const indexer = getMemoryIndexer();
-      await indexer.reindexAll();
-      logger.info("Memory FTS5 reindexed after nightly promotions");
-    } catch (indexErr) {
-      logger.warn({ error: indexErr }, "Failed to reindex memory after promotions");
-    }
-
-    if (writtenPromos > 0) {
-      stateManager.markContextBridgeDirty("nightly_memory");
-    }
+    // Dirty flags for reindex/embeddings/context_bridge/git_commit are set by
+    // canonicalMemory.promoteToFile() — no inline reindex or markContextBridgeDirty needed.
 
     const parts: string[] = [];
     if (writtenPromos > 0 || promotions.length > 0) {

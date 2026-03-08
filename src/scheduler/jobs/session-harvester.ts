@@ -7,13 +7,14 @@
  * FTS5 indexing.
  *
  * Sessions are immediately searchable via memory_search after this job completes.
- * Triggers memory-reindex → memory-embeddings chain after each run.
+ * Sets dirty flags for reindex/embeddings/context_bridge pipelines.
  */
 
 import { homedir } from "os";
 import { CLISessionImporter } from "../../cli-sessions/importer.js";
 import { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
+import { memoryEvents } from "../../events/memory-events.js";
 
 const DB_PATH = `${homedir()}/homer/data/homer.db`;
 const CLI_AGENTS = ["codex", "kimi", "claude", "opencode"] as const;
@@ -61,7 +62,13 @@ export async function runSessionHarvester(
     }
 
     if (stats.imported > 0) {
-      sm.markContextBridgeDirty("session_harvester");
+      sm.markPipelineDirty("reindex", "session_harvester");
+      sm.markPipelineDirty("embeddings", "session_harvester");
+      sm.markPipelineDirty("context_bridge", "session_harvester");
+      // Emit events for debounced reactive triggers
+      memoryEvents.emitDirty("reindex", "session_harvester");
+      memoryEvents.emitDirty("embeddings", "session_harvester");
+      memoryEvents.emitDirty("context_bridge", "session_harvester");
     }
 
     const parts: string[] = [];

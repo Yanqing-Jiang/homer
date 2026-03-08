@@ -16,6 +16,8 @@ import { executeGeminiAPI } from "../../executors/gemini.js";
 import { logger } from "../../utils/logger.js";
 import { StateManager, type SessionSummaryRow } from "../../state/manager.js";
 import { buildSchedulerContext, buildGoalScoreboard } from "../shared-context.js";
+import { getMemoryIndexer } from "../../memory/indexer.js";
+import { getCanonicalMemoryService } from "../../memory/canonical-service.js";
 import { PATHS } from "../../config/paths.js";
 
 const DAILY_LOG_DIR = PATHS.daily;
@@ -320,12 +322,13 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
       }
     }
 
-    // Apply promotions (CAS dedup via promoted_facts table)
+    // Apply promotions via CanonicalMemoryService (CAS dedup built in)
     let promotionsApplied = 0;
     const promotionLog: string[] = [];
     const validFiles = new Set(PERMANENT_FILES.map(f => f.path.split("/").pop()));
     const dedupSm = stateManager ?? new StateManager(DB_PATH);
     const ownedDedupSm = !stateManager;
+    const canonicalMemory = getCanonicalMemoryService(dedupSm, getMemoryIndexer());
 
     try {
       for (const promo of promotions) {
@@ -335,24 +338,21 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
           continue;
         }
 
+        // Strip .md extension for CanonicalMemoryService (expects "work", not "work.md")
+        const fileKey = fileName.replace(/\.md$/, "");
+
         const filePath = FILE_PATH_MAP[fileName] ?? `${PATHS.memory}/${fileName}`;
         if (!existsSync(filePath)) {
           logger.warn({ filePath }, "Promotion target does not exist, skipping");
           continue;
         }
 
-        // CAS dedup check — skip if already promoted
-        if (dedupSm.checkFactExists(promo.content, fileName)) {
-          logger.debug({ file: fileName, content: promo.content.slice(0, 60) }, "Skipping duplicate promoted fact (CAS)");
-          continue;
+        const promoted = await canonicalMemory.promoteToFile(promo.content, fileKey, null, "weekly");
+        if (promoted) {
+          promotionsApplied++;
+          promotionLog.push(`→ ${fileName}: ${promo.reason}`);
+          logger.info({ file: fileName, reason: promo.reason }, "Promoted fact to permanent memory");
         }
-
-        await appendFile(filePath, `\n\n${promo.content}\n`);
-        dedupSm.recordPromotedFact(promo.content, fileName, null, "weekly");
-        promotionsApplied++;
-        promotionLog.push(`→ ${fileName}: ${promo.reason}`);
-
-        logger.info({ file: fileName, reason: promo.reason }, "Promoted fact to permanent memory");
       }
     } finally {
       if (ownedDedupSm) dedupSm.close();

@@ -14,6 +14,7 @@ import { getMemoryIndexer } from "../memory/indexer.js";
 import { StateManager } from "../state/manager.js";
 import { PATHS } from "../config/paths.js";
 import type { ToolDeps } from "./tools/types.js";
+import { getCanonicalMemoryService } from "../memory/canonical-service.js";
 
 // Tool modules
 import * as memoryTools from "./tools/memory.js";
@@ -48,8 +49,11 @@ async function getAzureBlob() {
 // Initialize indexer
 const indexer = getMemoryIndexer();
 
+// Canonical memory service
+const canonicalMemory = getCanonicalMemoryService(getSharedStateManager(), indexer);
+
 // Shared dependencies for all tool modules
-const deps: ToolDeps = { getSharedStateManager, indexer, getAzureBlob };
+const deps: ToolDeps = { getSharedStateManager, indexer, getAzureBlob, canonicalMemory };
 
 // All tool modules in dispatch order
 const toolModules = [memoryTools, ideaTools, planTools, blobTools, sessionTools, meetingTools];
