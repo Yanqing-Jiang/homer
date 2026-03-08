@@ -3,12 +3,14 @@ import { readFileSync, existsSync } from "fs";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
 import { processRegistry } from "../process/registry.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 const DEFAULT_TIMEOUT = 1200_000; // 20 minutes
 const KILL_GRACE_MS = 5_000;
 const CLOSE_GRACE_MS = 1_000;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024; // 2MB capture cap
-const CLAUDE_PATH = process.env.CLAUDE_PATH ?? "/Users/yj/.local/bin/claude";
+const runtimePaths = getRuntimePaths();
+const CLAUDE_PATH = runtimePaths.claudeBinaryPath;
 
 // Note: Keychain token extraction was removed.
 // In Aqua session, Claude CLI can access keychain directly and handle
@@ -117,10 +119,10 @@ export async function executeClaudeCommand(
     NO_COLOR: process.env.NO_COLOR ?? "1",
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
     TMPDIR: process.env.TMPDIR ?? "/tmp",
-    HOME: process.env.HOME ?? "/Users/yj",
+    HOME: runtimePaths.homeDir,
   };
   // Load OAuth token from file if not in env
-  const tokenFile = `${process.env.HOME ?? "/Users/yj"}/.homer-claude-token`;
+  const tokenFile = runtimePaths.claudeTokenFile;
   if (!env.CLAUDE_CODE_OAUTH_TOKEN && existsSync(tokenFile)) {
     try {
       const token = readFileSync(tokenFile, "utf-8").trim();

@@ -14,8 +14,11 @@ import os from "os";
 import path from "path";
 import util from "util";
 import { spawnSync } from "child_process";
+import { getRuntimePaths } from "./utils/runtime-paths.js";
 
-const LOG_DIR = process.env.HOMER_LOG_DIR ?? path.join(os.homedir(), "Library", "Logs", "homer");
+const runtimePaths = getRuntimePaths();
+const LOG_DIR =
+  process.env.HOMER_LOG_DIR ?? runtimePaths.libraryLogsDir ?? path.join(os.homedir(), "Library", "Logs", "homer");
 const FATAL_LOG = path.join(LOG_DIR, "fatal.log");
 // Note: Telegram notification constants (disabled)
 // const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";

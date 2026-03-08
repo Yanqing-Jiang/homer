@@ -14,6 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOMER_DIR="/Users/yj/homer"
 PLIST_SRC="$HOMER_DIR/config/com.homer.daemon.plist"
 LOGS_DIR="$HOMER_DIR/logs"
+APP_WRAPPER_DST="/Users/yj/Applications/Homer.app"
 
 # Colors
 RED='\033[0;31m'
@@ -26,6 +27,13 @@ echo ""
 
 # Create logs directory
 mkdir -p "$LOGS_DIR"
+
+# Build the native app wrapper so launchd can attribute the background item to Homer.
+if [ "$EUID" -eq 0 ]; then
+    su - yj -c "bash '$HOMER_DIR/scripts/build-homer-app.sh' '$APP_WRAPPER_DST'"
+else
+    bash "$HOMER_DIR/scripts/build-homer-app.sh" "$APP_WRAPPER_DST"
+fi
 
 # Check for --agent flag
 if [[ "${1:-}" == "--agent" ]]; then
