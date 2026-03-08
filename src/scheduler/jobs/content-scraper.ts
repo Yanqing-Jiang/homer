@@ -32,6 +32,7 @@ import {
   buildArticleDeepFetchPrompt,
 } from "../../scraping/browser-prompts.js";
 import { cleanAgentOutput } from "../../scraping/clean-output.js";
+import { htmlToMarkdown, extractDeepLinks, extractImages, type DeepLink, type ImageRef } from "../../scraping/html-to-markdown.js";
 import { ensureCDP } from "../../scraping/chrome-launcher.js";
 import { insertScrape } from "../../scraping/scrape-store.js";
 import { StateManager } from "../../state/manager.js";
@@ -45,14 +46,14 @@ const DB_PATH = PATHS.db;
 // ============================================
 
 const SCRAPES_DIR = PATHS.scrapes;
-const MEDIUM_FILE = `${SCRAPES_DIR}/medium-posts.md`;
-const LINKEDIN_FILE = `${SCRAPES_DIR}/linkedin-posts.md`;
+const MEDIUM_FILE = `${SCRAPES_DIR}/medium-posts.json`;
+const LINKEDIN_FILE = `${SCRAPES_DIR}/linkedin-posts.json`;
 const MEDIUM_DIR = `${SCRAPES_DIR}/medium`;
 const LINKEDIN_DIR = `${SCRAPES_DIR}/linkedin`;
 
 const RUNS_DIR = `${SCRAPES_DIR}/runs`;
 const TRENDING_DIR = `${SCRAPES_DIR}/trending`;
-const MEDIUM_TRENDING_FILE = `${SCRAPES_DIR}/medium-trending.md`;
+const MEDIUM_TRENDING_FILE = `${SCRAPES_DIR}/medium-trending.json`;
 const MEDIUM_TRENDING_DIR = `${TRENDING_DIR}/medium`;
 
 const MEDIUM_RSS_URL = "https://medium.com/feed/@yanqing_j";
@@ -91,6 +92,8 @@ interface ScrapedPost {
   source?: string;
   author?: string;
   topic?: string;
+  deep_links?: DeepLink[];
+  images?: ImageRef[];
 }
 
 // ============================================
@@ -134,7 +137,10 @@ async function fetchMediumRSSFeed(url: string, source: string): Promise<ScrapedP
 
       if (!title) continue;
 
-      const content = sanitizeRssContent(contentEncoded ?? "");
+      const rawHtml = contentEncoded ?? "";
+      const content = htmlToMarkdown(rawHtml);
+      const deep_links = extractDeepLinks(rawHtml);
+      const images = extractImages(rawHtml);
       const dateStr = pubDate ? formatRssDate(pubDate) : undefined;
 
       items.push({
@@ -144,6 +150,8 @@ async function fetchMediumRSSFeed(url: string, source: string): Promise<ScrapedP
         link: link || undefined,
         source,
         author: creator ? decodeXmlEntities(creator) : undefined,
+        deep_links: deep_links.length > 0 ? deep_links : undefined,
+        images: images.length > 0 ? images : undefined,
       });
     }
 
@@ -153,17 +161,6 @@ async function fetchMediumRSSFeed(url: string, source: string): Promise<ScrapedP
     logger.warn({ error: String(err), url, source }, "Medium RSS fetch error");
     return [];
   }
-}
-
-function sanitizeRssContent(raw: string): string {
-  return raw
-    .replace(/<[^>]+>/g, "")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .trim();
 }
 
 function extractXmlTag(xml: string, tag: string): string | null {
@@ -222,14 +219,6 @@ function slugify(title: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 60);
-}
-
-function yamlEscape(value: string): string {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, " ")
-    .replace(/\r/g, "");
 }
 
 function normalizeUrl(url: string): string {
@@ -342,7 +331,7 @@ function parseScrapedJSON(output: string): ScrapedPost[] {
   }
 }
 
-function buildMarkdownCorpus(
+function buildJsonCorpus(
   posts: ScrapedPost[],
   platform: "medium" | "linkedin",
   options?: {
@@ -356,25 +345,38 @@ function buildMarkdownCorpus(
     : "https://www.linkedin.com/in/jiangyanqing/";
   const defaultTitle = platform === "medium" ? "Medium Posts - Yanqing Jiang" : "LinkedIn Posts - Yanqing Jiang";
 
-  const header = `# ${options?.title ?? defaultTitle}\n\n*Scraped from ${options?.sourceUrl ?? defaultUrl}*\n${options?.subtitle ? `*${options.subtitle}*\n` : ""}*Last updated: ${new Date().toISOString().slice(0, 10)}*\n\n---\n`;
+  const corpus = {
+    title: options?.title ?? defaultTitle,
+    platform,
+    source_url: options?.sourceUrl ?? defaultUrl,
+    subtitle: options?.subtitle ?? undefined,
+    last_updated: new Date().toISOString().slice(0, 10),
+    count: posts.length,
+    posts: posts.map((post) => buildPostObject(post, platform)),
+  };
 
-  const sections = posts.map((post) => {
-    const meta: string[] = [];
-    if (post.date) meta.push(`**Date:** ${post.date}`);
-    if (post.read_time) meta.push(`**Read time:** ${post.read_time}`);
-    if (post.claps != null) meta.push(`**Claps:** ${post.claps}`);
-    if (post.reactions != null) meta.push(`**Reactions:** ${post.reactions}`);
-    if (post.responses != null) meta.push(`**Responses:** ${post.responses}`);
-    if (post.comments != null) meta.push(`**Comments:** ${post.comments}`);
-    if (post.author) meta.push(`**Author:** ${post.author}`);
-    if (post.topic) meta.push(`**Topic:** ${post.topic}`);
-    if (post.source) meta.push(`**Source:** ${post.source}`);
-    if (post.link) meta.push(`**Link:** ${post.link}`);
+  return JSON.stringify(corpus, null, 2);
+}
 
-    return `\n## ${post.title}\n${meta.join(" | ")}\n\n${post.content}\n\n---\n`;
-  });
-
-  return header + sections.join("");
+function buildPostObject(post: ScrapedPost, platform: "medium" | "linkedin"): Record<string, unknown> {
+  const obj: Record<string, unknown> = {
+    title: post.title,
+    platform,
+  };
+  if (post.date) obj.date = post.date;
+  if (post.author) obj.author = post.author;
+  if (post.source) obj.source = post.source;
+  if (post.link) obj.link = post.link;
+  if (post.topic) obj.topic = post.topic;
+  if (post.read_time) obj.read_time = post.read_time;
+  if (post.claps != null) obj.claps = post.claps;
+  if (post.reactions != null) obj.reactions = post.reactions;
+  if (post.responses != null) obj.responses = post.responses;
+  if (post.comments != null) obj.comments = post.comments;
+  obj.content = post.content;
+  if (post.deep_links && post.deep_links.length > 0) obj.deep_links = post.deep_links;
+  if (post.images && post.images.length > 0) obj.images = post.images;
+  return obj;
 }
 
 function writeIndividualPosts(posts: ScrapedPost[], dir: string, platform: "medium" | "linkedin"): number {
@@ -392,8 +394,8 @@ function writeIndividualPosts(posts: ScrapedPost[], dir: string, platform: "medi
     }
     usedSlugs.add(slug);
 
-    const filePath = `${dir}/${slug}.md`;
-    const newContent = buildPostFile(post, platform);
+    const filePath = `${dir}/${slug}.json`;
+    const newContent = JSON.stringify(buildPostObject(post, platform), null, 2);
 
     // Only write if content changed
     if (existsSync(filePath)) {
@@ -408,26 +410,6 @@ function writeIndividualPosts(posts: ScrapedPost[], dir: string, platform: "medi
   }
 
   return written;
-}
-
-function buildPostFile(post: ScrapedPost, platform: "medium" | "linkedin"): string {
-  const frontmatter = [
-    "---",
-    `title: "${yamlEscape(post.title)}"`,
-    `platform: ${platform}`,
-    post.date ? `date: "${yamlEscape(post.date)}"` : null,
-    post.link ? `link: "${yamlEscape(post.link)}"` : null,
-    post.source ? `source: "${yamlEscape(post.source)}"` : null,
-    post.topic ? `topic: "${yamlEscape(post.topic)}"` : null,
-    post.author ? `author: "${yamlEscape(post.author)}"` : null,
-    post.claps != null ? `claps: ${post.claps}` : null,
-    post.reactions != null ? `reactions: ${post.reactions}` : null,
-    post.comments != null ? `comments: ${post.comments}` : null,
-    post.responses != null ? `responses: ${post.responses}` : null,
-    "---",
-  ].filter(Boolean).join("\n");
-
-  return `${frontmatter}\n\n# ${post.title}\n\n${post.content}\n`;
 }
 
 function recordMetrics(
@@ -935,7 +917,7 @@ export async function runContentScraper(db: Database.Database): Promise<{
       if (mediumPosts.length > 0) {
         ownMediumPosts = mediumPosts;
         const newPosts = detectNewPosts(db, mediumPosts, "medium");
-        writeFileSync(MEDIUM_FILE, buildMarkdownCorpus(mediumPosts, "medium"));
+        writeFileSync(MEDIUM_FILE, buildJsonCorpus(mediumPosts, "medium"));
         const written = writeIndividualPosts(mediumPosts, MEDIUM_DIR, "medium");
         const metrics = recordMetrics(db, mediumPosts, "medium", scrapeTime);
         results.push(`Medium: ${mediumPosts.length} posts scraped, ${newPosts.length} new, ${written} files updated, ${metrics} metrics recorded`);
@@ -994,7 +976,7 @@ export async function runContentScraper(db: Database.Database): Promise<{
 
           writeFileSync(
             MEDIUM_TRENDING_FILE,
-            buildMarkdownCorpus(trendingPosts, "medium", {
+            buildJsonCorpus(trendingPosts, "medium", {
               title: "Medium Trending Content",
               sourceUrl: "https://medium.com/tag",
               subtitle: `Tags: ${MEDIUM_TRENDING_TAGS.map((t) => t.tag).join(", ")}`,
@@ -1051,7 +1033,7 @@ export async function runContentScraper(db: Database.Database): Promise<{
       if (linkedinPosts.length > 0) {
         ownLinkedInPosts = linkedinPosts;
         const newPosts = detectNewPosts(db, linkedinPosts, "linkedin");
-        writeFileSync(LINKEDIN_FILE, buildMarkdownCorpus(linkedinPosts, "linkedin"));
+        writeFileSync(LINKEDIN_FILE, buildJsonCorpus(linkedinPosts, "linkedin"));
         const written = writeIndividualPosts(linkedinPosts, LINKEDIN_DIR, "linkedin");
         const metrics = recordMetrics(db, linkedinPosts, "linkedin", scrapeTime);
         results.push(`LinkedIn: ${linkedinPosts.length} posts scraped (browser), ${newPosts.length} new, ${written} files updated, ${metrics} metrics recorded`);
