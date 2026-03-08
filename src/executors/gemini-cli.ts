@@ -114,15 +114,15 @@ export interface GeminiAccountManagerOptions {
 }
 
 const DEFAULT_MANAGER_OPTIONS: Required<GeminiAccountManagerOptions> = {
-  rateLimitCooldownMs: 90_000,
+  rateLimitCooldownMs: 60_000,        // Code Assist: 120 RPM, wait for minute window reset
   authFailureCooldownMs: 300_000,
-  runtimeFailureCooldownMs: 15_000,
+  runtimeFailureCooldownMs: 10_000,
   disableAfterFailures: 5,
-  disabledRecheckMs: 30 * 60 * 1000,
-  lockAcquireTimeoutMs: 15_000,
+  disabledRecheckMs: 10 * 60 * 1000,  // Re-probe disabled accounts after 10min
+  lockAcquireTimeoutMs: 30_000,        // More time before semaphore timeout
   syncIntervalMs: 5_000,
-  maxConcurrentPerAccount: 2,
-  minInterSpawnMs: 15_000,
+  maxConcurrentPerAccount: 2,          // Code Assist: 1-2 concurrent per session
+  minInterSpawnMs: 5_000,             // Modest stagger to avoid burst detection
 };
 
 function sanitizeGeminiOutput(text: string): string {
@@ -134,6 +134,19 @@ function sanitizeGeminiOutput(text: string): string {
 
 function isRateLimitError(text: string): boolean {
   return /(?:\b429\b|quota|rate.?limit|resource_exhausted|exhausted)/i.test(text);
+}
+
+function sanitizeFailureReason(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) =>
+      !line.startsWith("[WARN] Skipping unreadable") &&
+      !line.startsWith("All tool calls will be automatically approved")
+    )
+    .join("\n")
+    .trim();
 }
 
 function isAuthError(text: string): boolean {
@@ -153,9 +166,24 @@ function failureKindToExitCode(kind: FailureKind): number {
   }
 }
 
-function detectFailureKind(run: GeminiProcessResult, cleanedOutput: string, cleanedErr: string): FailureKind | null {
-  if (run.timedOut) return "timeout";
+function detectFailureKind(
+  run: GeminiProcessResult,
+  cleanedOutput: string,
+  cleanedErr: string,
+  durationMs: number
+): FailureKind | null {
   if (run.spawnError) return "spawn";
+
+  // Gemini CLI 0.32.x can hang after a quota 429 because the SSE reader drops
+  // the plain JSON event body and stdout stays empty until our outer timeout fires.
+  const silent429Timeout =
+    run.timedOut &&
+    run.stdout.trim().length === 0 &&
+    durationMs > 8_000;
+
+  if (silent429Timeout) return "rate_limit";
+  if (run.timedOut) return "timeout";
+
   const combined = `${cleanedOutput}\n${cleanedErr}`;
   if (isRateLimitError(combined)) return "rate_limit";
   if (isAuthError(combined)) return "auth";
@@ -659,8 +687,22 @@ export class GeminiAccountManager {
     await fs.writeFile(runtimeCredsFile, creds, "utf-8");
     await fs.writeFile(runtimeAccountsFile, JSON.stringify({ active: email }, null, 2), "utf-8");
 
-    // Write billing settings to prevent overage charges from daemon jobs
-    await fs.writeFile(runtimeSettingsFile, JSON.stringify({ billing: { overageStrategy: "never" } }, null, 2), "utf-8");
+    // Deep-merge required auth and billing fields, preserving sibling keys
+    let settings: Record<string, unknown> = {};
+    try {
+      settings = JSON.parse(await fs.readFile(runtimeSettingsFile, "utf-8")) as Record<string, unknown>;
+    } catch {
+      // Missing or corrupt — start fresh
+    }
+    const sec = (settings.security ?? {}) as Record<string, unknown>;
+    const secAuth = (sec.auth ?? {}) as Record<string, unknown>;
+    secAuth.selectedType = "oauth-personal";
+    sec.auth = secAuth;
+    settings.security = sec;
+    const billing = (settings.billing ?? {}) as Record<string, unknown>;
+    billing.overageStrategy = "never";
+    settings.billing = billing;
+    await fs.writeFile(runtimeSettingsFile, JSON.stringify(settings, null, 2), "utf-8");
 
     // Load system prompt: prefer role-specific agent file, fall back to global GEMINI.md
     try {
@@ -761,13 +803,23 @@ async function runGeminiProcess(
 ): Promise<GeminiProcessResult> {
   return new Promise((resolve) => {
     const args = ["-m", model, "-y", ...(outputFormat ? ["-o", outputFormat] : []), "-p", prompt];
+    const childEnv: Record<string, string | undefined> = {
+      ...process.env,
+      HOME: runtimeHome,
+      // Skip keychain probe — daemon has no login keychain, causes macOS notifications
+      GEMINI_FORCE_FILE_STORAGE: "true",
+    };
+    // Remove all API key env vars to force OAuth auth via runtime home credentials
+    for (const key of Object.keys(childEnv)) {
+      if (/^(GEMINI_API_KEY|GOOGLE_API_KEY|GOOGLE_GENERATIVE_AI_API_KEY|GEMINI_CLI_OAUTH_CLIENT)/i.test(key)) {
+        delete childEnv[key];
+      }
+    }
+
     const child = spawn("gemini", args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd,
-      env: {
-        ...process.env,
-        HOME: runtimeHome,
-      },
+      env: childEnv,
     });
 
     let stdout = "";
@@ -971,6 +1023,7 @@ export async function executeGeminiCLIDirect(
           const cleanedOutput = sanitizeGeminiOutput(run.stdout);
           const cleanedErr = sanitizeGeminiOutput(run.stderr);
           const duration = Date.now() - startTime;
+          const attemptDuration = Date.now() - attemptStart;
 
           if (run.aborted) {
             return {
@@ -984,7 +1037,7 @@ export async function executeGeminiCLIDirect(
             };
           }
 
-          const failureKind = detectFailureKind(run, cleanedOutput, cleanedErr);
+          const failureKind = detectFailureKind(run, cleanedOutput, cleanedErr, attemptDuration);
           if (!failureKind) {
             manager.recordSuccess(email, Date.now());
             await manager.persistRefreshedCreds(email, runtimeHome);
@@ -1003,7 +1056,8 @@ export async function executeGeminiCLIDirect(
             };
           }
 
-          const errorSnippet = (cleanedErr || cleanedOutput || run.spawnError || "").slice(0, 400);
+          const filteredErr = sanitizeFailureReason(cleanedErr);
+          const errorSnippet = (filteredErr || cleanedOutput || run.spawnError || "").slice(0, 400);
           manager.recordFailure(email, failureKind, Date.now(), errorSnippet);
 
           const retryable = failureKind === "rate_limit" || failureKind === "auth" || failureKind === "runtime";
