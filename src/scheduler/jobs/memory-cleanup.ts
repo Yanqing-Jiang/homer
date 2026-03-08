@@ -11,11 +11,12 @@
  * Safety: backup before write, 10% sanity floor (catches API errors), per-file isolation.
  */
 
-import { readFile, writeFile } from "fs/promises";
+import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
 import { logger } from "../../utils/logger.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
+import { getCanonicalMemoryService } from "../../memory/canonical-service.js";
 import { buildSchedulerContext } from "../shared-context.js";
 import { StateManager } from "../../state/manager.js";
 import { PATHS } from "../../config/paths.js";
@@ -308,8 +309,9 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
         continue;
       }
 
-      // 5. Write cleaned file
-      await writeFile(file.path, cleaned + "\n", "utf-8");
+      // 5. Write cleaned file via CanonicalMemoryService
+      const canonicalMemory = getCanonicalMemoryService(sm, getMemoryIndexer());
+      await canonicalMemory.writeCleanedFile(file.path, cleaned + "\n", "memory-cleanup");
 
       const pctChange = Math.round((1 - cleanedLines / originalLines) * 100);
       logger.info(
@@ -338,14 +340,8 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
     }
   }
 
-  // Reindex all memory files after cleanup
-  try {
-    const indexer = getMemoryIndexer();
-    await indexer.indexAllMemoryFiles();
-    logger.info("Memory files reindexed after cleanup");
-  } catch (indexErr) {
-    logger.warn({ error: indexErr }, "Failed to reindex memory files after cleanup");
-  }
+  // Dirty flags for reindex/embeddings/context_bridge/git_commit are set by
+  // canonicalMemory.writeCleanedFile() — no inline reindex needed.
 
   // Build summary output
   const successCount = results.filter((r) => r.success).length;

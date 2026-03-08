@@ -7,15 +7,23 @@ import { execSync } from "child_process";
 import { existsSync } from "fs";
 import { logger } from "../../utils/logger.js";
 import { PATHS } from "../../config/paths.js";
+import type { StateManager } from "../../state/manager.js";
 
 const MEMORY_DIR = PATHS.memory;
 
-export async function runMemoryGitCommit(): Promise<{
+export async function runMemoryGitCommit(stateManager?: StateManager): Promise<{
   success: boolean;
   output: string;
   error?: string;
 }> {
   try {
+    // Skip if not dirty (when stateManager available)
+    if (stateManager && !stateManager.isPipelineDirty("git_commit")) {
+      const output = "Git commit skipped — not dirty";
+      logger.info(output);
+      return { success: true, output };
+    }
+
     // Initialize git if needed
     if (!existsSync(`${MEMORY_DIR}/.git`)) {
       execSync("git init", { cwd: MEMORY_DIR, timeout: 10_000 });
@@ -30,7 +38,7 @@ export async function runMemoryGitCommit(): Promise<{
       logger.info("Initialized git repo in ~/memory/");
     }
 
-    // Check for changes
+    // Check for changes (secondary guard — still useful even with dirty flag)
     const status = execSync("git status --porcelain", {
       cwd: MEMORY_DIR,
       encoding: "utf-8",
@@ -38,6 +46,10 @@ export async function runMemoryGitCommit(): Promise<{
     }).trim();
 
     if (!status) {
+      // No actual changes — clear dirty flag
+      if (stateManager) {
+        stateManager.clearPipelineDirty("git_commit");
+      }
       return { success: true, output: "No memory changes to commit" };
     }
 
@@ -53,6 +65,11 @@ export async function runMemoryGitCommit(): Promise<{
 
     execSync("git add -A", { cwd: MEMORY_DIR, timeout: 10_000 });
     execSync(`git commit -m "${commitMsg}"`, { cwd: MEMORY_DIR, timeout: 30_000 });
+
+    // Clear dirty flag
+    if (stateManager) {
+      stateManager.clearPipelineDirty("git_commit");
+    }
 
     const output = `Committed: ${commitMsg}`;
     logger.info({ added, modified, deleted }, "Memory git commit complete");

@@ -2,7 +2,7 @@
  * Memory tools: search, hybrid_search, generate_embeddings, append, promote, read, reindex, suggestions, context
  */
 
-import { readFile, appendFile } from "fs/promises";
+import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { PATHS } from "../../config/paths.js";
 import { logger } from "../../utils/logger.js";
@@ -305,25 +305,16 @@ export async function handle(
       const { content, context } = args as { content: string; context?: "work" | "life" | "general" };
       const time = new Date().toTimeString().slice(0, 5);
       const title = `[${context || "general"}] ${content.slice(0, 80)}`;
-      const sm = deps.getSharedStateManager();
-      sm.insertDaemonEvent(title, content, context || "general");
+      deps.canonicalMemory.insertSessionEvent(title, content, context || "general");
       return { content: [{ type: "text", text: `Appended to session_summaries at ${time}` }] };
     }
 
     case "memory_promote": {
       const { content, file, section } = args as { content: string; file: "me" | "work" | "life" | "preferences" | "tools"; section?: string };
-      const promoteSm = deps.getSharedStateManager();
-      if (promoteSm.checkFactExists(content, file)) {
+      const promoted = await deps.canonicalMemory.promoteToFile(content, file, section ?? null, "mcp");
+      if (!promoted) {
         return { content: [{ type: "text", text: `Skipped — duplicate (already promoted to ${file}.md)` }] };
       }
-      const filePath = `${MEMORY_BASE}/${file}.md`;
-      let toAppend = "\n";
-      if (section) toAppend += `## ${section}\n`;
-      toAppend += `${content}\n`;
-      await appendFile(filePath, toAppend, "utf-8");
-      promoteSm.recordPromotedFact(content, file, section ?? null, "mcp");
-      promoteSm.markContextBridgeDirty("memory_promote");
-      await deps.indexer.indexFile(filePath, file === "work" ? "work" : file === "life" ? "life" : "general");
       return { content: [{ type: "text", text: `Promoted to ${file}.md${section ? ` under "${section}"` : ""}` }] };
     }
 

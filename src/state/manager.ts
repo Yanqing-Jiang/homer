@@ -51,6 +51,8 @@ export class StateManager {
   private init(): void {
     // Prevent SQLITE_BUSY when daemon and MCP server write concurrently
     this._db.pragma("busy_timeout = 5000");
+    // WAL mode for better concurrent read/write performance
+    this._db.pragma("journal_mode = WAL");
     // Enable foreign key enforcement (SQLite defaults to OFF per-connection)
     this._db.pragma("foreign_keys = ON");
 
@@ -337,6 +339,32 @@ export class StateManager {
 
   markContextBridgeDirty(triggerSource: string): void {
     markContextBridgeDirtyInDb(this._db, triggerSource);
+  }
+
+  // ── Pipeline dirty-flag methods ────────────────────────────
+
+  markPipelineDirty(pipeline: string, source: string): void {
+    this._db.prepare(`
+      INSERT INTO pipeline_dirty (pipeline, is_dirty, last_trigger, marked_at)
+      VALUES (?, 1, ?, datetime('now'))
+      ON CONFLICT(pipeline) DO UPDATE SET
+        is_dirty = 1,
+        last_trigger = excluded.last_trigger,
+        marked_at = excluded.marked_at
+    `).run(pipeline, source);
+  }
+
+  isPipelineDirty(pipeline: string): boolean {
+    const row = this._db.prepare(
+      "SELECT is_dirty FROM pipeline_dirty WHERE pipeline = ?"
+    ).get(pipeline) as { is_dirty: number } | undefined;
+    return row?.is_dirty === 1;
+  }
+
+  clearPipelineDirty(pipeline: string): void {
+    this._db.prepare(
+      "UPDATE pipeline_dirty SET is_dirty = 0, cleared_at = datetime('now') WHERE pipeline = ?"
+    ).run(pipeline);
   }
 
   recordContextBridgeStart(triggerSource: string, startedAt?: string): void {
