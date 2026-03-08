@@ -11,8 +11,6 @@
 import { readFileSync, existsSync } from "fs";
 import { z } from "zod";
 import type Database from "better-sqlite3";
-import { executeClaudeCommand } from "../../executors/claude.js";
-import { RESEARCH_ONLY_PREFIX } from "../../executors/opencode-cli.js";
 import { executeGeminiCLIDirect, GEMINI_CLI_PRO_MODEL } from "../../executors/gemini-cli.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import * as ideaDao from "../../ideas/dao.js";
@@ -66,7 +64,7 @@ export async function runIdeasExplore(db?: Database.Database): Promise<{
       extractActiveProjects(),
     ]);
 
-    // Single Sonnet agent — GitHub trending discovery
+    // Single Gemini Flash agent — GitHub trending discovery
     const discoveryPrompt = `You are a GitHub trending discovery agent.
 
 Search GitHub trending repositories from the last 7 days that match Yanqing's interests.
@@ -99,9 +97,7 @@ Return ONLY a JSON array (no markdown, no commentary):
 
 If nothing relevant, return: []`;
 
-    const flashResult = await executeClaudeCommand(RESEARCH_ONLY_PREFIX + discoveryPrompt, {
-      cwd: process.env.HOME ?? "/Users/yj",
-      model: "sonnet",
+    const flashResult = await executeGeminiCLIDirect(discoveryPrompt, {
       timeout: 180_000,
     });
 

@@ -285,24 +285,56 @@ Rules:
 function parseDecision(output: string): TakeoverDecision | null {
   const fenced = output.match(/```json\n?([\s\S]*?)\n?```/);
   const jsonText = fenced?.[1] ?? output.match(/\{[\s\S]*\}/)?.[0];
-  if (!jsonText) return null;
 
-  try {
-    const parsed = JSON.parse(jsonText);
-    const action = parsed.action as TakeoverDecision["action"];
-    if (!action || !["retry", "fix_and_retry", "report"].includes(action)) return null;
-
-    return {
-      action,
-      diagnosis: typeof parsed.diagnosis === "string" ? parsed.diagnosis : "Unknown",
-      fixDescription: typeof parsed.fixDescription === "string" ? parsed.fixDescription : undefined,
-      retryModifications: typeof parsed.retryModifications === "string" ? parsed.retryModifications : undefined,
-      reportMessage: typeof parsed.reportMessage === "string" ? parsed.reportMessage : undefined,
-      confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.5,
-    };
-  } catch {
-    return null;
+  if (jsonText) {
+    try {
+      const parsed = JSON.parse(jsonText);
+      const action = parsed.action as TakeoverDecision["action"];
+      if (action && ["retry", "fix_and_retry", "report"].includes(action)) {
+        return {
+          action,
+          diagnosis: typeof parsed.diagnosis === "string" ? parsed.diagnosis : "Unknown",
+          fixDescription: typeof parsed.fixDescription === "string" ? parsed.fixDescription : undefined,
+          retryModifications: typeof parsed.retryModifications === "string" ? parsed.retryModifications : undefined,
+          reportMessage: typeof parsed.reportMessage === "string" ? parsed.reportMessage : undefined,
+          confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.5,
+        };
+      }
+    } catch {
+      // Fall through to text-based extraction
+    }
   }
+
+  // Fallback: extract intent from plain text when LLM didn't return structured JSON
+  return parseDecisionFromText(output);
+}
+
+function parseDecisionFromText(output: string): TakeoverDecision | null {
+  const lower = output.toLowerCase();
+  if (!lower || lower.length < 10) return null;
+
+  // Detect action from keywords
+  let action: TakeoverDecision["action"];
+  if (/\b(fix(?:ed)?(?:\s+and)?\s+retr|edited|patched|modified the)\b/.test(lower)) {
+    action = "fix_and_retry";
+  } else if (/\b(retr(?:y|ied)|re-run|rerun|cleared.*is_running|recommend(?:ed)?\s+retry)\b/.test(lower)) {
+    action = "retry";
+  } else if (/\b(report|unfixable|systemic|manual|cannot|give up)\b/.test(lower)) {
+    action = "report";
+  } else {
+    return null; // Can't determine intent
+  }
+
+  // Extract confidence if mentioned
+  const confMatch = lower.match(/confidence[:\s]+(\d+(?:\.\d+)?)/);
+  const confidence = confMatch?.[1] ? Math.min(parseFloat(confMatch[1]), 1.0) : 0.5;
+
+  // Use the full output as diagnosis (truncated)
+  const diagnosis = output.length > 300 ? output.slice(0, 297) + "..." : output;
+
+  logger.info({ action, confidence }, "Parsed takeover decision from plain text (JSON fallback)");
+
+  return { action, diagnosis, confidence };
 }
 
 // ============================================

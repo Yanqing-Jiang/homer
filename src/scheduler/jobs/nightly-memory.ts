@@ -1,8 +1,8 @@
 /**
- * Nightly Memory Processing — Gemini Flash fact extraction
+ * Nightly Memory Processing — Gemini Flash CLI fact extraction
  *
  * Reads unprocessed session_summaries from SQLite, extracts promotable facts
- * via Gemini Flash API (free, pre-summarized input), writes to permanent memory.
+ * via Gemini Flash CLI (free, pre-summarized input), writes to permanent memory.
  *
  * Replaces the Opus-based pipeline — input is already summarized by session-harvester,
  * so a free model is sufficient for fact extraction.
@@ -11,7 +11,7 @@
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "fs";
 import { z } from "zod";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
-import { executeClaudeCommand } from "../../executors/claude.js";
+import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
 import { buildCondensedContext, extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
 import { getRecentJobOutputs } from "../job-outputs.js";
 import { logger } from "../../utils/logger.js";
@@ -255,20 +255,17 @@ If nothing to promote, use an empty array.`;
       promptLength: unifiedPrompt.length,
       date: yesterday,
       sessionCount: sessions.length,
-    }, "Running nightly memory via Claude Sonnet");
+    }, "Running nightly memory via Gemini Flash");
 
-    // Use Claude Sonnet for high-stakes memory promotion decisions
-    const result = await executeClaudeCommand(
+    const result = await executeGeminiCLIDirect(
       unifiedPrompt + "\n\nReturn ONLY valid JSON, no markdown fences.",
       {
-        cwd: process.env.HOME ?? "/Users/yj",
-        model: "sonnet",
         timeout: 300_000,
       },
     );
 
     if (result.exitCode !== 0 || !result.output) {
-      return { success: false, output: "", error: `Claude Sonnet error: ${(result.output ?? "").slice(0, 200)}` };
+      return { success: false, output: "", error: `Gemini Flash error: ${(result.output ?? "").slice(0, 200)}` };
     }
 
     // Valid empty responses (e.g. [] or {"promotions":[]}) are not errors

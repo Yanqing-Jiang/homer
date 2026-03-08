@@ -1,9 +1,8 @@
 /**
  * HOMER Improvements — Dual-model codebase analysis + executable plan generation.
  *
- * Runs Gemini 3.1 Pro (gemini CLI) + Codex (gpt-5.4 xhigh) in parallel.
- * Each writes a .md analysis file to ~/homer/output/{gemini,codex}/.
- * Gemini 3.1 Pro consolidates both into a single improvement idea.
+ * Runs Codex (gpt-5.4) for codebase analysis, writes a .md file to ~/homer/output/codex/.
+ * Gemini 3.1 Pro API parses the analysis into a structured improvement idea.
  *
  * Prompt priority: critical issues/fixes → impactful optimizations → Yanqing's goals.
  * Archived ideas (feedback.md) are injected to avoid repeat suggestions.
@@ -14,7 +13,6 @@ import { readFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { execSync } from "child_process";
 import { z } from "zod";
-import { executeClaudeCommand } from "../../executors/claude.js";
 import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { executeGeminiAPI } from "../../executors/gemini.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
@@ -27,7 +25,6 @@ import { storeJobArtifact } from "./artifact-store.js";
 import { PATHS } from "../../config/paths.js";
 
 const HOMER_DIR = "/Users/yj/homer";
-const GEMINI_OUTPUT_DIR = "/Users/yj/homer/output/gemini";
 const CODEX_OUTPUT_DIR = "/Users/yj/homer/output/codex";
 const MAX_SOURCE_CHARS = 80_000;
 
@@ -246,69 +243,40 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
       schedulerContext = "Context unavailable";
     }
 
-    // Timestamped output file paths — include seconds to avoid stale-file race if job reruns
+    // Timestamped output file path
     const ts = new Date().toISOString().slice(0, 19).replace("T", "-").replace(/:/g, "");
-    const geminiOutputPath = `${GEMINI_OUTPUT_DIR}/homer-improvements-${ts}.md`;
     const codexOutputPath = `${CODEX_OUTPUT_DIR}/homer-improvements-${ts}.md`;
 
-    mkdirSync(GEMINI_OUTPUT_DIR, { recursive: true });
     mkdirSync(CODEX_OUTPUT_DIR, { recursive: true });
 
-    const sharedParams = {
+    const codexPrompt = buildSharedPrompt({
       buildHealth, recentFailures, sourceContext, fileListing,
       schedulerContext, existingTitles, archivedTitles,
-    };
-
-    const geminiPrompt = buildSharedPrompt({
-      ...sharedParams,
-      outputPath: geminiOutputPath,
-      agentLabel: "Sonnet (architectural analysis)",
-    });
-
-    const codexPrompt = buildSharedPrompt({
-      ...sharedParams,
       outputPath: codexOutputPath,
-      agentLabel: "Codex (deep code analysis)",
+      agentLabel: "Codex (codebase analysis)",
     });
 
-    logger.info("Running homer-improvements: Sonnet (Claude Code) + Codex in parallel");
+    logger.info("Running homer-improvements: Codex (gpt-5.4)");
 
-    // Fan-out: run both agents in parallel
-    const [geminiResult, codexResult] = await Promise.allSettled([
-      executeClaudeCommand(geminiPrompt, {
-        cwd: HOMER_DIR,
-        model: "sonnet",
-        timeout: 900_000, // 15 min
-      }),
-      executeCodexCLI(codexPrompt, {
-        cwd: HOMER_DIR,
-        model: "gpt-5.4",
-        reasoningEffort: "high",
-        timeout: 1_200_000, // 20 min
-      }),
-    ]);
+    const codexResult = await executeCodexCLI(codexPrompt, {
+      cwd: HOMER_DIR,
+      model: "gpt-5.4",
+      reasoningEffort: "high",
+      timeout: 1_200_000, // 20 min
+    });
 
-    // Read whichever .md files were actually written
+    // Read the output file
     const outputs: Array<{ agent: string; content: string }> = [];
-
-    if (existsSync(geminiOutputPath)) {
-      outputs.push({ agent: "Sonnet", content: readFileSync(geminiOutputPath, "utf-8") });
-      logger.info({ path: geminiOutputPath }, "Gemini output written");
-    } else {
-      const err = geminiResult.status === "rejected" ? geminiResult.reason : "file not written";
-      logger.warn({ error: String(err) }, "Gemini 3.1 Pro did not produce output file");
-    }
 
     if (existsSync(codexOutputPath)) {
       outputs.push({ agent: "Codex", content: readFileSync(codexOutputPath, "utf-8") });
       logger.info({ path: codexOutputPath }, "Codex output written");
     } else {
-      const err = codexResult.status === "rejected" ? codexResult.reason : "file not written";
-      logger.warn({ error: String(err) }, "Codex did not produce output file");
+      logger.warn({ exitCode: codexResult.exitCode }, "Codex did not produce output file");
     }
 
     if (outputs.length === 0) {
-      return { success: false, output: "", error: "Both agents failed to produce output files" };
+      return { success: false, output: "", error: "Codex failed to produce output file" };
     }
 
     // Consolidate via Gemini 3.1 Pro API
@@ -421,7 +389,7 @@ ${improvement.files_affected.map(f => `- \`${f}\``).join("\n")}
       status: "draft",
       source: "homer-analysis",
       content: improvement.description,
-      context: `${improvement.implementation_plan}\n\nRisk: ${improvement.risk_score}/10 — ${improvement.risk_explanation}\n\nAnalysis files:\n- ${geminiOutputPath}\n- ${codexOutputPath}`,
+      context: `${improvement.implementation_plan}\n\nRisk: ${improvement.risk_score}/10 — ${improvement.risk_explanation}\n\nAnalysis file: ${codexOutputPath}`,
       tags: ["homer-improvement", `risk-${improvement.risk_score}`],
       timestamp,
     };
