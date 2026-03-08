@@ -1,10 +1,9 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { existsSync } from "fs";
+import { getRuntimePaths } from "./runtime-paths.js";
 
 const execFileAsync = promisify(execFile);
-
-const DEFAULT_CLAUDE_PATH = "/Users/yj/.local/bin/claude";
 
 export interface ClaudeAuthStatus {
   claudePath: string;
@@ -14,13 +13,14 @@ export interface ClaudeAuthStatus {
 }
 
 export async function getClaudeAuthStatus(): Promise<ClaudeAuthStatus> {
-  const claudePath = process.env.CLAUDE_PATH ?? DEFAULT_CLAUDE_PATH;
+  const runtimePaths = getRuntimePaths();
+  const claudePath = runtimePaths.claudeBinaryPath;
   const claudeBinaryExists = existsSync(claudePath);
 
   // Check for Claude Code keychain item (no secret output)
   let keychainItemFound = false;
   let keychainCheckError: string | undefined;
-  const homeDir = process.env.HOME ?? "/Users/yj";
+  const homeDir = runtimePaths.homeDir;
   const loginKeychain = `${homeDir}/Library/Keychains/login.keychain-db`;
 
   const attempts: string[][] = [

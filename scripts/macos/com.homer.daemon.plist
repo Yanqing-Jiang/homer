@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.homer.daemon</string>
+
+  <key>BundleProgram</key>
+  <string>Contents/MacOS/Homer</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>Homer</string>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/yj/homer/dist/index.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/yj/homer</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NODE_ENV</key>
+    <string>production</string>
+    <key>HOME</key>
+    <string>/Users/yj</string>
+    <key>HOMER_HOME</key>
+    <string>/Users/yj</string>
+    <key>HOMER_ROOT</key>
+    <string>/Users/yj/homer</string>
+    <key>HOMER_DATA_PATH</key>
+    <string>/Users/yj/homer/data</string>
+    <key>DATABASE_PATH</key>
+    <string>/Users/yj/homer/data/homer.db</string>
+    <key>LOGS_PATH</key>
+    <string>/Users/yj/homer/logs</string>
+    <key>MEMORY_PATH</key>
+    <string>/Users/yj/memory</string>
+    <key>CLAUDE_DIR</key>
+    <string>/Users/yj/.claude</string>
+    <key>BROWSER_PROFILES_PATH</key>
+    <string>/Users/yj/homer/profiles</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/yj/.local/bin</string>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+    <key>LC_ALL</key>
+    <string>en_US.UTF-8</string>
+    <key>HOMER_LOG_DIR</key>
+    <string>/Users/yj/Library/Logs/homer</string>
+  </dict>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+    <key>NetworkState</key>
+    <true/>
+  </dict>
+
+  <key>ExitTimeOut</key>
+  <integer>360</integer>
+
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>/Users/yj/homer/logs/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/yj/homer/logs/stderr.log</string>
+</dict>
+</plist>

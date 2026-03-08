@@ -15,13 +15,14 @@ import { join } from "path";
 import { processRegistry } from "./registry.js";
 import { logger } from "../utils/logger.js";
 import type Database from "better-sqlite3";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 const INVESTIGATION_TIMEOUT_MS = 5 * 60 * 1000; // 5 min per executor
 const MAX_PER_HOUR = 2;
 const KILL_GRACE_MS = 5_000;
-const LOGS_DIR = join(process.env.HOME || "/Users/yj", "homer/logs/investigations");
-
-const CLAUDE_PATH = process.env.CLAUDE_PATH ?? "/Users/yj/.local/bin/claude";
+const runtimePaths = getRuntimePaths();
+const LOGS_DIR = join(runtimePaths.homerLogsDir, "investigations");
+const CLAUDE_PATH = runtimePaths.claudeBinaryPath;
 
 interface InvestigationContext {
   trigger: string;
@@ -168,12 +169,13 @@ function runExecutor(
     let settled = false;
 
     const proc = spawn(command, args, {
-      cwd: process.env.HOME || "/Users/yj",
+      cwd: runtimePaths.homeDir,
       stdio: ["pipe", "pipe", "pipe"],
       env: {
         ...process.env,
         CI: "1",
         NO_COLOR: "1",
+        HOME: runtimePaths.homeDir,
       },
     });
 

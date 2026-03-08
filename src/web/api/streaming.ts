@@ -8,8 +8,10 @@ import { processRegistry } from "../../process/registry.js";
 import { getUploadContent } from "./uploads.js";
 import { processResponse } from "../../utils/response-processor.js";
 import { webLane } from "../../utils/lanes.js";
+import { getRuntimePaths } from "../../utils/runtime-paths.js";
 
-const CLAUDE_PATH = process.env.CLAUDE_PATH ?? "/Users/yj/.local/bin/claude";
+const runtimePaths = getRuntimePaths();
+const CLAUDE_PATH = runtimePaths.claudeBinaryPath;
 const DEFAULT_TIMEOUT = 1200_000; // 20 minutes
 const HEARTBEAT_INTERVAL = 30_000; // 30 seconds
 const LOCK_TTL_MS = 22 * 60 * 1000; // 22 minutes (slightly above Claude timeout)
@@ -304,10 +306,11 @@ export function registerStreamingRoutes(
           TERM: "dumb",
           NO_COLOR: "1",
           PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
+          HOME: runtimePaths.homeDir,
         };
 
         // Load OAuth token
-        const tokenFile = `${process.env.HOME ?? "/Users/yj"}/.homer-claude-token`;
+        const tokenFile = runtimePaths.claudeTokenFile;
         if (!env.CLAUDE_CODE_OAUTH_TOKEN && existsSync(tokenFile)) {
           try {
             const token = readFileSync(tokenFile, "utf-8").trim();
@@ -324,7 +327,7 @@ export function registerStreamingRoutes(
 
         // Spawn Claude CLI
         proc = spawn(CLAUDE_PATH, args, {
-          cwd: process.env.HOME ?? "/Users/yj",
+          cwd: runtimePaths.homeDir,
           env,
           stdio: ["pipe", "pipe", "pipe"],
           detached: true,
