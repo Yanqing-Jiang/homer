@@ -6,6 +6,7 @@
  */
 
 import type Database from "better-sqlite3";
+import { markContextBridgeDirty } from "../state/context-bridge-state.js";
 import { logger } from "../utils/logger.js";
 
 function insertOutcomeCheck(
@@ -17,10 +18,13 @@ function insertOutcomeCheck(
 ): void {
   const id = `oc_${sourceType}_${Date.now()}`;
   try {
-    db.prepare(`
+    const result = db.prepare(`
       INSERT OR IGNORE INTO outcome_checks (id, source_type, source_id, source_title, check_at)
       VALUES (?, ?, ?, ?, datetime('now', ?))
     `).run(id, sourceType, sourceId, sourceTitle, `+${daysOut} days`);
+    if (result.changes > 0) {
+      markContextBridgeDirty(db, `outcome_${sourceType}`);
+    }
     logger.debug({ id, sourceType, sourceTitle, daysOut }, "Created outcome check");
   } catch (err) {
     // Table may not exist yet — gracefully degrade
