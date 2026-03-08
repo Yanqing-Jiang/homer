@@ -484,7 +484,8 @@ export async function runContextBridge(
     ownSm = !stateManager;
 
     const state = sm.getContextBridgeState();
-    if (!options.forceRefresh && PERIODIC_TRIGGER_SOURCES.has(triggerSource) && state.dirty === 0) {
+    const pipelineDirty = sm.isPipelineDirty("context_bridge");
+    if (!options.forceRefresh && PERIODIC_TRIGGER_SOURCES.has(triggerSource) && state.dirty === 0 && !pipelineDirty) {
       return {
         success: true,
         output: `Context bridge skipped (${triggerSource}) — state clean`,
@@ -544,6 +545,9 @@ export async function runContextBridge(
       dirty: false,
       method,
     });
+
+    // Clear pipeline dirty flag
+    sm.clearPipelineDirty("context_bridge");
 
     logger.info({ targets: results, method, triggerSource }, "Context bridge refreshed");
 

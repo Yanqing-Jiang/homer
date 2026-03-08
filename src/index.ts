@@ -164,6 +164,11 @@ async function main(): Promise<void> {
 
   // Reminder checker cron is now in scheduler as "reminder-check"
 
+  // Initialize canonical memory service with file watcher
+  const { getCanonicalMemoryService } = await import("./memory/canonical-service.js");
+  const canonicalMemory = getCanonicalMemoryService(stateManager, getMemoryIndexer());
+  canonicalMemory.startFileWatcher();
+
   // Initialize scheduler
   const scheduler = new Scheduler(bot, config.telegram.allowedChatId, stateManager);
   setScheduler(scheduler);
