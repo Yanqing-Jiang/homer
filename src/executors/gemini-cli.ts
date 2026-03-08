@@ -23,11 +23,13 @@ import path from "path";
 import { config } from "../config/index.js";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 export const GEMINI_CLI_FLASH_MODEL = "gemini-3-flash-preview";
 export const GEMINI_CLI_PRO_MODEL = "gemini-3.1-pro-preview";
 
-const HOME = process.env.HOME || "";
+const runtimePaths = getRuntimePaths();
+const HOME = runtimePaths.homeDir;
 const GEMINI_CREDS_DIR = path.join(HOME, "homer/config/auth/gemini-creds");
 const GEMINI_RUNTIME_HOMES_DIR = path.join(
   HOME,

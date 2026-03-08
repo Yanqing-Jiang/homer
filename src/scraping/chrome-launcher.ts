@@ -10,12 +10,14 @@ import { cpSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { logger } from "../utils/logger.js";
 import { processRegistry } from "../process/registry.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 const CDP_PORT = 9222;
 const CDP_POLL_INTERVAL_MS = 1_000;
 const CDP_POLL_MAX_MS = 15_000;
 const CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const PROFILE_SOURCE = join(process.env.HOME ?? "/Users/yj", "Library/Application Support/Google/Chrome");
+const runtimePaths = getRuntimePaths();
+const PROFILE_SOURCE = runtimePaths.chromeProfileRoot;
 
 export interface CDPHandle {
   /** PID of launched Chrome process (0 if reusing existing) */
