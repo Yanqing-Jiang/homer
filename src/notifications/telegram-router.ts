@@ -66,6 +66,126 @@ function normalizeMessage(message: string): string {
   return `${message.slice(0, MAX_OUTPUT_LENGTH - 20)}\n\n(truncated)`;
 }
 
+const PRESERVED_TAGS = [
+  "b",
+  "strong",
+  "i",
+  "em",
+  "u",
+  "ins",
+  "s",
+  "strike",
+  "del",
+  "code",
+  "pre",
+  "blockquote",
+  "a",
+];
+
+function preserveTelegramHtmlTags(input: string): {
+  text: string;
+  placeholders: Map<string, string>;
+} {
+  const placeholders = new Map<string, string>();
+  let placeholderIndex = 0;
+  const pattern = new RegExp(
+    `<\\/?(?:${PRESERVED_TAGS.join("|")})(?:\\s+href="[^"]*")?>`,
+    "gi",
+  );
+
+  const text = input.replace(pattern, (match) => {
+    const key = `@@TGHTML${placeholderIndex++}@@`;
+    placeholders.set(key, match);
+    return key;
+  });
+
+  return { text, placeholders };
+}
+
+function restoreTelegramHtmlTags(input: string, placeholders: Map<string, string>): string {
+  let restored = input;
+  for (const [key, value] of placeholders.entries()) {
+    restored = restored.replaceAll(key, value);
+  }
+  return restored;
+}
+
+function escapeHtmlText(input: string): string {
+  return input
+    .replace(/&(?!#?\w+;)/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function convertMarkdownLinks(input: string): string {
+  return input.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_match, label: string, url: string) => {
+    const safeLabel = escapeHtmlText(label.trim());
+    const safeUrl = escapeHtmlText(url.trim());
+    return `<a href="${safeUrl}">${safeLabel}</a>`;
+  });
+}
+
+function convertFencedCodeBlocks(input: string): string {
+  return input.replace(/```(?:[^\n`]*)\n?([\s\S]*?)```/g, (_match, code: string) => {
+    const trimmed = code.trim();
+    if (!trimmed) {
+      return "";
+    }
+    return `<pre>${escapeHtmlText(trimmed)}</pre>`;
+  });
+}
+
+function convertInlineMarkdown(input: string): string {
+  return input
+    .replace(/`([^`\n]+)`/g, (_match, text: string) => `<code>${escapeHtmlText(text)}</code>`)
+    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+    .replace(/__([^_\n]+)__/g, "<b>$1</b>")
+    .replace(/(^|\W)\*([^*\n]+)\*(?=\W|$)/g, (_match, prefix: string, text: string) => `${prefix}<i>${text}</i>`)
+    .replace(/(^|\W)_([^_\n]+)_(?=\W|$)/g, (_match, prefix: string, text: string) => `${prefix}<i>${text}</i>`);
+}
+
+function convertMarkdownStructure(input: string): string {
+  const lines = input.split("\n");
+  return lines.map((line) => {
+    if (/^\s*#{1,6}\s+/.test(line)) {
+      return line.replace(/^\s*#{1,6}\s+/, "<b>") + "</b>";
+    }
+    if (/^\s*[-*]\s+/.test(line)) {
+      return line.replace(/^\s*[-*]\s+/, "• ");
+    }
+    if (/^\s*\d+\.\s+/.test(line)) {
+      return line.replace(/^\s*(\d+\.)\s+/, "$1 ");
+    }
+    return line;
+  }).join("\n");
+}
+
+export function formatScheduledTelegramHtml(message: string): string {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const normalized = trimmed.replace(/\r\n/g, "\n");
+  const { text: protectedText, placeholders } = preserveTelegramHtmlTags(normalized);
+  const withLinks = convertMarkdownLinks(protectedText);
+  const withCodeBlocks = convertFencedCodeBlocks(withLinks);
+  const structured = convertMarkdownStructure(withCodeBlocks);
+  const inlineFormatted = convertInlineMarkdown(structured);
+  const escaped = escapeHtmlText(inlineFormatted);
+  const restored = restoreTelegramHtmlTags(escaped, placeholders)
+    .replace(/&lt;(\/?(?:b|strong|i|em|u|ins|s|strike|del|code|pre|blockquote))&gt;/gi, "<$1>")
+    .replace(/&lt;a href=(?:"([^"]*)"|&quot;([^"]*)&quot;)&gt;/gi, (_match, plainHref: string, escapedHref: string) => {
+      const href = plainHref || escapedHref;
+      return `<a href="${href}">`;
+    })
+    .replace(/&lt;\/a&gt;/gi, "</a>");
+
+  return restored
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function stripHtmlTags(message: string): string {
   return message.replace(/<[^>]*>/g, "");
 }

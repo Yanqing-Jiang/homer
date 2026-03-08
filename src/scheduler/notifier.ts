@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { Bot } from "grammy";
 import { logger } from "../utils/logger.js";
 import {
+  formatScheduledTelegramHtml,
   routeTelegramNotification,
   sendChunkedTelegramMessage,
 } from "../notifications/telegram-router.js";
@@ -35,9 +36,10 @@ export async function notifyJobResult(
     : job.config.notifyOnFailure !== false;
 
   const intent = result.notificationIntent ?? (isSuccess ? "user_info" : "failure_alert");
-  const message = isSuccess
+  const rawMessage = isSuccess
     ? result.output
     : `❌ <b>${escapeHtml(job.config.name)}</b> failed\n\n${escapeHtml(result.error || "Unknown error")}`;
+  const message = formatScheduledTelegramHtml(rawMessage);
 
   if (!shouldNotify) {
     logger.debug(

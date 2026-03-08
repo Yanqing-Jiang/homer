@@ -7,7 +7,10 @@ import type Database from "better-sqlite3";
 import type { Bot } from "grammy";
 import { InlineKeyboard } from "grammy";
 import { geminiUrl } from "../../job-hunt/config.js";
-import { routeTelegramNotification } from "../../notifications/telegram-router.js";
+import {
+  formatScheduledTelegramHtml,
+  routeTelegramNotification,
+} from "../../notifications/telegram-router.js";
 import { logger } from "../../utils/logger.js";
 
 interface FollowUpCandidate {
@@ -105,6 +108,7 @@ export async function runJobHuntFollowup(
               ``,
               `<blockquote>${escapeHtml(draft.slice(0, 400))}</blockquote>`,
             ].join("\n");
+            const formattedMessage = formatScheduledTelegramHtml(msg);
 
             const keyboard = new InlineKeyboard()
               .text("Send", `a:fu:${draftId}:send`)
@@ -117,12 +121,12 @@ export async function runJobHuntFollowup(
               sourceId: `followup_draft:${draftId}`,
               intent: "decision_request",
               title: `${candidate.company} — ${candidate.title}`,
-              messageText: msg,
+              messageText: formattedMessage,
               metadata: {
                 applicationId: candidate.app_id,
                 jobId: candidate.job_id,
               },
-              deliver: async () => bot.api.sendMessage(chatId, msg, {
+              deliver: async () => bot.api.sendMessage(chatId, formattedMessage, {
                 parse_mode: "HTML",
                 reply_markup: keyboard,
               }),

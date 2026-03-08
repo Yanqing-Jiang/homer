@@ -12,6 +12,7 @@ import type Database from "better-sqlite3";
 import { Bot, InlineKeyboard, type Context } from "grammy";
 import { logger } from "../../utils/logger.js";
 import {
+  formatScheduledTelegramHtml,
   routeTelegramNotification,
   sendChunkedTelegramMessage,
 } from "../../notifications/telegram-router.js";
@@ -608,6 +609,7 @@ export async function sendMilestoneNotification(
     : milestone === "failed"
       ? "failure_alert"
       : "operational_status";
+  const formattedMessage = formatScheduledTelegramHtml(message);
 
   const result = await routeTelegramNotification({
     db: options.db,
@@ -616,14 +618,14 @@ export async function sendMilestoneNotification(
     jobRunId: options.jobRunId,
     intent,
     title: `Overnight ${milestone}`,
-    messageText: message,
+    messageText: formattedMessage,
     deliver: async () => {
       try {
         return await sendChunkedTelegramMessage({
           bot,
           chatId,
-          message,
-          parseMode: "Markdown",
+          message: formattedMessage,
+          parseMode: "HTML",
           enableLinkPreview: false,
         });
       } catch (error) {

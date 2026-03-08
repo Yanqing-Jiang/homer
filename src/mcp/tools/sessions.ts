@@ -105,6 +105,7 @@ export async function handle(
         INSERT INTO outcome_checks (id, source_type, source_id, source_title, check_at)
         VALUES (?, ?, ?, ?, datetime('now', ?))
       `).run(id, source_type, source_id, source_title, `+${daysOut} days`);
+      sm.markContextBridgeDirty("outcome_check");
       return { content: [{ type: "text", text: `Created outcome check: ${source_title} (${source_type}), due in ${daysOut} days (ID: ${id})` }] };
     }
 
