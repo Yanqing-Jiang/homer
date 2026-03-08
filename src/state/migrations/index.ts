@@ -117,6 +117,17 @@ export function runMigrations(db: Database.Database): void {
       continue;
     }
 
+    // Pre-migration backup for pipeline_dirty migration
+    if (file === "052_pipeline_dirty.sql") {
+      try {
+        const backupPath = join(dirname(__dirname), "..", "..", "data", `homer-pre-052-${Date.now()}.db`);
+        db.exec(`VACUUM INTO '${backupPath}'`);
+        logger.info({ backupPath }, "Created pre-052 backup");
+      } catch (backupErr) {
+        logger.warn({ error: backupErr }, "Pre-052 backup failed, continuing with migration");
+      }
+    }
+
     logger.info({ migration: file }, "Running migration");
 
     const sql = readFileSync(join(__dirname, file), "utf-8");

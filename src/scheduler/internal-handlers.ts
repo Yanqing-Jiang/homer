@@ -804,7 +804,7 @@ async function runHandler(
       }
       case "memory_embeddings": {
         const { runMemoryEmbeddings } = await import("./jobs/memory-embeddings.js");
-        const result = await runMemoryEmbeddings();
+        const result = await runMemoryEmbeddings(ctx.stateManager);
         return buildResult(
           job,
           startedAt,
@@ -816,7 +816,7 @@ async function runHandler(
       }
       case "memory_reindex": {
         const { runMemoryReindex } = await import("./jobs/memory-reindex.js");
-        const result = await runMemoryReindex();
+        const result = await runMemoryReindex(ctx.stateManager);
         return buildResult(
           job,
           startedAt,
@@ -1032,7 +1032,7 @@ async function runHandler(
       }
       case "memory_git_commit": {
         const { runMemoryGitCommit } = await import("./jobs/memory-git-commit.js");
-        const result = await runMemoryGitCommit();
+        const result = await runMemoryGitCommit(ctx.stateManager);
         return buildResult(
           job,
           startedAt,

@@ -11,6 +11,7 @@ import { executeInternalJob } from "./internal-handlers.js";
 import { runCompletionCheckup } from "../executors/completion-checkup.js";
 import { routeTelegramNotification } from "../notifications/telegram-router.js";
 import { startHeartbeat, stopHeartbeat, startWatchdog, stopWatchdog } from "./observability.js";
+import { memoryEvents } from "../events/memory-events.js";
 
 function escapeHtml(text: string): string {
   return text
@@ -47,6 +48,7 @@ export class Scheduler {
   private compensateInterval: ReturnType<typeof setInterval> | null = null;
   private progressMessageId: Map<string, number> = new Map(); // jobId -> messageId
   private lastProgressTime: Map<string, number> = new Map(); // jobId -> timestamp
+  private debouncedTriggers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(bot: Bot, chatId: number, stateManager: StateManager) {
     this.bot = bot;
@@ -148,6 +150,41 @@ export class Scheduler {
         this.cronManager.registerJob(job.config, job.sourceFile);
       }
     });
+
+    // Set up debounced reactive triggers for memory pipelines
+    this.setupReactiveTriggers();
+  }
+
+  /**
+   * Set up debounced reactive triggers for memory pipelines.
+   * When a dirty flag is set, waits 30s then triggers the corresponding job.
+   */
+  private setupReactiveTriggers(): void {
+    const PIPELINE_TO_JOB: Record<string, string> = {
+      reindex: "memory-reindex",
+      embeddings: "memory-embeddings",
+      context_bridge: "context-bridge-refresh",
+      git_commit: "memory-git-commit",
+    };
+
+    memoryEvents.on("pipeline:dirty", ({ pipeline }: { pipeline: string }) => {
+      const jobId = PIPELINE_TO_JOB[pipeline];
+      if (!jobId) return;
+
+      const existing = this.debouncedTriggers.get(pipeline);
+      if (existing) clearTimeout(existing);
+
+      this.debouncedTriggers.set(
+        pipeline,
+        setTimeout(() => {
+          this.debouncedTriggers.delete(pipeline);
+          logger.info({ pipeline, jobId }, "Debounced reactive trigger firing");
+          this.cronManager.triggerJob(jobId, false);
+        }, 30_000),
+      );
+    });
+
+    logger.info("Reactive memory pipeline triggers initialized");
   }
 
   /**
@@ -161,6 +198,12 @@ export class Scheduler {
       clearInterval(this.compensateInterval);
       this.compensateInterval = null;
     }
+    // Clear debounced triggers
+    for (const timer of this.debouncedTriggers.values()) {
+      clearTimeout(timer);
+    }
+    this.debouncedTriggers.clear();
+    memoryEvents.removeAllListeners("pipeline:dirty");
     stopHeartbeat();
     stopWatchdog();
     this.watcher.stop();
@@ -388,16 +431,15 @@ export class Scheduler {
   }
 
   // Dependency triggers — extracted to constant
+  // Memory chains removed: session-harvester→memory-reindex, memory-reindex→memory-embeddings,
+  // nightly-memory→memory-embeddings/git-commit, idea-dedup→memory-embeddings.
+  // These are now handled by dirty flags + debounced reactive triggers.
   private static readonly DEPENDENCY_TRIGGERS: Record<string, string[]> = {
     "idea-ingest": ["idea-synthesizer"],
     "ideas-explore": ["idea-synthesizer"],
     "content-scraper": ["idea-synthesizer"],
     "idea-synthesizer": ["idea-dedup"],
-    "idea-dedup": ["memory-embeddings"],
     "job-hunt-discover": ["job-hunt-daily-approval"],
-    "session-harvester": ["memory-reindex"],
-    "memory-reindex": ["memory-embeddings"],
-    "nightly-memory": ["memory-embeddings", "memory-git-commit"],
     "outcome-tracker": ["preference-updater"],
   };
 
