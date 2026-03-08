@@ -2,16 +2,18 @@
  * Context Bridge — generates Homer zone in MEMORY.md for Claude Code auto-memory
  *
  * Runs at 02:30 daily (30 min after nightly-memory) and on SessionStart/Stop hooks.
- * Produces a snapshot of Homer's state within sentinel markers, preserving any
- * Claude Code auto-memory content outside the markers.
+ * Uses Claude Sonnet to intelligently curate the ~100-line budget within sentinel
+ * markers, prioritizing what's most relevant for upcoming sessions.
+ * Falls back to mechanical dump if Sonnet is unavailable.
  *
  * Sources: me.md goals, work.md active projects, recent promoted facts,
- * active plans, and pending outcome checks.
+ * active plans, pending outcome checks, and recent session summaries.
  */
 
 import { writeFileSync, readFileSync, mkdirSync, existsSync, renameSync, readdirSync, unlinkSync } from "fs";
 import { join } from "path";
 import { extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
 import { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
 import { PATHS } from "../../config/paths.js";
@@ -34,7 +36,7 @@ function mergeWithExisting(homerContent: string, memoryPath: string): string {
 
   const existing = readFileSync(memoryPath, "utf-8");
   const startIdx = existing.indexOf(HOMER_START);
-  const endIdx = existing.indexOf(HOMER_END);
+  const endIdx = existing.lastIndexOf(HOMER_END);
 
   let claudeContent: string;
   if (startIdx >= 0 && endIdx >= 0) {
@@ -49,6 +51,235 @@ function mergeWithExisting(homerContent: string, memoryPath: string): string {
   return wrapWithSentinels(homerContent) + (claudeContent ? "\n\n" + claudeContent : "");
 }
 
+// ============================================
+// RAW DATA COLLECTION
+// ============================================
+
+interface RawContextData {
+  goals: string;
+  projects: string;
+  recentFacts: string[];
+  activePlans: string[];
+  pendingOutcomes: string[];
+  recentSessions: string[];
+}
+
+async function collectRawData(sm: StateManager): Promise<RawContextData> {
+  const goals = await extractCurrentGoals();
+  const projects = await extractActiveProjects();
+
+  // Recent promoted facts (last 7 days)
+  const recentFacts: string[] = [];
+  try {
+    const facts = sm.getRecentPromotedFacts(7);
+    for (const fact of facts.slice(0, 12)) {
+      const date = fact.promotedAt.slice(0, 10);
+      const target = fact.targetFile;
+      recentFacts.push(`[${date}] → ${target}: ${fact.content}`);
+    }
+  } catch { /* promoted_facts table may not exist */ }
+
+  // Active plans
+  const activePlans: string[] = [];
+  const plansDir = PATHS.plans;
+  if (existsSync(plansDir)) {
+    try {
+      const planFiles = readdirSync(plansDir)
+        .filter(f => f.endsWith(".md") && f !== "archive");
+      for (const file of planFiles.slice(0, 10)) {
+        activePlans.push(file.replace(/\.md$/, "").replace(/-/g, " "));
+      }
+    } catch { /* plans dir read error */ }
+  }
+
+  // Pending outcome checks
+  const pendingOutcomes: string[] = [];
+  try {
+    const pending = sm.getDb().prepare(`
+      SELECT source_title, check_at
+      FROM outcome_checks
+      WHERE status = 'pending' AND check_at <= datetime('now', '+7 days')
+      ORDER BY check_at ASC LIMIT 5
+    `).all() as Array<{ source_title: string; check_at: string }>;
+    for (const oc of pending) {
+      pendingOutcomes.push(`[${oc.check_at.slice(0, 10)}] ${oc.source_title}`);
+    }
+  } catch { /* outcome_checks table may not exist */ }
+
+  // Recent session summaries (last 48h, non-sub-agent)
+  const recentSessions: string[] = [];
+  try {
+    const sessions = sm.getDb().prepare(`
+      SELECT title, agent, project, substr(summary, 1, 200) as summary
+      FROM session_summaries
+      WHERE is_sub_agent = 0
+        AND started_at > datetime('now', '-48 hours')
+      ORDER BY started_at DESC
+      LIMIT 10
+    `).all() as Array<{ title: string; agent: string; project: string; summary: string }>;
+    for (const s of sessions) {
+      const proj = s.project ? `[${s.project}]` : "";
+      recentSessions.push(`${proj} ${s.title ?? "untitled"}: ${s.summary ?? ""}`);
+    }
+  } catch { /* session_summaries may not exist */ }
+
+  return { goals, projects, recentFacts, activePlans, pendingOutcomes, recentSessions };
+}
+
+// ============================================
+// MECHANICAL FALLBACK (no LLM)
+// ============================================
+
+function buildMechanicalContent(data: RawContextData): string {
+  const sections: string[] = [];
+
+  sections.push(`<!-- Updated: ${new Date().toISOString()} -->`);
+  sections.push("");
+  sections.push("# Homer Context");
+  sections.push("");
+
+  if (!data.goals.startsWith("(")) {
+    sections.push("## Current Goals");
+    sections.push(data.goals);
+    sections.push("");
+  }
+
+  if (!data.projects.startsWith("(")) {
+    sections.push("## Active Projects");
+    sections.push(data.projects);
+    sections.push("");
+  }
+
+  if (data.recentFacts.length > 0) {
+    sections.push("## Recent Memory Promotions (7d)");
+    for (const fact of data.recentFacts.slice(0, 8)) {
+      const snippet = fact.length > 120 ? fact.slice(0, 120) + "..." : fact;
+      sections.push(`- ${snippet}`);
+    }
+    sections.push("");
+  }
+
+  if (data.activePlans.length > 0) {
+    sections.push("## Active Plans");
+    for (const plan of data.activePlans) {
+      sections.push(`- ${plan}`);
+    }
+    sections.push("");
+  }
+
+  if (data.pendingOutcomes.length > 0) {
+    sections.push("## Pending Outcome Checks");
+    for (const oc of data.pendingOutcomes) {
+      sections.push(`- ${oc}`);
+    }
+    sections.push("");
+  }
+
+  return sections.join("\n");
+}
+
+// ============================================
+// SONNET-CURATED CONTENT
+// ============================================
+
+async function buildCuratedContent(data: RawContextData): Promise<string | null> {
+  const prompt = `You are Homer's context-bridge. Your job is to curate the MEMORY.md file that gets auto-loaded into every Claude Code session (first 200 lines). This is the most valuable context real estate in the system — every line counts.
+
+## Your Budget
+- Maximum 100 lines of markdown output (leave room for Claude Code's own session notes below the HOMER:END marker)
+- Must include a timestamp line: <!-- Updated: ${new Date().toISOString()} -->
+- Must start with: # Homer Context
+
+## Raw Data to Curate
+
+### Goals (from me.md)
+${data.goals.startsWith("(") ? "Not available" : data.goals}
+
+### Active Projects (from work.md)
+${data.projects.startsWith("(") ? "Not available" : data.projects}
+
+### Recent Memory Promotions (7d)
+${data.recentFacts.length > 0 ? data.recentFacts.join("\n") : "None"}
+
+### Active Plans
+${data.activePlans.length > 0 ? data.activePlans.map(p => `- ${p}`).join("\n") : "None"}
+
+### Pending Outcome Checks
+${data.pendingOutcomes.length > 0 ? data.pendingOutcomes.map(o => `- ${o}`).join("\n") : "None"}
+
+### Recent Sessions (last 48h)
+${data.recentSessions.length > 0 ? data.recentSessions.join("\n") : "None"}
+
+## Curation Instructions
+
+1. **Prioritize by recency and relevance.** What's most likely to matter in the next session? Recent sessions tell you what Yanqing is actively working on — foreground those projects/goals.
+2. **Compress verbose descriptions.** Project descriptions should be 1-2 lines max. Drop implementation details that belong in the codebase, not in session context.
+3. **Drop stale items.** If a plan or project hasn't appeared in recent sessions, demote or omit it.
+4. **Surface actionable items.** Pending outcome checks that are due soon, blocked plans, and things that need attention should be prominent.
+5. **Synthesize, don't just dump.** If recent promotions relate to an active project, fold them into the project description instead of listing separately.
+6. **Keep goals concise.** Short-term goals with their current status, long-term goals as a brief list.
+
+## Output Format
+
+Return ONLY the curated markdown content. No preamble, no explanation, no code fences. Start directly with the timestamp comment and # Homer Context header. The output will be placed directly between HOMER:START and HOMER:END markers.`;
+
+  try {
+    const result = await executeClaudeCommand(prompt, {
+      cwd: process.env.HOME ?? "/Users/yj",
+      model: "sonnet",
+      timeout: 900_000, // 15 min
+    });
+
+    if (result.exitCode !== 0 || !result.output) {
+      logger.warn({ exitCode: result.exitCode }, "Sonnet curation failed, will use mechanical fallback");
+      return null;
+    }
+
+    let content = result.output.trim();
+
+    // Strip any markdown code fences the model might add
+    content = content.replace(/^```(?:markdown)?\n?/m, "").replace(/\n?```$/m, "");
+
+    // Strip preamble: everything before the first <!-- or # Homer Context
+    const headerIdx = content.indexOf("# Homer Context");
+    const commentIdx = content.indexOf("<!-- Updated:");
+    const startIdx = Math.min(
+      headerIdx >= 0 ? headerIdx : Infinity,
+      commentIdx >= 0 ? commentIdx : Infinity,
+    );
+    if (startIdx > 0 && startIdx < Infinity) {
+      content = content.slice(startIdx);
+    }
+
+    // Validate: must contain "# Homer Context"
+    if (!content.includes("# Homer Context")) {
+      logger.warn("Sonnet output missing '# Homer Context' header, using fallback");
+      return null;
+    }
+
+    // Enforce line limit
+    const lines = content.split("\n");
+    if (lines.length > HOMER_MAX_LINES) {
+      content = lines.slice(0, HOMER_MAX_LINES).join("\n");
+    }
+
+    logger.info(
+      { lines: content.split("\n").length, duration: result.duration },
+      "Sonnet-curated context bridge content"
+    );
+
+    return content;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ error: msg }, "Sonnet curation threw, using mechanical fallback");
+    return null;
+  }
+}
+
+// ============================================
+// MAIN
+// ============================================
+
 export async function runContextBridge(
   stateManager?: StateManager
 ): Promise<{ success: boolean; output: string; error?: string }> {
@@ -57,92 +288,20 @@ export async function runContextBridge(
     const ownSm = !stateManager;
 
     try {
-      const sections: string[] = [];
+      // Collect raw data from all sources
+      const data = await collectRawData(sm);
 
-      sections.push(`<!-- Updated: ${new Date().toISOString()} -->`);
-      sections.push("");
-      sections.push("# Homer Context");
-      sections.push("");
+      // Try Sonnet curation first, fall back to mechanical dump
+      let homerContent = await buildCuratedContent(data);
+      const curated = homerContent !== null;
 
-      // Current goals from me.md
-      const goals = await extractCurrentGoals();
-      if (!goals.startsWith("(")) {
-        sections.push("## Current Goals");
-        sections.push(goals);
-        sections.push("");
-      }
-
-      // Active projects from work.md
-      const projects = await extractActiveProjects();
-      if (!projects.startsWith("(")) {
-        sections.push("## Active Projects");
-        sections.push(projects);
-        sections.push("");
-      }
-
-      // Recent promoted facts (last 7 days) — reduced budget
-      try {
-        const facts = sm.getRecentPromotedFacts(7);
-        if (facts.length > 0) {
-          sections.push("## Recent Memory Promotions (7d)");
-          for (const fact of facts.slice(0, 8)) {
-            const date = fact.promotedAt.slice(0, 10);
-            const target = fact.targetFile;
-            const snippet = fact.content.length > 100
-              ? fact.content.slice(0, 100) + "..."
-              : fact.content;
-            sections.push(`- [${date}] → ${target}: ${snippet}`);
-          }
-          sections.push("");
+      if (!homerContent) {
+        homerContent = buildMechanicalContent(data);
+        // Enforce line limit on mechanical content
+        const lines = homerContent.split("\n");
+        if (lines.length > HOMER_MAX_LINES) {
+          homerContent = lines.slice(0, HOMER_MAX_LINES).join("\n") + "\n\n<!-- Truncated -->";
         }
-      } catch {
-        // promoted_facts table may not exist yet
-      }
-
-      // Active plans
-      const plansDir = PATHS.plans;
-      if (existsSync(plansDir)) {
-        try {
-          const planFiles = readdirSync(plansDir)
-            .filter(f => f.endsWith(".md") && f !== "archive");
-          if (planFiles.length > 0) {
-            sections.push("## Active Plans");
-            for (const file of planFiles.slice(0, 10)) {
-              const name = file.replace(/\.md$/, "").replace(/-/g, " ");
-              sections.push(`- ${name}`);
-            }
-            sections.push("");
-          }
-        } catch {
-          // plans dir read error
-        }
-      }
-
-      // Pending outcome checks
-      try {
-        const pending = sm.getDb().prepare(`
-          SELECT source_title, check_at
-          FROM outcome_checks
-          WHERE status = 'pending' AND check_at <= datetime('now', '+7 days')
-          ORDER BY check_at ASC LIMIT 5
-        `).all() as Array<{ source_title: string; check_at: string }>;
-
-        if (pending.length > 0) {
-          sections.push("## Pending Outcome Checks");
-          for (const oc of pending) {
-            sections.push(`- [${oc.check_at.slice(0, 10)}] ${oc.source_title}`);
-          }
-          sections.push("");
-        }
-      } catch {
-        // outcome_checks table may not exist
-      }
-
-      // Build Homer zone content, enforce line limit
-      let homerContent = sections.join("\n");
-      const lines = homerContent.split("\n");
-      if (lines.length > HOMER_MAX_LINES) {
-        homerContent = lines.slice(0, HOMER_MAX_LINES).join("\n") + "\n\n<!-- Truncated -->";
       }
 
       // Write to each target project dir
@@ -171,11 +330,12 @@ export async function runContextBridge(
         }
       }
 
-      logger.info({ targets: results }, "Context bridge: MEMORY.md generated");
+      const method = curated ? "sonnet-curated" : "mechanical-fallback";
+      logger.info({ targets: results, method }, "Context bridge: MEMORY.md generated");
 
       return {
         success: true,
-        output: `Generated MEMORY.md → ${results.join(", ")}`,
+        output: `Generated MEMORY.md (${method}) → ${results.join(", ")}`,
       };
     } finally {
       if (ownSm) sm.close();
