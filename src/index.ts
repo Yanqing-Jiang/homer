@@ -29,6 +29,7 @@ import { cleanupScheduler } from "./process/cleanup-scheduler.js";
 import { initFallbackChain } from "./process/fallback-chain.js";
 import type { FastifyInstance } from "fastify";
 import type { VoiceConfig } from "./voice/types.js";
+import { getRuntimePaths } from "./utils/runtime-paths.js";
 
 function parseIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -39,6 +40,7 @@ function parseIntEnv(name: string, fallback: number): number {
 }
 
 async function main(): Promise<void> {
+  const runtimePaths = getRuntimePaths();
   // Log build version for stale-daemon detection
   try {
     const { readFileSync } = await import("fs");
@@ -198,7 +200,7 @@ async function main(): Promise<void> {
       conversationId?: string
     ): Promise<{ response: string; conversationId?: string }> => {
       const result = await executeClaudeCommand(text, {
-        cwd: "/Users/yj",
+        cwd: runtimePaths.homeDir,
         claudeSessionId: conversationId,
       });
 

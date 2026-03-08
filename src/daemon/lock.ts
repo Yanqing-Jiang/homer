@@ -9,13 +9,14 @@
  */
 
 import fs from "fs";
-import os from "os";
 import path from "path";
 import { flockSync, fcntlSync, constants as fsExtConstants } from "fs-ext";
 import { execSync } from "child_process";
 import { logger } from "../utils/logger.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 
-const LOCK_DIR = path.join(os.homedir(), "Library", "Application Support", "Homer");
+const runtimePaths = getRuntimePaths();
+const LOCK_DIR = path.join(runtimePaths.libraryApplicationSupportDir, "Homer");
 const LOCK_FILE = path.join(LOCK_DIR, "homer.lock");
 
 // Open flags: create, read-write, close-on-exec (prevents child FD inheritance)

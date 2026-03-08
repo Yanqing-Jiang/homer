@@ -1,9 +1,24 @@
+import { existsSync } from "fs";
 import { z } from "zod";
 import { config as dotenvConfig } from "dotenv";
 import { resolve } from "path";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 
-// Load .env from project root
-dotenvConfig({ path: resolve(import.meta.dirname, "../../.env") });
+// Load .env from project root, with HOMER_ROOT support for helper-managed launches.
+const envCandidates = [
+  process.env.HOMER_ENV_FILE,
+  process.env.HOMER_ROOT ? resolve(process.env.HOMER_ROOT, ".env") : undefined,
+  resolve(import.meta.dirname, "../../.env"),
+].filter((candidate): candidate is string => Boolean(candidate));
+
+for (const candidate of envCandidates) {
+  if (existsSync(candidate)) {
+    dotenvConfig({ path: candidate });
+    break;
+  }
+}
+
+const runtimePaths = getRuntimePaths();
 
 const configSchema = z.object({
   telegram: z.object({
@@ -14,16 +29,16 @@ const configSchema = z.object({
     ttlHours: z.number().int().positive().default(4),
   }),
   paths: z.object({
-    lanes: z.string().default("/Users/yj/lanes"),
-    database: z.string().default("/Users/yj/homer/data/homer.db"),
-    logs: z.string().default("/Users/yj/homer/logs"),
-    browserProfiles: z.string().default("/Users/yj/homer/profiles"),
-    uploadLanding: z.string().default("/Users/yj/homer-upload-landing"),
-    memory: z.string().default("/Users/yj/memory"),
-    claudeDir: z.string().default("/Users/yj/.claude"),
-    homerData: z.string().default("/Users/yj/homer/data"),
-    homerRoot: z.string().default("/Users/yj/homer"),
-    archive: z.string().default("/Users/yj/archive"),
+    lanes: z.string().default(runtimePaths.lanesDir),
+    database: z.string().default(runtimePaths.databasePath),
+    logs: z.string().default(runtimePaths.homerLogsDir),
+    browserProfiles: z.string().default(runtimePaths.browserProfilesDir),
+    uploadLanding: z.string().default(runtimePaths.uploadLandingDir),
+    memory: z.string().default(runtimePaths.memoryDir),
+    claudeDir: z.string().default(runtimePaths.claudeDir),
+    homerData: z.string().default(runtimePaths.homerDataDir),
+    homerRoot: z.string().default(runtimePaths.homerRoot),
+    archive: z.string().default(runtimePaths.archiveDir),
   }),
   web: z.object({
     enabled: z.boolean().default(true),
@@ -72,6 +87,7 @@ const configSchema = z.object({
 export type Config = z.infer<typeof configSchema>;
 
 function loadConfig(): Config {
+  const runtimePaths = getRuntimePaths();
   const rawConfig = {
     telegram: {
       botToken: process.env.TELEGRAM_BOT_TOKEN ?? "",
@@ -81,16 +97,16 @@ function loadConfig(): Config {
       ttlHours: parseInt(process.env.SESSION_TTL_HOURS ?? "4", 10),
     },
     paths: {
-      lanes: process.env.LANES_PATH ?? "/Users/yj/lanes",
-      database: process.env.DATABASE_PATH ?? "/Users/yj/homer/data/homer.db",
-      logs: process.env.LOGS_PATH ?? "/Users/yj/homer/logs",
-      browserProfiles: process.env.BROWSER_PROFILES_PATH ?? "/Users/yj/homer/profiles",
-      uploadLanding: process.env.UPLOAD_LANDING_PATH ?? "/Users/yj/homer-upload-landing",
-      memory: process.env.MEMORY_PATH ?? "/Users/yj/memory",
-      claudeDir: process.env.CLAUDE_DIR ?? "/Users/yj/.claude",
-      homerData: process.env.HOMER_DATA_PATH ?? "/Users/yj/homer/data",
-      homerRoot: process.env.HOMER_ROOT ?? "/Users/yj/homer",
-      archive: process.env.ARCHIVE_PATH ?? "/Users/yj/archive",
+      lanes: process.env.LANES_PATH ?? runtimePaths.lanesDir,
+      database: process.env.DATABASE_PATH ?? runtimePaths.databasePath,
+      logs: process.env.LOGS_PATH ?? runtimePaths.homerLogsDir,
+      browserProfiles: process.env.BROWSER_PROFILES_PATH ?? runtimePaths.browserProfilesDir,
+      uploadLanding: process.env.UPLOAD_LANDING_PATH ?? runtimePaths.uploadLandingDir,
+      memory: process.env.MEMORY_PATH ?? runtimePaths.memoryDir,
+      claudeDir: process.env.CLAUDE_DIR ?? runtimePaths.claudeDir,
+      homerData: process.env.HOMER_DATA_PATH ?? runtimePaths.homerDataDir,
+      homerRoot: process.env.HOMER_ROOT ?? runtimePaths.homerRoot,
+      archive: process.env.ARCHIVE_PATH ?? runtimePaths.archiveDir,
     },
     web: {
       enabled: process.env.WEB_ENABLED !== "false",
