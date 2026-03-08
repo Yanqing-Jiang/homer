@@ -15,6 +15,7 @@ import { CronUtils } from "../utils/cron.js";
 import { getClaudeAuthStatus } from "../utils/claude-auth.js";
 import { checkGeminiAPIHealth } from "../executors/gemini.js";
 import {
+  formatScheduledTelegramHtml,
   routeTelegramNotification,
   sendChunkedTelegramMessage,
 } from "../notifications/telegram-router.js";
@@ -155,6 +156,7 @@ async function sendHealthMessage(
   message: string,
   options: { intent: NotificationIntent; sourceId: string }
 ): Promise<boolean> {
+  const formattedMessage = formatScheduledTelegramHtml(message);
   const result = await routeTelegramNotification({
     db: ctx.stateManager.getDb(),
     sourceType: "scheduler_job",
@@ -162,7 +164,7 @@ async function sendHealthMessage(
     jobRunId: ctx.jobRunId,
     intent: options.intent,
     title: "Health Check",
-    messageText: message,
+    messageText: formattedMessage,
     deliver: async () => {
       let lastError: unknown;
 
@@ -171,7 +173,7 @@ async function sendHealthMessage(
           return await sendChunkedTelegramMessage({
             bot: ctx.bot,
             chatId: ctx.chatId,
-            message,
+            message: formattedMessage,
             parseMode: "HTML",
             enableLinkPreview: false,
           });
@@ -776,7 +778,7 @@ async function runHandler(
       }
       case "session_harvester": {
         const { runSessionHarvester } = await import("./jobs/session-harvester.js");
-        const result = await runSessionHarvester(ctx.stateManager.getDb());
+        const result = await runSessionHarvester(ctx.stateManager);
         return buildResult(
           job,
           startedAt,
@@ -788,7 +790,9 @@ async function runHandler(
       }
       case "context_bridge": {
         const { runContextBridge } = await import("./jobs/context-bridge.js");
-        const result = await runContextBridge(ctx.stateManager);
+        const result = await runContextBridge(ctx.stateManager, {
+          triggerSource: job.config.id,
+        });
         return buildResult(
           job,
           startedAt,
@@ -950,7 +954,9 @@ async function runHandler(
           }
           const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
           const lines = stalled.map(a => `${esc(a.company)} — ${esc(a.title)}`).join("\n");
-          const message = `⚠️ <b>Stalled Applications</b>\n\n${lines}\n\nThese were stuck in "applying" for 24h+ and have been flagged.`;
+          const message = formatScheduledTelegramHtml(
+            `⚠️ <b>Stalled Applications</b>\n\n${lines}\n\nThese were stuck in "applying" for 24h+ and have been flagged.`,
+          );
           const delivery = await routeTelegramNotification({
             db,
             sourceType: "job_handler",

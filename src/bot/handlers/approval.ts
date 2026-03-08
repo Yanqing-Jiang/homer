@@ -19,6 +19,11 @@ import {
 import * as dao from "../../ideas/dao.js";
 import { PATHS } from "../../config/paths.js";
 import { staleMapCleaner } from "../../utils/stale-map-cleaner.js";
+import { config } from "../../config/index.js";
+import {
+  formatScheduledTelegramHtml,
+  sendChunkedTelegramMessage,
+} from "../../notifications/telegram-router.js";
 
 const IDEAS_FILE = PATHS.ideasMd;
 const FEEDBACK_FILE = PATHS.feedback;
@@ -386,7 +391,7 @@ export function formatIdeaForTelegram(idea: ParsedIdea, index: number): string {
     msg += `\n<a href="${escapeHtml(idea.link)}">来源链接</a>\n`;
   }
   msg += `\n<code>${id}</code>`;
-  return msg;
+  return formatScheduledTelegramHtml(msg);
 }
 
 function escapeHtml(text: string): string {
@@ -489,17 +494,17 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
     }
   });
 
-  // Handle talk button — triggers multi-model analysis
+  // Handle talk button — triggers Flash-only direct review
   bot.callbackQuery(/^a:i:([^:]+):talk$/, async (ctx) => {
     const ideaId = ctx.match?.[1];
     if (!ideaId) {
       await ctx.answerCallbackQuery("Invalid request");
       return;
     }
-    logger.info({ ideaId }, "Talk button clicked — starting analysis");
+    logger.info({ ideaId }, "Talk button clicked — starting Flash review");
 
     try {
-      await ctx.answerCallbackQuery("Starting analysis...");
+      await ctx.answerCallbackQuery("Starting review...");
 
       // Load idea
       const db = stateManagerRef?.getDb();
@@ -512,15 +517,17 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
 
       // Update message to show analysis in progress
       await ctx.editMessageText(
-        `🔬 <b>Analyzing: ${escapeHtml(idea.title)}</b>\n` +
-        `Running multi-model analysis (opencode opus + 2x flash)...\n` +
-        `Results in 1-5 minutes.`,
+        formatScheduledTelegramHtml(
+          `🔬 <b>Idea review</b>\n\n<b>${escapeHtml(idea.title)}</b>\n` +
+          `Running Gemini Flash direct review with the full idea payload.\n` +
+          `Results should land in about 1-2 minutes.`,
+        ),
         { parse_mode: "HTML" }
       );
 
       // Update status + append note
       dao.updateIdea(db, idea.id, { status: "discussion" });
-      dao.appendNote(db, idea.id, "Multi-model analysis started");
+      dao.appendNote(db, idea.id, "Gemini Flash review started");
       await logFeedback("talk", idea.title);
 
       // Track outcome for this idea entering discussion
@@ -550,8 +557,14 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       const chatId = ctx.chat?.id;
       if (!chatId) return;
 
-      const notify = async (text: string, _parseMode?: string) => {
-        await bot.api.sendMessage(chatId, text);
+      const notify = async (text: string, parseMode?: string) => {
+        await sendChunkedTelegramMessage({
+          bot,
+          chatId,
+          message: parseMode === "HTML" ? text : formatScheduledTelegramHtml(text),
+          parseMode: parseMode === "HTML" ? "HTML" : undefined,
+          enableLinkPreview: true,
+        });
       };
 
       // Fire-and-forget analysis
@@ -566,14 +579,26 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
             source: idea.source,
             tags: idea.tags,
             notes: idea.notes,
+            filePath: idea.filePath,
+            linkedExplorationThreadId: idea.linkedExplorationThreadId,
+            linkedPlanId: idea.linkedPlanId,
+            apiUrl: `${config.web.baseUrl}/api/ideas/${encodeURIComponent(idea.id)}`,
           },
           notify
         ).then(() => {
-          try { if (db) dao.appendNote(db, idea.id, "Analysis complete"); } catch { /* best-effort */ }
+          try { if (db) dao.appendNote(db, idea.id, "Gemini Flash review complete"); } catch { /* best-effort */ }
         }).catch(async (err) => {
           const msg = err instanceof Error ? err.message : String(err);
           logger.error({ ideaId, error: msg }, "Idea analysis failed");
-          await bot.api.sendMessage(chatId, `❌ Analysis failed for "${idea.title}": ${msg}`);
+          await sendChunkedTelegramMessage({
+            bot,
+            chatId,
+            message: formatScheduledTelegramHtml(
+              `❌ <b>Idea review failed</b>\n\n<b>${escapeHtml(idea.title)}</b>\n${escapeHtml(msg)}`,
+            ),
+            parseMode: "HTML",
+            enableLinkPreview: false,
+          });
         });
       }).catch(err => {
         logger.error({ ideaId, error: err }, "Failed to import analyze module");
@@ -808,7 +833,7 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
   // Send header
   await bot.api.sendMessage(
     chatId,
-    `📋 <b>想法审阅</b> (${selected.length})`,
+    formatScheduledTelegramHtml(`📋 <b>想法审阅</b> (${selected.length})`),
     { parse_mode: "HTML" }
   );
 

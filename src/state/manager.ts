@@ -3,6 +3,14 @@ import { randomUUID, createHash } from "crypto";
 import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
 import { threadEvents } from "../events/thread-events.js";
+import {
+  ensureContextBridgeStateTable,
+  getContextBridgeState as loadContextBridgeState,
+  markContextBridgeDirty as markContextBridgeDirtyInDb,
+  recordContextBridgeResult as recordContextBridgeResultInDb,
+  recordContextBridgeStart as recordContextBridgeStartInDb,
+  type ContextBridgeState,
+} from "./context-bridge-state.js";
 
 export interface Session {
   id: string;
@@ -221,6 +229,8 @@ export class StateManager {
         ON gemini_accounts(cooldown_until);
     `);
 
+    ensureContextBridgeStateTable(this._db);
+
     logger.debug("State manager initialized");
   }
 
@@ -319,6 +329,30 @@ export class StateManager {
   close(): void {
     this._closed = true;
     this._db.close();
+  }
+
+  getContextBridgeState(): ContextBridgeState {
+    return loadContextBridgeState(this._db);
+  }
+
+  markContextBridgeDirty(triggerSource: string): void {
+    markContextBridgeDirtyInDb(this._db, triggerSource);
+  }
+
+  recordContextBridgeStart(triggerSource: string, startedAt?: string): void {
+    recordContextBridgeStartInDb(this._db, triggerSource, startedAt);
+  }
+
+  recordContextBridgeResult(result: {
+    triggerSource: string;
+    sourceHash?: string | null;
+    outputHash?: string | null;
+    dirty: boolean;
+    method?: string | null;
+    error?: string | null;
+    completedAt?: string;
+  }): void {
+    recordContextBridgeResultInDb(this._db, result);
   }
 
   // Executor session methods for Claude --resume

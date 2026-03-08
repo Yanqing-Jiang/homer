@@ -41,18 +41,31 @@ interface CodexStreamEvent {
  */
 export async function executeCodexCLI(
   prompt: string,
-  options: CodexCLIOptions
+  options: CodexCLIOptions,
 ): Promise<CodexCLIResult> {
   const startTime = Date.now();
-  const { cwd, timeout = DEFAULT_TIMEOUT, signal, sessionId, model, reasoningEffort } = options;
+  const {
+    cwd,
+    timeout = DEFAULT_TIMEOUT,
+    signal,
+    sessionId,
+    model,
+    reasoningEffort = "high",
+  } = options;
 
   return new Promise((resolve, reject) => {
     const args: string[] = sessionId
-      ? ["exec", "resume", "--json", "--dangerously-bypass-approvals-and-sandbox"]
+      ? [
+          "exec",
+          "resume",
+          "--json",
+          "--dangerously-bypass-approvals-and-sandbox",
+        ]
       : ["exec", "--json", "--dangerously-bypass-approvals-and-sandbox"];
 
     if (model) args.push("-m", model);
-    if (reasoningEffort) args.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
+    if (reasoningEffort)
+      args.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
 
     if (sessionId) {
       args.push(sessionId, prompt);
@@ -69,7 +82,8 @@ export async function executeCodexCLI(
         CI: process.env.CI ?? "1",
         TERM: process.env.TERM ?? "dumb",
         NO_COLOR: process.env.NO_COLOR ?? "1",
-        PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
+        PATH:
+          process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
       },
     });
 
@@ -109,7 +123,11 @@ export async function executeCodexCLI(
       try {
         if (child.pid) process.kill(-child.pid, signal);
       } catch {
-        try { child.kill(signal); } catch { /* already dead */ }
+        try {
+          child.kill(signal);
+        } catch {
+          /* already dead */
+        }
       }
     };
 
@@ -163,8 +181,14 @@ export async function executeCodexCLI(
           if (event.type === "item.completed" || event.type === "item.delta") {
             const item = event.item;
             if (!item) continue;
-            if (item.type === "agent_message" || item.type === "assistant_message" || item.type === "message") {
-              const text = item.text || (typeof item.content === "string" ? item.content : "");
+            if (
+              item.type === "agent_message" ||
+              item.type === "assistant_message" ||
+              item.type === "message"
+            ) {
+              const text =
+                item.text ||
+                (typeof item.content === "string" ? item.content : "");
               if (text) responseChunks.push(text);
               continue;
             }
@@ -196,10 +220,19 @@ export async function executeCodexCLI(
           const event = JSON.parse(buffer.trim()) as CodexStreamEvent;
           if (event.type === "thread.started" && event.thread_id) {
             capturedSessionId = event.thread_id;
-          } else if (event.type === "item.completed" || event.type === "item.delta") {
+          } else if (
+            event.type === "item.completed" ||
+            event.type === "item.delta"
+          ) {
             const item = event.item;
-            if (item?.type === "agent_message" || item?.type === "assistant_message" || item?.type === "message") {
-              const text = item.text || (typeof item.content === "string" ? item.content : "");
+            if (
+              item?.type === "agent_message" ||
+              item?.type === "assistant_message" ||
+              item?.type === "message"
+            ) {
+              const text =
+                item.text ||
+                (typeof item.content === "string" ? item.content : "");
               if (text) responseChunks.push(text);
             } else if (item?.type === "error") {
               const message = item.message || item.text;
@@ -229,7 +262,8 @@ export async function executeCodexCLI(
 
       const parsedOutput = responseChunks.join("").trim();
       const parsedErrors = errorChunks.join("\n").trim();
-      const fallbackOutput = parsedOutput || stderr.trim() || stdout.trim() || "(No output)";
+      const fallbackOutput =
+        parsedOutput || stderr.trim() || stdout.trim() || "(No output)";
 
       if (code && code !== 0) {
         const errorOutput = parsedErrors || stderr.trim() || fallbackOutput;
