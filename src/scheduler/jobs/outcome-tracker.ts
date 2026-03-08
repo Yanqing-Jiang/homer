@@ -11,7 +11,10 @@ import type Database from "better-sqlite3";
 import type { Bot } from "grammy";
 import { InlineKeyboard } from "grammy";
 import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
-import { routeTelegramNotification } from "../../notifications/telegram-router.js";
+import {
+  formatScheduledTelegramHtml,
+  routeTelegramNotification,
+} from "../../notifications/telegram-router.js";
 import { logger } from "../../utils/logger.js";
 
 interface OutcomeCheck {
@@ -221,6 +224,7 @@ export async function runOutcomeTracker(
             `<b>Created:</b> ${check.created_at.slice(0, 10)}\n\n` +
             `<b>Evidence:</b>\n${escapeHtml(result.evidence)}\n\n` +
             `Did this lead to a positive outcome?`;
+          const formattedMessage = formatScheduledTelegramHtml(msg);
 
           try {
             const delivery = await routeTelegramNotification({
@@ -229,13 +233,13 @@ export async function runOutcomeTracker(
               sourceId: `outcome_check:${check.id}`,
               intent: "decision_request",
               title: check.source_title,
-              messageText: msg,
+              messageText: formattedMessage,
               metadata: {
                 outcomeCheckId: check.id,
                 sourceType: check.source_type,
                 sourceId: check.source_id,
               },
-              deliver: async () => bot.api.sendMessage(chatId, msg, {
+              deliver: async () => bot.api.sendMessage(chatId, formattedMessage, {
                 parse_mode: "HTML",
                 reply_markup: createOutcomeKeyboard(check.id),
               }),

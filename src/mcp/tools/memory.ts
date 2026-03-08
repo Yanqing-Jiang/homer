@@ -322,6 +322,7 @@ export async function handle(
       toAppend += `${content}\n`;
       await appendFile(filePath, toAppend, "utf-8");
       promoteSm.recordPromotedFact(content, file, section ?? null, "mcp");
+      promoteSm.markContextBridgeDirty("memory_promote");
       await deps.indexer.indexFile(filePath, file === "work" ? "work" : file === "life" ? "life" : "general");
       return { content: [{ type: "text", text: `Promoted to ${file}.md${section ? ` under "${section}"` : ""}` }] };
     }

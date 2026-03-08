@@ -365,6 +365,10 @@ If nothing to promote, use an empty array.`;
       logger.warn({ error: indexErr }, "Failed to reindex memory after promotions");
     }
 
+    if (writtenPromos > 0) {
+      stateManager.markContextBridgeDirty("nightly_memory");
+    }
+
     const parts: string[] = [];
     if (writtenPromos > 0 || promotions.length > 0) {
       parts.push(`Promoted ${writtenPromos}/${promotions.length} facts`);

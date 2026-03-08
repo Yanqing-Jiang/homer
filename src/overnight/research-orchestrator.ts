@@ -5,7 +5,7 @@
  * - Query expansion (10+ sub-queries)
  * - Parallel harvest (web, docs, code)
  * - Validation loops (cross-reference)
- * - Synthesis via Kimi (2M context)
+ * - Scheduled synthesis via Gemini Pro with Kimi fallback
  *
  * Produces 3 interpretations: Conservative, Progressive, Balanced
  */
@@ -13,7 +13,10 @@
 import { logger } from "../utils/logger.js";
 import { executeWithRouting } from "../executors/router.js";
 import { executeKimiCommand } from "../executors/kimi.js";
-import { executeGeminiCLIDirect } from "../executors/gemini-cli.js";
+import {
+  executeGeminiFlashResearch,
+  executeGeminiProResearch,
+} from "../executors/gemini-cli.js";
 import { OvernightTaskStore } from "./task-store.js";
 import type {
   OvernightTask,
@@ -70,11 +73,13 @@ export class ResearchOrchestrator {
     options?: {
       outputDir?: string;
       onMilestone?: (milestone: string, message: string) => Promise<void>;
-    }
+    },
   ) {
     this.task = task;
     this.store = store;
-    this.outputDir = options?.outputDir ?? join(DEFAULT_OVERNIGHT_CONFIG.workspacesDir, task.id);
+    this.outputDir =
+      options?.outputDir ??
+      join(DEFAULT_OVERNIGHT_CONFIG.workspacesDir, task.id);
     this.onMilestone = options?.onMilestone;
   }
 
@@ -85,31 +90,48 @@ export class ResearchOrchestrator {
     const startTime = Date.now();
     let totalTokens = 0;
 
-    logger.info({ taskId: this.task.id, subject: this.task.subject }, "Starting research orchestration");
+    logger.info(
+      { taskId: this.task.id, subject: this.task.subject },
+      "Starting research orchestration",
+    );
 
     try {
       // Ensure output directory exists
       await mkdir(this.outputDir, { recursive: true });
 
       // Phase 1: Query Expansion
-      this.store.updateTaskStatus(this.task.id, "planning", { startedAt: new Date() });
-      await this.notifyMilestone("planning", "📋 Expanding research queries...");
+      this.store.updateTaskStatus(this.task.id, "planning", {
+        startedAt: new Date(),
+      });
+      await this.notifyMilestone(
+        "planning",
+        "📋 Expanding research queries...",
+      );
       const queries = await this.expandQueries();
       totalTokens += 500;
 
       // Phase 2: Parallel Harvest
       this.store.updateTaskStatus(this.task.id, "executing");
-      await this.notifyMilestone("iteration_start", `🔍 Harvesting from ${queries.length} sources...`);
+      await this.notifyMilestone(
+        "iteration_start",
+        `🔍 Harvesting from ${queries.length} sources...`,
+      );
       const harvestResults = await this.parallelHarvest(queries);
       totalTokens += queries.length * 1000;
 
       // Phase 3: Validation Loop
-      await this.notifyMilestone("synthesis", "✅ Cross-validating findings...");
+      await this.notifyMilestone(
+        "synthesis",
+        "✅ Cross-validating findings...",
+      );
       const validatedResults = await this.validateFindings(harvestResults);
 
-      // Phase 4: Synthesis with Kimi
+      // Phase 4: Synthesis with Gemini Pro
       this.store.updateTaskStatus(this.task.id, "synthesizing");
-      await this.notifyMilestone("synthesis", "🧠 Synthesizing with Kimi (2M context)...");
+      await this.notifyMilestone(
+        "synthesis",
+        "🧠 Synthesizing with Gemini Pro...",
+      );
       const syntheses = await this.synthesizeFindings(validatedResults);
       totalTokens += 2000;
 
@@ -120,8 +142,13 @@ export class ResearchOrchestrator {
       await this.saveArtifacts(harvestResults, syntheses);
 
       // Phase 7: Update status to ready
-      this.store.updateTaskStatus(this.task.id, "ready", { completedAt: new Date() });
-      await this.notifyMilestone("ready", "✅ Research complete. Preparing morning briefing...");
+      this.store.updateTaskStatus(this.task.id, "ready", {
+        completedAt: new Date(),
+      });
+      await this.notifyMilestone(
+        "ready",
+        "✅ Research complete. Preparing morning briefing...",
+      );
 
       return {
         success: true,
@@ -131,8 +158,12 @@ export class ResearchOrchestrator {
         totalTokens,
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      logger.error({ taskId: this.task.id, error: errorMessage }, "Research orchestration failed");
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      logger.error(
+        { taskId: this.task.id, error: errorMessage },
+        "Research orchestration failed",
+      );
 
       this.store.updateTaskStatus(this.task.id, "failed", {
         error: errorMessage,
@@ -185,9 +216,10 @@ Respond in JSON:
 }
 \`\`\``;
 
-    const result = await executeGeminiCLIDirect(
-      "You are a research planner. Expand topics into specific, high-value queries.\n\n---\n\n" + prompt,
-      { timeout: 120_000, role: "research" },
+    const result = await executeGeminiFlashResearch(
+      "You are a research planner. Expand topics into specific, high-value queries.\n\n---\n\n" +
+        prompt,
+      { timeout: 120_000 },
     );
 
     if (result.exitCode !== 0) {
@@ -220,10 +252,26 @@ Respond in JSON:
     const subject = this.task.subject;
     return [
       { query: `${subject} best practices`, category: "web", priority: "high" },
-      { query: `${subject} implementation guide`, category: "docs", priority: "high" },
-      { query: `${subject} examples github`, category: "code", priority: "medium" },
-      { query: `${subject} comparison alternatives`, category: "web", priority: "medium" },
-      { query: `${subject} performance benchmarks`, category: "web", priority: "low" },
+      {
+        query: `${subject} implementation guide`,
+        category: "docs",
+        priority: "high",
+      },
+      {
+        query: `${subject} examples github`,
+        category: "code",
+        priority: "medium",
+      },
+      {
+        query: `${subject} comparison alternatives`,
+        category: "web",
+        priority: "medium",
+      },
+      {
+        query: `${subject} performance benchmarks`,
+        category: "web",
+        priority: "low",
+      },
     ];
   }
 
@@ -231,7 +279,9 @@ Respond in JSON:
   // PHASE 2: PARALLEL HARVEST
   // ============================================
 
-  private async parallelHarvest(queries: ResearchQuery[]): Promise<HarvestResult[]> {
+  private async parallelHarvest(
+    queries: ResearchQuery[],
+  ): Promise<HarvestResult[]> {
     // Group queries by priority for staged execution
     const highPriority = queries.filter((q) => q.priority === "high");
     const mediumPriority = queries.filter((q) => q.priority === "medium");
@@ -242,19 +292,19 @@ Respond in JSON:
 
     // High priority in parallel
     const highResults = await Promise.allSettled(
-      highPriority.map((q) => this.harvestQuery(q))
+      highPriority.map((q) => this.harvestQuery(q)),
     );
     results.push(...this.extractSettledResults(highResults));
 
     // Medium priority in parallel
     const mediumResults = await Promise.allSettled(
-      mediumPriority.map((q) => this.harvestQuery(q))
+      mediumPriority.map((q) => this.harvestQuery(q)),
     );
     results.push(...this.extractSettledResults(mediumResults));
 
     // Low priority in parallel
     const lowResults = await Promise.allSettled(
-      lowPriority.map((q) => this.harvestQuery(q))
+      lowPriority.map((q) => this.harvestQuery(q)),
     );
     results.push(...this.extractSettledResults(lowResults));
 
@@ -262,7 +312,10 @@ Respond in JSON:
   }
 
   private async harvestQuery(query: ResearchQuery): Promise<HarvestResult> {
-    logger.debug({ query: query.query, category: query.category }, "Harvesting query");
+    logger.debug(
+      { query: query.query, category: query.category },
+      "Harvesting query",
+    );
 
     const prompt = `Research the following topic and provide a comprehensive summary.
 
@@ -281,9 +334,10 @@ Provide a structured response with:
 - Sources (URLs if available)
 - Confidence level (0-1)`;
 
-    const result = await executeGeminiCLIDirect(
-      "You are an expert researcher. Provide comprehensive, accurate information with citations when available.\n\n---\n\n" + prompt,
-      { timeout: 120_000, role: "research" },
+    const result = await executeGeminiFlashResearch(
+      "You are an expert researcher. Provide comprehensive, accurate information with citations when available.\n\n---\n\n" +
+        prompt,
+      { timeout: 120_000 },
     );
 
     return {
@@ -305,13 +359,19 @@ Provide a structured response with:
     // Simple heuristic based on content length and structure
     if (content.length < 100) return 0.3;
     if (content.length < 500) return 0.5;
-    if (content.includes("source") || content.includes("according to")) return 0.8;
+    if (content.includes("source") || content.includes("according to"))
+      return 0.8;
     return 0.6;
   }
 
-  private extractSettledResults(settled: PromiseSettledResult<HarvestResult>[]): HarvestResult[] {
+  private extractSettledResults(
+    settled: PromiseSettledResult<HarvestResult>[],
+  ): HarvestResult[] {
     return settled
-      .filter((r): r is PromiseFulfilledResult<HarvestResult> => r.status === "fulfilled")
+      .filter(
+        (r): r is PromiseFulfilledResult<HarvestResult> =>
+          r.status === "fulfilled",
+      )
       .map((r) => r.value);
   }
 
@@ -319,7 +379,9 @@ Provide a structured response with:
   // PHASE 3: VALIDATION LOOP
   // ============================================
 
-  private async validateFindings(results: HarvestResult[]): Promise<HarvestResult[]> {
+  private async validateFindings(
+    results: HarvestResult[],
+  ): Promise<HarvestResult[]> {
     // Cross-reference findings to flag contradictions
     const validatedResults = [...results];
 
@@ -357,7 +419,10 @@ List any contradictions or inconsistencies found. If findings are consistent, sa
           }
         } else {
           // Flag potential issues
-          logger.info({ category }, "Validation found potential contradictions");
+          logger.info(
+            { category },
+            "Validation found potential contradictions",
+          );
         }
       } catch (error) {
         logger.warn({ category, error }, "Validation failed for category");
@@ -368,13 +433,18 @@ List any contradictions or inconsistencies found. If findings are consistent, sa
   }
 
   // ============================================
-  // PHASE 4: SYNTHESIS WITH KIMI
+  // PHASE 4: SYNTHESIS WITH GEMINI PRO
   // ============================================
 
-  private async synthesizeFindings(results: HarvestResult[]): Promise<SynthesisResult[]> {
+  private async synthesizeFindings(
+    results: HarvestResult[],
+  ): Promise<SynthesisResult[]> {
     // Compile all findings into a single context
     const compiledContext = results
-      .map((r) => `## ${r.query} (${r.category}, confidence: ${r.confidence})\n\n${r.content}`)
+      .map(
+        (r) =>
+          `## ${r.query} (${r.category}, confidence: ${r.confidence})\n\n${r.content}`,
+      )
       .join("\n\n---\n\n");
 
     const synthesisPrompt = `You are synthesizing research findings into 3 distinct interpretations.
@@ -420,11 +490,22 @@ Respond in JSON:
 }
 \`\`\``;
 
-    // Use Kimi for synthesis (2M context window)
-    const result = await executeKimiCommand(synthesisPrompt, {});
+    const result = await executeGeminiProResearch(synthesisPrompt, {
+      timeout: 300_000,
+    });
 
     if (result.exitCode !== 0) {
-      return this.getDefaultSyntheses();
+      logger.warn(
+        { taskId: this.task.id, exitCode: result.exitCode },
+        "Gemini Pro synthesis failed, falling back to Kimi",
+      );
+
+      const fallbackResult = await executeKimiCommand(synthesisPrompt, {});
+      if (fallbackResult.exitCode !== 0) {
+        return this.getDefaultSyntheses();
+      }
+
+      return this.parseSyntheses(fallbackResult.output);
     }
 
     return this.parseSyntheses(result.output);
@@ -453,11 +534,12 @@ Respond in JSON:
   }
 
   private getDefaultSyntheses(): SynthesisResult[] {
-    const interpretations: Array<{ label: ApproachLabel; name: ApproachName }> = [
-      { label: "A", name: "Conservative" },
-      { label: "B", name: "Innovative" },
-      { label: "C", name: "Pragmatic" },
-    ];
+    const interpretations: Array<{ label: ApproachLabel; name: ApproachName }> =
+      [
+        { label: "A", name: "Conservative" },
+        { label: "B", name: "Innovative" },
+        { label: "C", name: "Pragmatic" },
+      ];
 
     return interpretations.map((i) => ({
       label: i.label,
@@ -475,7 +557,7 @@ Respond in JSON:
   // ============================================
 
   private async createIterationsFromSyntheses(
-    syntheses: SynthesisResult[]
+    syntheses: SynthesisResult[],
   ): Promise<OvernightIteration[]> {
     const iterations: OvernightIteration[] = [];
 
@@ -525,12 +607,15 @@ Confidence: ${Math.round(synthesis.confidence * 100)}%`;
 
   private async saveArtifacts(
     harvestResults: HarvestResult[],
-    syntheses: SynthesisResult[]
+    syntheses: SynthesisResult[],
   ): Promise<void> {
     // Save raw harvest results
     const harvestPath = join(this.outputDir, "harvest.md");
     const harvestContent = harvestResults
-      .map((r) => `## ${r.query}\n\n${r.content}\n\n**Sources:** ${r.sources.join(", ")}`)
+      .map(
+        (r) =>
+          `## ${r.query}\n\n${r.content}\n\n**Sources:** ${r.sources.join(", ")}`,
+      )
       .join("\n\n---\n\n");
     await writeFile(harvestPath, harvestContent);
 
@@ -557,12 +642,16 @@ Completed overnight research with ${syntheses.length} interpretations.
 
 ## Interpretations
 
-${syntheses.map((s) => `### ${s.label}: ${s.name}
+${syntheses
+  .map(
+    (s) => `### ${s.label}: ${s.name}
 ${s.summary}
 
 **Top Finding:** ${s.keyFindings[0] || "N/A"}
 **Confidence:** ${Math.round(s.confidence * 100)}%
-`).join("\n")}
+`,
+  )
+  .join("\n")}
 
 ## Files
 - \`harvest.md\` - Raw research findings
@@ -574,7 +663,10 @@ ${s.summary}
   // MILESTONE NOTIFICATIONS
   // ============================================
 
-  private async notifyMilestone(milestone: string, message: string): Promise<void> {
+  private async notifyMilestone(
+    milestone: string,
+    message: string,
+  ): Promise<void> {
     this.store.createMilestone({
       taskId: this.task.id,
       milestone: milestone as any,
