@@ -498,7 +498,7 @@ Rules:
   try {
     const result = await executeGeminiCLIDirect(
       prompt + "\n\nReturn ONLY a valid JSON object, no markdown fences.",
-      { model: GEMINI_CLI_PRO_MODEL, timeout: 150_000 },
+      { model: GEMINI_CLI_PRO_MODEL, timeout: 300_000 },
     );
 
     if (result.exitCode !== 0 || !result.output) {
