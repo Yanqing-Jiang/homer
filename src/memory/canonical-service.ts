@@ -74,13 +74,17 @@ export class CanonicalMemoryService {
     const factSource = (validSources.has(source) ? source : "unknown") as "mcp" | "nightly" | "weekly" | "unknown";
     this.sm.recordPromotedFact(content, file, section, factSource);
 
-    // Index the file immediately
-    const context = file === "work" ? "work" : file === "life" ? "life" : "general";
-    await this.indexer.indexFile(filePath, context as "work" | "life" | "general");
-
-    // Mark all derived pipelines dirty
+    // Mark all derived pipelines dirty BEFORE indexing — ensures flags are set even if indexing fails
     for (const pipeline of ALL_WRITE_PIPELINES) {
       this.markDirty(pipeline, `promote:${source}`);
+    }
+
+    // Index the file immediately (best-effort — dirty flags already set for retry)
+    const context = file === "work" ? "work" : file === "life" ? "life" : "general";
+    try {
+      await this.indexer.indexFile(filePath, context as "work" | "life" | "general");
+    } catch (err) {
+      logger.warn({ err, filePath }, "Inline indexing failed after promote — reindex will pick it up");
     }
 
     logger.info({ file, section, source, content: content.slice(0, 80) }, "Promoted fact via CanonicalMemoryService");

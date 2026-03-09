@@ -1,5 +1,6 @@
 import { logger } from "../utils/logger.js";
 import type { StateManager } from "../state/manager.js";
+import { memoryEvents } from "../events/memory-events.js";
 
 // Module-level reference, wired at startup via setWriterStateManager()
 let stateManagerRef: StateManager | null = null;
@@ -43,6 +44,8 @@ async function appendToMemoryFile(target: string, content: string): Promise<void
       content,
       project,
     );
+    stateManagerRef.markPipelineDirty("embeddings", "writer");
+    memoryEvents.emitDirty("embeddings", "writer");
     logger.info({ target, project, contentLength: content.length }, "Memory update written to session_summaries");
   } catch (error) {
     logger.error({ error, target }, "Failed to write memory update to session_summaries");
