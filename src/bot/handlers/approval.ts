@@ -327,9 +327,9 @@ export async function getDenyPatterns(): Promise<string[]> {
  * Telegram callback_data max is 64 bytes — truncate ID to fit.
  * Callback handlers use startsWith matching, so truncation is safe.
  */
-export function createIdeaKeyboard(ideaId: string): InlineKeyboard {
-  // Longest payload: "a:i:" + id + ":archive" = 12 + id.length bytes
-  const maxIdBytes = 64 - "a:i:".length - ":archive".length; // 52
+export function createIdeaKeyboard(ideaId: string, hasEnrichment = false): InlineKeyboard {
+  // Longest payload: "a:i:" + id + ":deep_dive" = 14 + id.length bytes
+  const maxIdBytes = 64 - "a:i:".length - ":deep_dive".length; // 50
 
   // Truncate by bytes to prevent Telegram API crashes, ensure collision safety
   let id = ideaId;
@@ -340,10 +340,17 @@ export function createIdeaKeyboard(ideaId: string): InlineKeyboard {
     id = id.replace(/\uFFFD/g, '');
   }
 
-  return new InlineKeyboard()
-    .text("💬 聊聊", `a:i:${id}:talk`)
-    .text("💤 暂缓", `a:i:${id}:snooze`)
+  const kb = new InlineKeyboard()
+    .text("💬 聊聊", `a:i:${id}:talk`);
+
+  if (hasEnrichment) {
+    kb.text("🔍 深挖", `a:i:${id}:deep_dive`);
+  }
+
+  kb.text("💤 暂缓", `a:i:${id}:snooze`)
     .text("🗂 归档", `a:i:${id}:archive`);
+
+  return kb;
 }
 
 /**
@@ -378,15 +385,40 @@ export function formatIdeaForTelegram(idea: ParsedIdea, index: number): string {
   const confidence = extractConfidence(idea);
   const indicator = confidenceIndicator(confidence);
 
-  // Build summary from content (skip context — it's metadata now)
-  let summary = idea.content || "";
-  summary = summary.slice(0, 800);
-  if (summary.length === 800) summary = summary.slice(0, summary.lastIndexOf(" ")) + "...";
-  const summaryHtml = escapeHtml(summary);
-
   let msg = `<b>${emoji} ${title}</b>${indicator}\n`;
   msg += `${source}${tagsStr}\n\n`;
-  msg += `${summaryHtml}\n`;
+
+  // Use enrichment if available, fall back to raw content
+  let enrichment: Record<string, unknown> | null = null;
+  if (idea.enrichment) {
+    try { enrichment = JSON.parse(idea.enrichment); } catch { /* ignore */ }
+  }
+
+  if (enrichment) {
+    const dive = enrichment.deep_dive as { core_claim?: string } | undefined;
+    const links = enrichment.deep_links as Array<{ target: string; relationship: string }> | undefined;
+    const imp = enrichment.homer_improvement as { relevant?: boolean; summary?: string; area?: string; priority?: string } | undefined;
+
+    if (dive?.core_claim) {
+      msg += `${escapeHtml(dive.core_claim)}\n`;
+    }
+
+    if (links?.length) {
+      const linkStr = links.slice(0, 3).map(l => escapeHtml(l.target)).join(", ");
+      msg += `\n🔗 <i>${escapeHtml(links[0]?.relationship ?? "connects to")}: ${linkStr}</i>\n`;
+    }
+
+    if (imp?.relevant && imp.summary) {
+      const priorityIcon = imp.priority === "high" ? "🔴" : imp.priority === "medium" ? "🟡" : "🟢";
+      msg += `⚡ ${priorityIcon} <b>${escapeHtml(imp.summary)}</b>\n`;
+    }
+  } else {
+    let summary = idea.content || "";
+    summary = summary.slice(0, 600);
+    if (summary.length === 600) summary = summary.slice(0, summary.lastIndexOf(" ")) + "...";
+    msg += `${escapeHtml(summary)}\n`;
+  }
+
   if (idea.link) {
     msg += `\n<a href="${escapeHtml(idea.link)}">来源链接</a>\n`;
   }
@@ -530,6 +562,26 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       dao.appendNote(db, idea.id, "Gemini Flash review started");
       await logFeedback("talk", idea.title);
 
+      // Auto-create Homer task for high-priority improvements
+      if (idea.enrichment) {
+        try {
+          const enrichment = JSON.parse(idea.enrichment);
+          const imp = enrichment?.homer_improvement;
+          if (imp?.relevant && imp?.priority === "high") {
+            dao.createHomerTask(db, {
+              id: `ht_${Date.now()}_${idea.id.slice(0, 20)}`,
+              ideaId: idea.id,
+              title: imp.summary ?? idea.title,
+              area: imp.area ?? "none",
+              priority: imp.priority,
+              plan: JSON.stringify(imp.plan ?? []),
+              source: "idea_enrichment",
+            });
+            logger.info({ ideaId: idea.id, area: imp.area }, "Homer task auto-created from high-priority enrichment");
+          }
+        } catch { /* non-blocking */ }
+      }
+
       // Track outcome for this idea entering discussion
       try {
         if (stateManagerRef) {
@@ -606,6 +658,77 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
     } catch (error) {
       logger.error({ error, ideaId }, "Failed to initiate analysis");
       await ctx.answerCallbackQuery("Error starting analysis");
+    }
+  });
+
+  // Handle deep dive button — expand enrichment JSON inline
+  bot.callbackQuery(/^a:i:([^:]+):deep_dive$/, async (ctx) => {
+    const ideaId = ctx.match?.[1];
+    if (!ideaId) { await ctx.answerCallbackQuery("Invalid request"); return; }
+
+    const db = stateManagerRef?.getDb();
+    const idea = db ? dao.getIdea(db, ideaId) : null;
+    if (!idea || !db) { await ctx.answerCallbackQuery("Idea not found"); return; }
+
+    if (!idea.enrichment) {
+      await ctx.answerCallbackQuery("No enrichment data yet");
+      return;
+    }
+
+    await ctx.answerCallbackQuery("Loading deep dive...");
+
+    try {
+      const enrichment = JSON.parse(idea.enrichment);
+      const dive = enrichment?.deep_dive ?? {};
+      const links = enrichment?.deep_links ?? [];
+      const imp = enrichment?.homer_improvement ?? {};
+
+      let msg = `🔍 <b>深挖: ${escapeHtml(idea.title)}</b>\n\n`;
+
+      msg += `<b>核心论点</b>\n${escapeHtml(dive.core_claim ?? "N/A")}\n\n`;
+      msg += `<b>证据</b>\n${escapeHtml(dive.evidence ?? "N/A")}\n\n`;
+
+      if (dive.risks?.length) {
+        msg += `<b>风险</b>\n${(dive.risks as string[]).map((r: string) => `• ${escapeHtml(r)}`).join("\n")}\n\n`;
+      }
+
+      msg += `<b>最快验证</b>\n${escapeHtml(dive.validation_path ?? "N/A")}\n\n`;
+
+      if (links.length) {
+        msg += `<b>关联</b>\n`;
+        for (const l of links as Array<{ target: string; relationship: string; strength: number }>) {
+          msg += `• <i>${escapeHtml(l.relationship)}</i>: ${escapeHtml(l.target)} (${Math.round((l.strength ?? 0) * 100)}%)\n`;
+        }
+        msg += "\n";
+      }
+
+      if (imp.relevant) {
+        const priorityIcon = imp.priority === "high" ? "🔴" : imp.priority === "medium" ? "🟡" : "🟢";
+        msg += `<b>Homer 改进 ${priorityIcon} [${escapeHtml(imp.priority?.toUpperCase() ?? "")}]</b>\n`;
+        msg += `${escapeHtml(imp.summary ?? "")}\n\n`;
+        msg += `<i>${escapeHtml(imp.user_context ?? "")}</i>\n\n`;
+        if (imp.plan?.length) {
+          for (const step of imp.plan as Array<{ step: number; action: string; file: string; effort: string }>) {
+            msg += `${step.step}. [${escapeHtml(step.effort)}] ${escapeHtml(step.action)}\n   <code>${escapeHtml(step.file)}</code>\n`;
+          }
+          msg += "\n";
+        }
+        msg += `⚙️ <i>${escapeHtml(imp.automation_potential ?? "")}</i>\n`;
+      }
+
+      const chatId = ctx.chat?.id;
+      if (chatId) {
+        await sendChunkedTelegramMessage({
+          bot,
+          chatId,
+          message: formatScheduledTelegramHtml(msg),
+          parseMode: "HTML",
+          enableLinkPreview: false,
+        });
+      }
+    } catch (err) {
+      logger.error({ error: err, ideaId }, "Deep dive render failed");
+      await ctx.answerCallbackQuery("Failed to render deep dive");
     }
   });
 
@@ -842,7 +965,7 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
   for (let i = 0; i < selected.length; i++) {
     const idea = selected[i]!;
     const message = formatIdeaForTelegram(idea, i);
-    const keyboard = createIdeaKeyboard(idea.id);
+    const keyboard = createIdeaKeyboard(idea.id, !!idea.enrichment);
 
     try {
       await bot.api.sendMessage(chatId, message, {

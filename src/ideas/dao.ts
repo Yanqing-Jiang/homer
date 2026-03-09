@@ -41,6 +41,20 @@ export interface IdeaRow {
   content_hash: string | null;
   created_at: string | null;
   updated_at: string | null;
+  enrichment: string | null;
+}
+
+export interface HomerTaskRow {
+  id: string;
+  idea_id: string;
+  title: string;
+  area: string;
+  priority: string;
+  plan: string; // JSON array
+  status: string;
+  source: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface IdeaFilter {
@@ -82,6 +96,7 @@ export function rowToIdea(row: IdeaRow): ParsedIdea {
     contentHash: row.content_hash ?? undefined,
     linkedExplorationThreadId: row.linked_exploration_thread_id ?? undefined,
     linkedPlanId: row.linked_plan_id ?? undefined,
+    enrichment: row.enrichment ?? undefined,
   };
 }
 
@@ -112,6 +127,7 @@ function ideaToRow(idea: ParsedIdea): Omit<IdeaRow, "updated_at"> {
     file_path: filePath,
     content_hash: hash,
     created_at: idea.timestamp || new Date().toISOString(),
+    enrichment: idea.enrichment ?? null,
   };
 }
 
@@ -206,19 +222,19 @@ export function createIdea(db: Database.Database, idea: ParsedIdea): ParsedIdea 
         id, title, status, source, tags, raw_content, link, canonical_url,
         notes, context, exploration, fingerprint,
         linked_exploration_thread_id, linked_plan_id,
-        file_path, content_hash, created_at, updated_at
+        file_path, content_hash, created_at, enrichment, updated_at
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?,
         ?, ?,
-        ?, ?, ?, datetime('now')
+        ?, ?, ?, ?, datetime('now')
       )
     `).run(
       row.id, row.title, row.status, row.source, row.tags, row.raw_content,
       row.link, row.canonical_url,
       row.notes, row.context, row.exploration, row.fingerprint,
       row.linked_exploration_thread_id, row.linked_plan_id,
-      row.file_path, row.content_hash, row.created_at,
+      row.file_path, row.content_hash, row.created_at, row.enrichment,
     );
 
     // Sync to idea_index for backward compat (Web UI still uses IdeasIndexer)
@@ -238,7 +254,7 @@ export function createIdea(db: Database.Database, idea: ParsedIdea): ParsedIdea 
 export function updateIdea(
   db: Database.Database,
   id: string,
-  fields: Partial<Pick<ParsedIdea, "title" | "status" | "content" | "context" | "notes" | "exploration" | "link" | "tags" | "linkedExplorationThreadId" | "linkedPlanId">>
+  fields: Partial<Pick<ParsedIdea, "title" | "status" | "content" | "context" | "notes" | "exploration" | "link" | "tags" | "linkedExplorationThreadId" | "linkedPlanId" | "enrichment">>
 ): ParsedIdea | null {
   const existing = getIdea(db, id);
   if (!existing) return null;
@@ -255,6 +271,7 @@ export function updateIdea(
   if (fields.tags !== undefined) merged.tags = fields.tags;
   if (fields.linkedExplorationThreadId !== undefined) merged.linkedExplorationThreadId = fields.linkedExplorationThreadId;
   if (fields.linkedPlanId !== undefined) merged.linkedPlanId = fields.linkedPlanId;
+  if (fields.enrichment !== undefined) merged.enrichment = fields.enrichment;
 
   const row = ideaToRow(merged);
 
@@ -265,13 +282,13 @@ export function updateIdea(
         title = ?, status = ?, source = ?, tags = ?, raw_content = ?,
         link = ?, canonical_url = ?, notes = ?, context = ?, exploration = ?,
         fingerprint = ?, linked_exploration_thread_id = ?, linked_plan_id = ?,
-        file_path = ?, content_hash = ?, updated_at = datetime('now')
+        file_path = ?, content_hash = ?, enrichment = ?, updated_at = datetime('now')
       WHERE id = ?
     `).run(
       row.title, row.status, row.source, row.tags, row.raw_content,
       row.link, row.canonical_url, row.notes, row.context, row.exploration,
       row.fingerprint, row.linked_exploration_thread_id, row.linked_plan_id,
-      row.file_path, row.content_hash, existing.id,
+      row.file_path, row.content_hash, row.enrichment, existing.id,
     );
 
     syncToIdeaIndex(db, { ...row, id: existing.id });
@@ -413,6 +430,41 @@ export function getAllIdeaRows(db: Database.Database, filter?: IdeaFilter): Idea
   }
 
   return db.prepare(query).all(...params) as IdeaRow[];
+}
+
+// ============================================
+// Homer Tasks CRUD
+// ============================================
+
+export interface CreateHomerTaskInput {
+  id: string;
+  ideaId: string;
+  title: string;
+  area: string;
+  priority: string;
+  plan: string; // JSON array
+  source?: string;
+}
+
+export function createHomerTask(db: Database.Database, input: CreateHomerTaskInput): void {
+  try {
+    db.prepare(`
+      INSERT INTO homer_tasks (id, idea_id, title, area, priority, plan, status, source)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+    `).run(input.id, input.ideaId, input.title, input.area, input.priority, input.plan, input.source ?? 'idea_enrichment');
+  } catch (e) {
+    logger.warn({ error: e, ideaId: input.ideaId }, "Failed to create homer task (non-fatal)");
+  }
+}
+
+export function getPendingHomerTasks(db: Database.Database): HomerTaskRow[] {
+  try {
+    return db.prepare(
+      "SELECT * FROM homer_tasks WHERE status = 'pending' ORDER BY priority DESC, created_at ASC LIMIT 20"
+    ).all() as HomerTaskRow[];
+  } catch {
+    return [];
+  }
 }
 
 // ============================================

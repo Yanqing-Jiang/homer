@@ -12,11 +12,11 @@
  * Schedule: 0 1 * * * (daily at 1am, triggered by idea-ingest/ideas-explore/content-scraper)
  */
 
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, readdirSync, statSync, existsSync } from "fs";
+import { join } from "path";
 import { z } from "zod";
 import type Database from "better-sqlite3";
-import { executeClaudeCommand } from "../../executors/claude.js";
-import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
+import { executeGeminiCLIDirect, GEMINI_CLI_PRO_MODEL } from "../../executors/gemini-cli.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { getUnprocessedScrapes, markProcessed, type StoredScrape } from "../../scraping/scrape-store.js";
 import type { ParsedIdea } from "../../ideas/parser.js";
@@ -94,6 +94,98 @@ ${meta.stars ? `Stars: ${meta.stars} | ` : ""}${meta.language ? `Language: ${met
 ${(s.raw_content || "").slice(0, 2000)}
 `;
   }).join("\n---\n");
+}
+
+/**
+ * Load .md files modified in the last N days from output/plan dirs.
+ * Returns a single concatenated string, truncated to maxTotalChars.
+ * Files are sorted newest-first, each capped at perFileCap chars.
+ */
+function loadRecentMdFiles(maxDays = 7, maxTotalChars = 6000, perFileCap = 800): string {
+  const home = process.env.HOME ?? "/Users/yj";
+  const searchDirs = [
+    join(home, "homer", "output", "claude"),
+    join(home, "homer", "output", "codex"),
+    join(home, "homer", "output", "gemini"),
+    join(home, "homer", "output", "opus"),
+    join(home, "homer", "output", "kimi"),
+    join(home, "homer", "output", "swarm"),
+    PATHS.plans,
+  ];
+
+  const cutoff = Date.now() - maxDays * 24 * 60 * 60 * 1000;
+  const entries: { path: string; mtime: number }[] = [];
+
+  for (const dir of searchDirs) {
+    if (!existsSync(dir)) continue;
+    try {
+      for (const name of readdirSync(dir)) {
+        if (!name.endsWith(".md")) continue;
+        const full = join(dir, name);
+        try {
+          const st = statSync(full);
+          if (st.mtimeMs >= cutoff) entries.push({ path: full, mtime: st.mtimeMs });
+        } catch { /* skip unreadable */ }
+      }
+    } catch { /* skip unreadable dir */ }
+  }
+
+  entries.sort((a, b) => b.mtime - a.mtime);
+
+  const parts: string[] = [];
+  let total = 0;
+
+  for (const { path } of entries) {
+    if (total >= maxTotalChars) break;
+    try {
+      const raw = readFileSync(path, "utf-8").slice(0, perFileCap);
+      const name = path.split("/").slice(-2).join("/");
+      const snippet = `### ${name}\n${raw}`;
+      parts.push(snippet);
+      total += snippet.length;
+    } catch { /* skip */ }
+  }
+
+  return parts.join("\n\n---\n\n");
+}
+
+/**
+ * Digest recent .md outputs into a compact summary via a single Gemini Flash session.
+ * Keeps each enrichment Pro session's context small — raw files stay out of N parallel calls.
+ * Returns a ~1.5KB digest string, or raw content (truncated) on failure.
+ */
+async function digestRecentOutputs(rawContent: string): Promise<string> {
+  if (!rawContent || rawContent.trim().length < 100) return "(no recent outputs)";
+
+  const prompt = `You are summarizing recent agent work for Yanqing's idea pipeline.
+
+Read the following output files from the past 7 days and produce a compact digest (max 1500 chars).
+
+Extract:
+- What projects/tasks were worked on (1 line each)
+- Key findings or decisions made (bullet points)
+- Open gaps or next steps explicitly mentioned
+- Any patterns that suggest unmet needs or missed opportunities
+
+Be terse. This digest will be injected into multiple enrichment prompts, so dense > verbose.
+
+## Recent Output Files
+${rawContent}
+
+Return plain text only. No headers, no markdown fences.`;
+
+  try {
+    const result = await executeGeminiCLIDirect(
+      prompt,
+      { timeout: 90_000 }, // Flash default
+    );
+    if (result.exitCode === 0 && result.output?.trim()) {
+      return result.output.trim().slice(0, 1800);
+    }
+  } catch { /* fall through */ }
+
+  // Fallback: return raw truncated content
+  return rawContent.slice(0, 1800);
 }
 
 // ============================================
@@ -208,24 +300,21 @@ Return ONLY a JSON object (no markdown):
 {"ideas": [{"title": "...", "content": "...", "source": "x-bookmark|github-trending|medium-trending|github-gap-analysis", "link": "https://...", "tags": ["tag1"], "relevance": "why this matters", "confidenceScore": 0.8, "scrapeIds": ["id1", "id2"]}], "stats": {"candidatesGenerated": N, "candidatesFiltered": M}}`;
 
   try {
-    // Primary: Sonnet via Claude Code CLI — full context window, best synthesis quality
-    const sonnetResult = await executeClaudeCommand(prompt, {
-      cwd: process.env.HOME ?? "/Users/yj",
-      model: "sonnet",
-      timeout: 120_000,
-    });
+    // Gemini 3.1 Pro — no Claude Code tokens consumed
+    const proResult = await executeGeminiCLIDirect(
+      prompt + "\n\nReturn ONLY a valid JSON object, no markdown fences.",
+      { model: GEMINI_CLI_PRO_MODEL, timeout: 180_000 },
+    );
 
-    if (sonnetResult.exitCode === 0 && sonnetResult.output) {
-      return parseSwarmJSON(sonnetResult.output, SynthesisOutputSchema);
+    if (proResult.exitCode === 0 && proResult.output) {
+      return parseSwarmJSON(proResult.output, SynthesisOutputSchema);
     }
 
-    // Fallback: retry Sonnet with higher timeout
-    logger.warn({ exitCode: sonnetResult.exitCode }, "Sonnet synthesis failed, retrying with longer timeout");
-    const retryResult = await executeClaudeCommand(prompt, {
-      cwd: process.env.HOME ?? "/Users/yj",
-      model: "sonnet",
-      timeout: 180_000,
-    });
+    logger.warn({ exitCode: proResult.exitCode }, "Pro synthesis failed, retrying");
+    const retryResult = await executeGeminiCLIDirect(
+      prompt + "\n\nReturn ONLY a valid JSON object, no markdown fences.",
+      { model: GEMINI_CLI_PRO_MODEL, timeout: 300_000 },
+    );
 
     if (retryResult.exitCode !== 0 || !retryResult.output) {
       return { ideas: [], stats: { candidatesGenerated: 0, candidatesFiltered: 0 } };
@@ -302,6 +391,125 @@ Return ONLY a JSON array:
   } catch {
     // Critic failure is non-blocking — keep all ideas
     return new Set(ideas.map(i => i.title));
+  }
+}
+
+// ============================================
+// PASS 3: Idea Enrichment (Gemini Pro, parallel)
+// ============================================
+
+const EnrichmentSchema = z.object({
+  deep_dive: z.object({
+    core_claim: z.string(),
+    evidence: z.string(),
+    risks: z.array(z.string()).max(3),
+    validation_path: z.string(),
+  }),
+  deep_links: z.array(z.object({
+    target: z.string(),
+    relationship: z.string(),
+    strength: z.number().min(0).max(1),
+  })).max(5),
+  homer_improvement: z.object({
+    relevant: z.boolean(),
+    summary: z.string(),
+    area: z.enum(["idea-pipeline", "morning-brief", "scheduler", "career-os", "mahoraga", "content-pipeline", "new-mcp", "none"]),
+    priority: z.enum(["high", "medium", "low"]),
+    user_context: z.string(),
+    plan: z.array(z.object({
+      step: z.number(),
+      action: z.string(),
+      file: z.string(),
+      effort: z.enum(["S", "M", "L"]),
+    })).max(5),
+    automation_potential: z.string(),
+  }),
+});
+
+type IdeaEnrichment = z.infer<typeof EnrichmentSchema>;
+
+async function enrichIdea(
+  idea: z.infer<typeof SynthesizedIdeaSchema>,
+  context: {
+    meMd: string;
+    workMd: string;
+    existingIdeaTitles: string;
+    recentOutputs: string;
+  },
+): Promise<IdeaEnrichment | null> {
+  const prompt = `You are Homer enriching one idea for Yanqing. Return ONLY a JSON object, no markdown.
+
+## Yanqing's Profile (me.md)
+${context.meMd.slice(0, 2500)}
+
+## Active Work (work.md)
+${context.workMd.slice(0, 2500)}
+
+## Existing Idea Titles (for deep link matching)
+${context.existingIdeaTitles.slice(0, 1500)}
+
+## Recent Agent Outputs & Plans (last 7 days — check for overlapping work or reusable findings)
+${context.recentOutputs || "(none)"}
+
+## Homer Architecture
+Subsystems: idea-pipeline, morning-brief, scheduler, career-os, mahoraga, content-pipeline, new-mcp
+Available MCPs: notebooklm-mcp (notebooks, audio overviews, slides), gmail-mcp, elevenlabs-mcp, cloudflare-mcp
+User subscriptions: 3x Google Pro (= 3 NotebookLM Pro sessions), ElevenLabs, Cloudflare Workers
+Active projects: Homer Career OS (Stagehand browser agents), MAHORAGA (TQQQ/SQQQ trading), Shadow Data Pulse (DuckDB), PICE (2 posts/week content), ProfitSphere (chargeback prevention)
+
+## Idea to Enrich
+Title: ${idea.title}
+Content: ${idea.content}
+Source: ${idea.source}
+Tags: ${idea.tags.join(", ")}
+Relevance: ${idea.relevance}
+
+## Output JSON Schema
+{
+  "deep_dive": {
+    "core_claim": "What this idea is actually saying in 1-2 sentences",
+    "evidence": "Concrete signals from the source that support it",
+    "risks": ["Risk 1", "Risk 2"],
+    "validation_path": "Single fastest way to test or apply this"
+  },
+  "deep_links": [
+    {"target": "project or idea name", "relationship": "accelerates|enables|replaces|feeds into|conflicts with", "strength": 0.0-1.0}
+  ],
+  "homer_improvement": {
+    "relevant": true,
+    "summary": "One-line Homer action this idea suggests",
+    "area": "idea-pipeline|morning-brief|scheduler|career-os|mahoraga|content-pipeline|new-mcp|none",
+    "priority": "high|medium|low",
+    "user_context": "Why this fits Yanqing specifically — subscriptions, goals, existing tools",
+    "plan": [
+      {"step": 1, "action": "specific action", "file": "src/path/file.ts or skill name", "effort": "S|M|L"}
+    ],
+    "automation_potential": "What Homer could do autonomously with this"
+  }
+}
+
+Rules:
+- homer_improvement.relevant = false if the idea has no Homer automation angle; set area="none" and leave plan empty
+- high priority = directly unblocks an active project or adds revenue/career leverage within 1 week
+- deep_links must reference real active projects or existing idea titles
+- Check recent agent outputs — if similar work was already done, note it in deep_links with relationship="already explored"
+- Be specific. Avoid vague statements like "could be useful"`;
+
+  try {
+    const result = await executeGeminiCLIDirect(
+      prompt + "\n\nReturn ONLY a valid JSON object, no markdown fences.",
+      { model: GEMINI_CLI_PRO_MODEL, timeout: 150_000 },
+    );
+
+    if (result.exitCode !== 0 || !result.output) {
+      logger.warn({ title: idea.title }, "Enrichment Pro call failed");
+      return null;
+    }
+
+    return parseSwarmJSON(result.output, EnrichmentSchema);
+  } catch (err) {
+    logger.warn({ error: err, title: idea.title }, "Enrichment parse failed");
+    return null;
   }
 }
 
@@ -422,17 +630,46 @@ export async function runIdeaSynthesizer(db: Database.Database, jobRunId?: numbe
     const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
     const saveResults: SmartSaveResult[] = [];
 
-    for (const idea of synthesizedIdeas) {
-      // Quality gate: confidence threshold
+    // Filter to quality-passing ideas before enrichment
+    const qualityIdeas = synthesizedIdeas.filter(idea => {
       if (idea.confidenceScore < 0.4) {
         logger.info({ title: idea.title, score: idea.confidenceScore }, "Below quality threshold");
-        continue;
+        return false;
       }
-
-      // Critic filter
       if (!keepTitles.has(idea.title)) {
         logger.info({ title: idea.title }, "Filtered by critic");
-        continue;
+        return false;
+      }
+      return true;
+    });
+
+    // PASS 3: Enrichment — run all in parallel via Gemini Pro
+    logger.info({ count: qualityIdeas.length }, "Pass 3: enrichment via Gemini Pro");
+
+    // Pre-pass: digest recent .md files in one Flash session, then share the compact
+    // digest across all parallel enrichment Pro sessions (keeps each session's context small)
+    const recentMdRaw = loadRecentMdFiles(7, 8000, 1000);
+    const recentDigest = await digestRecentOutputs(recentMdRaw);
+    logger.info({ rawChars: recentMdRaw.length, digestChars: recentDigest.length }, "Recent outputs digested");
+
+    const enrichmentContext = {
+      meMd: loadFileIfExists(ME_MD, 2500),
+      workMd: loadFileIfExists(WORK_MD, 2500),
+      existingIdeaTitles: existingIdeas.slice(0, 80).map(i => `${i.title} [${(i.tags ?? []).join(",")}]`).join("\n"),
+      recentOutputs: recentDigest,
+    };
+
+    const enrichmentResults = await Promise.allSettled(
+      qualityIdeas.map(idea => enrichIdea(idea, enrichmentContext))
+    );
+
+    for (let i = 0; i < qualityIdeas.length; i++) {
+      const idea = qualityIdeas[i]!;
+      const enrichmentResult = enrichmentResults[i];
+      const enrichment = enrichmentResult?.status === "fulfilled" ? enrichmentResult.value : null;
+
+      if (enrichment) {
+        logger.info({ title: idea.title, homerArea: enrichment.homer_improvement.area, priority: enrichment.homer_improvement.priority }, "Enrichment complete");
       }
 
       const slug = idea.title
@@ -452,6 +689,7 @@ export async function runIdeaSynthesizer(db: Database.Database, jobRunId?: numbe
         link: idea.link || undefined,
         tags: [...idea.tags, "synthesized"],
         timestamp,
+        enrichment: enrichment ? JSON.stringify(enrichment) : undefined,
       };
 
       const result = smartSaveIdea(parsed, db);
