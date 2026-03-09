@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "fs";
 import type { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
 import { processRegistry } from "../../process/registry.js";
-import { getUploadContent } from "./uploads.js";
+import { getUploadPath } from "./uploads.js";
 import { processResponse } from "../../utils/response-processor.js";
 import { webLane } from "../../utils/lanes.js";
 import { getRuntimePaths } from "../../utils/runtime-paths.js";
@@ -162,17 +162,12 @@ export function registerStreamingRoutes(
       let messageContent = userContent;
 
       if (body.attachments && body.attachments.length > 0 && body.sessionId) {
-        const attachmentContents: string[] = [];
+        const attachmentPaths = body.attachments
+          .map((uploadId) => getUploadPath(body.sessionId!, uploadId))
+          .filter((path): path is string => Boolean(path));
 
-        for (const uploadId of body.attachments) {
-          const content = getUploadContent(body.sessionId, uploadId);
-          if (content) {
-            attachmentContents.push(`<attachment id="${uploadId}">\n${content}\n</attachment>`);
-          }
-        }
-
-        if (attachmentContents.length > 0) {
-          messageContent = `${attachmentContents.join("\n\n")}\n\n${userContent}`;
+        if (attachmentPaths.length > 0) {
+          messageContent = `Attached files (local paths):\n- ${attachmentPaths.join("\n- ")}\n\n${userContent}`;
         }
       }
 

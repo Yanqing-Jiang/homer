@@ -6,6 +6,7 @@
 		value = $bindable(''),
 		isStreaming,
 		sessionId,
+		ensureSessionForAttachments,
 		attachedFiles = $bindable<Upload[]>([]),
 		showSlashCommands = $bindable(false),
 		filteredCommands,
@@ -17,6 +18,7 @@
 		value: string;
 		isStreaming: boolean;
 		sessionId: string | null;
+		ensureSessionForAttachments: () => Promise<string | null>;
 		attachedFiles: Upload[];
 		showSlashCommands: boolean;
 		filteredCommands: CommandDefinition[];
@@ -29,6 +31,18 @@
 	let fileUploadComponent: FileUpload;
 	let chatInputElement: HTMLTextAreaElement;
 	let displayFiles = $state<DisplayFile[]>([]);
+	const hasUploadingFiles = $derived(displayFiles.some((file) => file.status === 'uploading'));
+	const uploadedDisplayFiles = $derived(
+		displayFiles.filter((file) => file.status === 'done' && file.path)
+	);
+
+	function formatAttachmentPath(file: DisplayFile): string | null {
+		if (!file.path) return null;
+
+		const pathSegments = file.path.split('/');
+		if (pathSegments.length <= 6) return file.path;
+		return `.../${pathSegments.slice(-4).join('/')}`;
+	}
 
 	function autoResizeTextarea(textarea: HTMLTextAreaElement) {
 		textarea.style.height = 'auto';
@@ -71,15 +85,19 @@
 		chatInputElement?.focus();
 	}
 
-	export function addFiles(files: FileList | File[]) {
-		fileUploadComponent?.addFiles(files);
+	export async function addFiles(files: FileList | File[]): Promise<void> {
+		await fileUploadComponent?.addFiles(files);
+	}
+
+	export function hasPendingUploads(): boolean {
+		return displayFiles.some((file) => file.status === 'uploading');
 	}
 
 	function removeFile(localId: string) {
 		fileUploadComponent?.removeFile(localId);
 	}
 
-	function handlePaste(e: ClipboardEvent) {
+	async function handlePaste(e: ClipboardEvent) {
 		const items = e.clipboardData?.items;
 		if (!items) return;
 
@@ -95,7 +113,7 @@
 
 		if (imageFiles.length > 0) {
 			e.preventDefault();
-			fileUploadComponent.addFiles(imageFiles);
+			await fileUploadComponent.addFiles(imageFiles);
 		}
 	}
 
@@ -133,6 +151,18 @@
 						</div>
 					{/each}
 				</div>
+				<div class="attachment-hint" aria-live="polite">
+					{#if hasUploadingFiles}
+						<span>Uploading to the Mac Mini local folder. Files will be passed to the CLI as filesystem paths.</span>
+					{:else if uploadedDisplayFiles.length > 0}
+						<span>Stored on the Mac Mini and passed to the CLI as local paths:</span>
+						{#each uploadedDisplayFiles as file}
+							<div class="attachment-path" title={file.path!}>
+								{file.filename}: {formatAttachmentPath(file)}
+							</div>
+						{/each}
+					{/if}
+				</div>
 			{/if}
 			{#if showSlashCommands && filteredCommands.length > 0}
 				<div class="slash-command-dropdown">
@@ -157,6 +187,7 @@
 				<FileUpload
 					bind:this={fileUploadComponent}
 					{sessionId}
+					{ensureSessionForAttachments}
 					onFilesChange={(files) => attachedFiles = files}
 					onDisplayChange={(files) => displayFiles = files}
 				/>
@@ -180,7 +211,12 @@
 					onpaste={handlePaste}
 					rows="1"
 				></textarea>
-				<button class="send-btn" onclick={onSend} disabled={!value.trim() || isStreaming} aria-label="Send">
+				<button
+					class="send-btn"
+					onclick={onSend}
+					disabled={(!value.trim() && attachedFiles.length === 0) || isStreaming || hasUploadingFiles}
+					aria-label="Send"
+				>
 					{#if isStreaming}
 						<span class="spinner-small"></span>
 					{:else}
@@ -241,6 +277,20 @@
 		gap: 6px;
 		width: 100%;
 		padding-bottom: 6px;
+	}
+
+	.attachment-hint {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		padding-bottom: 8px;
+		font-size: 11px;
+		color: #5f6b7a;
+	}
+
+	.attachment-path {
+		font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+		word-break: break-all;
 	}
 
 	.attachment-chip {

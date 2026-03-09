@@ -125,7 +125,9 @@
 		}
 	}
 
-	async function createThread(provider: 'claude' | 'gemini' | 'codex' | 'chatgpt' = 'claude') {
+	async function createThread(
+		provider: 'claude' | 'gemini' | 'codex' | 'kimi' | 'chatgpt' | 'opencode' = 'claude'
+	) {
 		if (!selectedSession) return;
 		try {
 			const thread = await api.createThread(selectedSession.id, {
@@ -143,18 +145,18 @@
 	}
 
 	// File attachment functions
-	const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+	const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+	const MAX_FILE_SIZE_MB = MAX_FILE_SIZE / 1024 / 1024;
 
 	function openFilePicker() {
 		const input = document.createElement('input');
 		input.type = 'file';
 		input.multiple = true;
-		input.accept = '.txt,.md,.csv,.html,.json,.js,.ts,.py,.sql,.xml,.yaml,.yml,.css,.tsx,.jsx,.pdf';
 		input.onchange = (e) => {
 			const files = Array.from((e.target as HTMLInputElement).files ?? []);
 			const oversized = files.filter((f) => f.size > MAX_FILE_SIZE);
 			if (oversized.length > 0) {
-				uploadError = `Files too large (>10MB): ${oversized.map((f) => f.name).join(', ')}`;
+				uploadError = `Files too large (>${MAX_FILE_SIZE_MB}MB): ${oversized.map((f) => f.name).join(', ')}`;
 				return;
 			}
 			uploadError = null;
@@ -199,10 +201,13 @@
 	async function sendMessage() {
 		if (!selectedThread || (!messageInput.trim() && attachedFiles.length === 0) || sendingMessage) return;
 
-		const content = messageInput.trim();
+		const typedContent = messageInput.trim();
+		const userVisibleContent =
+			typedContent || `Attached files: ${attachedFiles.map((file) => file.name).join(', ')}`;
+		const executionContent = typedContent || 'Please inspect the attached file(s).';
 		const threadId = selectedThread.id;
 		const provider = selectedThread.provider;
-		const isExecutorCommand = /^\/(gemini|codex|claude|sonnet|opus|chatgpt|kimi|open_flash|open_opus|g|x|new)\b/i.test(content);
+		const isExecutorCommand = /^\/(gemini|codex|claude|sonnet|opus|chatgpt|kimi|open_flash|open_opus|g|x|new)\b/i.test(typedContent);
 		let sessionExecutor: api.ExecutorType = 'claude';
 		if (selectedSession) {
 			try {
@@ -215,6 +220,7 @@
 
 		// Upload files first if any
 		let uploadIds: string[] = [];
+		let uploadPaths: string[] = [];
 		const filesToUpload = [...attachedFiles];
 		if (filesToUpload.length > 0 && selectedSession) {
 			uploadingFiles = true;
@@ -223,6 +229,7 @@
 				for (const file of filesToUpload) {
 					const upload = await api.uploadFile(file, selectedSession.id);
 					uploadIds.push(upload.id);
+					uploadPaths.push(upload.path);
 				}
 			} catch (err) {
 				uploadingFiles = false;
@@ -249,7 +256,7 @@
 			id: 'temp-' + Date.now(),
 			threadId: threadId,
 			role: 'user',
-			content,
+			content: userVisibleContent,
 			metadata: null,
 			createdAt: new Date().toISOString()
 		};
@@ -262,7 +269,7 @@
 		if (provider === 'claude' && !isExecutorCommand && sessionExecutor === 'claude') {
 			api.streamMessage(
 				threadId,
-				content,
+				executionContent,
 				{
 				onStart: (data) => {
 					// Update temp message with real ID
@@ -331,7 +338,11 @@
 		// Non-Claude executors: run + status events
 		try {
 			streamingContent = 'Running...';
-			const result = await api.executeMessage(threadId, content);
+			const result = await api.executeMessage(
+				threadId,
+				executionContent,
+				uploadPaths.length > 0 ? uploadPaths : undefined
+			);
 			if (result.userMessageId && selectedThread && selectedThread.id === threadId) {
 				selectedThread = {
 					...selectedThread,
@@ -365,6 +376,8 @@
 			sendingMessage = false;
 			streamingContent = '';
 			error = err instanceof Error ? err.message : 'Execution failed';
+			messageInput = typedContent;
+			attachedFiles = filesToUpload;
 		}
 	}
 
@@ -915,6 +928,9 @@
 											<button class="chip-clear-all" onclick={clearAllFiles} aria-label="Clear all files">
 												Clear all
 											</button>
+										</div>
+										<div class="attachment-local-hint">
+											Files upload to the Mac Mini local folder when you send this message, then Homer passes their local paths to the CLI. Max {MAX_FILE_SIZE_MB}MB per file.
 										</div>
 									{/if}
 
@@ -1791,6 +1807,12 @@
 		color: #a4262c;
 		font-size: 12px;
 		padding: 4px 0;
+	}
+
+	.attachment-local-hint {
+		font-size: 11px;
+		color: #605e5c;
+		padding-bottom: 4px;
 	}
 
 	.textarea-wrapper {
