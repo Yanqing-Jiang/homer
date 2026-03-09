@@ -10,7 +10,7 @@
 // ============================================
 
 export type SourceType =
-  | "twitter_bookmarks"   // Via Gemini Flash + agent-browser
+  | "twitter_bookmarks"   // Via Codex GPT-5.4 + agent-browser
   | "github_trending"     // GitHub trending repos
   | "hackernews"          // HN front page
   | "rss"                 // RSS feeds
