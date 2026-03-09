@@ -1,5 +1,6 @@
 import { logger } from "../utils/logger.js";
 import type { StateManager } from "../state/manager.js";
+import { memoryEvents } from "../events/memory-events.js";
 
 /**
  * Session data for flush scoring
@@ -171,6 +172,8 @@ export async function executeFlush(
       content,
       project,
     );
+    stateManager.markPipelineDirty("embeddings", "flush");
+    memoryEvents.emitDirty("embeddings", "flush");
 
     logger.info(
       {

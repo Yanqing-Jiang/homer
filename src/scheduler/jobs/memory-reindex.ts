@@ -11,6 +11,7 @@
 import { getMemoryIndexer } from "../../memory/indexer.js";
 import { logger } from "../../utils/logger.js";
 import type { StateManager } from "../../state/manager.js";
+import { memoryEvents } from "../../events/memory-events.js";
 
 export async function runMemoryReindex(stateManager?: StateManager): Promise<{
   success: boolean;
@@ -35,9 +36,10 @@ export async function runMemoryReindex(stateManager?: StateManager): Promise<{
       stateManager.clearPipelineDirty("reindex");
     }
 
-    // If anything was indexed, mark embeddings dirty
+    // If anything was indexed, mark embeddings dirty + emit event for reactive trigger
     if (stats.indexed > 0 && stateManager) {
       stateManager.markPipelineDirty("embeddings", "memory-reindex");
+      memoryEvents.emitDirty("embeddings", "memory-reindex");
     }
 
     return { success: true, output };
