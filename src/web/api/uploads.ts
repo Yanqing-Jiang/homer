@@ -6,29 +6,8 @@ import { logger } from "../../utils/logger.js";
 import { config } from "../../config/index.js";
 
 const UPLOADS_DIR = `${config.paths.uploadLanding}/web`;
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-const ALLOWED_TYPES = [
-  // Text
-  "text/plain",
-  "text/markdown",
-  "text/csv",
-  "text/html",
-  "text/css",
-  "text/javascript",
-  "application/json",
-  "application/xml",
-  // Images
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-  "image/svg+xml",
-  // PDF
-  "application/pdf",
-  // Code
-  "application/javascript",
-  "application/typescript",
-];
+const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+const MAX_FILE_SIZE_MB = MAX_FILE_SIZE / 1024 / 1024;
 
 // Extension to mime type mapping for fallback
 const EXT_TO_MIME: Record<string, string> = {
@@ -60,6 +39,42 @@ export interface UploadResult {
   createdAt: string;
 }
 
+function sanitizeSessionId(rawSessionId: string | null | undefined): string {
+  const trimmed = rawSessionId?.trim();
+  if (!trimmed) {
+    return "default";
+  }
+
+  return trimmed.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function readMultipartFieldValue(field: unknown): string | null {
+  if (typeof field === "string") {
+    return field;
+  }
+
+  if (field && typeof field === "object" && "value" in field) {
+    const value = (field as { value?: unknown }).value;
+    if (typeof value === "string") {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function findUploadFile(sessionId: string, uploadId: string): string | null {
+  const sessionDir = join(UPLOADS_DIR, sessionId);
+
+  if (!existsSync(sessionDir)) {
+    return null;
+  }
+
+  const files = readdirSync(sessionDir);
+  const file = files.find((entry) => entry.startsWith(uploadId));
+  return file ? join(sessionDir, file) : null;
+}
+
 /**
  * Register uploads API routes
  */
@@ -85,21 +100,11 @@ export function registerUploadsRoutes(server: FastifyInstance): void {
         return { error: "No file provided" };
       }
 
-      const { filename, mimetype, file } = data;
-      const sessionId = (request.body as any)?.sessionId || "default";
+      const { filename, mimetype, file, fields } = data;
+      const sessionId = sanitizeSessionId(readMultipartFieldValue(fields.sessionId));
 
-      // Validate mime type
       const ext = extname(filename).toLowerCase();
       const mimeType = mimetype || EXT_TO_MIME[ext] || "application/octet-stream";
-
-      const isAllowed = ALLOWED_TYPES.some(t =>
-        mimeType.startsWith(t.split("/")[0] ?? "") || mimeType === t
-      ) || Object.keys(EXT_TO_MIME).includes(ext);
-
-      if (!isAllowed) {
-        reply.status(400);
-        return { error: `File type not allowed: ${mimeType}` };
-      }
 
       // Read file into buffer
       const chunks: Buffer[] = [];
@@ -109,7 +114,7 @@ export function registerUploadsRoutes(server: FastifyInstance): void {
         totalSize += chunk.length;
         if (totalSize > MAX_FILE_SIZE) {
           reply.status(400);
-          return { error: `File too large. Maximum size is ${MAX_FILE_SIZE / 1024 / 1024}MB` };
+          return { error: `File too large. Maximum size is ${MAX_FILE_SIZE_MB}MB` };
         }
         chunks.push(chunk);
       }
@@ -276,21 +281,13 @@ export function registerUploadsRoutes(server: FastifyInstance): void {
  * Read file content for chat context
  */
 export function getUploadContent(sessionId: string, uploadId: string): string | null {
-  const sessionDir = join(UPLOADS_DIR, sessionId);
-
-  if (!existsSync(sessionDir)) {
-    return null;
-  }
-
   try {
-    const files = readdirSync(sessionDir);
-    const file = files.find(f => f.startsWith(uploadId));
-
-    if (!file) {
+    const filePath = findUploadFile(sessionId, uploadId);
+    if (!filePath) {
       return null;
     }
 
-    const filePath = join(sessionDir, file);
+    const file = basename(filePath);
     const ext = extname(file).toLowerCase();
     const mimeType = EXT_TO_MIME[ext] || "application/octet-stream";
 
@@ -312,6 +309,15 @@ export function getUploadContent(sessionId: string, uploadId: string): string | 
     return `[Binary file: ${file}]`;
   } catch (error) {
     logger.error({ error, sessionId, uploadId }, "Failed to read upload content");
+    return null;
+  }
+}
+
+export function getUploadPath(sessionId: string, uploadId: string): string | null {
+  try {
+    return findUploadFile(sessionId, uploadId);
+  } catch (error) {
+    logger.error({ error, sessionId, uploadId }, "Failed to resolve upload path");
     return null;
   }
 }

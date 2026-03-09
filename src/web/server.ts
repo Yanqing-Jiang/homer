@@ -12,6 +12,8 @@ import { createAuthHook } from "./auth.js";
 import type { Scheduler } from "../scheduler/index.js";
 import type { VoiceConfig } from "../voice/types.js";
 
+const MAX_UPLOAD_SIZE_BYTES = 100 * 1024 * 1024; // 100MB
+
 export interface WebServerOptions {
   stateManager: StateManager;
   queueManager: QueueManager;
@@ -36,7 +38,7 @@ export async function createWebServer(
   // Register multipart plugin for file uploads
   await server.register(multipart, {
     limits: {
-      fileSize: 10 * 1024 * 1024, // 10MB
+      fileSize: MAX_UPLOAD_SIZE_BYTES,
     },
   });
 
