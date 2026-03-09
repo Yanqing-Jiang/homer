@@ -59,7 +59,8 @@
 
 	// File upload state
 	let attachedFiles = $state<api.Upload[]>([]);
-	let chatInputComponent: ChatInput;
+	let chatInputComponent = $state<ChatInput | null>(null);
+	let creatingAttachmentSession = $state<Promise<string | null> | null>(null);
 
 	// Full-page drag-drop state
 	let pageDragCounter = $state(0);
@@ -98,7 +99,7 @@
 	let executorCommands = $state<Array<{ name: string; executor: api.ExecutorType; description: string; model?: string }>>([]);
 
 	// Fallback commands (used until dynamic ones load)
-	const fallbackCommands = [
+	const fallbackCommands: api.CommandDefinition[] = [
 		{ name: '/claude', category: 'executor', description: 'Switch to Claude (default)', executor: 'claude' as api.ExecutorType },
 		{ name: '/sonnet', category: 'executor', description: 'Switch Claude to Sonnet', executor: 'claude' as api.ExecutorType, model: 'sonnet' },
 		{ name: '/opus', category: 'executor', description: 'Switch Claude to Opus', executor: 'claude' as api.ExecutorType, model: 'opus' },
@@ -112,12 +113,12 @@
 	];
 
 	// Local-only commands (always available, not from API)
-	const localCommands = [
+	const localCommands: api.CommandDefinition[] = [
 		{ name: '/log-memory', category: 'memory', description: 'Log session summary to daily memory' },
 	];
 
 	// Use dynamic commands if loaded, otherwise fallback, and always include local commands
-	let slashCommands = $derived([
+	let slashCommands = $derived<api.CommandDefinition[]>([
 		...(dynamicCommands.length > 0 ? dynamicCommands : fallbackCommands),
 		...localCommands
 	]);
@@ -626,10 +627,13 @@ Just confirm when done. Keep your response brief.`;
 	}
 
 	async function handleSendMessage() {
-		if (!chatInput.trim() || isStreaming) return;
+		const hasPendingUploads = chatInputComponent?.hasPendingUploads() ?? false;
+		if ((!chatInput.trim() && attachedFiles.length === 0) || hasPendingUploads || isStreaming) return;
 
-		const userMessage = chatInput.trim();
-		const currentAttachments = attachedFiles.map(f => f.path);
+		const typedMessage = chatInput.trim();
+		const currentAttachments = attachedFiles.map((f) => f.path).filter(Boolean);
+		const userMessage = typedMessage || `Attached files: ${attachedFiles.map((f) => f.filename).join(', ')}`;
+		const executionMessage = typedMessage || 'Please inspect the attached file(s).';
 
 		// Parse typed slash commands (e.g., "/gemini hello")
 		if (userMessage.startsWith('/')) {
@@ -690,27 +694,30 @@ Just confirm when done. Keep your response brief.`;
 		attachedFiles = [];
 		chatInputComponent?.clearFiles();
 
-		try {
-			// Create session if needed
-			if (!sessionId) {
-				const session = await api.createSession('Web Chat');
-				sessionId = session.id;
-				currentSessionName = session.name;
-				loadSessions(); // Refresh dropdown
-			}
+			try {
+				// Create session if needed
+				if (!sessionId) {
+					const ensuredSessionId = await ensureSessionForAttachments();
+					if (!ensuredSessionId) {
+						throw new Error('Failed to create session for attachments');
+					}
+				}
 
-			// Create thread if needed
-			if (!threadId) {
-				const thread = await api.createThread(sessionId, { provider: currentExecutor });
-				threadId = thread.id;
-			}
+				// Create thread if needed
+				if (!threadId) {
+					if (!sessionId) {
+						throw new Error('Missing session id');
+					}
+					const thread = await api.createThread(sessionId, { provider: currentExecutor });
+					threadId = thread.id;
+				}
 
 			// Non-streaming execution for all CLIs
 			isStreaming = true;
 			streamingContent = 'Running...';
 
 			try {
-				const result = await api.executeMessage(threadId, userMessage, currentAttachments.length > 0 ? currentAttachments : undefined);
+				const result = await api.executeMessage(threadId, executionMessage, currentAttachments.length > 0 ? currentAttachments : undefined);
 				const runId = result.runId;
 
 				currentAbort = api.streamRunEvents(runId, {
@@ -772,6 +779,32 @@ Just confirm when done. Keep your response brief.`;
 
 	function toggleSidebar() {
 		sidebarOpen = !sidebarOpen;
+	}
+
+	async function ensureSessionForAttachments(): Promise<string | null> {
+		if (sessionId) {
+			return sessionId;
+		}
+
+		if (!creatingAttachmentSession) {
+			creatingAttachmentSession = (async () => {
+				try {
+					const session = await api.createSession('Web Chat');
+					sessionId = session.id;
+					currentSessionName = session.name;
+					markSessionSeen(session.id);
+					loadSessions();
+					return session.id;
+				} catch (error) {
+					chatError = error instanceof Error ? error.message : 'Failed to create session for attachments';
+					return null;
+				} finally {
+					creatingAttachmentSession = null;
+				}
+			})();
+		}
+
+		return creatingAttachmentSession;
 	}
 
 	function toggleUserMenu() {
@@ -1006,6 +1039,7 @@ Just confirm when done. Keep your response brief.`;
 						bind:value={chatInput}
 						{isStreaming}
 						{sessionId}
+						{ensureSessionForAttachments}
 						bind:attachedFiles
 						bind:showSlashCommands
 						{filteredCommands}
@@ -1023,7 +1057,7 @@ Just confirm when done. Keep your response brief.`;
 									<polyline points="17 8 12 3 7 8"/>
 									<line x1="12" y1="3" x2="12" y2="15"/>
 								</svg>
-								<span>Drop files here</span>
+								<span>Drop files here to upload them onto the Mac Mini</span>
 							</div>
 						</div>
 					{/if}

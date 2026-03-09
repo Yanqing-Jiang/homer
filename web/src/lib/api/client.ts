@@ -104,7 +104,7 @@ export interface Thread {
 	id: string;
 	chatSessionId: string;
 	title: string | null;
-	provider: 'claude' | 'gemini' | 'codex' | 'chatgpt';
+	provider: 'claude' | 'gemini' | 'codex' | 'kimi' | 'chatgpt' | 'opencode';
 	model: string | null;
 	status: 'active' | 'expired' | 'archived';
 	externalSessionId: string | null;
@@ -192,7 +192,7 @@ export async function createThread(
 	sessionId: string,
 	options: {
 		title?: string;
-		provider: 'claude' | 'gemini' | 'codex' | 'chatgpt';
+		provider: 'claude' | 'gemini' | 'codex' | 'kimi' | 'chatgpt' | 'opencode';
 		model?: string;
 		parentThreadId?: string;
 		branchPointMessageId?: string;
