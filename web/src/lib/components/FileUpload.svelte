@@ -8,17 +8,21 @@
 		size: number;
 		status: 'uploading' | 'done' | 'error';
 		previewUrl: string | null;
+		path: string | null;
+		sessionId: string | null;
+		createdAt?: string;
 		uploadId?: string;
 		error?: string;
 	}
 
 	interface Props {
 		sessionId: string | null;
+		ensureSessionForAttachments?: () => Promise<string | null>;
 		onFilesChange?: (files: api.Upload[]) => void;
 		onDisplayChange?: (files: DisplayFile[]) => void;
 	}
 
-	let { sessionId, onFilesChange, onDisplayChange }: Props = $props();
+	let { sessionId, ensureSessionForAttachments, onFilesChange, onDisplayChange }: Props = $props();
 
 	let displayFiles = $state<DisplayFile[]>([]);
 	let uploading = $state(false);
@@ -33,15 +37,15 @@
 
 	function getCompletedUploads(): api.Upload[] {
 		return displayFiles
-			.filter(f => f.status === 'done' && f.uploadId)
+			.filter((f) => f.status === 'done' && f.uploadId && f.path)
 			.map(f => ({
 				id: f.uploadId!,
 				filename: f.filename,
-				path: '',
+				path: f.path!,
 				mimeType: f.mimeType,
 				size: f.size,
-				sessionId: sessionId || '',
-				createdAt: new Date().toISOString()
+				sessionId: f.sessionId || sessionId || '',
+				createdAt: f.createdAt || new Date().toISOString()
 			}));
 	}
 
@@ -55,8 +59,8 @@
 		onFilesChange?.([]);
 	}
 
-	export function addFiles(files: FileList | File[]): void {
-		handleFiles(files);
+	export async function addFiles(files: FileList | File[]): Promise<void> {
+		await handleFiles(files);
 	}
 
 	export function removeFile(localId: string): void {
@@ -66,8 +70,8 @@
 		if (file.previewUrl) URL.revokeObjectURL(file.previewUrl);
 
 		// If uploaded, delete from server
-		if (file.uploadId && sessionId) {
-			api.deleteUpload(sessionId, file.uploadId).catch(console.error);
+		if (file.uploadId && file.sessionId) {
+			api.deleteUpload(file.sessionId, file.uploadId).catch(console.error);
 		}
 
 		// Mark as removed so in-flight upload skips callbacks
@@ -79,11 +83,11 @@
 	}
 
 	// Queue for sequential file uploads
-	let uploadQueue = $state<Array<{ file: File; localId: string }>>([]);
+	let uploadQueue = $state<Array<{ file: File; localId: string; sessionId: string }>>([]);
 	let isProcessingQueue = $state(false);
 
 	async function processUploadQueue() {
-		if (isProcessingQueue || uploadQueue.length === 0 || !sessionId) return;
+		if (isProcessingQueue || uploadQueue.length === 0) return;
 
 		isProcessingQueue = true;
 		uploading = true;
@@ -96,7 +100,7 @@
 				if (removedIds.has(item.localId)) continue;
 
 				try {
-					const result = await api.uploadFile(item.file, sessionId);
+					const result = await api.uploadFile(item.file, item.sessionId);
 
 					// Skip callbacks if removed during upload
 					if (removedIds.has(item.localId)) continue;
@@ -104,7 +108,14 @@
 					// Update display file to done
 					displayFiles = displayFiles.map(f =>
 						f.localId === item.localId
-							? { ...f, status: 'done' as const, uploadId: result.id }
+							? {
+								...f,
+								status: 'done' as const,
+								uploadId: result.id,
+								path: result.path,
+								sessionId: result.sessionId,
+								createdAt: result.createdAt
+							}
 							: f
 					);
 					notifyDisplay();
@@ -127,7 +138,10 @@
 	}
 
 	async function handleFiles(files: FileList | File[] | null) {
-		if (!files || files.length === 0 || !sessionId) return;
+		if (!files || files.length === 0) return;
+
+		const resolvedSessionId = sessionId || await ensureSessionForAttachments?.();
+		if (!resolvedSessionId) return;
 
 		const fileArray = Array.from(files);
 
@@ -138,7 +152,9 @@
 			mimeType: file.type,
 			size: file.size,
 			status: 'uploading' as const,
-			previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null
+			previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null,
+			path: null,
+			sessionId: resolvedSessionId
 		}));
 
 		displayFiles = [...displayFiles, ...newDisplayFiles];
@@ -147,15 +163,16 @@
 		// Queue for upload
 		const queueItems = fileArray.map((file, i) => ({
 			file,
-			localId: newDisplayFiles[i].localId
+			localId: newDisplayFiles[i].localId,
+			sessionId: resolvedSessionId
 		}));
 		uploadQueue = [...uploadQueue, ...queueItems];
-		processUploadQueue();
+		await processUploadQueue();
 	}
 
-	function handleFileSelect(e: Event) {
+	async function handleFileSelect(e: Event) {
 		const input = e.target as HTMLInputElement;
-		handleFiles(input.files);
+		await handleFiles(input.files);
 		input.value = '';
 	}
 </script>
@@ -167,14 +184,13 @@
 		bind:this={fileInput}
 		onchange={handleFileSelect}
 		class="file-input"
-		accept=".txt,.md,.csv,.html,.css,.js,.ts,.json,.xml,.png,.jpg,.jpeg,.gif,.webp,.svg,.pdf"
 	/>
 
 	<button
 		class="attach-btn"
 		onclick={() => fileInput.click()}
-		disabled={uploading || !sessionId}
-		title={sessionId ? 'Attach files' : 'Start a chat to attach files'}
+		disabled={uploading}
+		title="Attach files"
 	>
 		{#if uploading}
 			<span class="spinner"></span>
