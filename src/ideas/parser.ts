@@ -23,6 +23,7 @@ export interface ParsedIdea {
   contentHash?: string;
   linkedExplorationThreadId?: string;
   linkedPlanId?: string;
+  enrichment?: string; // JSON: {deep_dive, deep_links, homer_improvement}
 }
 
 /**
