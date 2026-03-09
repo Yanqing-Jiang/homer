@@ -24,7 +24,7 @@ export const AGENT_BROWSER_TOOLS = `TOOLS AVAILABLE (via bash):
 // ============================================
 
 export function buildBookmarkScrapePrompt(maxItems: number): string {
-  return `Scrape Twitter/X bookmarks using agent-browser CLI. Return the bookmarks as JSON.
+  return `Deep-scrape the top ${maxItems} Twitter/X bookmarks using agent-browser CLI and return them as JSON.
 
 ${AGENT_BROWSER_TOOLS}
 
@@ -32,22 +32,37 @@ WORKFLOW:
 1. Connect to browser: agent-browser connect 9222
 2. Navigate to Twitter bookmarks: agent-browser open "https://x.com/i/bookmarks"
 3. Wait for page load, then snapshot -i
-4. Extract bookmark content from the snapshot. Each bookmark is an <article> element containing:
+4. Identify the top ${maxItems} bookmark articles currently visible on the page. Scroll only as needed to reach ${maxItems}.
+5. For each selected bookmark, extract:
    - **Tweet text**: the main text content inside the article
    - **Author username**: from the link like /@username (e.g. /OpenAIDevs → "OpenAIDevs")
    - **Tweet ID**: CRITICAL — extract from the permalink URL like /@user/status/1234567890 — the numeric part is the ID. Do NOT invent IDs.
    - **External URLs**: any https://t.co/ or other non-twitter links
-5. Scroll down to get more bookmarks (up to ${maxItems})
-6. After each scroll, snapshot -i and extract new bookmarks
+   - **Quoted/embedded post summary**: if the bookmark includes an embedded/quoted post or preview card, summarize its actual content
+   - **Image analysis**: if the bookmark contains images, describe what they show and include visible text/OCR when legible
+6. If a bookmark has an external article/repo/page link, open the most important external link in the same tab, read enough to understand it, then return to bookmarks and continue. Summarize the linked content in 2-4 sentences.
+7. Write a short hook analysis for why this bookmark is compelling enough to save.
 
 CRITICAL RULES:
 - Tweet IDs MUST come from the actual permalink URLs in the snapshot (e.g. /username/status/2021725246244671606)
 - Do NOT guess or fabricate tweet IDs — if you can't find the permalink URL, omit the "id" field
 - Author usernames MUST come from the actual /@username links in the snapshot
+- Keep work to the top ${maxItems} bookmarks only
+- Return structured data, not prose
 
 OUTPUT FORMAT:
 Return ONLY a JSON array, no other text:
-[{"id": "tweet_id", "text": "tweet content", "author": "username", "urls": ["https://..."]}]
+[{
+  "id": "tweet_id",
+  "title": "short descriptive title",
+  "text": "tweet content",
+  "content": "tweet content plus the most important quoted/article context",
+  "author": "username",
+  "urls": ["https://..."],
+  "linked_summary": "summary of quoted post or external article",
+  "image_analysis": "what the images communicate, including visible text",
+  "hook_analysis": "why the bookmark's opening or framing is sticky"
+}]
 
 If bookmarks page is empty or requires login, return: []
 If you can't connect to the browser, return: []`;
@@ -127,6 +142,53 @@ OUTPUT FORMAT - Return ONLY a JSON array, no other text:
 If any error or blocking, return: []`;
 }
 
+export function buildMediumForYouScrapePrompt(maxItems: number = 5): string {
+  return `Find the top ${maxItems} most compelling articles currently visible in Medium's "For you" feed using agent-browser CLI.
+
+You MUST execute these bash commands in sequence — do not just list them, actually RUN them:
+
+${AGENT_BROWSER_TOOLS}
+
+Step 1: agent-browser connect 9222
+Step 2: agent-browser open "https://medium.com/"
+Step 3: sleep 4
+Step 4: agent-browser snapshot -i
+Step 5: If a "For you" tab or link is visible, click it, sleep 2, then snapshot -i again
+Step 6: Rank the visible "For you" article cards by prominence and interest. Work on the top ${maxItems}.
+Step 7: For each selected article, open it and try to extract:
+  - title
+  - author
+  - date
+  - first meaningful paragraph
+  - as much body text as is accessible
+Step 8: If the article is member-only or partially blocked, retry via:
+  agent-browser open "https://medium.com/m/global-identity?redirectUrl=<ENCODED_URL>"
+  then sleep 4, snapshot, scroll down, sleep 2, snapshot
+Step 9: If the body still is not accessible, keep the title plus first meaningful paragraph only
+Step 10: Analyze the hook: explain why the headline + opening paragraph are likely to pull readers in, or why they are weak
+
+CRITICAL RULES:
+- Stay on the signed-in Medium session via CDP
+- Do not fabricate body text, clap counts, or authors
+- "For you" is the source of truth, not tag pages or generic trending pages
+- content must contain the best available article text: full body if accessible, otherwise the first paragraph
+
+OUTPUT FORMAT - Return ONLY a JSON array:
+[{
+  "title": "Article title",
+  "author": "Author name",
+  "date": "Mar 9, 2026",
+  "link": "https://medium.com/...",
+  "first_paragraph": "Opening paragraph",
+  "hook_analysis": "Why the hook works",
+  "content": "Full body text if accessible, otherwise the opening paragraph",
+  "source": "medium-for-you",
+  "read_time": "5 min"
+}]
+
+If sign-in is required or the feed cannot be read, return []`;
+}
+
 export function buildLinkedInScrapePrompt(): string {
   return `Scrape all published posts from a LinkedIn activity page using agent-browser CLI.
 
@@ -172,6 +234,57 @@ OUTPUT FORMAT - Return ONLY a JSON array, no other text:
 If login required, return ONLY: AUTH_REQUIRED
 If verification or CAPTCHA appears, return ONLY: BOT_DETECTED
 If page loads but no posts are visible, return ONLY: []`;
+}
+
+export function buildLinkedInTopPostPrompt(): string {
+  return `Find the single hottest or most-trendy recent Yanqing Jiang LinkedIn activity item and return it as JSON.
+
+You MUST execute these bash commands in sequence — do not just list them, actually RUN them:
+
+${AGENT_BROWSER_TOOLS}
+
+Step 1: agent-browser connect 9222
+Step 2: agent-browser open "${LINKEDIN_URL}"
+Step 3: sleep 3
+Step 4: agent-browser snapshot -i
+
+If the initial page has no post cards or redirects, try these alternate URLs:
+- agent-browser open "${LINKEDIN_ALT_URL_1}" && sleep 2 && agent-browser snapshot -i
+- agent-browser open "${LINKEDIN_ALT_URL_2}" && sleep 2 && agent-browser snapshot -i
+
+If the page shows "Sign in", "Join LinkedIn", or a login modal, return ONLY: AUTH_REQUIRED
+If a verification wall or CAPTCHA appears, return ONLY: BOT_DETECTED
+
+WORKFLOW:
+1. Inspect recent activity items authored by Yanqing Jiang.
+2. Expand "see more" where needed to read the opening clearly.
+3. Compare items using visible reactions/comments and obvious recency/prominence signals.
+4. Pick the hottest single item.
+5. Extract:
+   - title: use the linked article headline if there is one, otherwise write a concise title from the post opening
+   - date
+   - reactions
+   - comments
+   - link
+   - first_paragraph: first meaningful paragraph or opening 1-3 sentences
+   - content: the best visible body text from the selected item
+   - hook_analysis: 2-4 sentences on why the opening hook works or falls flat
+
+OUTPUT FORMAT - Return ONLY a JSON array with one object:
+[{
+  "title": "Concise title",
+  "date": "2d",
+  "reactions": 85,
+  "comments": 14,
+  "link": "https://www.linkedin.com/...",
+  "first_paragraph": "Opening paragraph or opening 1-3 sentences",
+  "hook_analysis": "Why this hook works",
+  "content": "Best visible body text from the selected post or article",
+  "source": "linkedin-top-post",
+  "author": "Yanqing Jiang"
+}]
+
+If page loads but no authored activity is visible, return []`;
 }
 
 export function buildLinkedInPublicFallbackPrompt(maxItems: number = 20): string {

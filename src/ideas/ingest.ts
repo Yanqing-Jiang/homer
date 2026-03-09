@@ -6,12 +6,13 @@ import { logger } from "../utils/logger.js";
 import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
 import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
-import { executeBrowserScrape } from "../executors/browser-scrape.js";
+import { executeCodexBrowserScrape } from "../executors/codex-browser.js";
 import { buildBookmarkScrapePrompt, buildTweetReadPrompt, SCRAPE_OPTIONS, DEEP_FETCH_OPTIONS } from "../scraping/browser-prompts.js";
 import { ensureCDP } from "../scraping/chrome-launcher.js";
 import { cleanAgentOutput } from "../scraping/clean-output.js";
 import { insertScrape } from "../scraping/scrape-store.js";
 import { PATHS } from "../config/paths.js";
+import { X_BOOKMARK_CODEX_SKILLS } from "../scraping/skill-paths.js";
 
 const IDEAS_FILE = PATHS.ideasMd;
 const DENY_HISTORY_FILE = PATHS.denyHistory;
@@ -36,7 +37,12 @@ interface TwitterBookmark {
   id: string;
   text: string;
   author: string;
-  created_at: string;
+  title?: string;
+  content?: string;
+  linked_summary?: string;
+  image_analysis?: string;
+  hook_analysis?: string;
+  created_at?: string;
   urls?: string[];
 }
 
@@ -67,17 +73,16 @@ function ensureIdeaId(idea: ParsedIdea): void {
 }
 
 // ============================================
-// TWITTER/X SCRAPING (via Gemini Flash + agent-browser)
+// TWITTER/X SCRAPING (via Codex + agent-browser)
 // ============================================
 
 async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
-  logger.info("Scraping Twitter/X bookmarks via Gemini Flash + agent-browser");
+  logger.info("Scraping Twitter/X bookmarks via Codex + agent-browser");
 
   try {
-    const result = await executeBrowserScrape(
-      buildBookmarkScrapePrompt(20),
-      "",
-      SCRAPE_OPTIONS,
+    const result = await executeCodexBrowserScrape(
+      buildBookmarkScrapePrompt(10),
+      { ...SCRAPE_OPTIONS, skillPaths: X_BOOKMARK_CODEX_SKILLS },
     );
 
     if (result.exitCode !== 0) {
@@ -144,13 +149,21 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
     for (const bookmark of bookmarks) {
       const urls = bookmark.urls || [];
       const hasExternalLink = urls.some(u => !u.includes("twitter.com") && !u.includes("x.com"));
+      const title = bookmark.title?.trim()
+        || `X: ${bookmark.text.slice(0, 60)}${bookmark.text.length > 60 ? "..." : ""}`;
+      const contentParts = [
+        `**@${bookmark.author}**: ${bookmark.content?.trim() || bookmark.text}`,
+        bookmark.linked_summary ? `## Linked Content\n\n${bookmark.linked_summary.trim()}` : "",
+        bookmark.image_analysis ? `## Image Read\n\n${bookmark.image_analysis.trim()}` : "",
+        bookmark.hook_analysis ? `## Hook Analysis\n\n${bookmark.hook_analysis.trim()}` : "",
+      ].filter(Boolean);
 
       const idea: ParsedIdea = {
         id: `tweet_${bookmark.id}`,
-        title: `X: ${bookmark.text.slice(0, 60)}${bookmark.text.length > 60 ? "..." : ""}`,
+        title,
         status: "draft",
         source: "x-bookmarks",
-        content: `**@${bookmark.author}**: ${bookmark.text}`,
+        content: contentParts.join("\n\n"),
         link: `https://x.com/${bookmark.author}/status/${bookmark.id}`,
         tags: ["x-bookmark"],
         timestamp,
@@ -166,7 +179,7 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
       ideas.push(idea);
     }
 
-    logger.info({ count: ideas.length }, "Extracted ideas from Twitter bookmarks via agent-browser");
+    logger.info({ count: ideas.length }, "Extracted ideas from Twitter bookmarks via Codex");
     return ideas;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -190,10 +203,9 @@ async function deepFetchUrl(url: string, ideaTitle: string): Promise<string | nu
   // Handle Twitter/X URLs via agent-browser
   if (url.includes("twitter.com") || url.includes("x.com")) {
     try {
-      const result = await executeBrowserScrape(
+      const result = await executeCodexBrowserScrape(
         buildTweetReadPrompt(url),
-        "",
-        DEEP_FETCH_OPTIONS,
+        { ...DEEP_FETCH_OPTIONS, skillPaths: X_BOOKMARK_CODEX_SKILLS },
       );
       if (result.exitCode === 0 && result.output && result.output.length > 50 && !result.output.includes("FAILED")) {
         const cleaned = cleanAgentOutput(result.output);

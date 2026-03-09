@@ -10,31 +10,30 @@
  * - LinkedIn timeout reduced 300s → 90s; browser prompts: sleep 3→1, scrolls 20→10
  * - Explicit exitCode 4 (timeout) check before detectAuthOrBot — no silent laundering
  * - Telegram alert on AUTH_REQUIRED / BOT_DETECTED
- * - Deep-fetch: LinkedIn "see more" expansion + Medium trending article full-text fetch
+ * - Deep-fetch: LinkedIn "see more" expansion + Medium For You article hook extraction
  * - Heuristic scoring for trending idea selection (replaces positional first-4)
  * - ingestTrendingIdeas() failure logged to results (was silently swallowed)
  * - writeRunSummaryMarkdown() moved to finally block — always runs
  * - Post-scrape pattern analysis: Gemini Flash API extracts content patterns → patterns.md
- * - Browser scraping via Claude Sonnet (agent-browser CDP)
+ * - Browser scraping via Codex GPT-5.4 medium reasoning (agent-browser CDP)
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { createHash } from "crypto";
 import type Database from "better-sqlite3";
-import { executeClaudeCommand } from "../../executors/claude.js";
-import { BROWSER_ONLY_PREFIX } from "../../executors/opencode-cli.js";
+import { executeCodexBrowserScrape } from "../../executors/codex-browser.js";
 import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
 import {
   SCRAPE_OPTIONS,
-  DEEP_FETCH_OPTIONS,
   buildMediumScrapePrompt,
-  buildLinkedInScrapePrompt,
-  buildArticleDeepFetchPrompt,
+  buildMediumForYouScrapePrompt,
+  buildLinkedInTopPostPrompt,
 } from "../../scraping/browser-prompts.js";
 import { cleanAgentOutput } from "../../scraping/clean-output.js";
 import { htmlToMarkdown, extractDeepLinks, extractImages, type DeepLink, type ImageRef } from "../../scraping/html-to-markdown.js";
 import { ensureCDP } from "../../scraping/chrome-launcher.js";
 import { insertScrape } from "../../scraping/scrape-store.js";
+import { LINKEDIN_CODEX_SKILLS, MEDIUM_CODEX_SKILLS } from "../../scraping/skill-paths.js";
 import { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
 import { PATHS } from "../../config/paths.js";
@@ -57,20 +56,6 @@ const MEDIUM_TRENDING_FILE = `${SCRAPES_DIR}/medium-trending.json`;
 const MEDIUM_TRENDING_DIR = `${TRENDING_DIR}/medium`;
 
 const MEDIUM_RSS_URL = "https://medium.com/feed/@yanqing_j";
-const MEDIUM_TAG_RSS_BASE = "https://medium.com/feed/tag";
-
-const MEDIUM_TRENDING_TAGS: Array<{ tag: string; topic: string }> = [
-  { tag: "artificial-intelligence", topic: "AI/ML" },
-  { tag: "llm", topic: "LLMs" },
-  { tag: "typescript", topic: "TypeScript" },
-  { tag: "agents", topic: "AI agents" },
-  { tag: "algorithmic-trading", topic: "quant trading" },
-  { tag: "productivity", topic: "personal automation" },
-  { tag: "writing", topic: "content creation" },
-];
-
-const MAX_MEDIUM_TAG_ITEMS = 10;
-const MAX_DEEP_FETCH_ARTICLES = 5; // top N trending articles to deep-fetch (Medium trending only)
 // Disabled: Medium trending articles were low-signal clickbait polluting the ideas pipeline.
 // Scraping + patterns continue; idea creation skipped. Re-enable with CONTENT_SCRAPER_IDEA_INGEST=1.
 const PATTERNS_FILE = PATHS.patterns;
@@ -92,6 +77,9 @@ interface ScrapedPost {
   source?: string;
   author?: string;
   topic?: string;
+  first_paragraph?: string;
+  hook_analysis?: string;
+  access?: string;
   deep_links?: DeepLink[];
   images?: ImageRef[];
 }
@@ -190,18 +178,6 @@ function formatRssDate(dateStr: string): string {
   const d = new Date(dateStr);
   if (Number.isNaN(d.getTime())) return dateStr;
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-}
-
-async function fetchMediumTrendingByTags(): Promise<ScrapedPost[]> {
-  const perTag = await Promise.all(
-    MEDIUM_TRENDING_TAGS.map(async ({ tag, topic }) => {
-      const url = `${MEDIUM_TAG_RSS_BASE}/${encodeURIComponent(tag)}`;
-      const posts = await fetchMediumRSSFeed(url, `medium-tag:${tag}`);
-      return posts.slice(0, MAX_MEDIUM_TAG_ITEMS).map((p) => ({ ...p, topic }));
-    }),
-  );
-
-  return dedupePosts(perTag.flat());
 }
 
 // ============================================
@@ -303,6 +279,13 @@ function parseScrapedJSON(output: string): ScrapedPost[] {
         const source = typeof obj.source === "string" && obj.source.trim() ? obj.source.trim() : undefined;
         const topic = typeof obj.topic === "string" && obj.topic.trim() ? obj.topic.trim() : undefined;
         const author = typeof obj.author === "string" && obj.author.trim() ? obj.author.trim() : undefined;
+        const first_paragraph = typeof obj.first_paragraph === "string" && obj.first_paragraph.trim()
+          ? obj.first_paragraph.trim()
+          : undefined;
+        const hook_analysis = typeof obj.hook_analysis === "string" && obj.hook_analysis.trim()
+          ? obj.hook_analysis.trim()
+          : undefined;
+        const access = typeof obj.access === "string" && obj.access.trim() ? obj.access.trim() : undefined;
 
         return {
           title,
@@ -313,6 +296,9 @@ function parseScrapedJSON(output: string): ScrapedPost[] {
           source,
           topic,
           author,
+          first_paragraph,
+          hook_analysis,
+          access,
           claps: parseMetricValue(obj.claps),
           responses: parseMetricValue(obj.responses),
           reactions: parseMetricValue(obj.reactions),
@@ -369,6 +355,9 @@ function buildPostObject(post: ScrapedPost, platform: "medium" | "linkedin"): Re
   if (post.link) obj.link = post.link;
   if (post.topic) obj.topic = post.topic;
   if (post.read_time) obj.read_time = post.read_time;
+  if (post.first_paragraph) obj.first_paragraph = post.first_paragraph;
+  if (post.hook_analysis) obj.hook_analysis = post.hook_analysis;
+  if (post.access) obj.access = post.access;
   if (post.claps != null) obj.claps = post.claps;
   if (post.reactions != null) obj.reactions = post.reactions;
   if (post.responses != null) obj.responses = post.responses;
@@ -542,43 +531,6 @@ function scoreTrendingPost(post: ScrapedPost): number {
 // ============================================
 // DEEP FETCH (article full text)
 // ============================================
-
-/**
- * Deep-fetch full article body for top trending candidates.
- * Medium RSS teasers are 1-sentence previews — this gets the real content.
- * Runs serially (CONCURRENCY=1) to avoid Chrome navigation race conditions.
- */
-async function deepFetchTrendingArticles(posts: ScrapedPost[]): Promise<ScrapedPost[]> {
-  const CONCURRENCY = 1; // serial to avoid Chrome navigation race conditions
-  const enriched = [...posts];
-
-  for (let i = 0; i < enriched.length; i += CONCURRENCY) {
-    const batch = enriched.slice(i, i + CONCURRENCY);
-    await Promise.allSettled(
-      batch.map(async (post, batchIdx) => {
-        const idx = i + batchIdx;
-        if (!post.link) return;
-        try {
-          const result = await executeClaudeCommand(
-            BROWSER_ONLY_PREFIX + buildArticleDeepFetchPrompt(post.link),
-            DEEP_FETCH_OPTIONS,
-          );
-          if (result.exitCode === 0 && result.output) {
-            const body = result.output.trim();
-            if (body && body !== "PAYWALL" && body !== "FAILED" && body.length > 100) {
-              enriched[idx] = { ...post, content: body.slice(0, 20_000) };
-              logger.debug({ url: post.link, chars: body.length }, "Deep-fetched article body");
-            }
-          }
-        } catch (err) {
-          logger.warn({ url: post.link, error: String(err) }, "Article deep-fetch failed");
-        }
-      }),
-    );
-  }
-
-  return enriched;
-}
 
 // ============================================
 // POST-SCRAPE PATTERN ANALYSIS
@@ -859,29 +811,41 @@ export async function runContentScraper(db: Database.Database): Promise<{
     // PHASE 1 + 2: All sources in parallel
     //   - Medium RSS (fast, ~2s)
     //   - Medium RSS fallback browser scrape (only if RSS empty)
-    //   - Medium trending tag RSS (fast, ~2s for 7 tags parallel)
-    //   - LinkedIn browser CDP (agent-browser, up to 90s)
+    //   - Medium For You feed via Codex browser automation
+    //   - LinkedIn activity via Codex browser automation
     // =========================================================
 
     logger.info("Starting Medium RSS scrape");
     const rssPostsRaw = await fetchMediumRSS();
     logger.info({ count: rssPostsRaw.length }, "Medium RSS complete");
 
-    // Phase 2: parallel — trending + LinkedIn + optional Medium browser fallback
+    // Phase 2: parallel — Medium For You + LinkedIn + optional Medium browser fallback
     const [mediumFallbackResult, mediumTrendingResult, linkedinResult] = await Promise.allSettled([
       // Medium browser fallback (only if RSS was empty)
       rssPostsRaw.length > 0
         ? Promise.resolve(null)
         : (async () => {
             logger.info("Medium RSS empty — launching browser fallback in parallel");
-            return executeClaudeCommand(BROWSER_ONLY_PREFIX + buildMediumScrapePrompt(), { ...scrapeOpts, timeout: 120_000 });
+            return executeCodexBrowserScrape(
+              buildMediumScrapePrompt(),
+              { ...scrapeOpts, timeout: 120_000, skillPaths: MEDIUM_CODEX_SKILLS },
+            );
           })(),
-      // Medium trending: 7 tag RSS feeds all parallel
-      fetchMediumTrendingByTags(),
-      // LinkedIn: agent-browser CDP, 90s timeout
+      // Medium For You: signed-in browser feed via Codex
+      (async () => {
+        logger.info("Starting Medium For You scrape");
+        return executeCodexBrowserScrape(
+          buildMediumForYouScrapePrompt(5),
+          { ...scrapeOpts, timeout: 300_000, skillPaths: MEDIUM_CODEX_SKILLS },
+        );
+      })(),
+      // LinkedIn: signed-in browser activity via Codex
       (async () => {
         logger.info("Starting LinkedIn scrape");
-        return executeClaudeCommand(BROWSER_ONLY_PREFIX + buildLinkedInScrapePrompt(), { ...scrapeOpts, timeout: 300_000 });
+        return executeCodexBrowserScrape(
+          buildLinkedInTopPostPrompt(),
+          { ...scrapeOpts, timeout: 300_000, skillPaths: LINKEDIN_CODEX_SKILLS },
+        );
       })(),
     ]);
 
@@ -933,67 +897,68 @@ export async function runContentScraper(db: Database.Database): Promise<{
     }
 
     // =========================================================
-    // Process Medium trending (deep-fetch top articles for full body)
+    // Process Medium For You recommendations
     // =========================================================
     try {
       if (mediumTrendingResult.status === "fulfilled") {
-        let trendingPosts = mediumTrendingResult.value;
-        if (trendingPosts.length > 0) {
-          // Score and deep-fetch top 5 trending articles for full body content
-          const scored = trendingPosts
-            .map(p => ({ post: p, score: scoreTrendingPost(p) }))
-            .sort((a, b) => b.score - a.score);
-          const topCandidates = scored.slice(0, MAX_DEEP_FETCH_ARTICLES).map(s => s.post);
-          const rest = scored.slice(MAX_DEEP_FETCH_ARTICLES).map(s => s.post);
+        const r = mediumTrendingResult.value;
+        if (r.exitCode === 4) {
+          results.push(`Medium For You: TIMEOUT after ${r.duration}ms`);
+          logger.error({ duration: r.duration }, "Medium For You scrape timed out");
+        } else if (r.exitCode === 0 && r.output) {
+          const trendingPosts = parseScrapedJSON(r.output);
+          if (trendingPosts.length > 0) {
+            mediumTrendingPosts = trendingPosts;
 
-          logger.info({ count: topCandidates.length }, "Deep-fetching top trending articles");
-          const enriched = await deepFetchTrendingArticles(topCandidates);
-          trendingPosts = [...enriched, ...rest];
-          mediumTrendingPosts = trendingPosts;
+            let trendingScrapes = 0;
+            for (const post of trendingPosts) {
+              const key = `med_${slugify(post.title).slice(0, 30)}_${contentHash(post.content).slice(0, 8)}`;
+              const inserted = insertScrape(db, {
+                id: key,
+                source: "medium-trending",
+                url: post.link,
+                title: post.title,
+                author: post.author,
+                raw_content: post.content,
+                metadata: JSON.stringify({
+                  topic: post.topic,
+                  first_paragraph: post.first_paragraph,
+                  hook_analysis: post.hook_analysis,
+                  access: post.access,
+                  claps: post.claps,
+                  score: scoreTrendingPost(post),
+                }),
+              });
+              if (inserted) trendingScrapes++;
+            }
+            if (trendingScrapes > 0) {
+              logger.info({ count: trendingScrapes }, "Wrote Medium For You posts to scrapes table");
+            }
 
-          // Write trending posts to scrapes table for synthesizer
-          let trendingScrapes = 0;
-          for (const post of trendingPosts) {
-            const key = `med_${slugify(post.title).slice(0, 30)}_${contentHash(post.content).slice(0, 8)}`;
-            const inserted = insertScrape(db, {
-              id: key,
-              source: "medium-trending",
-              url: post.link,
-              title: post.title,
-              author: post.author,
-              raw_content: post.content,
-              metadata: JSON.stringify({
-                topic: post.topic,
-                claps: post.claps,
-                score: scoreTrendingPost(post),
+            writeFileSync(
+              MEDIUM_TRENDING_FILE,
+              buildJsonCorpus(trendingPosts, "medium", {
+                title: "Medium For You Content",
+                sourceUrl: "https://medium.com/",
+                subtitle: "Signed-in For you feed via Codex + CDP",
               }),
-            });
-            if (inserted) trendingScrapes++;
+            );
+            const written = writeIndividualPosts(trendingPosts, MEDIUM_TRENDING_DIR, "medium");
+            results.push(`Medium For You: ${trendingPosts.length} articles scraped, ${written} files updated`);
+          } else {
+            results.push("Medium For You: no articles parsed from scrape output");
           }
-          if (trendingScrapes > 0) {
-            logger.info({ count: trendingScrapes }, "Wrote trending posts to scrapes table");
-          }
-
-          writeFileSync(
-            MEDIUM_TRENDING_FILE,
-            buildJsonCorpus(trendingPosts, "medium", {
-              title: "Medium Trending Content",
-              sourceUrl: "https://medium.com/tag",
-              subtitle: `Tags: ${MEDIUM_TRENDING_TAGS.map((t) => t.tag).join(", ")}`,
-            }),
-          );
-          const written = writeIndividualPosts(trendingPosts, MEDIUM_TRENDING_DIR, "medium");
-          results.push(`Medium trending: ${trendingPosts.length} posts from ${MEDIUM_TRENDING_TAGS.length} tags, ${topCandidates.length} deep-fetched, ${written} files updated`);
-        } else {
-          results.push("Medium trending: no posts found from tag RSS feeds");
+        } else if (r.exitCode !== 0) {
+          results.push(`Medium For You: scrape failed — exit code ${r.exitCode}`);
+          logger.error({ exitCode: r.exitCode, output: r.output?.slice(0, 300) }, "Medium For You scrape failed");
         }
       } else {
-        results.push(`Medium trending: error — ${mediumTrendingResult.reason}`);
-        logger.error({ error: String(mediumTrendingResult.reason) }, "Medium trending error");
+        results.push(`Medium For You: error — ${mediumTrendingResult.reason}`);
+        logger.error({ error: String(mediumTrendingResult.reason) }, "Medium For You error");
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      results.push(`Medium trending: error — ${msg}`);
+      results.push(`Medium For You: error — ${msg}`);
     }
 
     // =========================================================
@@ -1036,7 +1001,7 @@ export async function runContentScraper(db: Database.Database): Promise<{
         writeFileSync(LINKEDIN_FILE, buildJsonCorpus(linkedinPosts, "linkedin"));
         const written = writeIndividualPosts(linkedinPosts, LINKEDIN_DIR, "linkedin");
         const metrics = recordMetrics(db, linkedinPosts, "linkedin", scrapeTime);
-        results.push(`LinkedIn: ${linkedinPosts.length} posts scraped (browser), ${newPosts.length} new, ${written} files updated, ${metrics} metrics recorded`);
+        results.push(`LinkedIn: ${linkedinPosts.length} top post scraped via Codex, ${newPosts.length} new, ${written} files updated, ${metrics} metrics recorded`);
         scrapeSucceeded = true;
         logger.info({ total: linkedinPosts.length, new: newPosts.length }, "LinkedIn scrape complete");
       } else if (!results.some((r) => r.startsWith("LinkedIn:"))) {
