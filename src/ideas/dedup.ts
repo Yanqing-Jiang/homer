@@ -17,8 +17,7 @@
 
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from "fs";
 import { logger } from "../utils/logger.js";
-import { executeGeminiWithFallback } from "../executors/opencode-cli.js";
-import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
+import { executeGeminiCLIDirect, GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 import { loadIdeasFromDir, type ParsedIdea } from "./parser.js";
 import * as dao from "./dao.js";
 import { canonicalizeUrl, extractRepoId } from "./canonical-url.js";
@@ -29,8 +28,8 @@ import { PATHS } from "../config/paths.js";
 
 const DENY_HISTORY_FILE = PATHS.denyHistory;
 
-// Max LLM calls per batch run
-const MAX_LLM_CALLS = 5;
+// One LLM call per run — avoids consuming full job timeout on retries
+const MAX_LLM_CALLS = 1;
 
 type IdeaStatus = "draft" | "review" | "discussion" | "planning" | "execution" | "archived";
 
@@ -199,10 +198,9 @@ If none found: {"groups":[]}`;
   };
 
   try {
-    const result = await executeGeminiWithFallback(prompt, "", {
+    const result = await executeGeminiCLIDirect(prompt, {
       model: GEMINI_CLI_FLASH_MODEL,
-      sandbox: true,
-      timeout: 120000,
+      timeout: 300_000,
     });
 
     if (result.exitCode === 0) {
