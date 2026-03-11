@@ -466,6 +466,13 @@ export class Scheduler {
       notifyOnSuccess: false, notifyOnFailure: false, failureTakeover: false,
       sourceFile: "system",
     },
+    {
+      id: "plan-execution-followup", name: "Plan Execution Follow-up", cron: "* * * * *",
+      query: "", lane: "default", enabled: true, executor: "internal",
+      handler: "plan_execution_followup", timeout: 30_000,
+      notifyOnSuccess: false, notifyOnFailure: false, failureTakeover: false,
+      sourceFile: "system",
+    },
   ];
 
   private fireDependencyTriggers(jobId: string): void {

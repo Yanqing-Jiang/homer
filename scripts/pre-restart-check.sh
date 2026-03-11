@@ -39,6 +39,11 @@ echo ""
 echo "  WARNING: ${active} active CLI run(s) in progress."
 echo ""
 
+if [ "${HOMER_DEPLOY_POLICY:-}" = "force" ]; then
+  echo "  Force deploy policy enabled. Restart will proceed despite active runs."
+  exit 0
+fi
+
 # Check if running interactively
 if [ -t 0 ]; then
   echo "  Options:"
