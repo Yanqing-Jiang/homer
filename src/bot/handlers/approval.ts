@@ -24,6 +24,11 @@ import {
   formatScheduledTelegramHtml,
   sendChunkedTelegramMessage,
 } from "../../notifications/telegram-router.js";
+import {
+  dismissPlanExecution,
+  mergeAndDeployPlanExecution,
+  snoozePlanExecution,
+} from "../../scheduler/plan-execution-flow.js";
 
 const IDEAS_FILE = PATHS.ideasMd;
 const FEEDBACK_FILE = PATHS.feedback;
@@ -1333,5 +1338,69 @@ export function registerPlanApprovalCallbacks(bot: Bot, stateManager: StateManag
       logger.error({ error, jobId }, "Failed to initiate plan instructions");
       await ctx.answerCallbackQuery("Error starting instruction capture");
     }
+  });
+
+  bot.callbackQuery(/^a:pe:(\d+):merge_deploy$/, async (ctx) => {
+    const execId = Number(ctx.match?.[1] ?? "0");
+    if (!Number.isFinite(execId) || execId <= 0) {
+      await ctx.answerCallbackQuery("Invalid request");
+      return;
+    }
+
+    await ctx.answerCallbackQuery("Starting merge + deploy...");
+
+    void mergeAndDeployPlanExecution({
+      bot,
+      stateManager,
+      execId,
+    }).then(async (result) => {
+      if (result.ok || !ctx.chat?.id) return;
+      try {
+        await bot.api.sendMessage(
+          ctx.chat.id,
+          `ℹ️ <b>Merge + deploy not started</b>\n${escapeHtml(result.message)}`,
+          { parse_mode: "HTML" }
+        );
+      } catch { /* best effort */ }
+    }).catch((error) => {
+      logger.error({ error, execId }, "Plan merge/deploy callback failed");
+    });
+  });
+
+  bot.callbackQuery(/^a:pe:(\d+):snooze$/, async (ctx) => {
+    const execId = Number(ctx.match?.[1] ?? "0");
+    if (!Number.isFinite(execId) || execId <= 0) {
+      await ctx.answerCallbackQuery("Invalid request");
+      return;
+    }
+
+    const result = snoozePlanExecution({ stateManager, execId });
+    await ctx.answerCallbackQuery(result.ok ? "Snoozed for 2 hours" : result.message);
+
+    if (!result.ok) return;
+
+    await ctx.editMessageText(
+      `⏸️ <b>Merge + deploy snoozed for 2 hours.</b>\n` +
+      `<b>Execution:</b> <code>${escapeHtml(String(execId))}</code>`,
+      { parse_mode: "HTML" }
+    );
+  });
+
+  bot.callbackQuery(/^a:pe:(\d+):dismiss$/, async (ctx) => {
+    const execId = Number(ctx.match?.[1] ?? "0");
+    if (!Number.isFinite(execId) || execId <= 0) {
+      await ctx.answerCallbackQuery("Invalid request");
+      return;
+    }
+
+    const result = dismissPlanExecution({ stateManager, execId });
+    await ctx.answerCallbackQuery(result.ok ? "Dismissed" : result.message);
+
+    if (!result.ok) return;
+
+    await ctx.editMessageText(
+      `🗑️ <b>Ready branch dismissed.</b>\n<b>Execution:</b> <code>${escapeHtml(String(execId))}</code>`,
+      { parse_mode: "HTML" }
+    );
   });
 }
