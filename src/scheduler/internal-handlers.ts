@@ -35,6 +35,8 @@ interface InternalJobContext {
   bot: Bot;
   chatId: number;
   jobRunId?: number;
+  /** AbortSignal from the scheduler hang-watchdog. Pass to LLM calls and batch loops. */
+  signal?: AbortSignal;
 }
 
 interface HealthAlertState {
@@ -779,7 +781,7 @@ async function runHandler(
       }
       case "session_harvester": {
         const { runSessionHarvester } = await import("./jobs/session-harvester.js");
-        const result = await runSessionHarvester(ctx.stateManager);
+        const result = await runSessionHarvester(ctx.stateManager, ctx.signal);
         return buildResult(
           job,
           startedAt,
@@ -998,7 +1000,7 @@ async function runHandler(
       }
       case "outcome_tracker": {
         const { runOutcomeTracker } = await import("./jobs/outcome-tracker.js");
-        const result = await runOutcomeTracker(ctx.stateManager.getDb(), ctx.bot, ctx.chatId);
+        const result = await runOutcomeTracker(ctx.stateManager.getDb(), ctx.bot, ctx.chatId, ctx.signal);
         return buildResult(
           job,
           startedAt,
@@ -1256,8 +1258,24 @@ export async function executeInternalJob(
   // Retry once for retryable handlers on transient errors
   const handler = job.config.handler ?? "";
   if (!result.success && RETRYABLE_HANDLERS.has(handler) && isTransientError(result.error)) {
+    // Skip retry if the job was aborted by the hang watchdog
+    if (ctx.signal?.aborted) {
+      logger.warn({ jobId: job.config.id }, "Job aborted by timeout, skipping retry");
+      return result;
+    }
+
     logger.warn({ jobId: job.config.id, error: result.error }, "Transient error detected, retrying in 10s");
-    await new Promise(resolve => setTimeout(resolve, 10_000));
+
+    // Wait 10s before retry, but bail early if aborted
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 10_000);
+      ctx.signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+    });
+
+    if (ctx.signal?.aborted) {
+      logger.warn({ jobId: job.config.id }, "Job aborted during retry wait, skipping retry");
+      return result;
+    }
 
     const retryStartedAt = new Date();
     const retryResult = await runHandler(job, ctx, retryStartedAt);

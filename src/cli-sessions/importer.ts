@@ -24,6 +24,8 @@ interface ImportOptions {
   dryRun?: boolean;
   /** Per-agent cutoff epoch (ms). Overrides sinceDays for agents that have a watermark. */
   cutoffPerAgent?: Record<string, number>;
+  /** AbortSignal from the scheduler watchdog — aborts mid-batch processing when timed out. */
+  signal?: AbortSignal;
 }
 
 interface ImportStats {
@@ -105,7 +107,7 @@ export class CLISessionImporter {
    * Import sessions from all or specific CLI
    */
   async import(options: ImportOptions = {}): Promise<ImportStats> {
-    const { sinceDays = 7, agent = "all", dryRun = false, cutoffPerAgent } = options;
+    const { sinceDays = 7, agent = "all", dryRun = false, cutoffPerAgent, signal } = options;
 
     const stats: ImportStats = {
       scanned: 0,
@@ -156,6 +158,10 @@ export class CLISessionImporter {
 
     // Process each session file
     for (const { agent: sessionAgent, path } of sessionFiles) {
+      if (signal?.aborted) {
+        logger.info("Session import aborted by signal (file loop)");
+        break;
+      }
       try {
         // Parse session
         let session: ParsedSession | null = null;
@@ -205,7 +211,7 @@ export class CLISessionImporter {
         }
 
         // Import session: summarize → INSERT session_summaries → record in cli_session_index
-        await this.importSession(session);
+        await this.importSession(session, signal);
         stats.imported++;
 
         logger.info(
@@ -224,6 +230,10 @@ export class CLISessionImporter {
 
     // Process thread sessions (Telegram + Web UI) — already parsed
     for (const session of threadSessions) {
+      if (signal?.aborted) {
+        logger.info("Session import aborted by signal (thread loop)");
+        break;
+      }
       try {
         // Dedup via content hash
         if (this.isAlreadyImported(session.contentHash)) {
@@ -247,7 +257,7 @@ export class CLISessionImporter {
         }
 
         // Import: summarize → INSERT session_summaries
-        await this.importSession(session);
+        await this.importSession(session, signal);
         stats.imported++;
 
         // Update watermark for this thread
@@ -328,14 +338,14 @@ export class CLISessionImporter {
   /**
    * Import a single session: summarize → INSERT session_summaries → record in cli_session_index → archive transcript
    */
-  private async importSession(session: ParsedSession): Promise<void> {
+  private async importSession(session: ParsedSession, signal?: AbortSignal): Promise<void> {
     const id = randomUUID();
     const logDate = getLogDate(session);
     const title = generateTitle(session);
     const rawExcerpt = buildRawExcerpt(session);
 
     // Smart summarization (template for small, Gemini for larger)
-    const summary = await summarizeSession(session);
+    const summary = await summarizeSession(session, signal);
 
     // INSERT into session_summaries (FTS5 auto-syncs via trigger)
     this.db
