@@ -21,7 +21,8 @@ const CLI_AGENTS = ["codex", "kimi", "claude", "opencode"] as const;
 const MAX_BACKFILL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days cap for first run
 
 export async function runSessionHarvester(
-  stateManager?: StateManager
+  stateManager?: StateManager,
+  signal?: AbortSignal
 ): Promise<{ success: boolean; output: string; error?: string }> {
   const sm = stateManager ?? new StateManager(DB_PATH);
   const ownSm = !stateManager;
@@ -49,6 +50,7 @@ export async function runSessionHarvester(
       agent: "all",
       dryRun: false,
       cutoffPerAgent,
+      signal,
     });
 
     // Update watermarks only if no errors — avoids permanently skipping errored sessions

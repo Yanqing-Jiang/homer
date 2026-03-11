@@ -125,7 +125,7 @@ async function gatherEvidence(db: Database.Database, check: OutcomeCheck): Promi
   return evidence.join("\n") || "No direct evidence found.";
 }
 
-async function evaluateOutcome(check: OutcomeCheck, evidence: string): Promise<EvidenceResult> {
+async function evaluateOutcome(check: OutcomeCheck, evidence: string, signal?: AbortSignal): Promise<EvidenceResult> {
   const prompt = `You are checking whether a past decision led to an outcome.
 
 Item: ${check.source_title}
@@ -145,7 +145,7 @@ Return JSON: { "outcome": "yes|no|partial|ambiguous", "confidence": 0.0-1.0, "ev
   try {
     const result = await executeGeminiCLIDirect(
       prompt + "\n\nReturn ONLY valid JSON, no markdown fences.",
-      { timeout: 60_000 },
+      { timeout: 60_000, signal },
     );
 
     if (result.exitCode === 0 && result.output) {
@@ -166,6 +166,7 @@ export async function runOutcomeTracker(
   db: Database.Database,
   bot?: Bot,
   chatId?: number,
+  signal?: AbortSignal,
 ): Promise<{
   success: boolean;
   output: string;
@@ -198,9 +199,13 @@ export async function runOutcomeTracker(
     let errors = 0;
 
     for (const check of dueChecks) {
+      if (signal?.aborted) {
+        logger.info("Outcome tracker aborted by signal");
+        break;
+      }
       try {
         const evidence = await gatherEvidence(db, check);
-        const result = await evaluateOutcome(check, evidence);
+        const result = await evaluateOutcome(check, evidence, signal);
 
         if (result.outcome !== "ambiguous" && result.confidence >= 0.7) {
           // Auto-resolve
