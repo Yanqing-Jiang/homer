@@ -1,5 +1,5 @@
 /**
- * Plan Executor — Spawns Claude Code on an isolated git branch to implement approved plans.
+ * Plan Executor — Spawns Codex on an isolated git branch to implement approved plans.
  *
  * Design:
  * - Plan text IS the prompt (no translation — LLM decides how to implement)
@@ -9,10 +9,11 @@
  * - Never auto-merges to main
  */
 
-import { executeClaudeCommand } from "../executors/claude.js";
+import { executeCodexCLI } from "../executors/codex-cli.js";
 import { execSync } from "child_process";
 import type { StateManager } from "../state/manager.js";
 import type { Bot } from "grammy";
+import { sendPlanExecutionReadyMessage } from "./plan-execution-flow.js";
 
 const HOMER_DIR = "/Users/yj/homer";
 const MAX_PLAN_EXECUTIONS_PER_DAY = 1;
@@ -46,7 +47,7 @@ function canExecuteToday(db: ReturnType<StateManager["getDb"]>): boolean {
 }
 
 /**
- * Execute an approved plan via Claude Code on an isolated branch.
+ * Execute an approved plan via Codex on an isolated branch.
  */
 export async function executePlan(params: {
   jobId: string;
@@ -119,10 +120,10 @@ export async function executePlan(params: {
   let execId: number | undefined;
   try {
     const stmt = db.prepare(`
-      INSERT INTO plan_executions (job_id, plan_text, branch_name, status)
-      VALUES (?, ?, ?, 'running')
+      INSERT INTO plan_executions (job_id, plan_text, branch_name, status, chat_id)
+      VALUES (?, ?, ?, 'running', ?)
     `);
-    const result = stmt.run(jobId, plan, branchName);
+    const result = stmt.run(jobId, plan, branchName, chatId);
     execId = Number(result.lastInsertRowid);
   } catch { /* table may not exist */ }
 
@@ -173,9 +174,11 @@ After implementation, output a JSON summary:
 }
 \`\`\``;
 
-    const result = await executeClaudeCommand(prompt, {
+    const result = await executeCodexCLI(prompt, {
       cwd: HOMER_DIR,
-      model: "sonnet",
+      model: "gpt-5.4",
+      reasoningEffort: "high",
+      timeout: 30 * 60 * 1000,
     });
 
     // Parse result
@@ -197,7 +200,7 @@ After implementation, output a JSON summary:
     try {
       buildOutput = execSync("npm run build 2>&1", {
         cwd: HOMER_DIR,
-        timeout: 60_000,
+        timeout: 10 * 60_000,
         encoding: "utf-8",
       });
       buildVerified = true;
@@ -222,9 +225,21 @@ After implementation, output a JSON summary:
       try {
         db.prepare(`
           UPDATE plan_executions
-          SET status = ?, executor_output = ?, build_output = ?, files_changed = ?, completed_at = CURRENT_TIMESTAMP, duration_ms = ?
+          SET status = ?, executor_output = ?, build_output = ?, files_changed = ?, summary_text = ?, diff_summary = ?, completed_at = CURRENT_TIMESTAMP, duration_ms = ?, integration_status = ?, deploy_status = ?, last_error = ?
           WHERE id = ?
-        `).run(status, result.output.slice(0, 50_000), buildOutput.slice(0, 10_000), JSON.stringify(filesChanged), durationMs, execId);
+        `).run(
+          status,
+          result.output.slice(0, 50_000),
+          buildOutput.slice(0, 10_000),
+          JSON.stringify(filesChanged),
+          String(summary).slice(0, 2_000),
+          diffSummary.slice(0, 4_000),
+          durationMs,
+          buildVerified ? "ready" : "failed",
+          buildVerified ? "pending" : "failed",
+          buildVerified ? null : buildOutput.slice(-4_000),
+          execId
+        );
       } catch { /* ignore */ }
     }
 
@@ -238,25 +253,38 @@ After implementation, output a JSON summary:
       try { execSync("git stash pop", { cwd: HOMER_DIR, timeout: 10_000 }); } catch { /* stash may conflict — preserved in stash list */ }
     }
 
-    // Notify user
-    const emoji = buildVerified ? "✅" : "❌";
-    const buildStatus = buildVerified ? "passed" : "FAILED";
-    const diffLines = diffSummary ? `\n<pre>${escapeHtml(diffSummary.slice(0, 1000))}</pre>` : "";
-
-    try {
-      await bot.api.sendMessage(chatId,
-        `${emoji} <b>Plan execution ${status}</b>\n` +
-        `<b>Branch:</b> <code>${escapeHtml(branchName)}</code>\n` +
-        `<b>Build:</b> ${buildStatus}\n` +
-        `<b>Duration:</b> ${Math.round(durationMs / 1000)}s\n` +
-        `<b>Summary:</b> ${escapeHtml(String(summary).slice(0, 500))}` +
-        diffLines +
-        (buildVerified
-          ? `\n\n<i>To apply: </i><code>cd ~/homer && git merge ${branchName} && npm run deploy</code>`
-          : `\n\n<i>Branch preserved for inspection. Fix and merge manually.</i>`),
-        { parse_mode: "HTML" }
-      );
-    } catch { /* best effort */ }
+    if (buildVerified && execId) {
+      try {
+        await sendPlanExecutionReadyMessage({ bot, stateManager, execId });
+      } catch {
+        try {
+          await bot.api.sendMessage(
+            chatId,
+            `✅ <b>Plan execution success</b>\n` +
+            `<b>Branch:</b> <code>${escapeHtml(branchName)}</code>\n` +
+            `<b>Duration:</b> ${Math.round(durationMs / 1000)}s\n` +
+            `<b>Summary:</b> ${escapeHtml(String(summary).slice(0, 500))}\n\n` +
+            `<i>Build passed, but ready-action buttons could not be sent automatically.</i>`,
+            { parse_mode: "HTML" }
+          );
+        } catch { /* best effort */ }
+      }
+    } else {
+      const diffLines = diffSummary ? `\n<pre>${escapeHtml(diffSummary.slice(0, 1000))}</pre>` : "";
+      try {
+        await bot.api.sendMessage(
+          chatId,
+          `❌ <b>Plan execution ${status}</b>\n` +
+          `<b>Branch:</b> <code>${escapeHtml(branchName)}</code>\n` +
+          `<b>Build:</b> FAILED\n` +
+          `<b>Duration:</b> ${Math.round(durationMs / 1000)}s\n` +
+          `<b>Summary:</b> ${escapeHtml(String(summary).slice(0, 500))}` +
+          diffLines +
+          `\n\n<i>Branch preserved for inspection. Fix and merge manually.</i>`,
+          { parse_mode: "HTML" }
+        );
+      } catch { /* best effort */ }
+    }
 
     return {
       success: buildVerified,
@@ -274,8 +302,10 @@ After implementation, output a JSON summary:
     if (execId) {
       try {
         db.prepare(`
-          UPDATE plan_executions SET status = 'error', executor_output = ?, completed_at = CURRENT_TIMESTAMP, duration_ms = ? WHERE id = ?
-        `).run(msg.slice(0, 50_000), durationMs, execId);
+          UPDATE plan_executions
+          SET status = 'error', executor_output = ?, completed_at = CURRENT_TIMESTAMP, duration_ms = ?, integration_status = 'failed', deploy_status = 'failed', last_error = ?
+          WHERE id = ?
+        `).run(msg.slice(0, 50_000), durationMs, msg.slice(-4_000), execId);
       } catch { /* ignore */ }
     }
 
