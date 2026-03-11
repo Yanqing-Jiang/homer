@@ -448,28 +448,28 @@ export class Scheduler {
     {
       id: "daemon-cleanup", name: "Daemon Cleanup", cron: "0 */4 * * *",
       query: "", lane: "default", enabled: true, executor: "internal",
-      handler: "daemon_cleanup", timeout: 120_000,
+      handler: "daemon_cleanup", timeout: 600_000,
       notifyOnSuccess: false, notifyOnFailure: true, failureTakeover: false,
       sourceFile: "system",
     },
     {
       id: "session-maintenance", name: "Session Maintenance", cron: "0 * * * *",
       query: "", lane: "default", enabled: true, executor: "internal",
-      handler: "session_maintenance", timeout: 60_000,
+      handler: "session_maintenance", timeout: 600_000,
       notifyOnSuccess: false, notifyOnFailure: true, failureTakeover: false,
       sourceFile: "system",
     },
     {
       id: "reminder-check", name: "Reminder Check", cron: "* * * * *",
       query: "", lane: "default", enabled: true, executor: "internal",
-      handler: "reminder_check", timeout: 30_000,
+      handler: "reminder_check", timeout: 600_000,
       notifyOnSuccess: false, notifyOnFailure: false, failureTakeover: false,
       sourceFile: "system",
     },
     {
       id: "plan-execution-followup", name: "Plan Execution Follow-up", cron: "* * * * *",
       query: "", lane: "default", enabled: true, executor: "internal",
-      handler: "plan_execution_followup", timeout: 30_000,
+      handler: "plan_execution_followup", timeout: 600_000,
       notifyOnSuccess: false, notifyOnFailure: false, failureTakeover: false,
       sourceFile: "system",
     },
@@ -512,20 +512,26 @@ export class Scheduler {
       const isInternal = job.config.executor === "internal" || !!job.config.handler;
       const takeoverEnabled = job.config.failureTakeover !== false;
 
-      // Execute the job (internal handler or CLI executor) with hang watchdog
-      // Use per-job configured timeout (+ 30s buffer) or fall back to 20 minutes
-      const DEFAULT_HANG_TIMEOUT_MS = 20 * 60 * 1000;
+      // Execute the job (internal handler or CLI executor) with hang watchdog.
+      // Default: 25 min (covers LLM reasoning tasks); minimum 10 min enforced for all jobs.
+      const DEFAULT_HANG_TIMEOUT_MS = 25 * 60 * 1000;
+      const MIN_HANG_TIMEOUT_MS = 10 * 60 * 1000;
       const configuredTimeout = typeof job.config.timeout === "number" && job.config.timeout > 0
         ? job.config.timeout + 30_000
         : DEFAULT_HANG_TIMEOUT_MS;
-      const HANG_TIMEOUT_MS = configuredTimeout;
+      const HANG_TIMEOUT_MS = Math.max(configuredTimeout, MIN_HANG_TIMEOUT_MS);
       const hangTimeoutMinutes = Math.round(HANG_TIMEOUT_MS / 60_000);
+
+      // AbortController for cooperative cancellation of internal jobs.
+      // When the hang watchdog fires, the signal propagates into the handler
+      // so batch loops and LLM calls can exit early instead of running forever.
+      const controller = new AbortController();
       let hangTimerId: ReturnType<typeof setTimeout> | null = null;
       const hangPromise = new Promise<never>((_, reject) => {
-        hangTimerId = setTimeout(
-          () => reject(new Error(`Job hung: exceeded ${hangTimeoutMinutes}-minute timeout`)),
-          HANG_TIMEOUT_MS
-        );
+        hangTimerId = setTimeout(() => {
+          controller.abort();
+          reject(new Error(`Job hung: exceeded ${hangTimeoutMinutes}-minute timeout`));
+        }, HANG_TIMEOUT_MS);
       });
 
       let result: JobExecutionResult;
@@ -536,6 +542,7 @@ export class Scheduler {
               bot: this.bot,
               chatId: this.chatId,
               jobRunId: runId,
+              signal: controller.signal,
             })
           : executeScheduledJob(job, onProgress, takeoverEnabled ? { skipDiagnosis: true } : undefined);
         result = await Promise.race([execPromise, hangPromise]);

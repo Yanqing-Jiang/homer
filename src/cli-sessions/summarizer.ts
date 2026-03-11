@@ -9,7 +9,7 @@ import { logger } from "../utils/logger.js";
  * - 21+ messages: Gemini Flash 5-8 bullets, truncated (~$0.005)
  * - Sub-agent: skip (no summary)
  */
-export async function summarizeSession(session: ParsedSession): Promise<string> {
+export async function summarizeSession(session: ParsedSession, signal?: AbortSignal): Promise<string> {
   const msgCount = session.messageCount;
 
   // Small sessions: template summary
@@ -19,7 +19,7 @@ export async function summarizeSession(session: ParsedSession): Promise<string> 
 
   // Medium/large sessions: Gemini Flash
   try {
-    return await geminiSummary(session);
+    return await geminiSummary(session, signal);
   } catch (error) {
     logger.warn({ error, sessionId: session.sessionId }, "Gemini summary failed, falling back to template");
     return templateSummary(session);
@@ -45,7 +45,7 @@ function templateSummary(session: ParsedSession): string {
 /**
  * Gemini Flash summary for medium/large sessions
  */
-async function geminiSummary(session: ParsedSession): Promise<string> {
+async function geminiSummary(session: ParsedSession, signal?: AbortSignal): Promise<string> {
   const isLarge = session.messageCount > 20;
   const bulletCount = isLarge ? "5-8" : "3-5";
 
@@ -69,6 +69,7 @@ ${conversationText}`;
 
   const result = await executeFlashViaOpenCode(prompt, {
     timeout: 60_000,
+    signal,
   });
 
   if (result.exitCode !== 0) {
