@@ -47,6 +47,14 @@ export class IdeasIndexer {
       INSERT INTO idea_index (
         id, title, status, source, tags, file_path, content_hash, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET
+        title = excluded.title,
+        status = excluded.status,
+        source = excluded.source,
+        tags = excluded.tags,
+        file_path = excluded.file_path,
+        content_hash = excluded.content_hash,
+        updated_at = CURRENT_TIMESTAMP
     `);
 
     for (const idea of ideas) {

@@ -3,6 +3,7 @@ import { InlineKeyboard, type Bot } from "grammy";
 import type { StateManager } from "../state/manager.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { logger } from "../utils/logger.js";
+import { getRuntimeBuildInfo, readDiskBuildInfo } from "../utils/build-info.js";
 
 const HOMER_DIR = "/Users/yj/homer";
 const RESTART_RUNNER = "/Users/yj/homer/scripts/run-plan-restart.mjs";
@@ -20,7 +21,8 @@ type IntegrationStatus =
   | "dismissed"
   | "failed";
 
-type DeployStatus = "pending" | "restarting" | "deployed" | "failed" | null;
+type DeployStatus = "pending" | "pushing" | "restarting" | "deployed" | "failed" | null;
+type ReviewStatus = "queued" | "running" | "clean" | "warning" | "patched" | "failed" | null;
 
 interface PlanExecutionRow {
   id: number;
@@ -33,6 +35,7 @@ interface PlanExecutionRow {
   chat_id: number | null;
   integration_status: IntegrationStatus | null;
   deploy_status: DeployStatus;
+  review_status: ReviewStatus;
   snooze_until: string | null;
   ready_message_id: number | null;
   ready_notified_at: string | null;
@@ -42,6 +45,13 @@ interface PlanExecutionRow {
   merged_at: string | null;
   deploy_started_at: string | null;
   deployed_at: string | null;
+  review_session_id: string | null;
+  review_started_at: string | null;
+  review_completed_at: string | null;
+  review_summary: string | null;
+  review_output: string | null;
+  review_patch_commit_sha: string | null;
+  review_last_error: string | null;
   repair_attempts: number;
   last_error: string | null;
   final_notified_at: string | null;
@@ -101,6 +111,7 @@ function loadExecution(stateManager: StateManager, execId: number): PlanExecutio
         chat_id,
         integration_status,
         deploy_status,
+        review_status,
         snooze_until,
         ready_message_id,
         ready_notified_at,
@@ -110,6 +121,13 @@ function loadExecution(stateManager: StateManager, execId: number): PlanExecutio
         merged_at,
         deploy_started_at,
         deployed_at,
+        review_session_id,
+        review_started_at,
+        review_completed_at,
+        review_summary,
+        review_output,
+        review_patch_commit_sha,
+        review_last_error,
         repair_attempts,
         last_error,
         final_notified_at
@@ -148,11 +166,58 @@ function formatReadyMessage(row: PlanExecutionRow): string {
   );
 }
 
+export function isCurrentBuildFresh(runtimeSha?: string | null, diskSha?: string | null): boolean {
+  if (!runtimeSha || !diskSha) {
+    return true;
+  }
+  return runtimeSha === diskSha;
+}
+
+export function shouldFinalizePlanExecution(row: {
+  deploy_status: DeployStatus;
+  review_status: ReviewStatus;
+}): boolean {
+  if (row.deploy_status === "failed") {
+    return true;
+  }
+  if (row.deploy_status !== "deployed") {
+    return false;
+  }
+  return row.review_status === null
+    || row.review_status === "clean"
+    || row.review_status === "warning"
+    || row.review_status === "patched"
+    || row.review_status === "failed";
+}
+
+function formatReviewLine(row: PlanExecutionRow): string {
+  const session = row.review_session_id
+    ? `<b>Review Session:</b> <code>${escapeHtml(row.review_session_id)}</code>\n`
+    : "";
+  const patch = row.review_patch_commit_sha
+    ? `<b>Review Patch:</b> <code>${escapeHtml(row.review_patch_commit_sha)}</code>\n`
+    : "";
+  const summary = row.review_summary
+    ? `<b>Review Summary:</b> ${escapeHtml(row.review_summary.slice(0, 800))}\n`
+    : "";
+  const warning = row.review_last_error
+    ? `<b>Review Error:</b> <pre>${escapeHtml(row.review_last_error.slice(0, 1600))}</pre>\n`
+    : "";
+
+  if (!session && !patch && !summary && !warning && !row.review_status) {
+    return "";
+  }
+
+  const status = row.review_status ? `<b>Review:</b> ${escapeHtml(row.review_status)}\n` : "";
+  return `\n${status}${session}${patch}${summary}${warning}`.trimEnd();
+}
+
 function formatFinalMessage(row: PlanExecutionRow, statusLabel: string): string {
   const currentSha = safeGitSha("HEAD");
   const commit = row.merged_commit_sha || currentSha || "unknown";
   const recovery = row.pre_merge_tag || "not recorded";
   const error = row.last_error ? `\n<b>Error:</b> <pre>${escapeHtml(row.last_error.slice(0, 1600))}</pre>` : "";
+  const review = formatReviewLine(row);
 
   return (
     `${statusLabel}\n` +
@@ -161,6 +226,7 @@ function formatFinalMessage(row: PlanExecutionRow, statusLabel: string): string 
     `<b>Repairs:</b> ${row.repair_attempts}\n` +
     `<b>Recovery Tag:</b> <code>${escapeHtml(recovery)}</code>\n` +
     `<b>Main:</b> <code>${escapeHtml(currentSha || "unknown")}</code>` +
+    (review ? `\n${review}` : "") +
     error
   );
 }
@@ -251,12 +317,32 @@ function runValidation(): ValidationResult {
   };
 }
 
+function ensureCurrentBuildIsLoaded(): void {
+  const runtimeBuild = getRuntimeBuildInfo();
+  const diskBuild = readDiskBuildInfo();
+  if (isCurrentBuildFresh(runtimeBuild?.sha, diskBuild?.sha)) {
+    return;
+  }
+
+  throw new Error(
+    `Refusing live merge/deploy from stale daemon build. ` +
+    `Runtime=${runtimeBuild?.sha ?? "unknown"} disk=${diskBuild?.sha ?? "unknown"}. ` +
+    `Restart HOMER first so the button runs the current build.`
+  );
+}
+
 function ensureCleanMainWorktree(): void {
   const status = runCommand("git", ["status", "--porcelain"], 10_000);
   if (status) {
     throw new Error(`Live repo is dirty. Refusing merge.\n${status}`);
   }
+  runCommand("git", ["fetch", "origin", "main"], 60_000);
   runCommand("git", ["checkout", "main"], 10_000);
+  runCommand("git", ["pull", "--ff-only", "origin", "main"], 60_000);
+}
+
+function pushMain(): void {
+  runCommand("git", ["push", "origin", "main"], 2 * 60_000);
 }
 
 function mergeBranch(row: PlanExecutionRow): { preMergeSha: string; preMergeTag: string; mergedCommitSha: string } {
@@ -355,13 +441,16 @@ function describeCurrentState(row: PlanExecutionRow): string {
     case "failed":
       return "Already failed";
     default:
+      if (row.review_status === "queued" || row.review_status === "running") {
+        return "Post-deploy review already running";
+      }
       return "Not ready to merge";
   }
 }
 
 export function createPlanExecutionReadyKeyboard(execId: number): InlineKeyboard {
   return new InlineKeyboard()
-    .text("Merge + Deploy", `a:pe:${execId}:merge_deploy`)
+    .text("Merge + Deploy Live", `a:pe:${execId}:merge_deploy`)
     .row()
     .text("Snooze 2h", `a:pe:${execId}:snooze`)
     .text("Dismiss", `a:pe:${execId}:dismiss`);
@@ -388,9 +477,17 @@ export async function sendPlanExecutionReadyMessage(params: {
   updateExecution(stateManager, execId, {
     integration_status: "ready",
     deploy_status: "pending",
+    review_status: null,
     ready_message_id: message.message_id,
     ready_notified_at: new Date().toISOString(),
     snooze_until: null,
+    review_session_id: null,
+    review_started_at: null,
+    review_completed_at: null,
+    review_summary: null,
+    review_output: null,
+    review_patch_commit_sha: null,
+    review_last_error: null,
     last_error: null,
     final_notified_at: null,
   });
@@ -457,7 +554,11 @@ export async function mergeAndDeployPlanExecution(params: {
       SELECT id
       FROM plan_executions
       WHERE id != ?
-        AND integration_status IN ('merging', 'repairing', 'deploying')
+        AND (
+          integration_status IN ('merging', 'repairing', 'deploying')
+          OR deploy_status IN ('pushing', 'restarting')
+          OR review_status IN ('queued', 'running')
+        )
       LIMIT 1
     `).get(id) as { id: number } | undefined;
     if (active) {
@@ -488,6 +589,7 @@ export async function mergeAndDeployPlanExecution(params: {
   );
 
   try {
+    ensureCurrentBuildIsLoaded();
     ensureCleanMainWorktree();
     const mergeResult = mergeBranch(row);
     updateExecution(stateManager, execId, {
@@ -556,8 +658,27 @@ export async function mergeAndDeployPlanExecution(params: {
     const mergedCommitSha = runCommand("git", ["rev-parse", "HEAD"], 10_000);
     updateExecution(stateManager, execId, {
       integration_status: "deploying",
-      deploy_status: "restarting",
+      deploy_status: "pushing",
       merged_commit_sha: mergedCommitSha,
+      review_status: "queued",
+      last_error: null,
+      review_last_error: null,
+    });
+    row = loadExecution(stateManager, execId) ?? row;
+
+    await editMessage(
+      bot,
+      row,
+      `📤 <b>Merged and validated. Pushing live main...</b>\n` +
+      `<b>Branch:</b> <code>${escapeHtml(row.branch_name)}</code>\n` +
+      `<b>Commit:</b> <code>${escapeHtml(mergedCommitSha)}</code>\n` +
+      `<b>Repairs:</b> ${repairs}`
+    );
+
+    pushMain();
+    updateExecution(stateManager, execId, {
+      integration_status: "deploying",
+      deploy_status: "restarting",
       deploy_started_at: new Date().toISOString(),
       last_error: null,
     });
@@ -566,11 +687,11 @@ export async function mergeAndDeployPlanExecution(params: {
     await editMessage(
       bot,
       row,
-      `🚀 <b>Merged and validated. Restarting daemon...</b>\n` +
+      `🚀 <b>Pushed live main. Restarting daemon...</b>\n` +
       `<b>Branch:</b> <code>${escapeHtml(row.branch_name)}</code>\n` +
       `<b>Commit:</b> <code>${escapeHtml(mergedCommitSha)}</code>\n` +
       `<b>Repairs:</b> ${repairs}\n` +
-      `<i>Final deploy status will follow after restart.</i>`
+      `<i>Claude review will run after restart.</i>`
     );
 
     spawnRestartRunner(execId);
@@ -593,12 +714,12 @@ export async function mergeAndDeployPlanExecution(params: {
 
 function markRestartedRowsDeployed(stateManager: StateManager): number {
   const restartingRows = stateManager.getDb().prepare(`
-    SELECT id, merged_commit_sha
+    SELECT id, merged_commit_sha, review_status
     FROM plan_executions
     WHERE deploy_status = 'restarting'
       AND deploy_started_at IS NOT NULL
       AND julianday(deploy_started_at) <= julianday('now', '-2 minutes')
-  `).all() as Array<{ id: number; merged_commit_sha: string | null }>;
+  `).all() as Array<{ id: number; merged_commit_sha: string | null; review_status: ReviewStatus }>;
 
   if (restartingRows.length === 0) return 0;
   const currentHead = safeGitSha("HEAD");
@@ -612,12 +733,47 @@ function markRestartedRowsDeployed(stateManager: StateManager): number {
     updateExecution(stateManager, row.id, {
       integration_status: "deployed",
       deploy_status: "deployed",
+      review_status: row.review_status ?? null,
       deployed_at: new Date().toISOString(),
       last_error: null,
     });
     marked += 1;
   }
   return marked;
+}
+
+function reviewRunningMessage(row: PlanExecutionRow): string {
+  const reviewSession = row.review_session_id
+    ? `\n<b>Review Session:</b> <code>${escapeHtml(row.review_session_id)}</code>`
+    : "";
+
+  return (
+    `✅ <b>Deployed on live main.</b>\n` +
+    `<b>Branch:</b> <code>${escapeHtml(row.branch_name)}</code>\n` +
+    `<b>Commit:</b> <code>${escapeHtml(row.merged_commit_sha || "unknown")}</code>\n` +
+    `<b>Repairs:</b> ${row.repair_attempts}\n` +
+    `<i>Claude review is running now.</i>` +
+    reviewSession
+  );
+}
+
+function finalStatusLabel(row: PlanExecutionRow): string {
+  if (row.deploy_status === "failed") {
+    return "❌ <b>Merge/deploy stopped.</b>";
+  }
+
+  switch (row.review_status) {
+    case "clean":
+      return "✅ <b>Merged, deployed, and review passed.</b>";
+    case "warning":
+      return "⚠️ <b>Merged and deployed. Review found follow-up items.</b>";
+    case "patched":
+      return "✅ <b>Merged, deployed, and shipped a review patch.</b>";
+    case "failed":
+      return "⚠️ <b>Merged and deployed, but the post-deploy review flow failed.</b>";
+    default:
+      return "✅ <b>Merged and deployed.</b>";
+  }
 }
 
 export async function processPlanExecutionFollowups(params: {
@@ -649,6 +805,49 @@ export async function processPlanExecutionFollowups(params: {
     resurfaced += 1;
   }
 
+  const reviewRows = db.prepare(`
+    SELECT
+      id,
+      job_id,
+      branch_name,
+      status,
+      summary_text,
+      diff_summary,
+      files_changed,
+      chat_id,
+      integration_status,
+      deploy_status,
+      review_status,
+      snooze_until,
+      ready_message_id,
+      ready_notified_at,
+      pre_merge_sha,
+      pre_merge_tag,
+      merged_commit_sha,
+      merged_at,
+      deploy_started_at,
+      deployed_at,
+      review_session_id,
+      review_started_at,
+      review_completed_at,
+      review_summary,
+      review_output,
+      review_patch_commit_sha,
+      review_last_error,
+      repair_attempts,
+      last_error,
+      final_notified_at
+    FROM plan_executions
+    WHERE chat_id = ?
+      AND final_notified_at IS NULL
+      AND deploy_status = 'deployed'
+      AND review_status IN ('queued', 'running')
+  `).all(chatId) as PlanExecutionRow[];
+
+  for (const row of reviewRows) {
+    await editMessage(bot, row, reviewRunningMessage(row));
+  }
+
   const finalRows = db.prepare(`
     SELECT
       id,
@@ -661,6 +860,7 @@ export async function processPlanExecutionFollowups(params: {
       chat_id,
       integration_status,
       deploy_status,
+      review_status,
       snooze_until,
       ready_message_id,
       ready_notified_at,
@@ -670,21 +870,35 @@ export async function processPlanExecutionFollowups(params: {
       merged_at,
       deploy_started_at,
       deployed_at,
+      review_session_id,
+      review_started_at,
+      review_completed_at,
+      review_summary,
+      review_output,
+      review_patch_commit_sha,
+      review_last_error,
       repair_attempts,
       last_error,
       final_notified_at
     FROM plan_executions
     WHERE chat_id = ?
       AND final_notified_at IS NULL
-      AND deploy_status IN ('deployed', 'failed')
+      AND (
+        deploy_status = 'failed'
+        OR (
+          deploy_status = 'deployed'
+          AND (review_status IS NULL OR review_status IN ('clean', 'warning', 'patched', 'failed'))
+        )
+      )
     ORDER BY id ASC
   `).all(chatId) as PlanExecutionRow[];
 
   let finalized = 0;
   for (const row of finalRows) {
-    const message = row.deploy_status === "deployed"
-      ? formatFinalMessage(row, "✅ <b>Merged and deployed.</b>")
-      : formatFinalMessage(row, "❌ <b>Merge/deploy stopped.</b>");
+    if (!shouldFinalizePlanExecution(row)) {
+      continue;
+    }
+    const message = formatFinalMessage(row, finalStatusLabel(row));
 
     await sendMessage(bot, row, message);
     updateExecution(stateManager, row.id, {

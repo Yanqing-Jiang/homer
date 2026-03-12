@@ -27,6 +27,7 @@ import { processRegistry } from "./process/registry.js";
 import { SessionTimeoutManager } from "./process/timeout-manager.js";
 import { cleanupScheduler } from "./process/cleanup-scheduler.js";
 import { initFallbackChain } from "./process/fallback-chain.js";
+import { setRuntimeBuildInfo } from "./utils/build-info.js";
 import type { FastifyInstance } from "fastify";
 import type { VoiceConfig } from "./voice/types.js";
 import { getRuntimePaths } from "./utils/runtime-paths.js";
@@ -46,6 +47,7 @@ async function main(): Promise<void> {
     const { readFileSync } = await import("fs");
     const versionPath = new URL("./.build-version", import.meta.url).pathname;
     const buildInfo = JSON.parse(readFileSync(versionPath, "utf-8"));
+    setRuntimeBuildInfo(buildInfo);
     logger.info({ build: buildInfo }, "H.O.M.E.R Phase 5 starting up...");
   } catch {
     logger.info("H.O.M.E.R Phase 5 starting up... (no build version stamp)");

@@ -28,6 +28,14 @@ export function buildBookmarkScrapePrompt(maxItems: number): string {
 
 ${AGENT_BROWSER_TOOLS}
 
+HOMER DEEP-LINK TARGETS:
+- Homer Career OS
+- MAHORAGA
+- Shadow Data Pulse
+- PICE
+- ProfitSphere
+- Homer subsystems: idea-pipeline, morning-brief, scheduler, content-pipeline, new-mcp
+
 WORKFLOW:
 1. Connect to browser: agent-browser connect 9222
 2. Navigate to Twitter bookmarks: agent-browser open "https://x.com/i/bookmarks"
@@ -42,12 +50,14 @@ WORKFLOW:
    - **Image analysis**: if the bookmark contains images, describe what they show and include visible text/OCR when legible
 6. If a bookmark has an external article/repo/page link, open the most important external link in the same tab, read enough to understand it, then return to bookmarks and continue. Summarize the linked content in 2-4 sentences.
 7. Write a short hook analysis for why this bookmark is compelling enough to save.
+8. Add 0-3 Homer deep-link hints when there is a real fit. Use the targets above only when the connection is concrete, and explain the connection briefly.
 
 CRITICAL RULES:
 - Tweet IDs MUST come from the actual permalink URLs in the snapshot (e.g. /username/status/2021725246244671606)
 - Do NOT guess or fabricate tweet IDs — if you can't find the permalink URL, omit the "id" field
 - Author usernames MUST come from the actual /@username links in the snapshot
 - Keep work to the top ${maxItems} bookmarks only
+- Do NOT force deep links. If there is no clear Homer fit, return an empty array.
 - Return structured data, not prose
 
 OUTPUT FORMAT:
@@ -61,7 +71,10 @@ Return ONLY a JSON array, no other text:
   "urls": ["https://..."],
   "linked_summary": "summary of quoted post or external article",
   "image_analysis": "what the images communicate, including visible text",
-  "hook_analysis": "why the bookmark's opening or framing is sticky"
+  "hook_analysis": "why the bookmark's opening or framing is sticky",
+  "deep_link_hints": [
+    {"target": "Homer Career OS", "relationship": "accelerates", "why": "how this bookmark concretely connects"}
+  ]
 }]
 
 If bookmarks page is empty or requires login, return: []
