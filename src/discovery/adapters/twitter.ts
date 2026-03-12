@@ -19,6 +19,11 @@ interface BrowserBookmark {
   linked_summary?: string;
   image_analysis?: string;
   hook_analysis?: string;
+  deep_link_hints?: Array<{
+    target: string;
+    relationship: string;
+    why: string;
+  }>;
   urls?: string[];
 }
 
@@ -75,6 +80,12 @@ export class TwitterAdapter extends BaseAdapter {
       bookmark.linked_summary,
       bookmark.image_analysis,
       bookmark.hook_analysis,
+      bookmark.deep_link_hints?.length
+        ? bookmark.deep_link_hints
+          .slice(0, 3)
+          .map((hint) => `${hint.target} (${hint.relationship}): ${hint.why}`)
+          .join("\n")
+        : "",
     ]
       .filter(Boolean)
       .join("\n\n");

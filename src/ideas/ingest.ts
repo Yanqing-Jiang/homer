@@ -42,8 +42,23 @@ interface TwitterBookmark {
   linked_summary?: string;
   image_analysis?: string;
   hook_analysis?: string;
+  deep_link_hints?: Array<{
+    target: string;
+    relationship: string;
+    why: string;
+  }>;
   created_at?: string;
   urls?: string[];
+}
+
+function formatBookmarkDeepLinkHints(
+  hints?: Array<{ target: string; relationship: string; why: string }>,
+): string {
+  if (!hints?.length) return "";
+  return hints
+    .slice(0, 3)
+    .map((hint) => `- ${hint.target} (${hint.relationship}): ${hint.why}`)
+    .join("\n");
 }
 
 // ============================================
@@ -156,6 +171,7 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
         bookmark.linked_summary ? `## Linked Content\n\n${bookmark.linked_summary.trim()}` : "",
         bookmark.image_analysis ? `## Image Read\n\n${bookmark.image_analysis.trim()}` : "",
         bookmark.hook_analysis ? `## Hook Analysis\n\n${bookmark.hook_analysis.trim()}` : "",
+        bookmark.deep_link_hints?.length ? `## Homer Deep Links\n\n${formatBookmarkDeepLinkHints(bookmark.deep_link_hints)}` : "",
       ].filter(Boolean);
 
       const idea: ParsedIdea = {

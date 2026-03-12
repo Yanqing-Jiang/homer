@@ -1,17 +1,15 @@
 /**
- * Nightly Memory Processing — Gemini Flash CLI fact extraction
+ * Nightly Memory Processing — Codex fact extraction
  *
  * Reads unprocessed session_summaries from SQLite, extracts promotable facts
- * via Gemini Flash CLI (free, pre-summarized input), writes to permanent memory.
- *
- * Replaces the Opus-based pipeline — input is already summarized by session-harvester,
- * so a free model is sufficient for fact extraction.
+ * via Codex, writes to permanent memory, and requires the full core memory set
+ * to be loaded before the model runs.
  */
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "fs";
 import { z } from "zod";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
-import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
+import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { buildCondensedContext, extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
 import { getRecentJobOutputs } from "../job-outputs.js";
 import { logger } from "../../utils/logger.js";
@@ -21,7 +19,9 @@ import type { StateManager } from "../../state/manager.js";
 import { trackPromotion } from "../../outcomes/hooks.js";
 import { PATHS } from "../../config/paths.js";
 
-const PERMANENT_FILES: Record<string, string> = {
+type MemoryFileKey = "me" | "work" | "life" | "preferences" | "tools";
+
+const PERMANENT_FILES: Record<MemoryFileKey, string> = {
   me: PATHS.me,
   work: PATHS.work,
   life: PATHS.life,
@@ -49,13 +49,24 @@ const NightlyOutputSchema = z.object({
 // HELPERS
 // ============================================
 
-function loadPermanentFiles(): Record<string, string> {
-  const contents: Record<string, string> = {};
-  for (const [key, path] of Object.entries(PERMANENT_FILES)) {
-    if (existsSync(path)) {
-      contents[key] = readFileSync(path, "utf-8");
+function loadRequiredMemoryFiles(): Record<MemoryFileKey, string> {
+  const requiredKeys = Object.keys(PERMANENT_FILES) as MemoryFileKey[];
+  const missing: string[] = [];
+  const contents = {} as Record<MemoryFileKey, string>;
+
+  for (const key of requiredKeys) {
+    const path = PERMANENT_FILES[key];
+    if (!existsSync(path)) {
+      missing.push(`${key}.md`);
+      continue;
     }
+    contents[key] = readFileSync(path, "utf-8");
   }
+
+  if (missing.length > 0) {
+    throw new Error(`Missing required memory files: ${missing.join(", ")}`);
+  }
+
   return contents;
 }
 
@@ -142,6 +153,13 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
       return { success: true, output: "No unprocessed sessions or feedback, skipping" };
     }
 
+    const permanentFiles = loadRequiredMemoryFiles();
+    logger.info({
+      memoryFiles: Object.fromEntries(
+        (Object.keys(permanentFiles) as MemoryFileKey[]).map((key) => [key, permanentFiles[key].length])
+      ),
+    }, "Loaded required memory files for nightly memory");
+
     // Format sessions as structured blocks grouped by project
     const byProject = new Map<string, string[]>();
     for (const s of sessions) {
@@ -162,10 +180,8 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
     }
     const sessionInput = sessionBlocks.join("\n\n") + feedbackLog;
 
-    // Load permanent memory files
-    const permanentFiles = loadPermanentFiles();
     const permanentContext = Object.entries(permanentFiles)
-      .map(([key, content]) => `## ${key}.md\n\n${content.slice(0, 6000)}`)
+      .map(([key, content]) => `## ${key}.md\n\n${content}`)
       .join("\n\n---\n\n");
 
     const [condensedContext, goals, projects] = await Promise.all([
@@ -227,17 +243,23 @@ If nothing to promote, use an empty array.`;
       promptLength: unifiedPrompt.length,
       date: yesterday,
       sessionCount: sessions.length,
-    }, "Running nightly memory via Gemini Flash");
+      executor: "codex",
+      model: "gpt-5.4",
+      reasoningEffort: "high",
+    }, "Running nightly memory via Codex");
 
-    const result = await executeGeminiCLIDirect(
+    const result = await executeCodexCLI(
       unifiedPrompt + "\n\nReturn ONLY valid JSON, no markdown fences.",
       {
+        cwd: process.env.HOME ?? "/Users/yj",
+        model: "gpt-5.4",
+        reasoningEffort: "high",
         timeout: 300_000,
       },
     );
 
     if (result.exitCode !== 0 || !result.output) {
-      return { success: false, output: "", error: `Gemini Flash error: ${(result.output ?? "").slice(0, 200)}` };
+      return { success: false, output: "", error: `Codex error: ${(result.output ?? "").slice(0, 200)}` };
     }
 
     // Valid empty responses (e.g. [] or {"promotions":[]}) are not errors

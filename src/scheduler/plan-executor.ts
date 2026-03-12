@@ -6,7 +6,7 @@
  * - Branch isolation: every run on `homer/auto/{slug}-{date}`
  * - Build gate: independent `npm run build` verification
  * - Max 1 execution/day (hardcoded safety rail)
- * - Never auto-merges to main
+ * - Never auto-merges to main without an explicit Telegram approval click
  */
 
 import { executeCodexCLI } from "../executors/codex-cli.js";

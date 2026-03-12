@@ -32,7 +32,7 @@ export interface CommandDefinition {
  * Model configurations for each executor
  */
 export const EXECUTOR_MODELS: Record<ExecutorType, string | undefined> = {
-  claude: "sonnet",                  // Default: Sonnet 4.6 (fast + smart)
+  claude: "opus",                     // Default: Opus 4.6 for web UI quality
   codex: undefined,                 // Codex CLI (model handled by CLI)
   gemini: GEMINI_CLI_FLASH_MODEL, // Fast, cheap
   kimi: "kimi-k2-5",                // Kimi K2.5 via NVIDIA NIM

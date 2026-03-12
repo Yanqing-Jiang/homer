@@ -1347,7 +1347,7 @@ export function registerPlanApprovalCallbacks(bot: Bot, stateManager: StateManag
       return;
     }
 
-    await ctx.answerCallbackQuery("Starting merge + deploy...");
+    await ctx.answerCallbackQuery("Starting live merge + deploy...");
 
     void mergeAndDeployPlanExecution({
       bot,
@@ -1358,7 +1358,7 @@ export function registerPlanApprovalCallbacks(bot: Bot, stateManager: StateManag
       try {
         await bot.api.sendMessage(
           ctx.chat.id,
-          `ℹ️ <b>Merge + deploy not started</b>\n${escapeHtml(result.message)}`,
+          `ℹ️ <b>Live merge + deploy not started</b>\n${escapeHtml(result.message)}`,
           { parse_mode: "HTML" }
         );
       } catch { /* best effort */ }
