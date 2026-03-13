@@ -168,7 +168,8 @@ function sanitizeFailureReason(text: string): string {
 }
 
 function isAuthError(text: string): boolean {
-  return /(?:\b401\b|\b403\b|unauthorized|forbidden|invalid.?credential|auth)/i.test(
+  // Match actual auth error patterns — NOT bare "auth" which hits "author", etc.
+  return /(?:\b401\b|\b403\b|unauthorized|forbidden|invalid.?credential|auth(?:entication|orization)?\s+(?:fail|error|invalid|expired|denied|required))/i.test(
     text,
   );
 }
@@ -201,6 +202,11 @@ function detectFailureKind(
 
   if (silent429Timeout) return "rate_limit";
   if (run.timedOut) return "timeout";
+
+  // Exit code 0 with non-empty output = success, regardless of text content.
+  // This prevents misclassifying valid output that happens to contain words
+  // like "auth", "unauthorized" (e.g. discussing authentication topics).
+  if (run.code === 0 && cleanedOutput) return null;
 
   const combined = `${cleanedOutput}\n${cleanedErr}`;
   if (isRateLimitError(combined)) return "rate_limit";
@@ -1027,16 +1033,18 @@ export async function executeGeminiCLIDirect(
 ): Promise<GeminiCLIDirectResult> {
   const {
     model = GEMINI_CLI_FLASH_MODEL,
-    timeout = 120_000,
+    timeout = 1_200_000,
     signal,
     cwd = "/tmp",
     outputFormat,
     role,
   } = options;
 
-  // Auto-elevate timeout for Pro model (needs more time for deep analysis)
+  // Enforce 20min floor for all models; Flash gets 15min, Pro gets 20min
   const effectiveTimeout =
-    model === GEMINI_CLI_PRO_MODEL ? Math.max(timeout, 300_000) : timeout;
+    model === GEMINI_CLI_PRO_MODEL
+      ? Math.max(timeout, 1_200_000)
+      : Math.max(timeout, 900_000);
 
   const startTime = Date.now();
   const deadline = startTime + effectiveTimeout;
