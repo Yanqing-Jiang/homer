@@ -5,7 +5,7 @@ import { readFileSync, existsSync } from "fs";
 import { execSync } from "child_process";
 import { config } from "../config/index.js";
 import type { Scheduler, RegisteredJob } from "../scheduler/index.js";
-import { getClaudeAuthStatus } from "../utils/claude-auth.js";
+import { getClaudeAuthStatus, isClaudeHealthy } from "../utils/claude-auth.js";
 import { CronUtils } from "../utils/cron.js";
 import { DEFAULT_JOB_TIMEOUT } from "../scheduler/types.js";
 import { registerSessionRoutes } from "./api/sessions.js";
@@ -208,7 +208,7 @@ export function createRoutes(
   server.get("/health/auth", async () => {
     const status = await getClaudeAuthStatus();
     return {
-      status: status.keychainItemFound && status.claudeBinaryExists ? "ok" : "degraded",
+      status: isClaudeHealthy(status) ? "ok" : "degraded",
       ...status,
     };
   });
@@ -310,7 +310,14 @@ export function createRoutes(
     }
 
     // Credential checks
-    const credentials: Record<string, { status: string; expiresAt?: string; expiresInHours?: number; refreshTokenPresent?: boolean; error?: string }> = {};
+    const credentials: Record<string, {
+      status: string;
+      expiresAt?: string;
+      expiresInHours?: number;
+      refreshTokenPresent?: boolean;
+      error?: string;
+      authMethod?: string;
+    }> = {};
 
     // Gmail OAuth
     try {
@@ -344,8 +351,12 @@ export function createRoutes(
     try {
       const claudeStatus = await getClaudeAuthStatus();
       credentials.claude = {
-        status: claudeStatus.keychainItemFound && claudeStatus.claudeBinaryExists ? "ok" : "error",
-        error: claudeStatus.keychainCheckError,
+        status: isClaudeHealthy(claudeStatus) ? "ok" : "error",
+        error:
+          !claudeStatus.claudeBinaryExists
+            ? `Claude binary missing at ${claudeStatus.claudePath}`
+            : claudeStatus.authError,
+        authMethod: claudeStatus.authMethod,
       };
     } catch (e) {
       credentials.claude = { status: "error", error: e instanceof Error ? e.message : String(e) };
