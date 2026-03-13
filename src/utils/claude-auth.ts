@@ -9,13 +9,20 @@ export interface ClaudeAuthStatus {
   claudePath: string;
   claudeBinaryExists: boolean;
   keychainItemFound: boolean;
+  tokenFilePath: string;
+  tokenFileExists: boolean;
+  authAvailable: boolean;
+  authMethod: "keychain" | "token-file" | "missing";
   keychainCheckError?: string;
+  authError?: string;
 }
 
 export async function getClaudeAuthStatus(): Promise<ClaudeAuthStatus> {
   const runtimePaths = getRuntimePaths();
   const claudePath = runtimePaths.claudeBinaryPath;
   const claudeBinaryExists = existsSync(claudePath);
+  const tokenFilePath = runtimePaths.claudeTokenFile;
+  const tokenFileExists = existsSync(tokenFilePath);
 
   // Check for Claude Code keychain item (no secret output)
   let keychainItemFound = false;
@@ -59,10 +66,30 @@ export async function getClaudeAuthStatus(): Promise<ClaudeAuthStatus> {
     keychainCheckError = errors.join(" | ");
   }
 
+  const authAvailable = keychainItemFound || tokenFileExists;
+  const authMethod =
+    keychainItemFound ? "keychain" :
+    tokenFileExists ? "token-file" :
+    "missing";
+  const authError = authAvailable
+    ? undefined
+    : keychainCheckError
+      ? `Claude auth missing: no keychain item and no token file (${tokenFilePath}). Keychain check: ${keychainCheckError}`
+      : `Claude auth missing: no keychain item and no token file (${tokenFilePath})`;
+
   return {
     claudePath,
     claudeBinaryExists,
     keychainItemFound,
+    tokenFilePath,
+    tokenFileExists,
+    authAvailable,
+    authMethod,
     keychainCheckError: keychainItemFound ? undefined : keychainCheckError,
+    authError,
   };
+}
+
+export function isClaudeHealthy(status: ClaudeAuthStatus): boolean {
+  return status.claudeBinaryExists && status.authAvailable;
 }

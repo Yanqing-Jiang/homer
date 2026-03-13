@@ -12,7 +12,7 @@ import { ensureCDP } from "../scraping/chrome-launcher.js";
 import { cleanAgentOutput } from "../scraping/clean-output.js";
 import { insertScrape } from "../scraping/scrape-store.js";
 import { PATHS } from "../config/paths.js";
-import { X_BOOKMARK_CODEX_SKILLS } from "../scraping/skill-paths.js";
+import { X_BOOKMARK_CODEX_SKILLS, TWEETER_BOOKMARK_SKILL_PATH } from "../scraping/skill-paths.js";
 
 const IDEAS_FILE = PATHS.ideasMd;
 const DENY_HISTORY_FILE = PATHS.denyHistory;
@@ -92,13 +92,21 @@ function ensureIdeaId(idea: ParsedIdea): void {
 // ============================================
 
 async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
-  logger.info("Scraping Twitter/X bookmarks via Codex + agent-browser");
+  logger.info("Scraping Twitter/X bookmarks via Claude Sonnet + agent-browser");
 
   try {
-    const result = await executeCodexBrowserScrape(
-      buildBookmarkScrapePrompt(10),
-      { ...SCRAPE_OPTIONS, skillPaths: X_BOOKMARK_CODEX_SKILLS },
-    );
+    // Primary: Claude Sonnet with tweeter_bookmark skill
+    const skillContent = existsSync(TWEETER_BOOKMARK_SKILL_PATH)
+      ? readFileSync(TWEETER_BOOKMARK_SKILL_PATH, "utf-8")
+      : "";
+
+    const sonnetPrompt = `${skillContent ? `SKILL REFERENCE:\n${skillContent}\n\n` : ""}${buildBookmarkScrapePrompt(10)}`;
+
+    const result = await executeClaudeCommand(sonnetPrompt, {
+      ...SCRAPE_OPTIONS,
+      model: "sonnet",
+      timeout: 600_000,
+    });
 
     if (result.exitCode !== 0) {
       logger.warn({ exitCode: result.exitCode, output: result.output?.slice(0, 300) }, "Browser bookmark scrape failed");

@@ -91,6 +91,28 @@ export function markProcessed(
 }
 
 /**
+ * Set quality_score and deep-linker enrichment WITHOUT marking as processed.
+ * Used by deep-linker to pre-score scrapes for the synthesizer's cross-source synthesis.
+ */
+export function scoreAndEnrichScrape(
+  db: Database.Database,
+  scrapeId: string,
+  score: number,
+  enrichmentData: Record<string, unknown>,
+): void {
+  const existing = db.prepare(`SELECT metadata FROM scrapes WHERE id = ?`).get(scrapeId) as { metadata: string | null } | undefined;
+  const meta = existing?.metadata ? JSON.parse(existing.metadata) : {};
+  meta.deep_linker = enrichmentData;
+
+  db.prepare(`
+    UPDATE scrapes
+    SET quality_score = ?,
+        metadata = ?
+    WHERE id = ?
+  `).run(score, JSON.stringify(meta), scrapeId);
+}
+
+/**
  * Get recent scrapes, optionally filtered by source.
  */
 export function getRecentScrapes(

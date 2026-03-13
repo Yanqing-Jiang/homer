@@ -1,15 +1,19 @@
 /**
  * Idea Synthesizer — The Brain
  *
- * 2-pass architecture:
- *   Pass 1: Per-source scoring via Gemini Flash (3x parallel)
- *   Pass 2: Cross-source synthesis via Gemini 3.1 Pro API
+ * Architecture (with deep-linker integration):
+ *   Pre: Deep-linker (1:00am) pre-scores + enriches scrapes via Codex 5.4 HIGH
+ *   Pass 1: Per-source scoring via Gemini Flash — SKIPPED for pre-scored scrapes
+ *   Pass 2: Cross-source synthesis via Gemini 3.1 Pro API (always runs)
+ *   Critic: Flash quality gate
+ *   Pass 3: Per-idea enrichment via Gemini Pro — SKIPPED for pre-enriched scrapes
  *   Post: Quality gate → smartSaveIdea() with provenance
  *
  * Reads unprocessed scrapes from the scrapes table.
+ * Pre-scored scrapes (quality_score set by deep-linker) skip Pass 1 + Pass 3.
  * Creates high-quality, goal-aligned ideas with provenance tracking.
  *
- * Schedule: 0 1 * * * (daily at 1am, triggered by idea-ingest/ideas-explore/content-scraper)
+ * Schedule: 30 1 * * * (daily at 1:30am, after deep-linker at 1:00am)
  */
 
 import { readFileSync, readdirSync, statSync, existsSync } from "fs";
@@ -101,7 +105,7 @@ ${(s.raw_content || "").slice(0, 2000)}
  * Returns a single concatenated string, truncated to maxTotalChars.
  * Files are sorted newest-first, each capped at perFileCap chars.
  */
-function loadRecentMdFiles(maxDays = 7, maxTotalChars = 6000, perFileCap = 800): string {
+export function loadRecentMdFiles(maxDays = 7, maxTotalChars = 6000, perFileCap = 800): string {
   const home = process.env.HOME ?? "/Users/yj";
   const searchDirs = [
     join(home, "homer", "output", "claude"),
@@ -546,25 +550,66 @@ export async function runIdeaSynthesizer(db: Database.Database, jobRunId?: numbe
     const existingTitles = existingIdeas.slice(0, 100).map(i => i.title).join("\n");
     const goals = loadFileIfExists(ME_MD, 3000) + "\n" + loadFileIfExists(WORK_MD, 3000);
 
-    // PASS 1: Per-source scoring (3x Flash, parallel)
-    const bySource = groupBy(unprocessed, s => s.source);
-    const sourceNames = Object.keys(bySource);
+    // Partition: pre-scored by deep-linker vs unscored
+    const prescored = unprocessed.filter(s => s.quality_score != null);
+    const unscored = unprocessed.filter(s => s.quality_score == null);
 
-    logger.info({ sources: sourceNames, counts: sourceNames.map(s => bySource[s]!.length) }, "Pass 1: scoring by source");
+    // Extract deep-linker metadata for pre-scored scrapes
+    const deepLinkerData = new Map<string, { title?: string; dimensions?: string[]; enrichment?: Record<string, unknown> }>();
+    for (const s of prescored) {
+      if (s.metadata) {
+        try {
+          const meta = JSON.parse(s.metadata);
+          if (meta.deep_linker) deepLinkerData.set(s.id, meta.deep_linker);
+        } catch { /* skip */ }
+      }
+    }
 
-    const scoringResults = await Promise.allSettled(
-      sourceNames.map(source =>
-        scoreSourceScrapes(bySource[source]!, source, preferences, goals)
-      )
-    );
-
-    const allScored = scoringResults.flatMap((result, i) => {
-      if (result.status === "fulfilled") return result.value;
-      logger.warn({ source: sourceNames[i], error: result.reason }, "Source scoring failed");
-      return [];
+    // Convert pre-scored to ScoredSummary format (skip Flash scoring for these)
+    const prescoredSummaries: z.infer<typeof ScoredArraySchema> = prescored.map(s => {
+      const dl = deepLinkerData.get(s.id);
+      return {
+        scrapeId: s.id,
+        score: s.quality_score!,
+        summary: dl?.title ?? s.title ?? "(no title)",
+        dimensions: dl?.dimensions ?? [],
+      };
     });
 
-    logger.info({ totalScored: allScored.length, aboveThreshold: allScored.filter(s => s.score >= 5).length }, "Pass 1 complete");
+    if (prescored.length > 0) {
+      logger.info({ count: prescored.length }, "Deep-linker pre-scored scrapes detected, skipping Pass 1 for these");
+    }
+
+    // PASS 1: Only Flash-score unscored scrapes (pre-scored skip this pass)
+    const bySource = groupBy(unscored, s => s.source);
+    const sourceNames = Object.keys(bySource);
+
+    let flashScored: z.infer<typeof ScoredArraySchema> = [];
+    if (sourceNames.length > 0) {
+      logger.info({ sources: sourceNames, counts: sourceNames.map(s => bySource[s]!.length) }, "Pass 1: scoring unscored by source");
+
+      const scoringResults = await Promise.allSettled(
+        sourceNames.map(source =>
+          scoreSourceScrapes(bySource[source]!, source, preferences, goals)
+        )
+      );
+
+      flashScored = scoringResults.flatMap((result, i) => {
+        if (result.status === "fulfilled") return result.value;
+        logger.warn({ source: sourceNames[i], error: result.reason }, "Source scoring failed");
+        return [];
+      });
+    }
+
+    // Merge pre-scored + flash-scored
+    const allScored = [...prescoredSummaries, ...flashScored];
+
+    logger.info({
+      totalScored: allScored.length,
+      fromDeepLinker: prescoredSummaries.length,
+      fromFlash: flashScored.length,
+      aboveThreshold: allScored.filter(s => s.score >= 5).length,
+    }, "Pass 1 complete");
 
     // Store Pass 1 artifact
     if (jobRunId && allScored.length > 0) {
@@ -643,33 +688,93 @@ export async function runIdeaSynthesizer(db: Database.Database, jobRunId?: numbe
       return true;
     });
 
-    // PASS 3: Enrichment — run all in parallel via Gemini Pro
-    logger.info({ count: qualityIdeas.length }, "Pass 3: enrichment via Gemini Pro");
-
-    // Pre-pass: digest recent .md files in one Flash session, then share the compact
-    // digest across all parallel enrichment Pro sessions (keeps each session's context small)
-    const recentMdRaw = loadRecentMdFiles(7, 8000, 1000);
-    const recentDigest = await digestRecentOutputs(recentMdRaw);
-    logger.info({ rawChars: recentMdRaw.length, digestChars: recentDigest.length }, "Recent outputs digested");
-
-    const enrichmentContext = {
-      meMd: loadFileIfExists(ME_MD, 2500),
-      workMd: loadFileIfExists(WORK_MD, 2500),
-      existingIdeaTitles: existingIdeas.slice(0, 80).map(i => `${i.title} [${(i.tags ?? []).join(",")}]`).join("\n"),
-      recentOutputs: recentDigest,
-    };
-
-    const enrichmentResults = await Promise.allSettled(
-      qualityIdeas.map(idea => enrichIdea(idea, enrichmentContext))
-    );
+    // PASS 3: Enrichment — skip for pre-enriched scrapes (deep-linker handled them)
+    // Check which ideas have source scrapes with deep-linker enrichment
+    const ideasNeedingEnrichment: typeof qualityIdeas = [];
+    const preEnrichedByIndex = new Map<number, IdeaEnrichment>();
 
     for (let i = 0; i < qualityIdeas.length; i++) {
       const idea = qualityIdeas[i]!;
-      const enrichmentResult = enrichmentResults[i];
-      const enrichment = enrichmentResult?.status === "fulfilled" ? enrichmentResult.value : null;
+      let found: IdeaEnrichment | null = null;
 
-      if (enrichment) {
-        logger.info({ title: idea.title, homerArea: enrichment.homer_improvement.area, priority: enrichment.homer_improvement.priority }, "Enrichment complete");
+      for (const scrapeId of idea.scrapeIds) {
+        const dl = deepLinkerData.get(scrapeId);
+        if (dl?.enrichment) {
+          const raw = dl.enrichment as Record<string, Record<string, unknown>>;
+          try {
+            // Adapt deep-linker schema to synthesizer schema (add missing fields)
+            const hi = raw.homer_improvement as Record<string, unknown> | undefined;
+            found = EnrichmentSchema.parse({
+              deep_dive: raw.deep_dive,
+              deep_links: raw.deep_links ?? [],
+              homer_improvement: {
+                relevant: hi?.relevant ?? false,
+                summary: hi?.summary ?? "",
+                area: hi?.area ?? "none",
+                priority: hi?.priority ?? "low",
+                user_context: (hi?.summary as string) ?? "",
+                plan: hi?.plan ?? [],
+                automation_potential: Array.isArray(hi?.plan) && (hi.plan as unknown[]).length > 0
+                  ? `${(hi.plan as unknown[]).length}-step plan from deep-linker`
+                  : "none",
+              },
+            });
+            break;
+          } catch {
+            // Schema mismatch — let Gemini Pro handle it
+          }
+        }
+      }
+
+      if (found) {
+        preEnrichedByIndex.set(i, found);
+      } else {
+        ideasNeedingEnrichment.push(idea);
+      }
+    }
+
+    logger.info({
+      total: qualityIdeas.length,
+      preEnriched: preEnrichedByIndex.size,
+      needsGemini: ideasNeedingEnrichment.length,
+    }, "Pass 3: enrichment routing");
+
+    // Only call Gemini Pro for ideas that need it
+    let enrichmentResults: PromiseSettledResult<IdeaEnrichment | null>[] = [];
+
+    if (ideasNeedingEnrichment.length > 0) {
+      const recentMdRaw = loadRecentMdFiles(7, 8000, 1000);
+      const recentDigest = await digestRecentOutputs(recentMdRaw);
+      logger.info({ rawChars: recentMdRaw.length, digestChars: recentDigest.length }, "Recent outputs digested");
+
+      const enrichmentContext = {
+        meMd: loadFileIfExists(ME_MD, 2500),
+        workMd: loadFileIfExists(WORK_MD, 2500),
+        existingIdeaTitles: existingIdeas.slice(0, 80).map(i => `${i.title} [${(i.tags ?? []).join(",")}]`).join("\n"),
+        recentOutputs: recentDigest,
+      };
+
+      enrichmentResults = await Promise.allSettled(
+        ideasNeedingEnrichment.map(idea => enrichIdea(idea, enrichmentContext))
+      );
+    }
+
+    // Merge enrichment results: pre-enriched + Gemini Pro results
+    let geminiIdx = 0;
+    for (let i = 0; i < qualityIdeas.length; i++) {
+      const idea = qualityIdeas[i]!;
+
+      let enrichment: IdeaEnrichment | null = null;
+      if (preEnrichedByIndex.has(i)) {
+        enrichment = preEnrichedByIndex.get(i)!;
+        logger.info({ title: idea.title, source: "deep-linker" }, "Using pre-computed enrichment");
+      } else {
+        const result = enrichmentResults[geminiIdx];
+        enrichment = result?.status === "fulfilled" ? result.value : null;
+        geminiIdx++;
+        if (enrichment) {
+          logger.info({ title: idea.title, homerArea: enrichment.homer_improvement.area, priority: enrichment.homer_improvement.priority }, "Enrichment complete");
+        }
       }
 
       const slug = idea.title
@@ -726,10 +831,12 @@ export async function runIdeaSynthesizer(db: Database.Database, jobRunId?: numbe
 
     const parts: string[] = [];
     parts.push(`${unprocessed.length} scrapes processed`);
+    if (prescored.length > 0) parts.push(`${prescored.length} pre-scored by deep-linker`);
     parts.push(`${synthesizedIdeas.length} synthesized`);
     if (created > 0) parts.push(`${created} new ideas`);
     if (enhanced > 0) parts.push(`${enhanced} enhanced`);
     if (skipped > 0) parts.push(`${skipped} skipped (duplicate)`);
+    if (preEnrichedByIndex.size > 0) parts.push(`${preEnrichedByIndex.size} pre-enriched`);
     const criticFiltered = synthesizedIdeas.length - keepTitles.size;
     if (criticFiltered > 0) parts.push(`${criticFiltered} critic-filtered`);
 
