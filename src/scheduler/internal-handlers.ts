@@ -205,7 +205,7 @@ const RETRYABLE_HANDLERS = new Set([
   "learning_engine", "homer_improvements", "session_summaries", "weekly_consolidation",
   "memory_cleanup", "planning_reminder", "content_scraper", "outcome_tracker",
   "preference_updater", "idea_dedup", "memory_git_commit", "nightly_code_push", "db_backup",
-  "idea_synthesizer", "archive_verify", "health_check", "context_bridge",
+  "idea_synthesizer", "idea_deep_linker", "archive_verify", "health_check", "context_bridge",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
 ]);
 
@@ -383,8 +383,11 @@ async function runHealthCheck(
 
   try {
     const claudeStatus = await getClaudeAuthStatus();
-    if (!claudeStatus.keychainItemFound || !claudeStatus.claudeBinaryExists) {
-      issues.push("🔴 Claude: auth/binary missing");
+    if (!claudeStatus.claudeBinaryExists) {
+      issues.push(`🔴 Claude: binary missing (${claudeStatus.claudePath})`);
+    }
+    if (!claudeStatus.authAvailable) {
+      issues.push(`🔴 Claude: auth missing (no keychain item or token file at ${claudeStatus.tokenFilePath})`);
     }
   } catch {
     issues.push("🔴 Claude: auth check failed");
@@ -1084,6 +1087,18 @@ async function runHandler(
       case "idea_synthesizer": {
         const { runIdeaSynthesizer } = await import("./jobs/idea-synthesizer.js");
         const result = await runIdeaSynthesizer(ctx.stateManager.getDb(), ctx.jobRunId);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
+      }
+      case "idea_deep_linker": {
+        const { runIdeaDeepLinker } = await import("./jobs/idea-deep-linker.js");
+        const result = await runIdeaDeepLinker(ctx.stateManager, ctx.jobRunId);
         return buildResult(
           job,
           startedAt,

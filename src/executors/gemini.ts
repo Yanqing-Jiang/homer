@@ -166,7 +166,8 @@ export async function executeGeminiAPI(
     const finishReason = response.candidates?.[0]?.finishReason as string | undefined;
     const truncated = finishReason === "MAX_TOKENS";
 
-    if (truncated) {
+    if (truncated && maxTokens !== 50) {
+      // Skip warning for health check probes (maxTokens=50)
       logger.warn(
         { model: modelName, maxTokens, outputTokens: response.usageMetadata?.candidatesTokenCount },
         "Gemini response truncated by token limit"
