@@ -32,13 +32,22 @@ export interface CommandDefinition {
  * Model configurations for each executor
  */
 export const EXECUTOR_MODELS: Record<ExecutorType, string | undefined> = {
-  claude: "opus",                     // Default: Opus 4.6 for web UI quality
+  claude: "opus[1m]",               // Default: Opus 4.6 with 1M context
   codex: undefined,                 // Codex CLI (model handled by CLI)
   gemini: GEMINI_CLI_FLASH_MODEL, // Fast, cheap
   kimi: "kimi-k2-5",                // Kimi K2.5 via NVIDIA NIM
   chatgpt: undefined,               // Uses Claude + browser skill to access ChatGPT
   opencode: GEMINI_CLI_FLASH_MODEL, // Gemini CLI (was OpenCode CLI)
 };
+
+/**
+ * Per-platform default Claude model.
+ * Web UI → opus[1m], Telegram → sonnet[1m]
+ */
+export function getClaudeDefaultModel(lane?: string): string {
+  if (lane?.startsWith("tg:")) return "sonnet[1m]";
+  return "opus[1m]"; // web UI and other contexts
+}
 
 /**
  * Unified command registry
@@ -57,7 +66,7 @@ export const COMMANDS: CommandDefinition[] = [
     category: "executor",
     description: "Switch to Claude (default, tool use)",
     executor: "claude",
-    model: "sonnet",
+    model: "sonnet[1m]",
   },
   {
     name: "/gemini",
@@ -77,16 +86,16 @@ export const COMMANDS: CommandDefinition[] = [
   {
     name: "/sonnet",
     category: "executor",
-    description: "Switch Claude to Sonnet",
+    description: "Switch Claude to Sonnet (1M context)",
     executor: "claude",
-    model: "sonnet",
+    model: "sonnet[1m]",
   },
   {
     name: "/opus",
     category: "executor",
-    description: "Switch Claude to Opus",
+    description: "Switch Claude to Opus (1M context)",
     executor: "claude",
-    model: "opus",
+    model: "opus[1m]",
   },
   {
     name: "/chatgpt",

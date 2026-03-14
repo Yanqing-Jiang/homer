@@ -9,6 +9,11 @@ function escapeMarkdown(text: string): string {
   return text.replace(/([_*`\[])/g, "\\$1");
 }
 
+/** Detect if text contains Telegram HTML tags — use HTML parse_mode if so */
+function detectParseMode(text: string): "HTML" | "Markdown" {
+  return /<(b|i|u|s|code|pre|a\s|blockquote)[\s>]/i.test(text) ? "HTML" : "Markdown";
+}
+
 /**
  * Progressive Telegram message updater — replaces "Thinking..." with
  * incremental content as CLI executor streams tokens.
@@ -125,34 +130,41 @@ export async function editWithResponse(
 ): Promise<void> {
   const MAX_MESSAGE_LENGTH = 4096;
 
+  const parseMode = detectParseMode(response);
+  const continuedMarker = parseMode === "HTML" ? "\n\n<i>(continued...)</i>" : "\n\n_(continued...)_";
+
   try {
     if (response.length <= MAX_MESSAGE_LENGTH) {
       await ctx.api.editMessageText(
         streamingMsg.chatId,
         streamingMsg.messageId,
         response,
-        { parse_mode: "Markdown" }
+        { parse_mode: parseMode }
       );
     } else {
       // For long responses, edit with first chunk then send remaining as new messages
-      const firstChunk = truncateAtSafePoint(response, MAX_MESSAGE_LENGTH - 20);
+      const firstChunk = truncateAtSafePoint(response, MAX_MESSAGE_LENGTH - 25);
       const remaining = response.slice(firstChunk.length).trim();
 
       await ctx.api.editMessageText(
         streamingMsg.chatId,
         streamingMsg.messageId,
-        firstChunk + "\n\n_(continued...)_",
-        { parse_mode: "Markdown" }
+        firstChunk + continuedMarker,
+        { parse_mode: parseMode }
       );
 
       // Send remaining chunks as new messages
-      await sendChunkedMessages(ctx, remaining);
+      await sendChunkedMessages(ctx, remaining, parseMode);
     }
   } catch (error) {
-    logger.error({ error }, "Failed to edit message with response");
-    // Fallback: escape Markdown and retry, then plain text as last resort
+    logger.error({ error, parseMode }, "Failed to edit message with response");
+    // Fallback: try without formatting, then plain text as last resort
     try {
-      await ctx.reply(escapeMarkdown(response).slice(0, MAX_MESSAGE_LENGTH), { parse_mode: "Markdown" });
+      if (parseMode === "Markdown") {
+        await ctx.reply(escapeMarkdown(response).slice(0, MAX_MESSAGE_LENGTH), { parse_mode: "Markdown" });
+      } else {
+        await ctx.reply(response.slice(0, MAX_MESSAGE_LENGTH), { parse_mode: "HTML" });
+      }
     } catch {
       try {
         await ctx.reply(response.slice(0, MAX_MESSAGE_LENGTH));
@@ -169,21 +181,22 @@ export async function editWithResponse(
  */
 export async function sendFinalResponse(ctx: Context, response: string): Promise<void> {
   const MAX_MESSAGE_LENGTH = 4096;
+  const parseMode = detectParseMode(response);
   if (response.length <= MAX_MESSAGE_LENGTH) {
     try {
-      await ctx.reply(response, { parse_mode: "Markdown" });
+      await ctx.reply(response, { parse_mode: parseMode });
     } catch {
       await ctx.reply(response);
     }
   } else {
-    await sendChunkedMessages(ctx, response);
+    await sendChunkedMessages(ctx, response, parseMode);
   }
 }
 
 /**
  * Send chunked messages for long responses
  */
-async function sendChunkedMessages(ctx: Context, text: string): Promise<void> {
+async function sendChunkedMessages(ctx: Context, text: string, parseMode: "HTML" | "Markdown" = "Markdown"): Promise<void> {
   const MAX_MESSAGE_LENGTH = 4096;
   let remaining = text;
 
@@ -192,9 +205,9 @@ async function sendChunkedMessages(ctx: Context, text: string): Promise<void> {
     remaining = remaining.slice(chunk.length).trim();
 
     try {
-      await ctx.reply(chunk, { parse_mode: "Markdown" });
+      await ctx.reply(chunk, { parse_mode: parseMode });
     } catch {
-      // Fallback without markdown
+      // Fallback without formatting
       await ctx.reply(chunk);
     }
 
