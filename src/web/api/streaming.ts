@@ -8,6 +8,7 @@ import { processRegistry } from "../../process/registry.js";
 import { getUploadPath } from "./uploads.js";
 import { processResponse } from "../../utils/response-processor.js";
 import { webLane } from "../../utils/lanes.js";
+import { getClaudeDefaultModel } from "../../commands/index.js";
 import { getRuntimePaths } from "../../utils/runtime-paths.js";
 
 const runtimePaths = getRuntimePaths();
@@ -280,10 +281,9 @@ export function registerStreamingRoutes(
         "--dangerously-skip-permissions",
       ];
 
-      if (executorState?.model) {
-        args.push("--model", executorState.model);
-        logger.debug({ model: executorState.model }, "Using model override for streaming");
-      }
+      const streamModel = executorState?.model ?? getClaudeDefaultModel(webLane(thread.chatSessionId));
+      args.push("--model", streamModel);
+      logger.debug({ model: streamModel }, "Using model for streaming");
 
         // Resume session if we have one
         if (thread.externalSessionId) {

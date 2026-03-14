@@ -163,3 +163,78 @@ export function pruneOldScrapes(db: Database.Database, days: number = 30): numbe
   }
   return result.changes;
 }
+
+// ============================================
+// LINK INBOX
+// ============================================
+
+export interface LinkInboxItem {
+  id: string;
+  url: string;
+  source: string;
+  link_type: string | null;
+  title: string | null;
+  notes: string | null;
+  status: string;
+  scrape_id: string | null;
+  error: string | null;
+  submitted_at: string;
+  processed_at: string | null;
+  submitted_by: string | null;
+}
+
+/** Detect link type from URL */
+function detectLinkType(url: string): string {
+  const u = url.toLowerCase();
+  if (u.includes("youtube.com/watch") || u.includes("youtu.be/")) return "youtube";
+  if (u.includes("medium.com/") || u.includes(".medium.com")) return "medium";
+  if (u.includes("twitter.com/") || u.includes("x.com/")) return "twitter";
+  if (u.includes("github.com/")) return "github";
+  return "website";
+}
+
+/** Add a URL to the link inbox. Returns true if inserted, false if duplicate. */
+export function addToLinkInbox(
+  db: Database.Database,
+  url: string,
+  opts?: { source?: string; title?: string; notes?: string; submittedBy?: string },
+): boolean {
+  const linkType = detectLinkType(url);
+  const id = `link_${Date.now()}_${linkType}`;
+  try {
+    const result = db.prepare(`
+      INSERT OR IGNORE INTO link_inbox (id, url, source, link_type, title, notes, submitted_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, url, opts?.source ?? "manual", linkType, opts?.title ?? null, opts?.notes ?? null, opts?.submittedBy ?? "user");
+    return result.changes > 0;
+  } catch (err) {
+    logger.warn({ error: err, url }, "Failed to add to link inbox");
+    return false;
+  }
+}
+
+/** Get pending links from the inbox. */
+export function getPendingLinks(db: Database.Database, limit = 20): LinkInboxItem[] {
+  return db.prepare(`
+    SELECT * FROM link_inbox WHERE status = 'pending' ORDER BY submitted_at ASC LIMIT ?
+  `).all(limit) as LinkInboxItem[];
+}
+
+/** Mark a link as processing. */
+export function markLinkProcessing(db: Database.Database, id: string): void {
+  db.prepare(`UPDATE link_inbox SET status = 'processing' WHERE id = ?`).run(id);
+}
+
+/** Mark a link as done, linking to the created scrape. */
+export function markLinkDone(db: Database.Database, id: string, scrapeId: string): void {
+  db.prepare(`
+    UPDATE link_inbox SET status = 'done', scrape_id = ?, processed_at = datetime('now') WHERE id = ?
+  `).run(scrapeId, id);
+}
+
+/** Mark a link as failed. */
+export function markLinkFailed(db: Database.Database, id: string, error: string): void {
+  db.prepare(`
+    UPDATE link_inbox SET status = 'failed', error = ?, processed_at = datetime('now') WHERE id = ?
+  `).run(error, id);
+}
