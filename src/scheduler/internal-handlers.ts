@@ -205,7 +205,7 @@ const RETRYABLE_HANDLERS = new Set([
   "learning_engine", "homer_improvements", "session_summaries", "weekly_consolidation",
   "memory_cleanup", "planning_reminder", "content_scraper", "outcome_tracker",
   "preference_updater", "idea_dedup", "memory_git_commit", "nightly_code_push", "db_backup",
-  "idea_synthesizer", "idea_deep_linker", "archive_verify", "health_check", "context_bridge",
+  "idea_synthesizer", "idea_deep_linker", "link_processor", "archive_verify", "health_check", "context_bridge",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
 ]);
 
@@ -1099,6 +1099,18 @@ async function runHandler(
       case "idea_deep_linker": {
         const { runIdeaDeepLinker } = await import("./jobs/idea-deep-linker.js");
         const result = await runIdeaDeepLinker(ctx.stateManager, ctx.jobRunId);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
+      }
+      case "link_processor": {
+        const { runLinkProcessor } = await import("./jobs/link-processor.js");
+        const result = await runLinkProcessor(ctx.stateManager, ctx.jobRunId);
         return buildResult(
           job,
           startedAt,
