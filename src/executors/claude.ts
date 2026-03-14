@@ -105,7 +105,7 @@ export async function executeClaudeCommand(
     logger.debug({ claudeSessionId }, "Resuming Claude session");
   }
 
-  args.push(finalQuery);
+  args.push("--", finalQuery);
 
   // In Aqua session, Claude CLI can access keychain directly for OAuth.
   // Don't inject token via env var - let Claude handle refresh automatically.

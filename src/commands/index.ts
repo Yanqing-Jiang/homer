@@ -13,6 +13,7 @@ export {
   getCommandsByCategory,
   isDeprecated,
   getExecutorModel,
+  getClaudeDefaultModel,
   getAvailableCommands,
   type ExecutorType,
   type CommandCategory,

@@ -10,7 +10,7 @@ import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { runWithFallbackChain, DEFAULT_CHAIN, type ExecutorKind } from "./fallback-orchestrator.js";
 import { processMemoryUpdates } from "../memory/writer.js";
-import { getExecutorModel } from "../commands/index.js";
+import { getExecutorModel, getClaudeDefaultModel } from "../commands/index.js";
 import { buildConversationContext, CONTEXT_DEFAULTS, type ContextSource } from "./context-builder.js";
 
 export type CLIExecutor = "claude" | "gemini" | "codex" | "kimi" | "chatgpt" | "opencode";
@@ -144,11 +144,13 @@ export class CLIRunManager {
     let executorState = this.stateManager.getCurrentExecutor(params.lane);
     const executor = params.executor ?? executorState?.executor ?? "claude";
     const model = params.model ?? executorState?.model ?? (
-      executor === "claude" || executor === "gemini" || executor === "codex" || executor === "opencode"
-        ? getExecutorModel(executor)
-        : executor === "chatgpt"
-          ? getExecutorModel("claude")
-          : undefined
+      executor === "claude"
+        ? getClaudeDefaultModel(params.lane)
+        : executor === "gemini" || executor === "codex" || executor === "opencode"
+          ? getExecutorModel(executor)
+          : executor === "chatgpt"
+            ? getClaudeDefaultModel(params.lane)
+            : undefined
     );
     const sessionId = executorState?.sessionId ?? null;
 

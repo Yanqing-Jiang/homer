@@ -1,0 +1,161 @@
+/**
+ * Link Processor — Process URLs from the link inbox
+ *
+ * Picks up pending links, routes to Claude Sonnet with the link-processor skill,
+ * extracts content, and inserts into the scrapes table for the idea pipeline.
+ *
+ * Schedule: 0 23 * * * (11pm, before midnight idea-ingest)
+ */
+
+import { readFileSync, existsSync } from "fs";
+import { executeClaudeCommand } from "../../executors/claude.js";
+import {
+  getPendingLinks,
+  markLinkProcessing,
+  markLinkDone,
+  markLinkFailed,
+  insertScrape,
+  type LinkInboxItem,
+} from "../../scraping/scrape-store.js";
+import { logger } from "../../utils/logger.js";
+import { storeJobArtifact } from "./artifact-store.js";
+import type { StateManager } from "../../state/manager.js";
+
+const SKILL_PATH = "/Users/yj/.claude/skills/link-processor/SKILLS.md";
+const PROCESS_TIMEOUT = 120_000; // 2min per link
+
+interface ExtractedContent {
+  title: string;
+  author?: string;
+  content: string;
+  metadata?: Record<string, unknown>;
+}
+
+function buildPrompt(link: LinkInboxItem, skillContent: string): string {
+  return `${skillContent}
+
+---
+
+Process this URL:
+- URL: ${link.url}
+- Link Type: ${link.link_type}
+${link.title ? `- Title hint: ${link.title}` : ""}
+${link.notes ? `- User notes: ${link.notes}` : ""}
+
+Extract the full content and return ONLY a JSON object as specified in the skill. No markdown fences.`;
+}
+
+function parseExtractedContent(output: string): ExtractedContent | null {
+  // Find JSON in the output
+  const jsonMatch = output.match(/\{[\s\S]*"content"[\s\S]*\}/);
+  if (!jsonMatch) return null;
+
+  try {
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (!parsed.content || parsed.content.startsWith("EXTRACTION_FAILED")) {
+      return null;
+    }
+    return parsed as ExtractedContent;
+  } catch {
+    return null;
+  }
+}
+
+export async function runLinkProcessor(
+  stateManager: StateManager,
+  jobRunId?: number,
+): Promise<{ success: boolean; output: string; error?: string }> {
+  try {
+    const db = stateManager.db;
+    const pending = getPendingLinks(db, 10);
+
+    if (pending.length === 0) {
+      return { success: true, output: "No pending links to process" };
+    }
+
+    logger.info({ count: pending.length }, "Processing link inbox");
+
+    const skillContent = existsSync(SKILL_PATH)
+      ? readFileSync(SKILL_PATH, "utf-8")
+      : "";
+
+    let processed = 0;
+    let failed = 0;
+    const results: Array<{ url: string; status: string; title?: string }> = [];
+
+    for (const link of pending) {
+      markLinkProcessing(db, link.id);
+
+      try {
+        const prompt = buildPrompt(link, skillContent);
+        const result = await executeClaudeCommand(prompt, {
+          cwd: "/tmp",
+          model: "sonnet",
+          timeout: PROCESS_TIMEOUT,
+        });
+
+        if (result.exitCode !== 0 || !result.output) {
+          markLinkFailed(db, link.id, `Exit code ${result.exitCode}: ${result.output?.slice(0, 200) ?? "no output"}`);
+          failed++;
+          results.push({ url: link.url, status: "failed" });
+          continue;
+        }
+
+        const extracted = parseExtractedContent(result.output);
+        if (!extracted) {
+          markLinkFailed(db, link.id, `Could not parse content from output (${result.output.length} chars)`);
+          failed++;
+          results.push({ url: link.url, status: "parse_failed" });
+          continue;
+        }
+
+        // Insert into scrapes table
+        const scrapeId = `inbox_${link.id}`;
+        const inserted = insertScrape(db, {
+          id: scrapeId,
+          source: `link-inbox-${link.link_type ?? "website"}`,
+          url: link.url,
+          title: extracted.title,
+          author: extracted.author,
+          raw_content: extracted.content,
+          metadata: JSON.stringify({
+            ...extracted.metadata,
+            inbox_id: link.id,
+            submitted_by: link.submitted_by,
+            notes: link.notes,
+          }),
+        });
+
+        if (inserted) {
+          markLinkDone(db, link.id, scrapeId);
+          processed++;
+          results.push({ url: link.url, status: "done", title: extracted.title });
+          logger.info({ url: link.url, title: extracted.title, scrapeId }, "Link processed");
+        } else {
+          markLinkDone(db, link.id, scrapeId); // URL duplicate is still "done"
+          processed++;
+          results.push({ url: link.url, status: "duplicate" });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        markLinkFailed(db, link.id, msg.slice(0, 500));
+        failed++;
+        results.push({ url: link.url, status: "error" });
+        logger.warn({ url: link.url, error: msg }, "Link processing failed");
+      }
+    }
+
+    if (jobRunId) {
+      storeJobArtifact(db, jobRunId, "link-processor", "results", "json",
+        JSON.stringify(results), { processed, failed });
+    }
+
+    const output = `Link processor: ${processed} processed, ${failed} failed (of ${pending.length} pending)`;
+    logger.info({ output }, "Link processor complete");
+    return { success: true, output };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.error({ error: msg }, "Link processor failed");
+    return { success: false, output: "", error: msg };
+  }
+}
