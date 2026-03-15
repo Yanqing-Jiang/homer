@@ -1,7 +1,7 @@
 /**
- * Daily Session Summary — Gemini API handler
+ * Daily Session Summary — Claude Opus 1M handler
  *
- * Now reads from two sources:
+ * Reads from two sources:
  * 1. session_summaries table (pre-summarized CLI sessions from session-harvester)
  * 2. Daily log file (daemon outputs, personal notes — no longer contains raw transcripts)
  *
@@ -11,7 +11,7 @@
 
 import { readFile, writeFile } from "fs/promises";
 import { existsSync } from "fs";
-import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
 import { logger } from "../../utils/logger.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
 import { StateManager } from "../../state/manager.js";
@@ -230,22 +230,26 @@ export async function runSessionSummary(
 
     logger.info(
       { date, sessions: sessions.length, dailyLogKB: Math.round(dailyLogContent.length / 1024) },
-      "Running session summary via Gemini Flash"
+      "Running session summary via Claude Opus 1M"
     );
 
-    const result = await executeGeminiCLIDirect(
+    const result = await executeClaudeCommand(
       systemPrompt ? `${systemPrompt}\n\n---\n\n${fullPrompt}` : fullPrompt,
-      { timeout: 180_000 },
+      {
+        cwd: process.env.HOME ?? "/Users/yj",
+        model: "opus[1m]",
+        timeout: 600_000, // 10 min — large context
+      },
     );
 
     if (result.exitCode !== 0) {
-      return { success: false, output: "", error: `Gemini Flash error: ${result.output}` };
+      return { success: false, output: "", error: `Claude Opus error: ${result.output}` };
     }
 
     const summaryText = result.output.trim();
 
     // Append summary to daily log (preserve raw content instead of overwriting)
-    const summarySection = `\n\n---\n\n## Daily Summary\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via Gemini Flash (${sessions.length} sessions)*\n\n${summaryText}\n`;
+    const summarySection = `\n\n---\n\n## Daily Summary\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via Claude Opus (${sessions.length} sessions)*\n\n${summaryText}\n`;
 
     if (existsSync(logPath)) {
       const existing = await readFile(logPath, "utf-8");

@@ -12,6 +12,7 @@ import {
   routeTelegramNotification,
 } from "../../notifications/telegram-router.js";
 import { logger } from "../../utils/logger.js";
+import { escapeHtml } from "../../utils/telegram-format.js";
 
 interface FollowUpCandidate {
   app_id: string;
@@ -23,9 +24,6 @@ interface FollowUpCandidate {
   match_analysis: string;
 }
 
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
 
 export async function runJobHuntFollowup(
   db: Database.Database,

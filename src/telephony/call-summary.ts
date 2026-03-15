@@ -2,6 +2,7 @@ import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
 import { executeGeminiCLIDirect } from "../executors/gemini-cli.js";
 import type { Bot } from "grammy";
+import { escapeHtml } from "../utils/telegram-format.js";
 
 const ELEVENLABS_API_BASE = "https://api.elevenlabs.io/v1";
 
@@ -127,10 +128,6 @@ function formatCallSummaryForTelegram(
     `ID: <code>${conversation.conversation_id}</code>\n\n` +
     escapeHtml(summary)
   );
-}
-
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 /**

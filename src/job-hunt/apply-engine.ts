@@ -14,6 +14,7 @@ import { validateOptimizedResume } from "./resume-validator.js";
 import { readFileSync } from "fs";
 import { logger } from "../utils/logger.js";
 import { trackApplicationSubmitted } from "../outcomes/hooks.js";
+import { escapeHtml } from "../utils/telegram-format.js";
 
 export interface ApplyResult {
   success: boolean;
@@ -313,9 +314,6 @@ export async function processApprovalQueue(
 
 // ── Telegram FYI Notification ───────────────────────────────────
 
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
 
 async function sendApplicationFYI(
   bot: Bot,

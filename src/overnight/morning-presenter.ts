@@ -315,17 +315,22 @@ export class MorningPresenter {
 
   private formatComparisonTable(matrix: ComparisonMatrix): string {
     if (matrix.rows.length === 0) {
-      return "_No comparison data available_\n";
+      return "<i>No comparison data available</i>\n";
     }
 
-    let table = "| Approach | Lines | Risk | Score |\n";
-    table += "|----------|-------|------|-------|\n";
-
-    for (const row of matrix.rows) {
-      table += `| ${row.approach}: ${row.name} | ${row.values.Lines} | ${row.values.Risk} | ${row.values.Score} |\n`;
-    }
-
-    return table;
+    // Card layout — mobile-friendly, no tables
+    return matrix.rows
+      .map((row) => {
+        const risk = row.values.Risk;
+        const emoji = risk === "low" ? "🟢" : risk === "high" ? "🔴" : "🟡";
+        return [
+          `◼ <b>${row.approach}: ${row.name}</b>`,
+          `  Lines: ${row.values.Lines}`,
+          `  Risk: ${emoji} ${risk}`,
+          `  Score: ${row.values.Score}`,
+        ].join("\n");
+      })
+      .join("\n\n") + "\n";
   }
 
   private determineRecommendation(

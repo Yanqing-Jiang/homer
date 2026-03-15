@@ -8,6 +8,7 @@ import { Bot, InlineKeyboard } from "grammy";
 import type Database from "better-sqlite3";
 import { logger } from "../../utils/logger.js";
 import type { StateManager } from "../../state/manager.js";
+import { escapeHtml } from "../../utils/telegram-format.js";
 
 const MAX_APPROVALS_PER_DAY = 5;
 
@@ -30,9 +31,6 @@ function getDailyApprovalCount(db: Database.Database): number {
   return row.c;
 }
 
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
 
 function createJobKeyboard(jobId: string): InlineKeyboard {
   return new InlineKeyboard()

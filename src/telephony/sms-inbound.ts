@@ -2,6 +2,7 @@ import { sendSmsNotification } from "../bot/handlers/sms.js";
 import { YANQING_PHONE } from "./constants.js";
 import { logger } from "../utils/logger.js";
 import type { Bot } from "grammy";
+import { escapeHtml } from "../utils/telegram-format.js";
 
 export interface InboundSms {
   from: string;
@@ -94,9 +95,3 @@ async function handleExternalSms(
   }
 }
 
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}

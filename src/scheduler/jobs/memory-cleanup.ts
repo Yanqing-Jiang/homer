@@ -1,11 +1,11 @@
 /**
- * Weekly Memory Cleanup — Gemini Flash API handler
+ * Weekly Memory Cleanup — Claude Opus 1M handler
  *
  * Reviews preferences.md, tools.md, work.md, and life.md with full Yanqing context,
  * recent daily logs, and cross-file awareness. The AI's judgment is the quality gate —
  * not rigid size floors or header checks.
  *
- * Each file is processed in its own Gemini call with rich context (soul, identity,
+ * Each file is processed in its own Claude Opus call with rich context (soul, identity,
  * weekly activity, cross-reference of all files) as system prompt.
  *
  * Safety: backup before write, 10% sanity floor (catches API errors), per-file isolation.
@@ -13,7 +13,7 @@
 
 import { readFile } from "fs/promises";
 import { existsSync } from "fs";
-import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
 import { logger } from "../../utils/logger.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
 import { getCanonicalMemoryService } from "../../memory/canonical-service.js";
@@ -255,10 +255,12 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
     logger.info({ file: file.name, originalLines, sizeKB: Math.round(fileContent.length / 1024) }, "Cleaning memory file");
 
     try {
-      const result = await executeGeminiCLIDirect(
+      const result = await executeClaudeCommand(
         agentContext + "\n\n---\n\n" + prompt,
         {
-          timeout: 180_000,
+          cwd: process.env.HOME ?? "/Users/yj",
+          model: "opus[1m]",
+          timeout: 600_000, // 10 min per file — large context
         },
       );
 
@@ -269,7 +271,7 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
           originalLines,
           cleanedLines: 0,
           changelog: "",
-          error: `Gemini Flash error: ${result.output}`,
+          error: `Claude Opus error: ${result.output}`,
         });
         continue;
       }
