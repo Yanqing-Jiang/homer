@@ -24,6 +24,7 @@ import {
   formatScheduledTelegramHtml,
   sendChunkedTelegramMessage,
 } from "../../notifications/telegram-router.js";
+import { escapeHtml } from "../../utils/telegram-format.js";
 import {
   dismissPlanExecution,
   mergeAndDeployPlanExecution,
@@ -213,7 +214,6 @@ async function archiveIdea(
 
   return { success: true, message: `Archived: ${idea.title}`, idea };
 }
-
 
 /**
  * Add user instructions to an idea
@@ -429,13 +429,6 @@ export function formatIdeaForTelegram(idea: ParsedIdea, index: number): string {
   }
   msg += `\n<code>${id}</code>`;
   return formatScheduledTelegramHtml(msg);
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
 }
 
 /**
