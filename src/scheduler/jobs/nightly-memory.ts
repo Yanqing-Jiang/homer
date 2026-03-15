@@ -1,15 +1,15 @@
 /**
- * Nightly Memory Processing — Codex fact extraction
+ * Nightly Memory Processing — Claude Opus 1M fact extraction
  *
  * Reads unprocessed session_summaries from SQLite, extracts promotable facts
- * via Codex, writes to permanent memory, and requires the full core memory set
- * to be loaded before the model runs.
+ * via Claude Opus (1M context), writes to permanent memory, and requires the
+ * full core memory set to be loaded before the model runs.
  */
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "fs";
 import { z } from "zod";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
-import { executeCodexCLI } from "../../executors/codex-cli.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
 import { buildCondensedContext, extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
 import { getRecentJobOutputs } from "../job-outputs.js";
 import { logger } from "../../utils/logger.js";
@@ -243,18 +243,16 @@ If nothing to promote, use an empty array.`;
       promptLength: unifiedPrompt.length,
       date: yesterday,
       sessionCount: sessions.length,
-      executor: "codex",
-      model: "gpt-5.4",
-      reasoningEffort: "high",
-    }, "Running nightly memory via Codex");
+      executor: "claude",
+      model: "opus[1m]",
+    }, "Running nightly memory via Claude Opus 1M");
 
-    const result = await executeCodexCLI(
+    const result = await executeClaudeCommand(
       unifiedPrompt + "\n\nReturn ONLY valid JSON, no markdown fences.",
       {
         cwd: process.env.HOME ?? "/Users/yj",
-        model: "gpt-5.4",
-        reasoningEffort: "high",
-        timeout: 300_000,
+        model: "opus[1m]",
+        timeout: 600_000, // 10 min — large context with all memory files
       },
     );
 

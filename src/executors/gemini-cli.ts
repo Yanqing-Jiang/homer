@@ -23,6 +23,7 @@ import path from "path";
 import { config } from "../config/index.js";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
+import { processRegistry } from "../process/registry.js";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 export const GEMINI_CLI_FLASH_MODEL = "gemini-3-flash-preview";
@@ -130,7 +131,7 @@ export interface GeminiAccountManagerOptions {
 
 const DEFAULT_MANAGER_OPTIONS: Required<GeminiAccountManagerOptions> = {
   rateLimitCooldownMs: 60_000, // Code Assist: 120 RPM, wait for minute window reset
-  authFailureCooldownMs: 300_000,
+  authFailureCooldownMs: 60_000, // Reduced from 300s — stale OAuth just needs refresh, not 5min wait
   runtimeFailureCooldownMs: 10_000,
   disableAfterFailures: 5,
   disabledRecheckMs: 10 * 60 * 1000, // Re-probe disabled accounts after 10min
@@ -148,8 +149,17 @@ function sanitizeGeminiOutput(text: string): string {
 }
 
 function isRateLimitError(text: string): boolean {
+  // Strip permission/filesystem warnings before testing — EACCES on /private/tmp/
+  // was causing false positives via the "exhausted" substring match.
+  const filtered = text
+    .split("\n")
+    .filter(
+      (line) =>
+        !/EACCES|permission denied|Could not read directory/i.test(line),
+    )
+    .join("\n");
   return /(?:\b429\b|quota|rate.?limit|resource_exhausted|exhausted)/i.test(
-    text,
+    filtered,
   );
 }
 
@@ -695,15 +705,35 @@ export class GeminiAccountManager {
     }
   }
 
+  /** Stagger index tracks how many accounts have been cooled down in quick
+   *  succession, so each gets a progressively longer cooldown to prevent
+   *  all accounts from locking/unlocking at the same instant. */
+  private cooldownStaggerIndex = 0;
+  private lastCooldownResetMs = 0;
+
   private getCooldownMsForFailure(kind: FailureKind): number {
-    switch (kind) {
-      case "rate_limit":
-        return this.options.rateLimitCooldownMs;
-      case "auth":
-        return this.options.authFailureCooldownMs;
-      default:
-        return this.options.runtimeFailureCooldownMs;
+    const now = Date.now();
+    // Reset stagger counter if >2 min since last cooldown (new burst)
+    if (now - this.lastCooldownResetMs > 120_000) {
+      this.cooldownStaggerIndex = 0;
     }
+    this.lastCooldownResetMs = now;
+
+    const base = (() => {
+      switch (kind) {
+        case "rate_limit":
+          return this.options.rateLimitCooldownMs;
+        case "auth":
+          return this.options.authFailureCooldownMs;
+        default:
+          return this.options.runtimeFailureCooldownMs;
+      }
+    })();
+
+    // Each subsequent account in a burst gets +30s offset
+    const stagger = this.cooldownStaggerIndex * 30_000;
+    this.cooldownStaggerIndex += 1;
+    return base + stagger;
   }
 
   recordSelection(email: string, now: number): void {
@@ -959,6 +989,14 @@ async function runGeminiProcess(
       stdio: ["pipe", "pipe", "pipe"],
       cwd,
       env: childEnv,
+    });
+
+    // Register with process lifecycle management
+    processRegistry.register(child, {
+      command: "gemini",
+      type: "executor",
+      timeoutMs,
+      source: "scheduler",
     });
 
     let stdout = "";

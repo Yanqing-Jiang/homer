@@ -16,6 +16,7 @@ import {
   routeTelegramNotification,
 } from "../../notifications/telegram-router.js";
 import { logger } from "../../utils/logger.js";
+import { escapeHtml } from "../../utils/telegram-format.js";
 
 interface OutcomeCheck {
   id: string;
@@ -32,9 +33,6 @@ interface EvidenceResult {
   evidence: string;
 }
 
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
 
 function createOutcomeKeyboard(checkId: string): InlineKeyboard {
   return new InlineKeyboard()

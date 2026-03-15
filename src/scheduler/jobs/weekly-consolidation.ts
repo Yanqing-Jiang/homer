@@ -1,8 +1,8 @@
 /**
- * Weekly Memory Consolidation — Gemini 3.1 Pro API handler
+ * Weekly Memory Consolidation — Claude Opus 1M handler
  *
  * Reads the past 7 days of daily logs + permanent memory files,
- * sends to Gemini 3.1 Pro for cross-day analysis (large context up to 1.8M chars), then:
+ * sends to Claude Opus (1M context) for cross-day analysis, then:
  * 1. Appends a weekly summary to the current daily log
  * 2. Promotes key facts to permanent memory files
  *
@@ -12,7 +12,7 @@
 
 import { readFile, appendFile } from "fs/promises";
 import { existsSync } from "fs";
-import { executeGeminiAPI } from "../../executors/gemini.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
 import { logger } from "../../utils/logger.js";
 import { StateManager, type SessionSummaryRow } from "../../state/manager.js";
 import { buildSchedulerContext, buildGoalScoreboard } from "../shared-context.js";
@@ -29,7 +29,7 @@ const FILE_PATH_MAP: Record<string, string> = {
   "tools.md": PATHS.tools,
   "preferences.md": PATHS.preferences,
 };
-const MAX_INPUT_CHARS = 1_800_000; // ~450K tokens, well within 1M context
+const MAX_INPUT_CHARS = 800_000; // ~200K tokens, within Opus 1M context
 
 const PERMANENT_FILES = [
   { path: PATHS.me, label: "me.md (identity, goals, ambition)" },
@@ -157,7 +157,7 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
   const startDate = dates[0];
   const endDate = dates[dates.length - 1];
 
-  logger.info({ startDate, endDate, days: daysBack }, "Starting weekly memory consolidation via Gemini 3.1 Pro API");
+  logger.info({ startDate, endDate, days: daysBack }, "Starting weekly memory consolidation via Claude Opus 1M");
 
   // Build dynamic system prompt — no hardcoded bio
   let systemPrompt: string;
@@ -247,19 +247,20 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
   }
 
   const inputSizeKB = Math.round(fullInput.length / 1024);
-  logger.info({ logsFound, inputSizeKB, totalRawSizeKB: Math.round(totalSize / 1024) }, "Sending to Gemini 3.1 Pro API");
+  logger.info({ logsFound, inputSizeKB, totalRawSizeKB: Math.round(totalSize / 1024) }, "Sending to Claude Opus 1M");
 
   try {
-    const result = await executeGeminiAPI(fullInput, {
-      model: "pro31",
-      systemPrompt,
-      temperature: 0.3,
-      timeout: 300000, // 5 min
-      useGrounding: false,
-    });
+    const result = await executeClaudeCommand(
+      systemPrompt + "\n\n---\n\n" + fullInput,
+      {
+        cwd: process.env.HOME ?? "/Users/yj",
+        model: "opus[1m]",
+        timeout: 600_000, // 10 min — large context needs more time
+      },
+    );
 
     if (result.exitCode !== 0) {
-      return { success: false, output: "", error: `Gemini API error: ${result.output}` };
+      return { success: false, output: "", error: `Claude Opus error: ${result.output}` };
     }
 
     const response = result.output;
@@ -293,7 +294,7 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
     // Append weekly summary to today's daily log
     const todayDate = getTodayDateString();
     const todayLogPath = `${DAILY_LOG_DIR}/${todayDate}.md`;
-    const summaryBlock = `\n\n---\n\n## Weekly Consolidation (${startDate} → ${endDate})\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via Gemini 3.1 Pro*\n\n${weeklySummary}\n`;
+    const summaryBlock = `\n\n---\n\n## Weekly Consolidation (${startDate} → ${endDate})\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via Claude Opus*\n\n${weeklySummary}\n`;
 
     if (existsSync(todayLogPath)) {
       await appendFile(todayLogPath, summaryBlock);
@@ -358,12 +359,8 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
       if (ownedDedupSm) dedupSm.close();
     }
 
-    const tokenInfo = result.inputTokens
-      ? ` (${result.inputTokens} in / ${result.outputTokens} out tokens)`
-      : "";
-
     const parts = [
-      `Weekly consolidation ${startDate}→${endDate} in ${Math.round(result.duration / 1000)}s${tokenInfo}`,
+      `Weekly consolidation ${startDate}→${endDate} in ${Math.round(result.duration / 1000)}s`,
       `${logsFound} logs analyzed, summary appended to ${todayDate}.md`,
     ];
 
@@ -377,8 +374,6 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
     logger.info({
       startDate, endDate, logsFound,
       duration: result.duration,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
       promotionsApplied,
     }, "Weekly consolidation complete");
 

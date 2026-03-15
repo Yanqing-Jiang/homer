@@ -1,17 +1,49 @@
 import type { Context, Api } from "grammy";
 import { logger } from "../utils/logger.js";
+import { balanceHtmlTags, mdToTelegramHtml, chunkForTelegram } from "../utils/telegram-format.js";
 
 const THINKING_INDICATOR = "🤔 Thinking...";
 
-/** Escape characters that break Telegram Markdown v1 parsing */
-function escapeMarkdown(text: string): string {
-  // Only escape characters that Telegram treats as Markdown control chars
-  return text.replace(/([_*`\[])/g, "\\$1");
-}
+/**
+ * Maintains the "typing" status in Telegram during long generations.
+ * Telegram typing indicators expire after 5 seconds.
+ */
+export class TelegramTypingLoop {
+  private timer: NodeJS.Timeout | null = null;
+  private stopped = false;
+  private chatId: number;
+  private bot: Api;
 
-/** Detect if text contains Telegram HTML tags — use HTML parse_mode if so */
-function detectParseMode(text: string): "HTML" | "Markdown" {
-  return /<(b|i|u|s|code|pre|a\s|blockquote)[\s>]/i.test(text) ? "HTML" : "Markdown";
+  constructor(chatId: number, bot: Api) {
+    this.chatId = chatId;
+    this.bot = bot;
+  }
+
+  start(): void {
+    if (this.stopped) return;
+    this.send();
+  }
+
+  private send(): void {
+    if (this.stopped) return;
+    
+    // Fire and forget chat action
+    this.bot.sendChatAction(this.chatId, "typing").catch((err) => {
+      logger.debug({ err, chatId: this.chatId }, "Failed to send typing chat action");
+    });
+
+    this.timer = setTimeout(() => {
+      this.send();
+    }, 4000); // Repeat every 4 seconds
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+  }
 }
 
 /**
@@ -24,17 +56,20 @@ export class TelegramDraftStream {
   private chatId: number;
   private bot: Api;
   private lastEditTime = 0;
+  private lastDisplayedLength = 0;
   private pendingText = "";
   private throttleMs: number;
+  private minCharDelta: number;
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
   private inflight: Promise<void> | null = null;
 
-  constructor(chatId: number, bot: Api, initialMessageId?: number, throttleMs = 1000) {
+  constructor(chatId: number, bot: Api, initialMessageId?: number, throttleMs = 800) {
     this.chatId = chatId;
     this.bot = bot;
     this.messageId = initialMessageId;
     this.throttleMs = throttleMs;
+    this.minCharDelta = 20; // Only edit if at least 20 chars added
   }
 
   /** Replace displayed text with cumulative content from stream */
@@ -46,7 +81,18 @@ export class TelegramDraftStream {
 
   private scheduleEdit(): void {
     if (this.stopped || this.timer) return;
+
+    const charDelta = this.pendingText.length - this.lastDisplayedLength;
     const elapsed = Date.now() - this.lastEditTime;
+
+    // Buffer edits: either enough characters accumulated OR enough time passed
+    // AND always throttle by throttleMs to avoid 429s
+    if (charDelta < this.minCharDelta && elapsed < 2000) {
+      // Not enough delta yet, and it hasn't been that long (2s)
+      // We'll wait for more tokens or the next update call
+      return;
+    }
+
     const delay = Math.max(0, this.throttleMs - elapsed);
     this.timer = setTimeout(() => {
       this.timer = null;
@@ -59,19 +105,23 @@ export class TelegramDraftStream {
     if (this.stopped || !this.pendingText) return;
 
     // Truncate to Telegram limit, append cursor indicator
-    const display = this.pendingText.length > 4000
-      ? this.pendingText.slice(0, 4000) + "\n\n▍"
-      : this.pendingText + "\n\n▍";
+    const raw = this.pendingText.length > 3900
+      ? this.pendingText.slice(0, 3900)
+      : this.pendingText;
+
+    // Convert to HTML and balance unclosed tags so parse_mode works mid-stream
+    const asHtml = mdToTelegramHtml(raw);
+    const display = balanceHtmlTags(asHtml) + " ▌";
 
     try {
       if (!this.messageId) {
-        const msg = await this.bot.sendMessage(this.chatId, display);
+        const msg = await this.bot.sendMessage(this.chatId, display, { parse_mode: "HTML" });
         this.messageId = msg.message_id;
       } else {
-        // No parse_mode — partial content may have unclosed markdown
-        await this.bot.editMessageText(this.chatId, this.messageId, display);
+        await this.bot.editMessageText(this.chatId, this.messageId, display, { parse_mode: "HTML" });
       }
       this.lastEditTime = Date.now();
+      this.lastDisplayedLength = this.pendingText.length;
     } catch (error) {
       const msg = error instanceof Error ? error.message : "";
       if (!msg.includes("not modified")) {
@@ -128,49 +178,33 @@ export async function editWithResponse(
   streamingMsg: StreamingMessage,
   response: string
 ): Promise<void> {
-  const MAX_MESSAGE_LENGTH = 4096;
-
-  const parseMode = detectParseMode(response);
-  const continuedMarker = parseMode === "HTML" ? "\n\n<i>(continued...)</i>" : "\n\n_(continued...)_";
+  const html = mdToTelegramHtml(response);
+  const chunks = chunkForTelegram(html);
 
   try {
-    if (response.length <= MAX_MESSAGE_LENGTH) {
-      await ctx.api.editMessageText(
-        streamingMsg.chatId,
-        streamingMsg.messageId,
-        response,
-        { parse_mode: parseMode }
-      );
-    } else {
-      // For long responses, edit with first chunk then send remaining as new messages
-      const firstChunk = truncateAtSafePoint(response, MAX_MESSAGE_LENGTH - 25);
-      const remaining = response.slice(firstChunk.length).trim();
+    // Edit the thinking message with first chunk
+    await ctx.api.editMessageText(
+      streamingMsg.chatId,
+      streamingMsg.messageId,
+      chunks[0] + (chunks.length > 1 ? "\n\n<i>(continued...)</i>" : ""),
+      { parse_mode: "HTML" }
+    );
 
-      await ctx.api.editMessageText(
-        streamingMsg.chatId,
-        streamingMsg.messageId,
-        firstChunk + continuedMarker,
-        { parse_mode: parseMode }
+    // Send remaining chunks as new messages
+    for (let i = 1; i < chunks.length; i++) {
+      const chunk = chunks[i]!;
+      await sleep(100);
+      await ctx.reply(chunk, { parse_mode: "HTML" }).catch(() =>
+        ctx.reply(chunk) // fallback: no formatting
       );
-
-      // Send remaining chunks as new messages
-      await sendChunkedMessages(ctx, remaining, parseMode);
     }
   } catch (error) {
-    logger.error({ error, parseMode }, "Failed to edit message with response");
-    // Fallback: try without formatting, then plain text as last resort
+    logger.error({ error }, "Failed to edit message with HTML response");
+    // Fallback: plain text, no formatting
     try {
-      if (parseMode === "Markdown") {
-        await ctx.reply(escapeMarkdown(response).slice(0, MAX_MESSAGE_LENGTH), { parse_mode: "Markdown" });
-      } else {
-        await ctx.reply(response.slice(0, MAX_MESSAGE_LENGTH), { parse_mode: "HTML" });
-      }
-    } catch {
-      try {
-        await ctx.reply(response.slice(0, MAX_MESSAGE_LENGTH));
-      } catch (finalErr) {
-        logger.error({ error: finalErr }, "All attempts to send response failed");
-      }
+      await ctx.reply(response.slice(0, 4096));
+    } catch (finalErr) {
+      logger.error({ error: finalErr }, "All attempts to send response failed");
     }
   }
 }
@@ -180,70 +214,17 @@ export async function editWithResponse(
  * Used as fallback when no streaming message exists to edit.
  */
 export async function sendFinalResponse(ctx: Context, response: string): Promise<void> {
-  const MAX_MESSAGE_LENGTH = 4096;
-  const parseMode = detectParseMode(response);
-  if (response.length <= MAX_MESSAGE_LENGTH) {
+  const html = mdToTelegramHtml(response);
+  const chunks = chunkForTelegram(html);
+
+  for (const chunk of chunks) {
     try {
-      await ctx.reply(response, { parse_mode: parseMode });
+      await ctx.reply(chunk, { parse_mode: "HTML" });
     } catch {
-      await ctx.reply(response);
+      await ctx.reply(chunk); // fallback: no formatting
     }
-  } else {
-    await sendChunkedMessages(ctx, response, parseMode);
+    if (chunks.length > 1) await sleep(100);
   }
-}
-
-/**
- * Send chunked messages for long responses
- */
-async function sendChunkedMessages(ctx: Context, text: string, parseMode: "HTML" | "Markdown" = "Markdown"): Promise<void> {
-  const MAX_MESSAGE_LENGTH = 4096;
-  let remaining = text;
-
-  while (remaining.length > 0) {
-    const chunk = truncateAtSafePoint(remaining, MAX_MESSAGE_LENGTH);
-    remaining = remaining.slice(chunk.length).trim();
-
-    try {
-      await ctx.reply(chunk, { parse_mode: parseMode });
-    } catch {
-      // Fallback without formatting
-      await ctx.reply(chunk);
-    }
-
-    // Small delay to avoid rate limiting
-    if (remaining.length > 0) {
-      await sleep(100);
-    }
-  }
-}
-
-/**
- * Truncate text at a safe point (paragraph, line, sentence, word boundary)
- */
-function truncateAtSafePoint(text: string, maxLength: number): string {
-  if (text.length <= maxLength) return text;
-
-  const chunk = text.slice(0, maxLength);
-
-  // Try to find a good break point
-  const breakPoints = [
-    chunk.lastIndexOf("\n\n"), // Paragraph
-    chunk.lastIndexOf("\n"),   // Line
-    chunk.lastIndexOf(". "),   // Sentence
-    chunk.lastIndexOf("! "),
-    chunk.lastIndexOf("? "),
-    chunk.lastIndexOf(" "),    // Word
-  ];
-
-  for (const bp of breakPoints) {
-    if (bp > maxLength * 0.5) {
-      return text.slice(0, bp + 1);
-    }
-  }
-
-  // No good break point, hard cut
-  return chunk;
 }
 
 function sleep(ms: number): Promise<void> {

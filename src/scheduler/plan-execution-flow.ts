@@ -4,6 +4,7 @@ import type { StateManager } from "../state/manager.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { logger } from "../utils/logger.js";
 import { getRuntimeBuildInfo, readDiskBuildInfo } from "../utils/build-info.js";
+import { escapeHtml } from "../utils/telegram-format.js";
 
 const HOMER_DIR = "/Users/yj/homer";
 const RESTART_RUNNER = "/Users/yj/homer/scripts/run-plan-restart.mjs";
@@ -61,10 +62,6 @@ interface ValidationResult {
   success: boolean;
   failedStep?: string;
   details: string;
-}
-
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function tail(text: string, maxChars = 2000): string {

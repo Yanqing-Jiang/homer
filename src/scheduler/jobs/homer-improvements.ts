@@ -1,8 +1,8 @@
 /**
- * HOMER Improvements — Dual-model codebase analysis + executable plan generation.
+ * HOMER Improvements — Claude Opus 1M codebase analysis + executable plan generation.
  *
- * Runs Codex (gpt-5.4) for codebase analysis, writes a .md file to ~/homer/output/codex/.
- * Gemini 3.1 Pro API parses the analysis into a structured improvement idea.
+ * Runs Claude Opus (1M context) for codebase analysis and structured JSON output.
+ * Single-pass — no consolidation step needed.
  *
  * Prompt priority: critical issues/fixes → impactful optimizations → Yanqing's goals.
  * Archived ideas (feedback.md) are injected to avoid repeat suggestions.
@@ -13,8 +13,7 @@ import { readFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { execSync } from "child_process";
 import { z } from "zod";
-import { executeCodexCLI } from "../../executors/codex-cli.js";
-import { executeGeminiAPI } from "../../executors/gemini.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { buildSchedulerContext } from "../shared-context.js";
 import { loadIdeasFromDir, saveIdeaFile, type ParsedIdea } from "../../ideas/parser.js";
@@ -25,7 +24,7 @@ import { storeJobArtifact } from "./artifact-store.js";
 import { PATHS } from "../../config/paths.js";
 
 const HOMER_DIR = "/Users/yj/homer";
-const CODEX_OUTPUT_DIR = "/Users/yj/homer/output/codex";
+const OUTPUT_DIR = "/Users/yj/homer/output/claude";
 const MAX_SOURCE_CHARS = 80_000;
 
 // Priority files to read — core modules that improvements would target
@@ -207,7 +206,18 @@ Write the following to ${outputPath} (create any missing directories):
 \`\`\`
 \`\`\`
 
-After writing the file, respond with a 2-sentence summary of your recommendation.`;
+After writing the file, output ONLY the JSON block from your analysis (no markdown fences, no explanation).
+The JSON must match this exact schema:
+{
+  "title": "Short descriptive title",
+  "description": "2-3 sentence description",
+  "implementation_plan": "Step-by-step with file paths and function names",
+  "files_affected": ["src/path/to/file.ts"],
+  "risk_score": 1-10,
+  "risk_explanation": "Why this risk level",
+  "estimated_effort_minutes": 5-60,
+  "category": "reliability|performance|feature|code-quality|build-fix"
+}`;
 }
 
 export async function runHomerImprovements(db?: Database.Database, jobRunId?: number): Promise<{
@@ -245,83 +255,51 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
 
     // Timestamped output file path
     const ts = new Date().toISOString().slice(0, 19).replace("T", "-").replace(/:/g, "");
-    const codexOutputPath = `${CODEX_OUTPUT_DIR}/homer-improvements-${ts}.md`;
+    const outputPath = `${OUTPUT_DIR}/homer-improvements-${ts}.md`;
 
-    mkdirSync(CODEX_OUTPUT_DIR, { recursive: true });
+    mkdirSync(OUTPUT_DIR, { recursive: true });
 
-    const codexPrompt = buildSharedPrompt({
+    const prompt = buildSharedPrompt({
       buildHealth, recentFailures, sourceContext, fileListing,
       schedulerContext, existingTitles, archivedTitles,
-      outputPath: codexOutputPath,
-      agentLabel: "Codex (codebase analysis)",
+      outputPath,
+      agentLabel: "Claude Opus (codebase analysis)",
     });
 
-    logger.info("Running homer-improvements: Codex (gpt-5.4)");
+    logger.info("Running homer-improvements: Claude Opus 1M");
 
-    const codexResult = await executeCodexCLI(codexPrompt, {
+    const result = await executeClaudeCommand(prompt, {
       cwd: HOMER_DIR,
-      model: "gpt-5.4",
-      reasoningEffort: "high",
+      model: "opus[1m]",
       timeout: 1_200_000, // 20 min
     });
 
-    // Read the output file
-    const outputs: Array<{ agent: string; content: string }> = [];
+    // Extract JSON from stdout
+    let rawJson = result.output?.trim() || "";
 
-    if (existsSync(codexOutputPath)) {
-      outputs.push({ agent: "Codex", content: readFileSync(codexOutputPath, "utf-8") });
-      logger.info({ path: codexOutputPath }, "Codex output written");
-    } else {
-      logger.warn({ exitCode: codexResult.exitCode }, "Codex did not produce output file");
+    // If stdout is empty/short, try the output file
+    if (rawJson.length < 50 && existsSync(outputPath)) {
+      const fileContent = readFileSync(outputPath, "utf-8");
+      logger.info({ path: outputPath }, "Opus output file written");
+      const jsonMatch = fileContent.match(/```json\s*([\s\S]*?)```/);
+      if (jsonMatch?.[1]) rawJson = jsonMatch[1].trim();
     }
 
-    if (outputs.length === 0) {
-      return { success: false, output: "", error: "Codex failed to produce output file" };
+    if (!rawJson) {
+      return { success: false, output: "", error: "Claude Opus produced no parseable output" };
     }
 
-    // Consolidate via Gemini 3.1 Pro API
-    const consolidationPrompt = `You are consolidating two codebase improvement analyses into a single best recommendation.
-
-${outputs.map(o => `## ${o.agent} Analysis\n\n${o.content.slice(0, 20000)}`).join("\n\n---\n\n")}
-
-## Your Task
-
-Review both analyses above. Pick the single most impactful improvement, or synthesize the best elements if they complement each other.
-
-Return ONLY a JSON object (no markdown, no explanation):
-{
-  "title": "Short descriptive title",
-  "description": "2-3 sentence description connecting to real impact",
-  "implementation_plan": "Step-by-step implementation with specific file paths, function names, and code changes",
-  "files_affected": ["src/path/to/file.ts"],
-  "risk_score": 1-10,
-  "risk_explanation": "Why this risk level — be honest",
-  "estimated_effort_minutes": 5-60,
-  "category": "reliability|performance|feature|code-quality|build-fix"
-}`;
-
-    const consolidation = await executeGeminiAPI(consolidationPrompt, {
-      model: "pro31",  // gemini-3.1-pro-preview — falls back to flash3 if unavailable
-      temperature: 0.2,
-      maxTokens: 4096,
-    });
-
-    if (!consolidation.output) {
-      return { success: false, output: "", error: "Consolidation API returned empty response" };
-    }
-
-    // Store consolidation artifact
+    // Store artifact
     if (db && jobRunId) {
-      storeJobArtifact(db, jobRunId, "homer-improvements", "consolidation", "json",
-        consolidation.output, { inputTokens: consolidation.inputTokens, outputTokens: consolidation.outputTokens });
+      storeJobArtifact(db, jobRunId, "homer-improvements", "opus-analysis", "json", rawJson, {});
     }
 
     let improvement: z.infer<typeof ImprovementSchema>;
     try {
-      improvement = parseSwarmJSON(consolidation.output, ImprovementSchema);
+      improvement = parseSwarmJSON(rawJson, ImprovementSchema);
     } catch (parseErr) {
       const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-      logger.error({ error: msg, raw: consolidation.output.slice(0, 500) }, "Failed to parse consolidated improvement");
+      logger.error({ error: msg, raw: rawJson.slice(0, 500) }, "Failed to parse Codex improvement JSON");
       return { success: false, output: "", error: `Parse failed: ${msg}` };
     }
 
@@ -389,7 +367,7 @@ ${improvement.files_affected.map(f => `- \`${f}\``).join("\n")}
       status: "draft",
       source: "homer-analysis",
       content: improvement.description,
-      context: `${improvement.implementation_plan}\n\nRisk: ${improvement.risk_score}/10 — ${improvement.risk_explanation}\n\nAnalysis file: ${codexOutputPath}`,
+      context: `${improvement.implementation_plan}\n\nRisk: ${improvement.risk_score}/10 — ${improvement.risk_explanation}\n\nAnalysis file: ${outputPath}`,
       tags: ["homer-improvement", `risk-${improvement.risk_score}`],
       timestamp,
     };

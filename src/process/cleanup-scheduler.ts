@@ -1,12 +1,12 @@
 /**
  * CleanupScheduler — Periodic orphan/idle process cleanup.
  *
- * Runs every 4 hours. Two-pronged detection:
+ * Runs every 2 hours. Two-pronged detection:
  * A) Registry scan for over-timeout / idle processes.
  * B) OS orphan scan via `ps` for known HOMER patterns not in registry.
  *
- * 6-layer safety before any kill.
- * Phase 1: monitor-only (logs but does not kill).
+ * 6-layer safety before any kill. Enforcement ON by default (set PROCESS_CLEANUP_ENFORCE=0 to disable).
+ * Age-based kill: any HOMER-pattern process > 2 hours killed regardless of parent PID.
  */
 
 import { execSync } from "child_process";
@@ -17,14 +17,16 @@ import type Database from "better-sqlite3";
 
 const IDLE_THRESHOLD_MS = 30 * 60 * 1000; // 30 min no activity
 const RECENT_ACTIVITY_MS = 5 * 60 * 1000; // 5 min — spare if active recently
+const ORPHAN_AGE_KILL_MS = 2 * 60 * 60 * 1000; // 2 hours — kill any HOMER process older than this
 
 // Patterns to find HOMER-spawned processes in `ps`
 const ORPHAN_PATTERNS = [
   "homer/dist",
-  "claude.*-p",
-  "codex exec",
+  "claude.*--(?:print|dangerously|model|resume)",
+  "codex(?:\\s+exec|.*bypass)",
   "opencode run",
   "kimi --quiet",
+  "gemini.*-(?:m|p)\\s",
   "chrome-x-profile", // agent-browser Chrome sessions
 ];
 
@@ -40,7 +42,8 @@ export class CleanupScheduler {
   private enforce: boolean;
 
   constructor() {
-    this.enforce = process.env.PROCESS_CLEANUP_ENFORCE === "1";
+    // Enforcement ON by default; set PROCESS_CLEANUP_ENFORCE=0 to disable
+    this.enforce = process.env.PROCESS_CLEANUP_ENFORCE !== "0";
   }
 
   init(db: Database.Database): void {
@@ -96,7 +99,8 @@ export class CleanupScheduler {
       const idle = now - record.lastActivity;
 
       // Over-timeout (belt-and-suspenders with TimeoutManager)
-      if (age > record.timeoutMs * 1.5) {
+      // timeoutMs: 0 means "no timeout" — skip timeout check, still enforce idle
+      if (record.timeoutMs > 0 && age > record.timeoutMs * 1.5) {
         actions.push(this.handleProcess(record, `over-timeout: age=${(age / 60000).toFixed(1)}min`));
         continue;
       }
@@ -220,21 +224,38 @@ export class CleanupScheduler {
 
   /**
    * Safety checks for orphan processes (not in registry).
+   * Age-based: any HOMER-pattern process > 2 hours is killed regardless of parent.
    */
   private isSafeToKillOrphan(pid: number, _cmdline: string): boolean {
     if (pid <= 1 || pid === process.pid) return false;
 
-    // Check parent PID — only kill orphans whose parent is init (1) or our daemon
     try {
-      const ppid = execSync(`ps -o ppid= -p ${pid}`, { encoding: "utf-8", timeout: 2000 }).trim();
-      const ppidNum = parseInt(ppid, 10);
-      // Safe if parent is init (1) or our daemon
-      if (ppidNum !== 1 && ppidNum !== process.pid) return false;
+      // Get parent PID and elapsed time
+      const info = execSync(`ps -o ppid=,etime= -p ${pid}`, { encoding: "utf-8", timeout: 2000 }).trim();
+      const parts = info.split(/\s+/);
+      const ppid = parseInt(parts[0] ?? "", 10);
+      const etime = parts[1] ?? "";
+
+      // Parse etime (DD-HH:MM:SS or HH:MM:SS or MM:SS)
+      const ageMs = parseEtime(etime);
+
+      // Always safe to kill if parent is init (1) or our daemon
+      if (ppid === 1 || ppid === process.pid) return true;
+
+      // Age-based: kill any HOMER process older than 2 hours regardless of parent
+      if (ageMs > ORPHAN_AGE_KILL_MS) {
+        logger.info(
+          { pid, ppid, ageHours: (ageMs / 3600_000).toFixed(1) },
+          "Orphan process exceeds age threshold, safe to kill"
+        );
+        return true;
+      }
+
+      // Young process with non-daemon parent — spare it (may be interactive session)
+      return false;
     } catch {
       return false;
     }
-
-    return true;
   }
 
   private handleOrphan(pid: number, command: string): CleanupAction {
@@ -279,6 +300,34 @@ export class CleanupScheduler {
       // Best effort
     }
   }
+}
+
+/**
+ * Parse ps etime format (DD-HH:MM:SS, HH:MM:SS, or MM:SS) into milliseconds.
+ */
+function parseEtime(etime: string): number {
+  let days = 0;
+  let rest = etime.trim();
+
+  // Handle DD- prefix
+  const dayMatch = rest.match(/^(\d+)-(.+)$/);
+  if (dayMatch) {
+    days = parseInt(dayMatch[1]!, 10);
+    rest = dayMatch[2]!;
+  }
+
+  const parts = rest.split(":").map((p) => parseInt(p, 10));
+  let hours = 0, minutes = 0, seconds = 0;
+
+  if (parts.length === 3) {
+    [hours, minutes, seconds] = parts as [number, number, number];
+  } else if (parts.length === 2) {
+    [minutes, seconds] = parts as [number, number];
+  } else if (parts.length === 1) {
+    seconds = parts[0] ?? 0;
+  }
+
+  return ((days * 24 + hours) * 3600 + minutes * 60 + seconds) * 1000;
 }
 
 export const cleanupScheduler = new CleanupScheduler();
