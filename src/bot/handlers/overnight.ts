@@ -39,6 +39,7 @@ import {
 } from "../../feedback/events.js";
 import { updatePreferences, type PreferenceSignal } from "../../preferences/engine.js";
 import { staleMapCleaner } from "../../utils/stale-map-cleaner.js";
+import { escapeHtml } from "../../utils/telegram-format.js";
 
 // ============================================
 // STATE
@@ -1137,13 +1138,6 @@ function formatTaskSummary(subject: string, type: string, output: string | undef
     `<b>任务ID:</b> <code>${escapeHtml(taskId)}</code>\n\n`;
   const body = output ? escapeHtml(output.slice(0, 1500)) : "无输出记录";
   return header + body;
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
 }
 
 function formatAge(date: Date): string {

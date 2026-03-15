@@ -7,16 +7,11 @@ import {
   sendChunkedTelegramMessage,
 } from "../notifications/telegram-router.js";
 import type { JobExecutionResult, RegisteredJob } from "./types.js";
+import { escapeHtml } from "../utils/telegram-format.js";
 
 /**
  * Escape HTML special characters
  */
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
 
 /**
  * Send job execution result to Telegram

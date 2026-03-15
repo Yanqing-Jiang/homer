@@ -23,7 +23,7 @@ import { registerCallFollowupHandlers } from "./handlers/call-followup.js";
 import { registerSmsReplyHandlers } from "./handlers/sms-reply.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { StateManager } from "../state/manager.js";
-import { sendThinkingIndicator, editWithResponse, TelegramDraftStream, sendFinalResponse } from "./streaming.js";
+import { sendThinkingIndicator, editWithResponse, TelegramDraftStream, sendFinalResponse, TelegramTypingLoop } from "./streaming.js";
 import { loadBootstrapFiles } from "../memory/loader.js";
 import { searchMemory, formatSearchResults } from "../memory/search.js";
 import { hybridSearch, formatHybridResults } from "../search/index.js";
@@ -1086,6 +1086,7 @@ async function handleNewExecution(
 
   let streamingMsg = null;
   let draftStream: TelegramDraftStream | null = null;
+  let typingLoop: TelegramTypingLoop | null = null;
 
   if (!returnResponse) {
     if (ENABLE_STREAMING) {
@@ -1096,6 +1097,8 @@ async function handleNewExecution(
           ctx.api,
           streamingMsg.messageId
         );
+        typingLoop = new TelegramTypingLoop(streamingMsg.chatId, ctx.api);
+        typingLoop.start();
       }
     } else {
       await ctx.replyWithChatAction("typing");
@@ -1154,6 +1157,7 @@ async function handleNewExecution(
 
     // Await in-flight draft before sending final message
     if (draftStream) await draftStream.stop();
+    if (typingLoop) typingLoop.stop();
 
     // Update session activity
     stateManager.updateSessionActivity(session.id);
@@ -1169,6 +1173,7 @@ async function handleNewExecution(
     }
   } catch (error) {
     if (draftStream) await draftStream.stop();
+    if (typingLoop) typingLoop.stop();
 
     logger.error({ error, query: parsed.query }, "Execution failed");
 

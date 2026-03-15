@@ -14,6 +14,7 @@ import { execSync } from "child_process";
 import type { StateManager } from "../state/manager.js";
 import type { Bot } from "grammy";
 import { sendPlanExecutionReadyMessage } from "./plan-execution-flow.js";
+import { escapeHtml } from "../utils/telegram-format.js";
 
 const HOMER_DIR = "/Users/yj/homer";
 const MAX_PLAN_EXECUTIONS_PER_DAY = 1;
@@ -27,9 +28,6 @@ interface PlanExecutionResult {
   error?: string;
 }
 
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
 
 /**
  * Check daily execution limit (safety rail — not LLM decision)

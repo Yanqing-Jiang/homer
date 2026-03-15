@@ -12,10 +12,8 @@ import type { Bot } from "grammy";
 import type { StateManager } from "../../state/manager.js";
 import type { Scheduler } from "../../scheduler/index.js";
 import { logger } from "../../utils/logger.js";
+import { escapeHtml } from "../../utils/telegram-format.js";
 
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
 
 let schedulerRef: Scheduler | null = null;
 

@@ -12,13 +12,7 @@ import { runCompletionCheckup } from "../executors/completion-checkup.js";
 import { routeTelegramNotification } from "../notifications/telegram-router.js";
 import { startHeartbeat, stopHeartbeat, startWatchdog, stopWatchdog } from "./observability.js";
 import { memoryEvents } from "../events/memory-events.js";
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
+import { escapeHtml } from "../utils/telegram-format.js";
 
 function isMemoryJob(job: RegisteredJob): boolean {
   const id = job.config.id.toLowerCase();
@@ -446,7 +440,7 @@ export class Scheduler {
   // System jobs — internal daemon tasks registered at boot and on hot reload
   private static readonly SYSTEM_JOBS: Array<import("./types.js").ScheduledJobConfig & { sourceFile: string }> = [
     {
-      id: "daemon-cleanup", name: "Daemon Cleanup", cron: "0 */4 * * *",
+      id: "daemon-cleanup", name: "Daemon Cleanup", cron: "0 */2 * * *",
       query: "", lane: "default", enabled: true, executor: "internal",
       handler: "daemon_cleanup", timeout: 600_000,
       notifyOnSuccess: false, notifyOnFailure: true, failureTakeover: false,

@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { Bot } from "grammy";
 import { logger } from "../utils/logger.js";
 import { chunkMessage } from "../utils/chunker.js";
+import { escapeHtml as escapeHtmlText } from "../utils/telegram-format.js";
 import type {
   NotificationDecision,
   NotificationIntent,
@@ -108,13 +109,6 @@ function restoreTelegramHtmlTags(input: string, placeholders: Map<string, string
     restored = restored.replaceAll(key, value);
   }
   return restored;
-}
-
-function escapeHtmlText(input: string): string {
-  return input
-    .replace(/&(?!#?\w+;)/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
 }
 
 function convertMarkdownLinks(input: string): string {
