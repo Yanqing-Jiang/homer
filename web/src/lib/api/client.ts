@@ -441,14 +441,14 @@ export async function deleteIdea(id: string): Promise<{ deleted: boolean; id: st
 export async function startIdeaResearch(
 	id: string
 ): Promise<{ sessionId: string; threadId: string; message: string }> {
-	return apiFetch(`/api/ideas/${id}/research`, { method: 'POST' });
+	return apiFetch(`/api/ideas/${id}/research`, { method: 'POST', body: '{}' });
 }
 
 // Start exploration on an idea (creates exploration thread with context)
 export async function startIdeaExploration(
 	id: string
 ): Promise<{ sessionId: string; threadId: string; message: string; resumed: boolean }> {
-	return apiFetch(`/api/ideas/${id}/explore`, { method: 'POST' });
+	return apiFetch(`/api/ideas/${id}/explore`, { method: 'POST', body: '{}' });
 }
 
 // Create a plan from an idea
