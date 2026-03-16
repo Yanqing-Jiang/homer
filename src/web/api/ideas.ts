@@ -11,6 +11,7 @@ import * as dao from "../../ideas/dao.js";
 import { join } from "path";
 import { recordFeedback } from "../../feedback/events.js";
 import { PATHS } from "../../config/paths.js";
+import { webLane } from "../../utils/lanes.js";
 
 let ideasIndexer: IdeasIndexer | null = null;
 
@@ -329,35 +330,25 @@ export function registerIdeasRoutes(
       chatSessionId: sessionId,
       title: `Exploring: ${idea.title}`,
       provider: "claude",
+      model: "sonnet[1m]",
     });
 
-    const systemMessage = `# Exploration Context
+    // Set executor to Sonnet for this session's lane
+    const lane = webLane(sessionId);
+    stateManager.setCurrentExecutor(lane, "claude", "sonnet[1m]");
 
-You are helping explore and develop this idea into an actionable plan.
+    const systemMessage = `# Idea Exploration — ${idea.id}
 
-## Idea Details
-**Title:** ${idea.title}
-**Status:** ${idea.status}
-${idea.link ? `**Link:** ${idea.link}` : ""}
-${idea.tags?.length ? `**Tags:** ${idea.tags.join(", ")}` : ""}
+You are helping explore and develop this idea. Use the idea ID \`${idea.id}\` to query the database for updates if needed.
 
-## Content
+## ${idea.title}
+${idea.link ? `**Link:** ${idea.link}` : ""}${idea.tags?.length ? `\n**Tags:** ${idea.tags.join(", ")}` : ""}
+
 ${idea.content}
-${idea.context ? `\n## Context\n${idea.context}` : ""}
-${idea.notes ? `\n## Notes\n${idea.notes}` : ""}
-${idea.exploration ? `\n## Previous Exploration\n${idea.exploration}` : ""}
+${idea.context ? `\n### Context\n${idea.context}` : ""}${idea.notes ? `\n### Notes\n${idea.notes}` : ""}${idea.exploration ? `\n### Previous Exploration\n${idea.exploration}` : ""}
 
-## Your Role
-
-Have a freeform conversation to understand this idea. Explore:
-- Goals & Outcomes - What does success look like?
-- Scope - What's in scope vs out of scope?
-- Phases - How might this break down into phases?
-- Resources - What's needed?
-- Risks & Dependencies
-
-When the user indicates they're ready ("ready", "create plan", "let's do it"),
-generate a structured plan and offer to save it.`;
+## Instructions
+Explore this idea through conversation: goals, scope, phases, resources, risks. When the user says "ready" or "create plan", generate a structured plan.`;
 
     stateManager.createThreadMessage({
       id: randomUUID(),
