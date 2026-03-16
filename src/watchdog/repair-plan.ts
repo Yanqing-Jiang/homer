@@ -9,6 +9,9 @@ const REPAIR_HANDLERS_BY_SIGNATURE: Partial<Record<WatchdogSignature, RepairHand
   native_module_abi_mismatch: "repair_native_modules",
   launchd_runtime_mismatch: "repair_launchd_runtime",
   stale_lock_holder: "repair_stale_lock",
+  docker_daemon_down: "repair_docker_daemon",
+  docker_container_stopped: "repair_docker_restart",
+  docker_container_unhealthy: "repair_docker_restart",
 };
 
 const DETERMINISTIC_PLANS: Partial<Record<WatchdogSignature, DeterministicPlan>> = {
@@ -21,6 +24,9 @@ const DETERMINISTIC_PLANS: Partial<Record<WatchdogSignature, DeterministicPlan>>
   build_failure: { action: "escalate", repairHandler: null },
   llm_parse_failure: { action: "escalate", repairHandler: null },
   llm_quota_exhausted: { action: "escalate", repairHandler: null },
+  docker_daemon_down: { action: "repair", repairHandler: "repair_docker_daemon" },
+  docker_container_stopped: { action: "repair", repairHandler: "repair_docker_restart" },
+  docker_container_unhealthy: { action: "repair", repairHandler: "repair_docker_restart" },
 };
 
 export function getRepairHandlerForSignature(signature: WatchdogSignature): RepairHandler | null {
