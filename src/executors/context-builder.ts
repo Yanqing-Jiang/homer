@@ -171,12 +171,13 @@ export async function buildConversationContext(
     return { formatted: "", messageCount: 0, anchorCount: 0, truncated: false };
   }
 
+  // Extract anchors first — system messages are always anchors and survive truncation
+  // even when includeSystem is false (they provide essential context like idea exploration prompts)
+  const anchors = preserveAnchors ? extractAnchors(messages) : [];
+
   if (!includeSystem) {
     messages = messages.filter((m) => m.role !== "system");
   }
-
-  // Extract anchors first (constraints, corrections that must survive truncation)
-  const anchors = preserveAnchors ? extractAnchors(messages) : [];
   const anchorIds = new Set(anchors.map((a) => String(a.id)));
 
   // Calculate anchor token cost
