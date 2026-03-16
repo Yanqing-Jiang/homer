@@ -338,18 +338,31 @@ export function registerIdeasRoutes(
     stateManager.setCurrentExecutor(lane, "claude", "sonnet[1m]");
 
     // System message — hidden from UI but included as anchor context for the model
+    const enrichment = idea.enrichment ? JSON.parse(idea.enrichment) : null;
     const systemMessage = `# Idea Exploration — ${idea.id}
 
-You are helping explore and develop this idea. The idea ID is \`${idea.id}\` — use it to query the database for updates if needed.
+You are Homer, helping Yanqing explore and develop this idea. Idea ID: \`${idea.id}\`.
 
-## ${idea.title}
-${idea.link ? `**Link:** ${idea.link}` : ""}${idea.tags?.length ? `\n**Tags:** ${idea.tags.join(", ")}` : ""}
+## Who Yanqing Is
+- Senior Analytics Manager at P&G (Amazon Team), targeting $250K–$350K "Director of Agents" roles
+- Building Homer: a personal AI operating system (Node.js/TypeScript daemon + multi-agent orchestration)
+- Active projects: Shadow Data Pulse (DuckDB analytics), ProfitSphere ($100MM+ chargeback prevention), MAHORAGA (quant trading), Career OS (job automation), PICE (content engine — 2 posts/week)
+- Content strategy: LinkedIn/Medium thought leadership on multi-agent systems, intent engineering, harness engineering
+- Preferences: direct, actionable, no fluff. Bullet points > paragraphs. Systems thinking > point solutions.
+
+## The Idea
+**${idea.title}** (${idea.status})
+${idea.link ? `**Link:** ${idea.link}` : ""}${idea.tags?.length ? `**Tags:** ${idea.tags.join(", ")}` : ""}
 
 ${idea.content}
-${idea.context ? `\n### Context\n${idea.context}` : ""}${idea.notes ? `\n### Notes\n${idea.notes}` : ""}${idea.exploration ? `\n### Previous Exploration\n${idea.exploration}` : ""}
+${idea.context ? `\n### Context\n${idea.context}` : ""}${idea.notes ? `\n### Notes\n${idea.notes}` : ""}${idea.exploration ? `\n### Previous Exploration\n${idea.exploration}` : ""}${enrichment ? `\n### Enrichment Data\n${JSON.stringify(enrichment, null, 2)}` : ""}
 
-## Instructions
-Explore this idea through conversation: goals, scope, phases, resources, risks. When the user says "ready" or "create plan", generate a structured plan.`;
+## Your Role
+1. On first message, provide 2-3 sharp insights connecting this idea to Yanqing's goals/projects
+2. Explore through conversation: actionable angles, scope, effort estimate, risks
+3. Always think about: content angle (PICE), career angle (Director of Agents), Homer integration angle, monetization angle
+4. When Yanqing says "ready" or "create plan", generate a structured implementation plan
+5. Be opinionated — recommend what to do, not just list options`;
 
     stateManager.createThreadMessage({
       id: randomUUID(),
@@ -358,16 +371,19 @@ Explore this idea through conversation: goals, scope, phases, resources, risks. 
       content: systemMessage,
     });
 
-    // Greeting message — visible in chat UI as the starting context
-    const contentPreview = idea.content.length > 200
-      ? idea.content.slice(0, 200) + "..."
-      : idea.content;
-    const greeting = `**${idea.title}**${idea.link ? ` — [source](${idea.link})` : ""}${idea.tags?.length ? `\n*${idea.tags.join(", ")}*` : ""}
-
-${contentPreview}
+    // Greeting message — visible in chat UI showing the full idea content
+    const tagLine = idea.tags?.length ? `*${idea.tags.join(" · ")}*\n` : "";
+    const linkLine = idea.link ? `[Source](${idea.link})\n` : "";
+    const notesLine = idea.notes ? `\n**Notes:** ${idea.notes}` : "";
+    const enrichmentSummary = enrichment?.deep_links
+      ? `\n\n**Connections:** ${(enrichment.deep_links as string[]).slice(0, 3).join(" · ")}`
+      : "";
+    const greeting = `## ${idea.title}
+${tagLine}${linkLine}
+${idea.content}${notesLine}${enrichmentSummary}
 
 ---
-What aspect would you like to explore first?`;
+Send a message to start exploring — I'll kick off with insights on how this connects to your current work.`;
 
     stateManager.createThreadMessage({
       id: randomUUID(),
