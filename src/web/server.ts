@@ -32,6 +32,16 @@ export async function createWebServer(
     logger: false, // Use our own logger
   });
 
+  // Handle empty JSON bodies gracefully (e.g. POST with Content-Type: application/json but no body)
+  server.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => {
+    try {
+      const str = (body as string) || "";
+      done(null, str.length > 0 ? JSON.parse(str) : {});
+    } catch (e) {
+      done(e as Error, undefined);
+    }
+  });
+
   // Register WebSocket plugin
   await server.register(websocket);
 
