@@ -543,8 +543,10 @@
 	async function loadThreadMessages(tId: string) {
 		try {
 			const thread = await api.getThread(tId);
-			knownMessageIds = new Set(thread.messages.map(m => m.id));
-			messages = thread.messages.map((m) => ({
+			// Filter out system messages — they're context for the model, not for display
+			const displayMessages = thread.messages.filter(m => m.role !== 'system');
+			knownMessageIds = new Set(displayMessages.map(m => m.id));
+			messages = displayMessages.map((m) => ({
 				id: m.id,
 				role: m.role as 'user' | 'assistant',
 				content: m.content,
