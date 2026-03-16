@@ -13,11 +13,12 @@ export type ExecutorKind = "claude" | "gemini" | "codex" | "kimi" | "opencode";
 export type ErrorType = "timeout" | "rate_limit" | "session_timeout" | "auth" | "unknown";
 
 // OpenCode (gemini) last - research/analysis only, no code changes
-export const DEFAULT_CHAIN: ExecutorKind[] = ["claude", "codex", "kimi", "gemini"];
-export const MEMORY_CHAIN: ExecutorKind[] = ["gemini", "claude", "codex", "kimi"];
+export const DEFAULT_CHAIN: ExecutorKind[] = ["claude", "codex", "gemini"];
+export const MEMORY_CHAIN: ExecutorKind[] = ["gemini", "claude", "codex"];
 
 const FAILURE_DISABLE_THRESHOLD = 2;
 const DISABLE_MS = 30 * 60 * 1000;
+const MAX_RETRIES_PER_EXECUTOR = 2; // Retry same CLI twice before switching to next
 
 interface HealthState {
   consecutiveFailures: number;
@@ -398,7 +399,10 @@ export async function runWithFallbackChain<T extends ExecutorAttemptResult>(
   let lastResult: T | null = null;
   let fallbackUsed = false;
   let notifiedFallback = false;
-  let attemptsRemaining = maxAttempts ?? chain.length + 2;
+  let attemptsRemaining = maxAttempts ?? chain.length * MAX_RETRIES_PER_EXECUTOR + 1;
+
+  // Track per-executor retry count: retry up to MAX_RETRIES_PER_EXECUTOR times before switching
+  const executorAttempts = new Map<ExecutorKind, number>();
 
   while (current && attemptsRemaining > 0) {
     attemptsRemaining -= 1;
@@ -412,6 +416,9 @@ export async function runWithFallbackChain<T extends ExecutorAttemptResult>(
       }
       break;
     }
+
+    const attemptNum = (executorAttempts.get(current) ?? 0) + 1;
+    executorAttempts.set(current, attemptNum);
 
     const result = await runExecutor(current, queryOverride);
     lastResult = result;
@@ -472,6 +479,17 @@ export async function runWithFallbackChain<T extends ExecutorAttemptResult>(
       });
     }
 
+    // Retry same executor up to MAX_RETRIES_PER_EXECUTOR times before switching
+    if (attemptNum < MAX_RETRIES_PER_EXECUTOR) {
+      logger.info(
+        { jobId: job.id, executor: current, attempt: attemptNum, maxRetries: MAX_RETRIES_PER_EXECUTOR },
+        "Retrying same executor before fallback"
+      );
+      queryOverride = buildRetryQuery(job.query, failure);
+      continue;
+    }
+
+    // Exhausted retries on this executor — run diagnosis or switch
     const rawDecision = skipDiagnosis
       ? { action: "switch_next" as const }
       : await diagnoseDecision(job, primary, chain, failure, attempts);

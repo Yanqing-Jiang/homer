@@ -127,6 +127,6 @@ export const LANE_CWD: Record<string, string> = {
 };
 
 /**
- * Default job timeout (10 minutes)
+ * Default job timeout (20 minutes)
  */
-export const DEFAULT_JOB_TIMEOUT = 600_000;
+export const DEFAULT_JOB_TIMEOUT = 1_200_000;

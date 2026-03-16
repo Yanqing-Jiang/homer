@@ -150,11 +150,6 @@ export const COMMANDS: CommandDefinition[] = [
     description: "Show system debug info",
   },
   {
-    name: "/restart",
-    category: "system",
-    description: "Restart the daemon",
-  },
-  {
     name: "/jobs",
     category: "system",
     description: "List scheduled jobs",

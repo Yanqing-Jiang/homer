@@ -1,5 +1,5 @@
 import fs from "fs";
-import { classifyContext } from "./signature.js";
+import { classifyContext, classifyDockerContext } from "./signature.js";
 import { normalizeLlmDecision } from "./llm.js";
 import { getDeterministicPlan, isUnknownSignature } from "./repair-plan.js";
 import {
@@ -11,6 +11,7 @@ import {
   getDefaultStateFile,
 } from "./state.js";
 import type {
+  DockerWatchdogContext,
   OutcomeStatus,
   RepairHandler,
   WatchdogAction,
@@ -50,9 +51,29 @@ function nextIncidentId(timestamp: string): string {
   return `wd-${timestamp.replace(/[-:.TZ]/g, "").slice(0, 14)}`;
 }
 
+interface IncidentDiagnostics {
+  launchdPid: number | null;
+  portOwnerPid: number | null;
+  lockHolders: number[];
+}
+
+function contextDiagnostics(context: WatchdogContext): IncidentDiagnostics {
+  return {
+    launchdPid: context.launchdPid,
+    portOwnerPid: context.portOwnerPid,
+    lockHolders: context.lockHolders.map((holder) => holder.pid),
+  };
+}
+
+const DOCKER_DIAGNOSTICS: IncidentDiagnostics = {
+  launchdPid: null,
+  portOwnerPid: null,
+  lockHolders: [],
+};
+
 function setIncidentState(
   state: WatchdogState,
-  context: WatchdogContext,
+  diagnostics: IncidentDiagnostics,
   signature: WatchdogSignature,
   summary: string,
   timestamp: string,
@@ -67,9 +88,9 @@ function setIncidentState(
       : timestamp,
     signature,
     summary,
-    launchdPid: context.launchdPid,
-    portOwnerPid: context.portOwnerPid,
-    lockHolders: context.lockHolders.map((holder) => holder.pid),
+    launchdPid: diagnostics.launchdPid,
+    portOwnerPid: diagnostics.portOwnerPid,
+    lockHolders: diagnostics.lockHolders,
     lastAction: state.currentIncident?.signature === signature ? state.currentIncident.lastAction : null,
     lastActionAt: state.currentIncident?.signature === signature ? state.currentIncident.lastActionAt : null,
     lastOutcome: state.currentIncident?.signature === signature ? state.currentIncident.lastOutcome : null,
@@ -90,7 +111,7 @@ function buildDecision(
   reason: string,
   decisionSource: "local_policy" | "claude",
 ): WatchdogDecision {
-  const incidentId = setIncidentState(state, context, signature, reason, context.timestamp);
+  const incidentId = setIncidentState(state, contextDiagnostics(context), signature, reason, context.timestamp);
   return {
     incidentId,
     signature,
@@ -109,7 +130,7 @@ function buildNeedsLlmDecision(
   signature: WatchdogSignature,
   reason: string,
 ): WatchdogDecision {
-  const incidentId = setIncidentState(state, context, signature, reason, context.timestamp);
+  const incidentId = setIncidentState(state, contextDiagnostics(context), signature, reason, context.timestamp);
   return {
     incidentId,
     signature,
@@ -409,6 +430,122 @@ export function decideWatchdogAction(
   return chooseLocalDecision(state, context);
 }
 
+function getLastRepairHandler(state: WatchdogState, signature: WatchdogSignature): RepairHandler | null {
+  for (let i = state.recentActions.length - 1; i >= 0; i--) {
+    const entry = state.recentActions[i];
+    if (entry && entry.signature === signature && entry.action === "repair") {
+      return entry.repairHandler;
+    }
+  }
+  return null;
+}
+
+const DOCKER_TWO_HOURS_MS = 2 * 60 * 60 * 1000;
+
+function countDockerRepairs(state: WatchdogState, signature: WatchdogSignature, timestamp: string): number {
+  const cutoff = new Date(timestamp).getTime() - DOCKER_TWO_HOURS_MS;
+  return state.recentActions.filter((entry) =>
+    entry.signature === signature &&
+    entry.action === "repair" &&
+    new Date(entry.at).getTime() >= cutoff,
+  ).length;
+}
+
+function buildDockerDecision(
+  state: WatchdogState,
+  timestamp: string,
+  signature: WatchdogSignature,
+  action: WatchdogAction,
+  repairHandler: RepairHandler | null,
+  reason: string,
+): WatchdogDecision {
+  const incidentId = setIncidentState(state, DOCKER_DIAGNOSTICS, signature, reason, timestamp);
+  return {
+    incidentId,
+    signature,
+    action,
+    repairHandler,
+    reason,
+    decisionSource: "local_policy",
+    needsLlm: false,
+    budgetSnapshot: computeBudgetSnapshot(state, signature, timestamp),
+  };
+}
+
+function chooseDockerDecision(
+  state: WatchdogState,
+  context: DockerWatchdogContext,
+): WatchdogDecision | null {
+  const classification = classifyDockerContext(context);
+  if (!classification) return null;
+
+  const signatureState = touchSignature(state, classification.signature, context.timestamp);
+  const repairsInWindow = countDockerRepairs(state, classification.signature, context.timestamp);
+
+  if (classification.signature === "docker_daemon_down" && repairsInWindow >= 1) {
+    return buildDockerDecision(
+      state, context.timestamp, classification.signature, "escalate", null,
+      "Docker daemon repair budget exhausted (1 per 2h).",
+    );
+  }
+
+  if (
+    (classification.signature === "docker_container_stopped" ||
+      classification.signature === "docker_container_unhealthy") &&
+    repairsInWindow >= 2
+  ) {
+    return buildDockerDecision(
+      state, context.timestamp, classification.signature, "escalate", null,
+      "Docker container repair budget exhausted (2 per 2h).",
+    );
+  }
+
+  if (
+    classification.signature === "docker_container_stopped" ||
+    classification.signature === "docker_container_unhealthy"
+  ) {
+    if (
+      signatureState.lastOutcome === "same_signature_recurred" ||
+      signatureState.lastOutcome === "validation_failed"
+    ) {
+      const lastHandler = getLastRepairHandler(state, classification.signature);
+      if (lastHandler === "repair_docker_restart") {
+        return buildDockerDecision(
+          state, context.timestamp, classification.signature, "repair", "repair_docker_recreate",
+          "Docker restart failed, escalating to recreate.",
+        );
+      }
+      if (lastHandler === "repair_docker_recreate") {
+        return buildDockerDecision(
+          state, context.timestamp, classification.signature, "escalate", null,
+          "Docker recreate also failed, escalating to user.",
+        );
+      }
+    }
+  }
+
+  const deterministicPlan = getDeterministicPlan(classification.signature);
+  if (!deterministicPlan) {
+    return buildDockerDecision(
+      state, context.timestamp, classification.signature, "escalate", null,
+      classification.summary,
+    );
+  }
+
+  return buildDockerDecision(
+    state, context.timestamp, classification.signature,
+    deterministicPlan.action, deterministicPlan.repairHandler,
+    classification.summary,
+  );
+}
+
+export function decideDockerAction(
+  state: WatchdogState,
+  context: DockerWatchdogContext,
+): WatchdogDecision | null {
+  return chooseDockerDecision(state, context);
+}
+
 function resolveValidationSignature(args: Map<string, string | boolean>): WatchdogSignature | null {
   const explicit = args.get("--result-signature");
   if (typeof explicit === "string" && isWatchdogSignature(explicit)) {
@@ -426,8 +563,8 @@ function resolveValidationSignature(args: Map<string, string | boolean>): Watchd
 
 async function main(): Promise<void> {
   const [, , command, ...rest] = process.argv;
-  if (command !== "decide" && command !== "record-outcome" && command !== "classify") {
-    console.error("Usage: policy.js decide|record-outcome|classify [--flags]");
+  if (command !== "decide" && command !== "record-outcome" && command !== "classify" && command !== "docker-decide") {
+    console.error("Usage: policy.js decide|record-outcome|classify|docker-decide [--flags]");
     process.exit(1);
   }
 
@@ -456,6 +593,18 @@ async function main(): Promise<void> {
     const llmOutputFile = args.get("--llm-output-file");
     const llmOutput = typeof llmOutputFile === "string" ? fs.readFileSync(llmOutputFile, "utf8") : undefined;
     const decision = decideWatchdogAction(state, context, llmOutput);
+    saveState(state, stateFile);
+    process.stdout.write(`${JSON.stringify(decision)}\n`);
+    return;
+  }
+
+  if (command === "docker-decide") {
+    const dockerContextFile = args.get("--docker-context-file");
+    if (typeof dockerContextFile !== "string") {
+      throw new Error("--docker-context-file is required");
+    }
+    const dockerContext = readJsonFile<DockerWatchdogContext>(dockerContextFile);
+    const decision = decideDockerAction(state, dockerContext);
     saveState(state, stateFile);
     process.stdout.write(`${JSON.stringify(decision)}\n`);
     return;
