@@ -1,4 +1,4 @@
-import type { ClassificationResult, WatchdogContext, WatchdogSignature } from "./types.js";
+import type { ClassificationResult, DockerWatchdogContext, WatchdogContext, WatchdogSignature } from "./types.js";
 
 function normalizeText(...parts: Array<string | null | undefined>): string {
   return parts.filter((part): part is string => Boolean(part)).join("\n");
@@ -119,6 +119,38 @@ export function classifyContext(context: WatchdogContext): ClassificationResult 
   };
 }
 
+export function classifyDockerContext(context: DockerWatchdogContext): ClassificationResult | null {
+  if (!context.dockerDaemonRunning) {
+    return {
+      signature: "docker_daemon_down",
+      summary: "Docker Desktop / dockerd is not running.",
+      clearSourceEvidence: false,
+    };
+  }
+
+  for (const service of context.services) {
+    if (service.containerState === "stopped" || service.containerState === "not_found") {
+      return {
+        signature: "docker_container_stopped",
+        summary: `Docker container '${service.name}' is ${service.containerState}.`,
+        clearSourceEvidence: false,
+      };
+    }
+  }
+
+  for (const service of context.services) {
+    if (service.healthStatus === "unhealthy" || (service.httpStatus !== null && service.httpStatus !== 200)) {
+      return {
+        signature: "docker_container_unhealthy",
+        summary: `Docker container '${service.name}' is unhealthy (health=${service.healthStatus}, http=${service.httpStatus}).`,
+        clearSourceEvidence: false,
+      };
+    }
+  }
+
+  return null;
+}
+
 export function summarizeSignature(signature: WatchdogSignature): string {
   switch (signature) {
     case "native_module_abi_mismatch":
@@ -143,5 +175,11 @@ export function summarizeSignature(signature: WatchdogSignature): string {
       return "Unknown startup crash";
     case "unknown_runtime_failure":
       return "Unknown runtime failure";
+    case "docker_daemon_down":
+      return "Docker daemon not running";
+    case "docker_container_stopped":
+      return "Docker container stopped";
+    case "docker_container_unhealthy":
+      return "Docker container unhealthy";
   }
 }

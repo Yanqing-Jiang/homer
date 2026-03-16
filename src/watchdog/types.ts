@@ -10,6 +10,9 @@ export const WATCHDOG_SIGNATURES = [
   "llm_quota_exhausted",
   "unknown_startup_crash",
   "unknown_runtime_failure",
+  "docker_daemon_down",
+  "docker_container_stopped",
+  "docker_container_unhealthy",
 ] as const;
 
 export type WatchdogSignature =
@@ -23,7 +26,10 @@ export type WatchdogSignature =
   | "llm_parse_failure"
   | "llm_quota_exhausted"
   | "unknown_startup_crash"
-  | "unknown_runtime_failure";
+  | "unknown_runtime_failure"
+  | "docker_daemon_down"
+  | "docker_container_stopped"
+  | "docker_container_unhealthy";
 
 export const WATCHDOG_ACTIONS = [
   "restart",
@@ -44,12 +50,20 @@ export const REPAIR_HANDLERS = [
   "repair_native_modules",
   "repair_launchd_runtime",
   "repair_stale_lock",
+  "repair_docker_daemon",
+  "repair_docker_restart",
+  "repair_docker_recreate",
+  "repair_docker_health_wait",
 ] as const;
 
 export type RepairHandler =
   | "repair_native_modules"
   | "repair_launchd_runtime"
-  | "repair_stale_lock";
+  | "repair_stale_lock"
+  | "repair_docker_daemon"
+  | "repair_docker_restart"
+  | "repair_docker_recreate"
+  | "repair_docker_health_wait";
 
 export type DecisionSource = "local_policy" | "claude";
 
@@ -84,6 +98,21 @@ export interface WatchdogContext {
   recentFatalLog: string;
   processSnapshot: string;
   healthTimedOut: boolean;
+}
+
+export interface DockerServiceStatus {
+  name: string;
+  containerState: "running" | "stopped" | "not_found";
+  healthStatus: "healthy" | "unhealthy" | "starting" | "none" | "unknown";
+  httpStatus: number | null;
+}
+
+export interface DockerWatchdogContext {
+  timestamp: string;
+  failureCount: number;
+  dockerDaemonRunning: boolean;
+  composeDir: string;
+  services: DockerServiceStatus[];
 }
 
 export interface ClassificationResult {

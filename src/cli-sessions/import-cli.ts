@@ -18,7 +18,7 @@ import { logger } from "../utils/logger.js";
 
 interface CLIArgs {
   sinceDays: number;
-  agent: "codex" | "gemini" | "kimi" | "claude" | "opencode" | "all";
+  agent: "codex" | "gemini" | "claude" | "opencode" | "all";
   dryRun: boolean;
   stats: boolean;
 }
@@ -42,7 +42,7 @@ function parseArgs(): CLIArgs {
       }
     } else if (arg === "--agent" && process.argv[i + 1]) {
       const agentArg = process.argv[i + 1];
-      if (agentArg === "codex" || agentArg === "gemini" || agentArg === "kimi" || agentArg === "claude" || agentArg === "opencode" || agentArg === "all") {
+      if (agentArg === "codex" || agentArg === "gemini" || agentArg === "claude" || agentArg === "opencode" || agentArg === "all") {
         args.agent = agentArg;
       }
       i++;

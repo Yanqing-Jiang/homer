@@ -79,8 +79,7 @@ export function mergeWithExisting(homerContent: string, memoryPath: string): str
   let claudeContent: string;
   if (startIdx >= 0 && endIdx >= 0) {
     const before = existing.slice(0, startIdx).trim();
-    const after = existing.slice(endIdx + HOMER_END.length).trim();
-    claudeContent = [before, after].filter(Boolean).join("\n\n");
+    claudeContent = before || "";
   } else {
     claudeContent = existing.trim();
   }
@@ -322,6 +321,7 @@ async function collectRawData(sm: StateManager): Promise<RawContextData> {
     for (const session of sessions) {
       const project = session.project ? `[${session.project}] ` : "";
       const title = session.title?.trim() || "untitled";
+      if (title.startsWith("<") || title.startsWith("session-flush")) continue;
       const summary = session.summary?.trim() || "";
       recentSessions.push(truncateLine(`${project}${title}: ${summary}`, 180));
     }
@@ -505,6 +505,7 @@ export async function runContextBridge(
         dirty: false,
         method: "unchanged-source",
       });
+      sm.clearPipelineDirty("context_bridge");
       return {
         success: true,
         output: `Context bridge skipped (${triggerSource}) — source unchanged`,
@@ -529,6 +530,7 @@ export async function runContextBridge(
         dirty: false,
         method: "unchanged-output",
       });
+      sm.clearPipelineDirty("context_bridge");
       return {
         success: true,
         output: `Context bridge skipped (${triggerSource}) — output unchanged`,

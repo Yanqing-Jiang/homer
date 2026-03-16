@@ -40,7 +40,7 @@
     <key>FAILURES_BEFORE_ACTION</key>
     <string>1</string>
     <key>RECOVERY_AGENT</key>
-    <string>codex</string>
+    <string>claude</string>
     <key>CLAUDE_BIN</key>
     <string>/Users/yj/.local/bin/claude</string>
     <key>CODEX_BIN</key>
@@ -49,6 +49,8 @@
     <string>REDACTED_TELEGRAM_BOT_TOKEN</string>
     <key>TELEGRAM_CHAT_ID</key>
     <string>REDACTED_TELEGRAM_CHAT_ID</string>
+    <key>DOCKER_COMPOSE_DIR</key>
+    <string>/Users/yj/ai-portfolio</string>
   </dict>
 
   <key>StandardOutPath</key>

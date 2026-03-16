@@ -29,7 +29,7 @@ import { PATHS } from "../../config/paths.js";
 
 const DENY_HISTORY = PATHS.denyHistory;
 const SKILL_PATH = "/Users/yj/.claude/skills/idea-synthesizer/SKILLS.md";
-const SONNET_TIMEOUT = 300_000; // 5 min for single-pass
+const SONNET_TIMEOUT = 1_200_000; // 20 min for single-pass
 const MAX_SCRAPES_PER_BATCH = 10;
 const RETRY_BATCH_SIZE = 5;
 
