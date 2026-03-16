@@ -17,7 +17,7 @@ import { logger } from "../../utils/logger.js";
 import { memoryEvents } from "../../events/memory-events.js";
 
 const DB_PATH = `${homedir()}/homer/data/homer.db`;
-const CLI_AGENTS = ["codex", "kimi", "claude", "opencode"] as const;
+const CLI_AGENTS = ["codex", "claude", "opencode"] as const;
 const MAX_BACKFILL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days cap for first run
 
 export async function runSessionHarvester(

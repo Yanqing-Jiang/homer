@@ -21,6 +21,7 @@ EXPECTED_NODE_PATH="${EXPECTED_NODE_PATH:-/opt/homebrew/bin/node}"
 WATCHDOG_NODE_BIN="${WATCHDOG_NODE_BIN:-$EXPECTED_NODE_PATH}"
 
 INTERVAL="${INTERVAL:-1800}"
+MIN_DAEMON_AGE_SECS="${MIN_DAEMON_AGE_SECS:-7200}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-15}"
 FAILURES_BEFORE_ACTION="${FAILURES_BEFORE_ACTION:-2}"
 TRIAGE_COOLDOWN="${TRIAGE_COOLDOWN:-300}"
@@ -48,6 +49,12 @@ EVENT_LOG_MAX_BYTES="${EVENT_LOG_MAX_BYTES:-1048576}"
 WATCHDOG_POLICY_JS="${WATCHDOG_POLICY_JS:-$HOMER_DIR/dist/watchdog/policy.js}"
 FATAL_LOG="${FATAL_LOG:-$LOG_DIR/fatal.log}"
 
+DOCKER_COMPOSE_DIR="${DOCKER_COMPOSE_DIR:-$HOME/ai-portfolio}"
+DOCKER_HEALTH_URL="${DOCKER_HEALTH_URL:-http://localhost:8100/health}"
+DOCKER_HEALTH_TIMEOUT=10
+DOCKER_POST_RESTART_WAIT=15
+DOCKER_POST_DAEMON_WAIT=40
+
 mkdir -p "$LOG_DIR" "$APP_SUPPORT_DIR" "$CRASH_REPORTS_DIR"
 
 run_with_timeout() {
@@ -67,6 +74,20 @@ log() {
   local ts
   ts=$(/bin/date -u +"%Y-%m-%dT%H:%M:%SZ")
   echo "${ts} $*" | tee -a "$LOG_DIR/watchdog.log"
+}
+
+send_telegram() {
+  local message="$1"
+  if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+    log "TELEGRAM: no credentials, skipping notification"
+    return 0
+  fi
+  /usr/bin/curl -fsS --max-time 10 \
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    -d chat_id="${TELEGRAM_CHAT_ID}" \
+    -d parse_mode="Markdown" \
+    --data-urlencode "text=${message}" >/dev/null 2>&1 || \
+    log "TELEGRAM: failed to send notification"
 }
 
 rotate_event_log() {
@@ -198,6 +219,25 @@ port_owner_pid() {
 
 pid_cmdline() {
   /bin/ps -o command= -p "$1" 2>/dev/null
+}
+
+daemon_too_young() {
+  # Returns 0 (true) if the daemon process has been running for less than MIN_DAEMON_AGE_SECS
+  local pid
+  pid=$(get_launchd_pid || true)
+  if [[ -z "$pid" ]]; then
+    return 1  # no daemon running — not "too young"
+  fi
+  # Get process start time (epoch) via ps -o lstart=, then compute age
+  local start_epoch now_epoch age_secs
+  start_epoch=$(/bin/ps -o lstart= -p "$pid" 2>/dev/null | xargs -I{} /bin/date -jf "%c" "{}" +%s 2>/dev/null) || return 1
+  now_epoch=$(/bin/date +%s)
+  age_secs=$(( now_epoch - start_epoch ))
+  if (( age_secs < MIN_DAEMON_AGE_SECS )); then
+    log "SAFETY: daemon pid=$pid is only ${age_secs}s old (min ${MIN_DAEMON_AGE_SECS}s); skipping destructive action"
+    return 0  # too young
+  fi
+  return 1  # old enough
 }
 
 lock_holder_pids() {
@@ -428,6 +468,10 @@ ensure_launchd_loaded() {
 }
 
 action_restart() {
+  if daemon_too_young; then
+    log "ACTION: restart skipped because daemon process is younger than ${MIN_DAEMON_AGE_SECS}s"
+    return 10
+  fi
   if has_active_runs; then
     log "ACTION: restart skipped because active CLI runs are still in progress"
     return 10
@@ -440,6 +484,10 @@ action_restart() {
 }
 
 action_force_kill() {
+  if daemon_too_young; then
+    log "ACTION: force-kill skipped because daemon process is younger than ${MIN_DAEMON_AGE_SECS}s"
+    return 10
+  fi
   if has_active_runs; then
     log "ACTION: force-kill skipped because active CLI runs are still in progress"
     return 10
@@ -540,6 +588,227 @@ repair_stale_lock() {
   action_restart
 }
 
+write_docker_context_json() {
+  local output_file="$1"
+  local daemon_running="$2"
+  local ts
+  ts=$(/bin/date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  local backend_state="not_found"
+  local backend_health="unknown"
+  local http_status="null"
+
+  if [[ "$daemon_running" == "true" ]]; then
+    backend_state=$(docker inspect --format '{{.State.Status}}' ai-portfolio-backend-1 2>/dev/null || echo "not_found")
+    if [[ "$backend_state" == "running" ]]; then
+      backend_health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' ai-portfolio-backend-1 2>/dev/null || echo "unknown")
+      local code
+      code=$(/usr/bin/curl -s -o /dev/null -w '%{http_code}' --max-time "$DOCKER_HEALTH_TIMEOUT" "$DOCKER_HEALTH_URL" 2>/dev/null || echo "0")
+      http_status="$code"
+    fi
+  fi
+
+  /usr/bin/python3 - "$output_file" "$ts" "$daemon_running" "$DOCKER_COMPOSE_DIR" \
+    "$backend_state" "$backend_health" "$http_status" <<'PY'
+import json
+import sys
+
+output_file = sys.argv[1]
+ts = sys.argv[2]
+daemon_running = sys.argv[3] == "true"
+compose_dir = sys.argv[4]
+backend_state = sys.argv[5]
+backend_health = sys.argv[6]
+http_status_str = sys.argv[7]
+http_status = int(http_status_str) if http_status_str not in ("null", "") else None
+
+payload = {
+    "timestamp": ts,
+    "failureCount": 1,
+    "dockerDaemonRunning": daemon_running,
+    "composeDir": compose_dir,
+    "services": [
+        {
+            "name": "backend",
+            "containerState": backend_state if backend_state in ("running", "stopped") else "not_found",
+            "healthStatus": backend_health if backend_health in ("healthy", "unhealthy", "starting", "none") else "unknown",
+            "httpStatus": http_status,
+        }
+    ],
+}
+
+with open(output_file, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
+}
+
+repair_docker_daemon() {
+  log "REPAIR: starting Docker Desktop"
+  open -a Docker
+  local elapsed=0
+  while (( elapsed < DOCKER_POST_DAEMON_WAIT )); do
+    /bin/sleep 5
+    elapsed=$(( elapsed + 5 ))
+    if docker info >/dev/null 2>&1; then
+      log "REPAIR: Docker daemon is ready after ${elapsed}s"
+      return 0
+    fi
+  done
+  log "REPAIR: Docker daemon did not start within ${DOCKER_POST_DAEMON_WAIT}s"
+  return 1
+}
+
+repair_docker_restart() {
+  log "REPAIR: restarting Docker Compose backend service"
+  (cd "$DOCKER_COMPOSE_DIR" && docker compose restart backend) || return 1
+  /bin/sleep "$DOCKER_POST_RESTART_WAIT"
+}
+
+repair_docker_recreate() {
+  log "REPAIR: recreating Docker Compose services"
+  (cd "$DOCKER_COMPOSE_DIR" && docker compose down && docker compose up -d) || return 1
+  /bin/sleep 20
+}
+
+repair_docker_health_wait() {
+  log "REPAIR: waiting for Docker containers to stabilize"
+  /bin/sleep 20
+  local code
+  code=$(/usr/bin/curl -s -o /dev/null -w '%{http_code}' --max-time "$DOCKER_HEALTH_TIMEOUT" "$DOCKER_HEALTH_URL" 2>/dev/null || echo "0")
+  if [[ "$code" == "200" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+run_docker_policy_decide() {
+  local context_file="$1"
+  local decision_file="$2"
+
+  if [[ ! -x "$WATCHDOG_NODE_BIN" ]] && ! command -v "$WATCHDOG_NODE_BIN" >/dev/null 2>&1; then
+    log "DOCKER POLICY: node binary not available at $WATCHDOG_NODE_BIN"
+    return 1
+  fi
+  if [[ ! -f "$WATCHDOG_POLICY_JS" ]]; then
+    log "DOCKER POLICY: missing helper at $WATCHDOG_POLICY_JS"
+    return 1
+  fi
+
+  "$WATCHDOG_NODE_BIN" "$WATCHDOG_POLICY_JS" docker-decide \
+    --docker-context-file "$context_file" \
+    --state-file "$STATE_FILE" > "$decision_file"
+}
+
+validate_docker_after_action() {
+  /bin/sleep "$DOCKER_POST_RESTART_WAIT"
+
+  if ! docker info >/dev/null 2>&1; then
+    VALIDATION_OUTCOME="same_signature_recurred"
+    VALIDATION_SIGNATURE="docker_daemon_down"
+    return 0
+  fi
+
+  local code
+  code=$(/usr/bin/curl -s -o /dev/null -w '%{http_code}' --max-time "$DOCKER_HEALTH_TIMEOUT" "$DOCKER_HEALTH_URL" 2>/dev/null || echo "0")
+  if [[ "$code" == "200" ]]; then
+    VALIDATION_OUTCOME="health_recovered"
+    VALIDATION_SIGNATURE=""
+    return 0
+  fi
+
+  local backend_state
+  backend_state=$(docker inspect --format '{{.State.Status}}' ai-portfolio-backend-1 2>/dev/null || echo "not_found")
+  if [[ "$backend_state" != "running" ]]; then
+    VALIDATION_OUTCOME="same_signature_recurred"
+    VALIDATION_SIGNATURE="docker_container_stopped"
+    return 0
+  fi
+
+  VALIDATION_OUTCOME="same_signature_recurred"
+  VALIDATION_SIGNATURE="docker_container_unhealthy"
+}
+
+check_docker_health() {
+  command -v docker >/dev/null 2>&1 || return 0
+
+  local daemon_running=true
+  docker info >/dev/null 2>&1 || daemon_running=false
+
+  local need_action=false
+
+  if [[ "$daemon_running" == "false" ]]; then
+    need_action=true
+  else
+    local backend_state
+    backend_state=$(docker inspect --format '{{.State.Status}}' ai-portfolio-backend-1 2>/dev/null || echo "not_found")
+    if [[ "$backend_state" != "running" ]]; then
+      need_action=true
+    else
+      local code
+      code=$(/usr/bin/curl -s -o /dev/null -w '%{http_code}' --max-time "$DOCKER_HEALTH_TIMEOUT" "$DOCKER_HEALTH_URL" 2>/dev/null || echo "0")
+      if [[ "$code" != "200" ]]; then
+        need_action=true
+      fi
+    fi
+  fi
+
+  [[ "$need_action" == "true" ]] || return 0
+
+  log "DOCKER: health check failed (daemon=$daemon_running)"
+
+  local docker_context docker_decision
+  docker_context="$(mktemp /tmp/homer-watchdog-docker-ctx.XXXXXX)"
+  docker_decision="$(mktemp /tmp/homer-watchdog-docker-dec.XXXXXX)"
+
+  write_docker_context_json "$docker_context" "$daemon_running"
+
+  if ! run_docker_policy_decide "$docker_context" "$docker_decision"; then
+    log "DOCKER: policy engine failed"
+    rm -f "$docker_context" "$docker_decision"
+    return 1
+  fi
+
+  local action signature reason repair_handler
+  action=$(json_field "$docker_decision" "action")
+  signature=$(json_field "$docker_decision" "signature")
+  reason=$(json_field "$docker_decision" "reason")
+  repair_handler=$(json_field "$docker_decision" "repairHandler")
+
+  if [[ -z "$action" || "$action" == "null" ]]; then
+    rm -f "$docker_context" "$docker_decision"
+    return 0
+  fi
+
+  log "DOCKER: signature=$signature action=$action handler=$repair_handler"
+
+  EXECUTED="true"
+  VALIDATION_OUTCOME="validation_failed"
+  VALIDATION_SIGNATURE=""
+
+  if [[ "$action" == "escalate" ]]; then
+    send_telegram "*Homer Watchdog: Docker Escalation*
+Signature: \`${signature}\`
+Reason: ${reason}"
+    VALIDATION_OUTCOME="validation_failed"
+  elif [[ "$action" == "repair" && -n "$repair_handler" && "$repair_handler" != "null" ]]; then
+    send_telegram "*Homer Watchdog: Docker ${action}*
+Signature: \`${signature}\`
+Handler: \`${repair_handler}\`"
+    execute_repair_handler "$repair_handler"
+    local rc=$?
+    if (( rc != 0 )); then
+      VALIDATION_OUTCOME="validation_failed"
+    else
+      validate_docker_after_action
+    fi
+  fi
+
+  record_policy_outcome "$docker_decision" "$VALIDATION_OUTCOME" "$EXECUTED" "$VALIDATION_SIGNATURE"
+  append_event_log "$docker_decision" "$VALIDATION_OUTCOME" "" "$VALIDATION_SIGNATURE"
+
+  rm -f "$docker_context" "$docker_decision"
+}
+
 execute_repair_handler() {
   local handler="$1"
   case "$handler" in
@@ -552,10 +821,54 @@ execute_repair_handler() {
     repair_stale_lock)
       repair_stale_lock
       ;;
+    repair_docker_daemon)
+      repair_docker_daemon
+      ;;
+    repair_docker_restart)
+      repair_docker_restart
+      ;;
+    repair_docker_recreate)
+      repair_docker_recreate
+      ;;
+    repair_docker_health_wait)
+      repair_docker_health_wait
+      ;;
     *)
       return 1
       ;;
   esac
+}
+
+build_symptom_summary() {
+  local context_file="$1"
+  local launchd_pid port_pid health_timed_out lock_count failure_count
+  launchd_pid=$(json_field "$context_file" "launchdPid")
+  port_pid=$(json_field "$context_file" "portOwnerPid")
+  health_timed_out=$(json_field "$context_file" "healthTimedOut")
+  lock_count=$(json_field "$context_file" "lockHolders" | /usr/bin/python3 -c "import sys,json; print(len(json.loads(sys.stdin.read())))" 2>/dev/null || echo "?")
+  failure_count=$(json_field "$context_file" "failureCount")
+
+  local symptoms=""
+  if [[ -z "$launchd_pid" || "$launchd_pid" == "null" ]]; then
+    symptoms="${symptoms}- Daemon process is NOT running (no launchd PID)\n"
+  else
+    symptoms="${symptoms}- Daemon process IS running (PID ${launchd_pid})\n"
+  fi
+  if [[ -z "$port_pid" || "$port_pid" == "null" ]]; then
+    symptoms="${symptoms}- Port ${PORT} is FREE (nobody listening)\n"
+  elif [[ "$port_pid" == "$launchd_pid" ]]; then
+    symptoms="${symptoms}- Port ${PORT} is held by the daemon (PID ${port_pid})\n"
+  else
+    symptoms="${symptoms}- Port ${PORT} is held by a DIFFERENT process (PID ${port_pid}, expected ${launchd_pid})\n"
+  fi
+  if [[ "$health_timed_out" == "true" ]]; then
+    symptoms="${symptoms}- Health endpoint TIMED OUT (did not respond within ${HEALTH_TIMEOUT}s)\n"
+  else
+    symptoms="${symptoms}- Health endpoint returned an error or was unreachable\n"
+  fi
+  symptoms="${symptoms}- Lock holders: ${lock_count}\n"
+  symptoms="${symptoms}- Consecutive health failures: ${failure_count}\n"
+  echo -e "$symptoms"
 }
 
 run_claude_triage() {
@@ -568,62 +881,48 @@ run_claude_triage() {
     return 0
   fi
 
+  local symptoms
+  symptoms=$(build_symptom_summary "$context_file")
+
   local prompt
   prompt=$(cat <<EOF
-You are triaging an unknown Homer watchdog failure.
+You are the Homer daemon watchdog. The daemon health check has failed and the deterministic classifier could not match a known signature. You must decide what to do.
 
-Return ONLY one raw JSON object with this schema:
-{"action":"restart|force_kill|repair|source_fix|escalate","signature":"native_module_abi_mismatch|launchd_runtime_mismatch|stale_lock_holder|port_conflict|daemon_missing|health_timeout_with_live_pid|unknown_startup_crash|unknown_runtime_failure","reason":"short explanation","repairHandler":"repair_native_modules|repair_launchd_runtime|repair_stale_lock|null"}
+SYMPTOMS:
+${symptoms}
+AVAILABLE ACTIONS:
+- restart: graceful launchctl restart (safe, preserves state)
+- force_kill: kill -9 the daemon process + port holder + stale locks, then restart (use when restart alone won't work, e.g. port conflict or stuck process)
+- repair: run a specific repair handler (only for ABI mismatch, launchd plist issues, or stale locks)
+- source_fix: have Claude edit Homer source code to fix a bug (only if logs show a clear stack trace into Homer source/dist code)
+- escalate: do nothing, notify the user (use when evidence is ambiguous or you're unsure)
 
-Rules:
-- Prefer deterministic known signatures when the evidence supports them.
-- Use source_fix only if the logs show a clear Homer code bug with a stack trace into Homer source or dist code.
-- If the evidence is weak or mixed, escalate.
-- Do not include markdown fences or commentary.
+REPAIR HANDLERS (only valid with action=repair):
+- repair_native_modules: rebuild fs-ext/better-sqlite3 against current Node
+- repair_launchd_runtime: reinstall the daemon plist
+- repair_stale_lock: remove orphaned lock file
 
-Context JSON:
+SIGNATURES (classify the failure):
+- daemon_missing: no PID, port free
+- port_conflict: port held by wrong process
+- stale_lock_holder: lock held by non-daemon process
+- health_timeout_with_live_pid: daemon alive + port held but health timed out
+- native_module_abi_mismatch: ERR_DLOPEN_FAILED in logs
+- launchd_runtime_mismatch: wrong Node.js path in launchd
+- unknown_startup_crash: daemon exited, no match
+- unknown_runtime_failure: daemon alive but health failing, no match
+
+Read the recent stdout, stderr, and fatal logs in the context carefully. Look for error messages, stack traces, OOM kills, or connection refused patterns.
+
+Return ONLY one raw JSON object (no markdown fences, no commentary):
+{"action":"restart|force_kill|repair|source_fix|escalate","signature":"<one of the signatures above>","reason":"one sentence explaining what you see and why you chose this action","repairHandler":"repair_native_modules|repair_launchd_runtime|repair_stale_lock|null"}
+
+FULL CONTEXT JSON:
 $(cat "$context_file")
 EOF
 )
 
-  run_with_timeout "$TRIAGE_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" --output-format text > "$llm_output_file" 2>&1 || true
-}
-
-run_codex_triage() {
-  local context_file="$1"
-  local llm_output_file="$2"
-
-  if ! command -v "$CODEX_BIN" >/dev/null 2>&1; then
-    log "TRIAGE: codex binary not found at $CODEX_BIN"
-    : > "$llm_output_file"
-    return 0
-  fi
-
-  local prompt_file
-  prompt_file="$(mktemp /tmp/homer-watchdog-codex-prompt.XXXXXX)"
-  cat > "$prompt_file" <<CODEXPROMPT
-You are triaging an unknown Homer watchdog failure.
-
-Return ONLY one raw JSON object with this schema:
-{"action":"restart|force_kill|repair|source_fix|escalate","signature":"native_module_abi_mismatch|launchd_runtime_mismatch|stale_lock_holder|port_conflict|daemon_missing|health_timeout_with_live_pid|unknown_startup_crash|unknown_runtime_failure","reason":"short explanation","repairHandler":"repair_native_modules|repair_launchd_runtime|repair_stale_lock|null"}
-
-Rules:
-- Prefer deterministic known signatures when the evidence supports them.
-- Use source_fix only if the logs show a clear Homer code bug with a stack trace into Homer source or dist code.
-- If the evidence is weak or mixed, escalate.
-- Do not include markdown fences or commentary.
-
-Context JSON:
-$(cat "$context_file")
-CODEXPROMPT
-
-  run_with_timeout "$TRIAGE_TIMEOUT" "$CODEX_BIN" exec \
-    -m gpt-5.4 \
-    -c model_reasoning_effort="medium" \
-    --skip-git-repo-check \
-    "$(cat "$prompt_file")" > "$llm_output_file" 2>&1 || true
-
-  rm -f "$prompt_file"
+  run_with_timeout "$TRIAGE_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" --output-format text --model sonnet > "$llm_output_file" 2>&1 || true
 }
 
 run_ai_triage() {
@@ -632,20 +931,16 @@ run_ai_triage() {
 
   case "$RECOVERY_AGENT" in
     claude)
-      log "TRIAGE: unknown signature, requesting Claude classification"
+      log "TRIAGE: unknown signature, requesting Claude Sonnet classification"
       run_claude_triage "$context_file" "$llm_output_file"
-      ;;
-    codex)
-      log "TRIAGE: unknown signature, requesting Codex classification"
-      run_codex_triage "$context_file" "$llm_output_file"
       ;;
     bash|none)
       log "TRIAGE: AI disabled (RECOVERY_AGENT=$RECOVERY_AGENT), skipping"
       : > "$llm_output_file"
       ;;
     *)
-      log "TRIAGE: unknown RECOVERY_AGENT=$RECOVERY_AGENT, skipping AI"
-      : > "$llm_output_file"
+      log "TRIAGE: unknown RECOVERY_AGENT=$RECOVERY_AGENT, falling back to Claude"
+      run_claude_triage "$context_file" "$llm_output_file"
       ;;
   esac
 }
@@ -720,7 +1015,9 @@ action_escalate() {
   log "ACTION: escalate -- ${reason}"
   local dump_file
   dump_file=$(dump_diagnostics)
-  osascript -e "display notification \"${reason}\" with title \"Homer Escalation\"" 2>/dev/null || true
+  send_telegram "*Homer Watchdog Escalation*
+${reason}
+Diagnostics: \`${dump_file}\`"
   echo "$dump_file"
 }
 
@@ -852,6 +1149,13 @@ execute_decision() {
 
   # Clean up stale cli_runs AFTER safety check passes but before action
   cleanup_stale_cli_runs
+
+  # Notify via Telegram when daemon is broken and LLM decides a destructive action
+  if [[ "$action" == "restart" || "$action" == "force_kill" || "$action" == "repair" || "$action" == "source_fix" ]]; then
+    send_telegram "*Homer Watchdog: ${action}*
+Signature: \`${signature}\`
+Reason: ${reason}"
+  fi
 
   case "$action" in
     restart)
@@ -1077,6 +1381,7 @@ run_once() {
     # Healthy -- do periodic maintenance checks
     check_disk_space || true
     check_memory || true
+    check_docker_health || true
     exit 0
   fi
 
@@ -1087,6 +1392,7 @@ run_once() {
 
   log "watchdog: health failed (agent=${RECOVERY_AGENT})"
   handle_failure "$health_timed_out"
+  check_docker_health || true
 }
 
 # --- Dispatch (always one-shot, launchd handles scheduling) ---

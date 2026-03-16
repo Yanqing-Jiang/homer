@@ -120,24 +120,6 @@ export function createRoutes(
     return { status: "alive", pid: process.pid, uptime: process.uptime() };
   });
 
-  // Kickstart: trigger daemon restart via launchd WatchPaths
-  server.post("/api/kickstart", async () => {
-    const { writeFileSync, mkdirSync } = await import("fs");
-    const { join } = await import("path");
-    const appSupportDir = process.env.APP_SUPPORT_DIR
-      ?? join(process.env.HOME ?? "/Users/yj", "Library", "Application Support", "Homer");
-    const triggerFile = join(appSupportDir, "kickstart.request");
-
-    mkdirSync(appSupportDir, { recursive: true });
-    writeFileSync(triggerFile, [
-      `requested_at=${new Date().toISOString()}`,
-      `reason=web-ui`,
-      `pid=${process.pid}`,
-    ].join("\n") + "\n");
-
-    return { ok: true, message: "Kickstart triggered. Daemon will restart within seconds." };
-  });
-
   // Health check counter for periodic integrity checks
   let healthCheckCounter = 0;
 

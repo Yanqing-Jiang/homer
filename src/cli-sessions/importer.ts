@@ -4,11 +4,9 @@ import { logger } from "../utils/logger.js";
 import type { ParsedSession } from "./parsers.js";
 import {
   parseCodexSession,
-  parseKimiSession,
   parseClaudeSession,
   parseOpencodeSession,
   scanCodexSessions,
-  scanKimiSessions,
   scanClaudeSessions,
   scanOpencodeSessions,
   scanThreadSessions,
@@ -16,7 +14,7 @@ import {
 import { statSync } from "fs";
 import { summarizeSession, generateTitle, buildRawExcerpt, getLogDate } from "./summarizer.js";
 
-export type AgentType = "codex" | "gemini" | "kimi" | "claude" | "opencode" | "telegram" | "web" | "all";
+export type AgentType = "codex" | "gemini" | "claude" | "opencode" | "telegram" | "web" | "all";
 
 interface ImportOptions {
   sinceDays?: number;
@@ -127,11 +125,6 @@ export class CLISessionImporter {
       sessionFiles.push(...codexFiles.map((path) => ({ agent: "codex", path })));
     }
 
-    if (agent === "all" || agent === "kimi") {
-      const kimiFiles = scanKimiSessions(this.homeDir, sinceDays, cutoffPerAgent?.kimi);
-      sessionFiles.push(...kimiFiles.map((path) => ({ agent: "kimi", path })));
-    }
-
     if (agent === "all" || agent === "claude") {
       const claudeFiles = scanClaudeSessions(this.homeDir, sinceDays, cutoffPerAgent?.claude);
       sessionFiles.push(...claudeFiles.map((path) => ({ agent: "claude", path })));
@@ -168,8 +161,6 @@ export class CLISessionImporter {
 
         if (sessionAgent === "codex") {
           session = parseCodexSession(path);
-        } else if (sessionAgent === "kimi") {
-          session = parseKimiSession(path);
         } else if (sessionAgent === "claude") {
           session = parseClaudeSession(path);
         } else if (sessionAgent === "opencode") {
