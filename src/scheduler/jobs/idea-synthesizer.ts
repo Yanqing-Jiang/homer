@@ -30,6 +30,8 @@ import { PATHS } from "../../config/paths.js";
 const DENY_HISTORY = PATHS.denyHistory;
 const SKILL_PATH = "/Users/yj/.claude/skills/idea-synthesizer/SKILLS.md";
 const SONNET_TIMEOUT = 300_000; // 5 min for single-pass
+const MAX_SCRAPES_PER_BATCH = 10;
+const RETRY_BATCH_SIZE = 5;
 
 // ============================================
 // SCHEMAS
@@ -236,8 +238,8 @@ export async function runIdeaSynthesizer(db: Database.Database, jobRunId?: numbe
       ? readFileSync(SKILL_PATH, "utf-8")
       : "";
 
-    // Build the single-pass prompt
-    const prompt = `${skillContent}
+    // Shared context for all batches
+    const sharedContext = `${skillContent}
 
 ---
 
@@ -258,45 +260,108 @@ ${existingTitles.slice(0, 2000)}
 ### Recent Agent Outputs (last 7 days)
 ${recentOutputs.slice(0, 3000) || "(none)"}
 
+---`;
+
+    // Helper: synthesize a single batch of scrapes
+    async function synthesizeBatch(scrapes: StoredScrape[]): Promise<z.infer<typeof SonnetOutputSchema> | null> {
+      const prompt = `${sharedContext}
+
+## Scrapes to Process (${scrapes.length} items)
+
+${formatScrapesForPrompt(scrapes)}
+
 ---
 
-## Scrapes to Process (${unprocessed.length} items)
-
-${formatScrapesForPrompt(unprocessed)}
-
----
-
-Process all ${unprocessed.length} scrapes through the full pipeline (score → synthesize → critic → enrich).
+Process all ${scrapes.length} scrapes through the full pipeline (score → synthesize → critic → enrich).
 Return ONLY a valid JSON object matching the output format in the skill. No markdown fences.`;
 
-    // Single Sonnet call
-    logger.info({ scrapeCount: unprocessed.length, promptChars: prompt.length }, "Calling Sonnet");
+      logger.info({ scrapeCount: scrapes.length, promptChars: prompt.length }, "Calling Sonnet for batch");
 
-    const result = await executeClaudeCommand(prompt, {
-      cwd: "/tmp",
-      model: "sonnet",
-      timeout: SONNET_TIMEOUT,
-    });
+      const result = await executeClaudeCommand(prompt, {
+        cwd: "/tmp",
+        model: "sonnet",
+        timeout: SONNET_TIMEOUT,
+      });
 
-    if (result.exitCode !== 0 || !result.output) {
-      logger.error({ exitCode: result.exitCode, output: result.output?.slice(0, 500) }, "Sonnet call failed");
-      return { success: false, output: "", error: `Sonnet exit ${result.exitCode}: ${result.output?.slice(0, 200) ?? "no output"}` };
+      if (result.exitCode !== 0 || !result.output) {
+        logger.error({ exitCode: result.exitCode, output: result.output?.slice(0, 500) }, "Sonnet batch call failed");
+        return null;
+      }
+
+      const rawParsed = parseJsonFromOutput(result.output);
+      if (!rawParsed) {
+        logger.error({ outputLen: result.output.length, sample: result.output.slice(0, 500) }, "Failed to parse Sonnet batch JSON");
+        return null;
+      }
+
+      try {
+        return SonnetOutputSchema.parse(rawParsed);
+      } catch (err) {
+        logger.error({ error: err, sample: JSON.stringify(rawParsed).slice(0, 500) }, "Sonnet batch schema validation failed");
+        return null;
+      }
     }
 
-    // Parse Sonnet output
-    const rawParsed = parseJsonFromOutput(result.output);
-    if (!rawParsed) {
-      logger.error({ outputLen: result.output.length, sample: result.output.slice(0, 500) }, "Failed to parse Sonnet JSON");
-      return { success: false, output: "", error: "Could not parse JSON from Sonnet output" };
+    // Process scrapes in chunks with retry
+    const chunks: StoredScrape[][] = [];
+    for (let i = 0; i < unprocessed.length; i += MAX_SCRAPES_PER_BATCH) {
+      chunks.push(unprocessed.slice(i, i + MAX_SCRAPES_PER_BATCH));
     }
 
-    let sonnetResult: z.infer<typeof SonnetOutputSchema>;
-    try {
-      sonnetResult = SonnetOutputSchema.parse(rawParsed);
-    } catch (err) {
-      logger.error({ error: err, sample: JSON.stringify(rawParsed).slice(0, 500) }, "Sonnet output schema validation failed");
-      return { success: false, output: "", error: `Schema validation: ${err instanceof Error ? err.message : String(err)}` };
+    logger.info({ totalScrapes: unprocessed.length, batchCount: chunks.length, batchSize: MAX_SCRAPES_PER_BATCH }, "Processing scrapes in batches");
+
+    const batchResults: z.infer<typeof SonnetOutputSchema>[] = [];
+    const failedScrapeIds: string[] = [];
+
+    for (const chunk of chunks) {
+      let result = await synthesizeBatch(chunk);
+
+      if (!result && chunk.length > RETRY_BATCH_SIZE) {
+        // Retry by splitting into smaller sub-batches
+        logger.warn({ chunkSize: chunk.length, retrySize: RETRY_BATCH_SIZE }, "Batch failed, retrying with smaller sub-batches");
+        for (let i = 0; i < chunk.length; i += RETRY_BATCH_SIZE) {
+          const subChunk = chunk.slice(i, i + RETRY_BATCH_SIZE);
+          const subResult = await synthesizeBatch(subChunk);
+          if (subResult) {
+            batchResults.push(subResult);
+          } else {
+            logger.error({ scrapeIds: subChunk.map(s => s.id) }, "Sub-batch also failed, marking scrapes as processed");
+            failedScrapeIds.push(...subChunk.map(s => s.id));
+          }
+        }
+        continue;
+      }
+
+      if (result) {
+        batchResults.push(result);
+      } else {
+        logger.error({ scrapeIds: chunk.map(s => s.id) }, "Batch failed (small batch), marking scrapes as processed");
+        failedScrapeIds.push(...chunk.map(s => s.id));
+      }
     }
+
+    // Mark double-failed scrapes as processed to prevent infinite retry
+    for (const scrapeId of failedScrapeIds) {
+      markProcessed(db, scrapeId);
+    }
+
+    if (batchResults.length === 0) {
+      return { success: false, output: "", error: "All batches failed to produce valid output" };
+    }
+
+    // Merge batch results
+    const sonnetResult: z.infer<typeof SonnetOutputSchema> = {
+      scores: batchResults.flatMap(r => r.scores),
+      ideas: batchResults.flatMap(r => r.ideas),
+      stats: {
+        totalScraped: batchResults.reduce((sum, r) => sum + r.stats.totalScraped, 0),
+        scored: batchResults.reduce((sum, r) => sum + r.stats.scored, 0),
+        aboveThreshold: batchResults.reduce((sum, r) => sum + r.stats.aboveThreshold, 0),
+        synthesized: batchResults.reduce((sum, r) => sum + r.stats.synthesized, 0),
+        criticPassed: batchResults.reduce((sum, r) => sum + r.stats.criticPassed, 0),
+        enriched: batchResults.reduce((sum, r) => sum + r.stats.enriched, 0),
+      },
+    };
 
     logger.info({
       scores: sonnetResult.scores.length,
