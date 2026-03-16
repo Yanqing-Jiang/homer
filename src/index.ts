@@ -31,6 +31,8 @@ import { setRuntimeBuildInfo } from "./utils/build-info.js";
 import type { FastifyInstance } from "fastify";
 import type { VoiceConfig } from "./voice/types.js";
 import { getRuntimePaths } from "./utils/runtime-paths.js";
+import fs from "fs";
+import path from "path";
 
 function parseIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -236,6 +238,22 @@ async function main(): Promise<void> {
   // Budget: Phase 1 (~5s) + Phase 2 drain (270s) + force-kill (10s) + Phase 3 (~5s) = ~290s < 330s
   const DRAIN_TIMEOUT_MS = parseInt(process.env.DRAIN_TIMEOUT_MS ?? "270000", 10);
 
+  // Drain sentinel: tells heartbeat we're shutting down gracefully (don't emergency-restart)
+  const DRAIN_SENTINEL = path.join(
+    runtimePaths.libraryApplicationSupportDir, "Homer", "daemon.draining"
+  );
+  // Remove stale sentinel from prior crash on startup
+  try { fs.unlinkSync(DRAIN_SENTINEL); } catch { /* not present = fine */ }
+
+  // Write drain sentinel FIRST (before stopping web server) so heartbeat sees it
+  registerShutdownTask(() => {
+    logger.info("Writing drain sentinel...");
+    fs.writeFileSync(DRAIN_SENTINEL, JSON.stringify({
+      pid: process.pid,
+      at: new Date().toISOString(),
+    }));
+  });
+
   // Phase 1: Stop accepting new work
   registerShutdownTask(() => {
     logger.info("Phase 1: Stopping new work acceptance...");
@@ -331,6 +349,10 @@ async function main(): Promise<void> {
   registerShutdownTask(() => {
     logger.info("Closing state manager...");
     stateManager.close();
+  });
+  // Clean up drain sentinel at the very end of shutdown
+  registerShutdownTask(() => {
+    try { fs.unlinkSync(DRAIN_SENTINEL); } catch { /* already gone = fine */ }
   });
 
   await startBot(bot);

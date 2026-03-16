@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.homer.heartbeat</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/yj/homer/scripts/heartbeat-monitor.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/yj/homer</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StartInterval</key>
+  <integer>20</integer>
+
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOMER_LABEL</key>
+    <string>com.homer.daemon</string>
+    <key>DAEMON_PLIST</key>
+    <string>/Users/yj/Library/LaunchAgents/com.homer.daemon.plist</string>
+    <key>HEALTH_URL</key>
+    <string>http://127.0.0.1:3000/health</string>
+    <key>PORT</key>
+    <string>3000</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/yj/Library/Logs/homer/heartbeat.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/yj/Library/Logs/homer/heartbeat.err.log</string>
+</dict>
+</plist>

@@ -17,14 +17,18 @@ MAX_WAIT="${MAX_WAIT:-300}"  # Max 5 minutes wait for drain
 # Check for active CLI runs via SQLite (more reliable than health endpoint)
 check_active_runs() {
   if ! command -v sqlite3 &>/dev/null; then
-    return 0  # Can't check, assume safe
+    echo 999  # fail closed: can't check, assume active
+    return
   fi
   if [ ! -f "$DB_PATH" ]; then
-    return 0
+    echo 999  # fail closed: DB missing
+    return
   fi
 
   local count
-  count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM cli_runs WHERE status = 'running'" 2>/dev/null || echo "0")
+  count=$(sqlite3 "$DB_PATH" \
+    "SELECT COUNT(*) FROM cli_runs WHERE status = 'running' AND started_at > (CAST(strftime('%s','now','-2 hours') AS INTEGER) * 1000);" \
+    2>/dev/null || echo "999")
   echo "$count"
 }
 
