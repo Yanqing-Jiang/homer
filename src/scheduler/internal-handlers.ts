@@ -28,7 +28,6 @@ import { processRegistry } from "../process/registry.js";
 import { cleanupScheduler } from "../process/cleanup-scheduler.js";
 import { checkAndFlushExpiringSessions } from "../memory/flush.js";
 import { config } from "../config/index.js";
-import { processPlanExecutionFollowups } from "./plan-execution-flow.js";
 
 interface InternalJobContext {
   stateManager: StateManager;
@@ -1225,21 +1224,6 @@ async function runHandler(
             : {
                 notificationIntent: "operational_status",
               }
-        );
-      }
-      case "plan_execution_followup": {
-        const result = await processPlanExecutionFollowups({
-          bot: ctx.bot,
-          chatId: ctx.chatId,
-          stateManager: ctx.stateManager,
-        });
-        return buildResult(
-          job,
-          startedAt,
-          true,
-          `Plan execution follow-up: resurfaced ${result.resurfaced}, finalized ${result.finalized}`,
-          undefined,
-          { notificationIntent: "operational_status" }
         );
       }
       default: {

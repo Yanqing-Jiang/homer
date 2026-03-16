@@ -32,8 +32,11 @@ DISK_CHECK_INTERVAL="${DISK_CHECK_INTERVAL:-1}"
 DISK_EMERGENCY_THRESHOLD="${DISK_EMERGENCY_THRESHOLD:-5}"
 
 CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude 2>/dev/null || echo "$HOME/.claude/local/claude")}"
+CODEX_BIN="${CODEX_BIN:-$(command -v codex 2>/dev/null || echo "/opt/homebrew/bin/codex")}"
+RECOVERY_AGENT="${RECOVERY_AGENT:-claude}"
 TRIAGE_TIMEOUT="${TRIAGE_TIMEOUT:-120}"
 FIX_TIMEOUT="${FIX_TIMEOUT:-180}"
+DB_PATH="${DB_PATH:-$HOME/homer/data/homer.db}"
 
 HOMER_DIR="${HOMER_DIR:-$HOME/homer}"
 LOG_DIR="${LOG_DIR:-$HOME/Library/Logs/homer}"
@@ -141,7 +144,11 @@ canonical_plist_source() {
 }
 
 check_health() {
-  /usr/bin/curl -fsS --max-time "$HEALTH_TIMEOUT" "$HEALTH_URL" >/dev/null 2>&1
+  local payload status
+  payload=$(/usr/bin/curl -fsS --max-time "$HEALTH_TIMEOUT" "$HEALTH_URL" 2>/dev/null) || return 1
+  [[ -n "$payload" ]] || return 1
+  status=$(echo "$payload" | /usr/bin/python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || return 1
+  [[ "$status" =~ ^(healthy|degraded)$ ]]
 }
 
 check_disk_space() {
@@ -210,13 +217,21 @@ lock_holder_rows() {
 }
 
 has_active_runs() {
+  # Escape hatch: force-restart file bypasses safety checks
+  if [[ -f "$APP_SUPPORT_DIR/force-restart" ]]; then
+    log "FORCE_RESTART detected; bypassing active-run safety check"
+    /bin/rm -f "$APP_SUPPORT_DIR/force-restart"
+    return 1  # false = no active runs
+  fi
   local db="$HOME/homer/data/homer.db"
   if ! command -v sqlite3 >/dev/null 2>&1 || [[ ! -f "$db" ]]; then
-    return 1
+    return 0  # fail closed: assume runs exist if can't check
   fi
   local count
-  count=$(sqlite3 "$db" "SELECT COUNT(*) FROM cli_runs WHERE status = 'running'" 2>/dev/null || echo "0")
-  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  count=$(sqlite3 "$db" \
+    "SELECT COUNT(*) FROM cli_runs WHERE status = 'running' AND started_at > (CAST(strftime('%s','now','-2 hours') AS INTEGER) * 1000);" \
+    2>/dev/null || echo "999")
+  [[ "$count" =~ ^[0-9]+$ ]] || count=999
   (( count > 0 ))
 }
 
@@ -430,21 +445,33 @@ action_force_kill() {
     return 10
   fi
   log "ACTION: force-kill Homer processes and restart"
-  /usr/bin/pkill -9 -f "homer/dist/index.js" 2>/dev/null || true
+
+  # Prefer targeted kill via launchd PID over broad pattern matching
+  local launchd_pid
+  launchd_pid=$(get_launchd_pid || true)
+  if [[ -n "$launchd_pid" ]]; then
+    log "ACTION: killing launchd-managed process pid=$launchd_pid"
+    /bin/kill -9 "$launchd_pid" 2>/dev/null || true
+  else
+    # Fallback: pattern match only if launchd PID unavailable
+    /usr/bin/pkill -9 -f "homer/dist/index.js" 2>/dev/null || true
+  fi
   /bin/sleep 2
 
+  # Clean up port holder if still bound
   local port_pid
   port_pid=$(/usr/sbin/lsof -ti:${PORT} 2>/dev/null || true)
   if [[ -n "$port_pid" ]]; then
     kill -9 "$port_pid" 2>/dev/null || true
   fi
 
+  # Clean up stale lock holders (only if they match the daemon PID or homer pattern)
   local holders holder cmdline
   holders=$(lock_holder_pids || true)
   if [[ -n "$holders" ]]; then
     for holder in $holders; do
       cmdline=$(pid_cmdline "$holder")
-      if echo "$cmdline" | /usr/bin/grep -Eq "$LOCK_OWNER_PATTERN"; then
+      if echo "$cmdline" | /usr/bin/grep -Fq "homer/dist/index.js"; then
         /bin/kill -9 "$holder" 2>/dev/null || true
       fi
     done
@@ -562,6 +589,81 @@ EOF
   run_with_timeout "$TRIAGE_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" --output-format text > "$llm_output_file" 2>&1 || true
 }
 
+run_codex_triage() {
+  local context_file="$1"
+  local llm_output_file="$2"
+
+  if ! command -v "$CODEX_BIN" >/dev/null 2>&1; then
+    log "TRIAGE: codex binary not found at $CODEX_BIN"
+    : > "$llm_output_file"
+    return 0
+  fi
+
+  local prompt_file
+  prompt_file="$(mktemp /tmp/homer-watchdog-codex-prompt.XXXXXX)"
+  cat > "$prompt_file" <<CODEXPROMPT
+You are triaging an unknown Homer watchdog failure.
+
+Return ONLY one raw JSON object with this schema:
+{"action":"restart|force_kill|repair|source_fix|escalate","signature":"native_module_abi_mismatch|launchd_runtime_mismatch|stale_lock_holder|port_conflict|daemon_missing|health_timeout_with_live_pid|unknown_startup_crash|unknown_runtime_failure","reason":"short explanation","repairHandler":"repair_native_modules|repair_launchd_runtime|repair_stale_lock|null"}
+
+Rules:
+- Prefer deterministic known signatures when the evidence supports them.
+- Use source_fix only if the logs show a clear Homer code bug with a stack trace into Homer source or dist code.
+- If the evidence is weak or mixed, escalate.
+- Do not include markdown fences or commentary.
+
+Context JSON:
+$(cat "$context_file")
+CODEXPROMPT
+
+  run_with_timeout "$TRIAGE_TIMEOUT" "$CODEX_BIN" exec \
+    -m gpt-5.4 \
+    -c model_reasoning_effort="medium" \
+    --skip-git-repo-check \
+    "$(cat "$prompt_file")" > "$llm_output_file" 2>&1 || true
+
+  rm -f "$prompt_file"
+}
+
+run_ai_triage() {
+  local context_file="$1"
+  local llm_output_file="$2"
+
+  case "$RECOVERY_AGENT" in
+    claude)
+      log "TRIAGE: unknown signature, requesting Claude classification"
+      run_claude_triage "$context_file" "$llm_output_file"
+      ;;
+    codex)
+      log "TRIAGE: unknown signature, requesting Codex classification"
+      run_codex_triage "$context_file" "$llm_output_file"
+      ;;
+    bash|none)
+      log "TRIAGE: AI disabled (RECOVERY_AGENT=$RECOVERY_AGENT), skipping"
+      : > "$llm_output_file"
+      ;;
+    *)
+      log "TRIAGE: unknown RECOVERY_AGENT=$RECOVERY_AGENT, skipping AI"
+      : > "$llm_output_file"
+      ;;
+  esac
+}
+
+cleanup_stale_cli_runs() {
+  if [[ ! -f "$DB_PATH" ]]; then
+    return 0
+  fi
+  local stale_count
+  stale_count=$(/usr/bin/sqlite3 "$DB_PATH" \
+    "UPDATE cli_runs SET status = 'failed', error = 'watchdog: stale run cleanup'
+     WHERE status = 'running' AND started_at < (CAST(strftime('%s','now','-2 hours') AS INTEGER) * 1000);
+     SELECT changes();" 2>/dev/null || echo 0)
+  if [[ "$stale_count" -gt 0 ]] 2>/dev/null; then
+    log "CLEANUP: marked ${stale_count} stale cli_runs as failed"
+  fi
+}
+
 run_source_fix() {
   local context_file="$1"
   local reason="$2"
@@ -615,7 +717,7 @@ $(cat "$context_file")
 
 action_escalate() {
   local reason="$1"
-  log "ACTION: escalate — ${reason}"
+  log "ACTION: escalate -- ${reason}"
   local dump_file
   dump_file=$(dump_diagnostics)
   osascript -e "display notification \"${reason}\" with title \"Homer Escalation\"" 2>/dev/null || true
@@ -748,6 +850,9 @@ execute_decision() {
   VALIDATION_OUTCOME="validation_failed"
   VALIDATION_SIGNATURE=""
 
+  # Clean up stale cli_runs AFTER safety check passes but before action
+  cleanup_stale_cli_runs
+
   case "$action" in
     restart)
       action_restart
@@ -843,8 +948,7 @@ handle_failure() {
 
   needs_llm=$(json_field "$decision_file" "needsLlm")
   if [[ "$needs_llm" == "true" ]]; then
-    log "TRIAGE: unknown signature, requesting Claude classification"
-    run_claude_triage "$context_file" "$llm_output_file"
+    run_ai_triage "$context_file" "$llm_output_file"
     if ! run_policy_decide "$context_file" "$decision_file" "$llm_output_file"; then
       local fallback_report
       fallback_report=$(action_escalate "Watchdog policy helper failed after Claude triage")
@@ -875,6 +979,9 @@ while (( $# > 0 )); do
   case "$1" in
     --dry-run)
       DRY_RUN=1
+      ;;
+    --once)
+      : # accepted for backward compat, ignored (always one-shot now)
       ;;
     --context-file)
       DRY_RUN_CONTEXT_FILE="${2:-}"
@@ -909,47 +1016,78 @@ if (( DRY_RUN == 1 )); then
   exit 0
 fi
 
-log "watchdog v3 started — interval=${INTERVAL}s, health_timeout=${HEALTH_TIMEOUT}s, failures_before_action=${FAILURES_BEFORE_ACTION}, launchd_domain=${LAUNCHD_DOMAIN}"
+# --- Watchdog Execution Lock (atomic mkdir, same pattern as heartbeat) ---
+WATCHDOG_LOCK_DIR="${APP_SUPPORT_DIR}/watchdog.lockdir"
+WATCHDOG_LOCK_MAX_AGE=300  # 5 minutes
 
-CONSECUTIVE_FAILURES=0
-DISK_CHECK_COUNTER=0
-EXECUTED="true"
-VALIDATION_OUTCOME="validation_failed"
-VALIDATION_SIGNATURE=""
+acquire_watchdog_lock() {
+  if mkdir "$WATCHDOG_LOCK_DIR" 2>/dev/null; then
+    echo "$$" > "$WATCHDOG_LOCK_DIR/pid"
+    trap 'rm -rf "$WATCHDOG_LOCK_DIR"' EXIT
+    return 0
+  fi
+  # Check for stale lock — PID dead OR age exceeds max
+  local owner_pid lock_age
+  owner_pid=$(cat "$WATCHDOG_LOCK_DIR/pid" 2>/dev/null || echo "")
+  lock_age=$(($(date +%s) - $(stat -f%m "$WATCHDOG_LOCK_DIR" 2>/dev/null || echo "0")))
+  if { [[ -n "$owner_pid" ]] && ! kill -0 "$owner_pid" 2>/dev/null; } || (( lock_age > WATCHDOG_LOCK_MAX_AGE )); then
+    log "removing stale watchdog lock (pid=$owner_pid, age=${lock_age}s)"
+    rm -rf "$WATCHDOG_LOCK_DIR"
+    mkdir "$WATCHDOG_LOCK_DIR" 2>/dev/null || return 1
+    echo "$$" > "$WATCHDOG_LOCK_DIR/pid"
+    trap 'rm -rf "$WATCHDOG_LOCK_DIR"' EXIT
+    return 0
+  fi
+  log "watchdog lock held by pid=$owner_pid (age=${lock_age}s); skipping"
+  return 1
+}
 
-while true; do
-  check_health
-  health_rc=$?
-  if (( health_rc == 0 )); then
-    if (( CONSECUTIVE_FAILURES > 0 )); then
-      log "health recovered after ${CONSECUTIVE_FAILURES} failures"
-      CONSECUTIVE_FAILURES=0
+# --- One-shot mode (default entry point via launchd StartInterval) ---
+run_once() {
+  acquire_watchdog_lock || exit 0
+
+  CONSECUTIVE_FAILURES=1
+  EXECUTED="true"
+  VALIDATION_OUTCOME="validation_failed"
+  VALIDATION_SIGNATURE=""
+
+  # Check drain sentinel — daemon is shutting down gracefully, don't interfere
+  local DRAIN_SENTINEL="$APP_SUPPORT_DIR/daemon.draining"
+  local DRAIN_MAX_AGE_SECS=360  # 6 minutes (270s drain + 90s margin)
+  if [[ -f "$DRAIN_SENTINEL" ]]; then
+    local sentinel_age sentinel_pid
+    sentinel_age=$(($(date +%s) - $(stat -f%m "$DRAIN_SENTINEL")))
+    sentinel_pid=$(/usr/bin/python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('pid',''))" "$DRAIN_SENTINEL" 2>/dev/null || echo "")
+    # Validate PID if available — if process is dead, sentinel is stale
+    if [[ -n "$sentinel_pid" ]] && ! kill -0 "$sentinel_pid" 2>/dev/null; then
+      log "drain sentinel PID ${sentinel_pid} is dead; removing stale sentinel"
+      /bin/rm -f "$DRAIN_SENTINEL"
+    elif (( sentinel_age > DRAIN_MAX_AGE_SECS )); then
+      log "drain sentinel expired (age=${sentinel_age}s); removing"
+      /bin/rm -f "$DRAIN_SENTINEL"
+    else
+      log "daemon is draining (pid=${sentinel_pid:-?}, age=${sentinel_age}s); suppressing watchdog"
+      exit 0
     fi
-
-    DISK_CHECK_COUNTER=$((DISK_CHECK_COUNTER + 1))
-    if (( DISK_CHECK_COUNTER >= DISK_CHECK_INTERVAL )); then
-      DISK_CHECK_COUNTER=0
-      check_disk_space || true
-      check_memory || true
-    fi
-
-    /bin/sleep "$INTERVAL"
-    continue
   fi
 
-  health_timed_out=0
+  check_health
+  local health_rc=$?
+  if (( health_rc == 0 )); then
+    # Healthy -- do periodic maintenance checks
+    check_disk_space || true
+    check_memory || true
+    exit 0
+  fi
+
+  local health_timed_out=0
   if (( health_rc == 28 )); then
     health_timed_out=1
   fi
 
-  CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
-  log "health failed (failure #${CONSECUTIVE_FAILURES}/${FAILURES_BEFORE_ACTION})"
-
-  if (( CONSECUTIVE_FAILURES < FAILURES_BEFORE_ACTION )); then
-    /bin/sleep "$INTERVAL"
-    continue
-  fi
-
+  log "watchdog: health failed (agent=${RECOVERY_AGENT})"
   handle_failure "$health_timed_out"
-  /bin/sleep "$TRIAGE_COOLDOWN"
-done
+}
+
+# --- Dispatch (always one-shot, launchd handles scheduling) ---
+run_once
