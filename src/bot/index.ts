@@ -392,16 +392,43 @@ ${checksStr}`;
     }
   });
 
-  // /restart - trigger graceful restart (launchd will respawn)
+  // /kickstart - trigger daemon restart via launchd WatchPaths
+  bot.command("kickstart", async (ctx) => {
+    const fs = await import("fs/promises");
+    const nodePath = await import("path");
+    const appSupportDir = process.env.APP_SUPPORT_DIR
+      ?? nodePath.join(process.env.HOME ?? "/Users/yj", "Library", "Application Support", "Homer");
+    const triggerFile = nodePath.join(appSupportDir, "kickstart.request");
+    const activeRuns = runManager.activeCount;
+
+    logger.info({ activeRuns }, "Kickstart requested via Telegram");
+
+    await fs.writeFile(triggerFile, [
+      `requested_at=${new Date().toISOString()}`,
+      `reason=telegram`,
+      `pid=${process.pid}`,
+      `active_runs=${activeRuns}`,
+    ].join("\n") + "\n");
+
+    if (activeRuns > 0) {
+      await ctx.reply(`Kickstart requested. ${activeRuns} active CLI run(s) — kickstart script will defer.`);
+    } else {
+      await ctx.reply("Kickstart triggered. Daemon will restart within seconds.");
+    }
+  });
+
+  // /restart - alias for /kickstart (backward compat)
   bot.command("restart", async (ctx) => {
-    await ctx.reply("Initiating graceful restart...");
-    logger.info("Manual restart requested via Telegram");
-    // Send SIGTERM to self so fatal-handlers run the full graceful shutdown sequence
-    // Exit code 3 (non-zero) ensures launchd restarts
-    setTimeout(() => {
-      process.exitCode = 3;
-      process.kill(process.pid, "SIGTERM");
-    }, 1000);
+    await ctx.reply("Use /kickstart instead. Forwarding...");
+    // Trigger the same logic
+    const fs = await import("fs/promises");
+    const nodePath = await import("path");
+    const appSupportDir = process.env.APP_SUPPORT_DIR
+      ?? nodePath.join(process.env.HOME ?? "/Users/yj", "Library", "Application Support", "Homer");
+    await fs.writeFile(
+      nodePath.join(appSupportDir, "kickstart.request"),
+      `requested_at=${new Date().toISOString()}\nreason=telegram-restart-alias\npid=${process.pid}\n`
+    );
   });
 
   // /meeting - process audio document

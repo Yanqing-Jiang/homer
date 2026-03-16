@@ -25,11 +25,6 @@ import {
   sendChunkedTelegramMessage,
 } from "../../notifications/telegram-router.js";
 import { escapeHtml } from "../../utils/telegram-format.js";
-import {
-  dismissPlanExecution,
-  mergeAndDeployPlanExecution,
-  snoozePlanExecution,
-} from "../../scheduler/plan-execution-flow.js";
 
 const IDEAS_FILE = PATHS.ideasMd;
 const FEEDBACK_FILE = PATHS.feedback;
@@ -1097,20 +1092,53 @@ export function registerPlanApprovalHandlers(bot: Bot, stateManager: StateManage
       });
     } catch { /* best-effort */ }
 
-    // Fire-and-forget plan execution
-    import("../../scheduler/plan-executor.js").then(({ executePlan }) => {
-      executePlan({
-        jobId,
-        plan,
-        stateManager,
-        bot,
-        chatId: ctx.chat?.id ?? 0,
+    // Fire-and-forget: spawn Claude Code to implement the plan on main (no branch)
+    const cmdChatId = ctx.chat?.id;
+    if (cmdChatId) {
+      import("../../executors/claude.js").then(({ executeClaudeCommand }) => {
+        const prompt = `You are implementing an approved Homer improvement plan.
+
+## The Plan
+
+${plan}
+
+## Instructions
+
+1. Read the relevant source files mentioned in the plan.
+2. Implement the changes described. Use your judgment on the best approach.
+3. After making changes, run \`npm run build\` in ~/homer/ to verify.
+4. If the build fails, fix the issues until it passes.
+5. Commit your changes with a descriptive message.
+6. Do NOT push to remote, restart the daemon, or modify .env/credentials/CLAUDE.md.
+7. Do NOT create git branches — work directly on the current branch.
+
+Output a brief summary of what you changed and whether the build passes.`;
+
+        executeClaudeCommand(prompt, {
+          cwd: "/Users/yj/homer",
+          model: "opus",
+          timeout: 20 * 60 * 1000,
+        }).then(async (result) => {
+          const summary = (result.output || "completed").slice(0, 1500);
+          try {
+            await bot.api.sendMessage(cmdChatId,
+              `✅ <b>Plan implemented</b>\n<b>ID:</b> <code>${escapeHtml(jobId)}</code>\n<b>Result:</b>\n${escapeHtml(summary)}`,
+              { parse_mode: "HTML" }
+            );
+          } catch { /* best effort */ }
+        }).catch(async (err) => {
+          logger.error({ jobId, error: err }, "Plan implementation via Claude Code failed");
+          try {
+            await bot.api.sendMessage(cmdChatId,
+              `❌ <b>Plan implementation failed</b>\n<b>ID:</b> <code>${escapeHtml(jobId)}</code>\n<code>${escapeHtml(String(err).slice(0, 500))}</code>`,
+              { parse_mode: "HTML" }
+            );
+          } catch { /* best effort */ }
+        });
       }).catch(err => {
-        logger.error({ jobId, error: err }, "Plan execution failed (command)");
+        logger.error({ jobId, error: err }, "Failed to import claude executor");
       });
-    }).catch(err => {
-      logger.error({ jobId, error: err }, "Failed to import plan-executor");
-    });
+    }
   });
 
   // /reject <jobId> - Reject and discard a pending plan
@@ -1241,22 +1269,52 @@ export function registerPlanApprovalCallbacks(bot: Bot, stateManager: StateManag
       });
     } catch { /* best-effort */ }
 
-    // Fire-and-forget plan execution — clear plan only after launch succeeds
+    // Fire-and-forget: spawn Claude Code to implement the plan on main (no branch)
     const chatId = ctx.chat?.id;
     if (chatId) {
-      import("../../scheduler/plan-executor.js").then(({ executePlan }) => {
-        stateManager.clearPendingPlan(jobId);
-        executePlan({
-          jobId,
-          plan,
-          stateManager,
-          bot,
-          chatId,
-        }).catch(err => {
-          logger.error({ jobId, error: err }, "Plan execution failed (inline)");
+      stateManager.clearPendingPlan(jobId);
+      import("../../executors/claude.js").then(({ executeClaudeCommand }) => {
+        const prompt = `You are implementing an approved Homer improvement plan.
+
+## The Plan
+
+${plan}
+
+## Instructions
+
+1. Read the relevant source files mentioned in the plan.
+2. Implement the changes described. Use your judgment on the best approach.
+3. After making changes, run \`npm run build\` in ~/homer/ to verify.
+4. If the build fails, fix the issues until it passes.
+5. Commit your changes with a descriptive message.
+6. Do NOT push to remote, restart the daemon, or modify .env/credentials/CLAUDE.md.
+7. Do NOT create git branches — work directly on the current branch.
+
+Output a brief summary of what you changed and whether the build passes.`;
+
+        executeClaudeCommand(prompt, {
+          cwd: "/Users/yj/homer",
+          model: "opus",
+          timeout: 20 * 60 * 1000,
+        }).then(async (result) => {
+          const summary = (result.output || "completed").slice(0, 1500);
+          try {
+            await bot.api.sendMessage(chatId,
+              `✅ <b>Plan implemented</b>\n<b>ID:</b> <code>${escapeHtml(jobId)}</code>\n<b>Result:</b>\n${escapeHtml(summary)}`,
+              { parse_mode: "HTML" }
+            );
+          } catch { /* best effort */ }
+        }).catch(async (err) => {
+          logger.error({ jobId, error: err }, "Plan implementation via Claude Code failed");
+          try {
+            await bot.api.sendMessage(chatId,
+              `❌ <b>Plan implementation failed</b>\n<b>ID:</b> <code>${escapeHtml(jobId)}</code>\n<code>${escapeHtml(String(err).slice(0, 500))}</code>`,
+              { parse_mode: "HTML" }
+            );
+          } catch { /* best effort */ }
         });
       }).catch(err => {
-        logger.error({ jobId, error: err }, "Failed to import plan-executor");
+        logger.error({ jobId, error: err }, "Failed to import claude executor");
       });
     }
   });
@@ -1333,67 +1391,4 @@ export function registerPlanApprovalCallbacks(bot: Bot, stateManager: StateManag
     }
   });
 
-  bot.callbackQuery(/^a:pe:(\d+):merge_deploy$/, async (ctx) => {
-    const execId = Number(ctx.match?.[1] ?? "0");
-    if (!Number.isFinite(execId) || execId <= 0) {
-      await ctx.answerCallbackQuery("Invalid request");
-      return;
-    }
-
-    await ctx.answerCallbackQuery("Starting live merge + deploy...");
-
-    void mergeAndDeployPlanExecution({
-      bot,
-      stateManager,
-      execId,
-    }).then(async (result) => {
-      if (result.ok || !ctx.chat?.id) return;
-      try {
-        await bot.api.sendMessage(
-          ctx.chat.id,
-          `ℹ️ <b>Live merge + deploy not started</b>\n${escapeHtml(result.message)}`,
-          { parse_mode: "HTML" }
-        );
-      } catch { /* best effort */ }
-    }).catch((error) => {
-      logger.error({ error, execId }, "Plan merge/deploy callback failed");
-    });
-  });
-
-  bot.callbackQuery(/^a:pe:(\d+):snooze$/, async (ctx) => {
-    const execId = Number(ctx.match?.[1] ?? "0");
-    if (!Number.isFinite(execId) || execId <= 0) {
-      await ctx.answerCallbackQuery("Invalid request");
-      return;
-    }
-
-    const result = snoozePlanExecution({ stateManager, execId });
-    await ctx.answerCallbackQuery(result.ok ? "Snoozed for 2 hours" : result.message);
-
-    if (!result.ok) return;
-
-    await ctx.editMessageText(
-      `⏸️ <b>Merge + deploy snoozed for 2 hours.</b>\n` +
-      `<b>Execution:</b> <code>${escapeHtml(String(execId))}</code>`,
-      { parse_mode: "HTML" }
-    );
-  });
-
-  bot.callbackQuery(/^a:pe:(\d+):dismiss$/, async (ctx) => {
-    const execId = Number(ctx.match?.[1] ?? "0");
-    if (!Number.isFinite(execId) || execId <= 0) {
-      await ctx.answerCallbackQuery("Invalid request");
-      return;
-    }
-
-    const result = dismissPlanExecution({ stateManager, execId });
-    await ctx.answerCallbackQuery(result.ok ? "Dismissed" : result.message);
-
-    if (!result.ok) return;
-
-    await ctx.editMessageText(
-      `🗑️ <b>Ready branch dismissed.</b>\n<b>Execution:</b> <code>${escapeHtml(String(execId))}</code>`,
-      { parse_mode: "HTML" }
-    );
-  });
 }

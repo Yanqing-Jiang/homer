@@ -141,7 +141,10 @@ export function loadState(stateFile = getDefaultStateFile()): WatchdogState {
 
 export function saveState(state: WatchdogState, stateFile = getDefaultStateFile()): void {
   ensureParentDir(stateFile);
-  fs.writeFileSync(stateFile, `${JSON.stringify(pruneRecentActions(state), null, 2)}\n`, "utf8");
+  const dir = path.dirname(stateFile);
+  const tmp = path.join(dir, `.tmp.${process.pid}.${Date.now()}.json`);
+  fs.writeFileSync(tmp, `${JSON.stringify(pruneRecentActions(state), null, 2)}\n`, "utf8");
+  fs.renameSync(tmp, stateFile);
 }
 
 function createSignatureState(occurredAt: string): SignatureState {
