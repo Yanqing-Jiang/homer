@@ -321,14 +321,14 @@ export function registerIdeasRoutes(
     const sessionId = randomUUID();
     stateManager.createChatSession({
       id: sessionId,
-      name: `Explore: ${idea.title}`,
+      name: `Idea Explorer: ${idea.title}`,
     });
 
     const threadId = randomUUID();
     stateManager.createThread({
       id: threadId,
       chatSessionId: sessionId,
-      title: `Exploring: ${idea.title}`,
+      title: `Idea Explorer: ${idea.title}`,
       provider: "claude",
       model: "sonnet[1m]",
     });
@@ -337,9 +337,10 @@ export function registerIdeasRoutes(
     const lane = webLane(sessionId);
     stateManager.setCurrentExecutor(lane, "claude", "sonnet[1m]");
 
+    // System message — hidden from UI but included as anchor context for the model
     const systemMessage = `# Idea Exploration — ${idea.id}
 
-You are helping explore and develop this idea. Use the idea ID \`${idea.id}\` to query the database for updates if needed.
+You are helping explore and develop this idea. The idea ID is \`${idea.id}\` — use it to query the database for updates if needed.
 
 ## ${idea.title}
 ${idea.link ? `**Link:** ${idea.link}` : ""}${idea.tags?.length ? `\n**Tags:** ${idea.tags.join(", ")}` : ""}
@@ -355,6 +356,24 @@ Explore this idea through conversation: goals, scope, phases, resources, risks. 
       threadId,
       role: "system",
       content: systemMessage,
+    });
+
+    // Greeting message — visible in chat UI as the starting context
+    const contentPreview = idea.content.length > 200
+      ? idea.content.slice(0, 200) + "..."
+      : idea.content;
+    const greeting = `**${idea.title}**${idea.link ? ` — [source](${idea.link})` : ""}${idea.tags?.length ? `\n*${idea.tags.join(", ")}*` : ""}
+
+${contentPreview}
+
+---
+What aspect would you like to explore first?`;
+
+    stateManager.createThreadMessage({
+      id: randomUUID(),
+      threadId,
+      role: "assistant",
+      content: greeting,
     });
 
     stateManager.createThreadLink({
