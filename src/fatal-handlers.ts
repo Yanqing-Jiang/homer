@@ -163,7 +163,7 @@ async function gracefulExit(signal: string): Promise<void> {
   sendTelegramBestEffort(msg);
 
   await runShutdownTasks();
-  process.exit(0);
+  process.exit(process.exitCode || 0);
 }
 
 /**

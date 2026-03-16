@@ -16,7 +16,7 @@ import { z } from "zod";
 import { executeClaudeCommand } from "../../executors/claude.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { buildSchedulerContext } from "../shared-context.js";
-import { loadIdeasFromDir, saveIdeaFile, type ParsedIdea } from "../../ideas/parser.js";
+import { loadIdeasFromDir } from "../../ideas/parser.js";
 import { logger } from "../../utils/logger.js";
 import type Database from "better-sqlite3";
 import { trackImprovement } from "../../outcomes/hooks.js";
@@ -33,7 +33,6 @@ const PRIORITY_FILES = [
   "src/scheduler/executor.ts",
   "src/scheduler/internal-handlers.ts",
   "src/scheduler/failure-takeover.ts",
-  "src/scheduler/plan-executor.ts",
   "src/bot/handlers/approval.ts",
   "src/bot/handlers/commands.ts",
   "src/executors/claude.ts",
@@ -316,9 +315,8 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
       return { success: true, output: `Suggested "${improvement.title}" but it's a duplicate of an existing idea` };
     }
 
-    // Route based on risk score
-    if (improvement.risk_score <= 7) {
-      const planText = `## Implementation Plan
+    // Always output as plan for human approval — no auto-execution, no branches
+    const planText = `## Implementation Plan
 
 ### ${improvement.title}
 
@@ -326,6 +324,7 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
 **Category:** ${improvement.category || "improvement"}
 **Files:** ${improvement.files_affected.join(", ")}
 **Effort:** ~${improvement.estimated_effort_minutes || "?"} minutes
+**Plan File:** ${outputPath}
 
 ### Description
 ${improvement.description}
@@ -337,51 +336,17 @@ ${improvement.implementation_plan}
 ${improvement.files_affected.map(f => `- \`${f}\``).join("\n")}
 `;
 
-      logger.info(
-        { title: improvement.title, risk: improvement.risk_score, files: improvement.files_affected },
-        "Generated executable improvement plan"
-      );
+    logger.info(
+      { title: improvement.title, risk: improvement.risk_score, files: improvement.files_affected, outputPath },
+      "Generated improvement plan for approval"
+    );
 
-      // Track outcome for executable plans too
-      const planId = `homer_plan_${new Date().toISOString().slice(5, 10).replace("-", "")}_${improvement.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30)}`;
-      try {
-        if (db) trackImprovement(db, planId, improvement.title);
-      } catch { /* best-effort */ }
-
-      return { success: true, output: planText };
-    }
-
-    // Risk > 7: save as idea file for human review
-    const now = new Date();
-    const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
-    const slug = improvement.title
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "")
-      .slice(0, 40);
-    const id = `homer_${now.toISOString().slice(5, 10).replace("-", "")}_${slug}`;
-
-    const parsed: ParsedIdea = {
-      id,
-      title: improvement.title,
-      status: "draft",
-      source: "homer-analysis",
-      content: improvement.description,
-      context: `${improvement.implementation_plan}\n\nRisk: ${improvement.risk_score}/10 — ${improvement.risk_explanation}\n\nAnalysis file: ${outputPath}`,
-      tags: ["homer-improvement", `risk-${improvement.risk_score}`],
-      timestamp,
-    };
-
-    saveIdeaFile(parsed);
-
+    const planId = `homer_plan_${new Date().toISOString().slice(5, 10).replace("-", "")}_${improvement.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30)}`;
     try {
-      if (db) trackImprovement(db, id, improvement.title);
-    } catch { /* outcome tracking best-effort */ }
+      if (db) trackImprovement(db, planId, improvement.title);
+    } catch { /* best-effort */ }
 
-    const output = `Generated improvement "${improvement.title}" (risk ${improvement.risk_score}/10 — saved as idea)`;
-    logger.info({ id, title: improvement.title, risk: improvement.risk_score }, "Wrote high-risk homer improvement as idea");
-
-    return { success: true, output };
+    return { success: true, output: planText };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     logger.error({ error: msg }, "Homer improvements failed");
