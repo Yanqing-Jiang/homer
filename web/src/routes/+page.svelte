@@ -714,52 +714,45 @@ Just confirm when done. Keep your response brief.`;
 					threadId = thread.id;
 				}
 
-			// Non-streaming execution for all CLIs
+			// Execute and poll for completion (no SSE streaming)
 			isStreaming = true;
-			streamingContent = 'Running...';
+			streamingContent = 'Thinking...';
 
 			try {
 				const result = await api.executeMessage(threadId, executionMessage, currentAttachments.length > 0 ? currentAttachments : undefined);
 				const runId = result.runId;
 
-				currentAbort = api.streamRunEvents(runId, {
-					onStatus: async (data) => {
-						if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
-							try {
-								const run = await api.getRun(runId);
-								const output = run.run.output || (run.run.error ?? '');
-								// Detect session expiry from run output
-								const expiredPattern = /session expired|session not found/i;
-								if (expiredPattern.test(output) || expiredPattern.test(run.run.error ?? '')) {
-									sessionExpired = true;
-								}
-								if (output) {
-									messages = [...messages, { role: 'assistant', content: output, timestamp: new Date() }];
-								} else if (run.run.status === 'cancelled') {
-									chatError = 'Run cancelled.';
-								}
-							} catch (e) {
-								chatError = e instanceof Error ? e.message : 'Failed to load run output';
-							} finally {
-								streamingContent = '';
-								isStreaming = false;
-								currentAbort?.abort();
-								currentAbort = null;
-								executorMessageCount++;
+				// Poll for completion instead of SSE
+				const pollInterval = setInterval(async () => {
+					try {
+						const run = await api.getRun(runId);
+						if (run.run.status === 'completed' || run.run.status === 'failed' || run.run.status === 'cancelled') {
+							clearInterval(pollInterval);
+							const output = run.run.output || (run.run.error ?? '');
+							const expiredPattern = /session expired|session not found/i;
+							if (expiredPattern.test(output) || expiredPattern.test(run.run.error ?? '')) {
+								sessionExpired = true;
 							}
+							if (output) {
+								messages = [...messages, { role: 'assistant', content: output, timestamp: new Date() }];
+							} else if (run.run.status === 'cancelled') {
+								chatError = 'Run cancelled.';
+							}
+							streamingContent = '';
+							isStreaming = false;
+							currentAbort = null;
+							executorMessageCount++;
 						}
-					},
-					onError: (err) => {
-						// Detect session expiry from error
-						if (/session expired|SESSION_EXPIRED/i.test(err.message)) {
-							sessionExpired = true;
-						}
-						chatError = err.message;
+					} catch (e) {
+						clearInterval(pollInterval);
+						chatError = e instanceof Error ? e.message : 'Failed to check run status';
 						streamingContent = '';
 						isStreaming = false;
 						currentAbort = null;
 					}
-				});
+				}, 2000);
+
+				currentAbort = { abort: () => clearInterval(pollInterval) };
 			} catch (execError) {
 				console.error('Execute error:', execError);
 				chatError = execError instanceof Error ? execError.message : 'Execution failed';
