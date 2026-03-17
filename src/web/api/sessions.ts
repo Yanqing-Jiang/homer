@@ -31,10 +31,161 @@ interface CreateMessageBody {
   metadata?: Record<string, unknown>;
 }
 
+interface SearchResultRow {
+  id: string;
+  name: string;
+  updatedAt: string;
+  threadCount?: number;
+  snippet?: string | null;
+  rank?: number;
+}
+
+interface SessionSearchResult {
+  id: string;
+  name: string;
+  updatedAt: string;
+  threadCount: number;
+  snippet: string | null;
+  matchType: "name" | "content";
+}
+
+function mergeSearchResults(
+  nameHits: SearchResultRow[],
+  ftsHits: SearchResultRow[],
+  limit: number
+): SessionSearchResult[] {
+  const seen = new Map<string, SessionSearchResult>();
+
+  for (const row of nameHits) {
+    if (!seen.has(row.id)) {
+      seen.set(row.id, {
+        id: row.id,
+        name: row.name,
+        updatedAt: row.updatedAt,
+        threadCount: row.threadCount ?? 0,
+        snippet: null,
+        matchType: "name",
+      });
+    }
+  }
+
+  for (const row of ftsHits) {
+    const existing = seen.get(row.id);
+    if (!existing) {
+      seen.set(row.id, {
+        id: row.id,
+        name: row.name,
+        updatedAt: row.updatedAt,
+        threadCount: row.threadCount ?? 0,
+        snippet: row.snippet ?? null,
+        matchType: "content",
+      });
+    } else if (!existing.snippet && row.snippet) {
+      existing.snippet = row.snippet;
+    }
+  }
+
+  const results = Array.from(seen.values());
+  results.sort((a, b) => {
+    if (a.matchType !== b.matchType) {
+      return a.matchType === "name" ? -1 : 1;
+    }
+    return b.updatedAt.localeCompare(a.updatedAt);
+  });
+
+  return results.slice(0, limit);
+}
+
 export function registerSessionRoutes(
   server: FastifyInstance,
   stateManager: StateManager
 ): void {
+  // ============================================
+  // Session Search (must be before /:id route)
+  // ============================================
+
+  server.get("/api/chat-sessions/search", async (request: FastifyRequest) => {
+    const query = request.query as { q?: string; limit?: string; includeArchived?: string };
+
+    const searchQuery = (query.q ?? "").trim();
+    if (searchQuery.length < 2) {
+      return { sessions: [], query: searchQuery, totalMatches: 0 };
+    }
+
+    const limit = Math.min(parseInt(query.limit ?? "10", 10), 30);
+    const includeArchived = query.includeArchived === "true";
+    const db = stateManager.getDb();
+
+    const tokens = searchQuery
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((t) => t.replace(/[*()":^${}[\]\\]/g, ""))
+      .filter((t) => t.length > 0)
+      .slice(0, 10);
+
+    if (tokens.length === 0) {
+      return { sessions: [], query: searchQuery, totalMatches: 0 };
+    }
+
+    const archivedClause = includeArchived ? "" : "AND cs.archived_at IS NULL";
+
+    // Query 1: Session name matches (per-token LIKE with AND)
+    const nameLikeConditions = tokens.map(() => "lower(cs.name) LIKE ?").join(" AND ");
+    const nameLikeParams = tokens.map(
+      (t) => `%${t.toLowerCase().replace(/%/g, "\\%").replace(/_/g, "\\_")}%`
+    );
+
+    const nameHits = db
+      .prepare(
+        `SELECT
+          cs.id,
+          cs.name,
+          cs.updated_at AS updatedAt,
+          (SELECT COUNT(*) FROM threads th WHERE th.chat_session_id = cs.id) AS threadCount
+        FROM chat_sessions cs
+        WHERE ${nameLikeConditions}
+          ${archivedClause}
+        ORDER BY cs.updated_at DESC
+        LIMIT ?`
+      )
+      .all(...nameLikeParams, limit) as SearchResultRow[];
+
+    // Query 2: FTS5 content matches
+    const ftsMatchExpr = tokens.join(" AND ");
+    let ftsHits: SearchResultRow[] = [];
+    try {
+      ftsHits = db
+        .prepare(
+          `SELECT
+            cs.id,
+            cs.name,
+            cs.updated_at AS updatedAt,
+            snippet(thread_messages_fts, 0, '<mark>', '</mark>', '...', 24) AS snippet,
+            bm25(thread_messages_fts) AS rank
+          FROM thread_messages_fts
+          JOIN thread_messages tm ON thread_messages_fts.rowid = tm.rowid
+          JOIN threads th ON th.id = tm.thread_id
+          JOIN chat_sessions cs ON cs.id = th.chat_session_id
+          WHERE thread_messages_fts MATCH ?
+            ${archivedClause}
+          ORDER BY bm25(thread_messages_fts)
+          LIMIT 50`
+        )
+        .all(ftsMatchExpr) as SearchResultRow[];
+    } catch {
+      // FTS5 MATCH can fail on edge-case inputs; degrade gracefully
+      ftsHits = [];
+    }
+
+    const results = mergeSearchResults(nameHits, ftsHits, limit);
+    const totalMatches = new Set([
+      ...nameHits.map((r) => r.id),
+      ...ftsHits.map((r) => r.id),
+    ]).size;
+
+    return { sessions: results, query: searchQuery, totalMatches };
+  });
+
   // ============================================
   // Chat Sessions
   // ============================================
