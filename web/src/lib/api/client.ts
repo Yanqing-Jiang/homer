@@ -1251,6 +1251,56 @@ export async function stopTradingService(): Promise<{ success: boolean; message:
 }
 
 // ============================================
+// Actions API (Push / Deploy)
+// ============================================
+
+export interface ActionStep {
+	name: string;
+	status: 'completed' | 'failed' | 'skipped';
+	output?: string;
+	error?: string;
+	durationMs?: number;
+}
+
+export interface PushResult {
+	success: boolean;
+	branch?: string;
+	steps: ActionStep[];
+	message?: string;
+	error?: string;
+	restarting?: boolean;
+}
+
+export interface RepoStatus {
+	branch: string;
+	hasChanges: boolean;
+	changedFiles: number;
+	ahead: number;
+	error?: string;
+}
+
+/** Push (commit + push) changes for a repo */
+export async function pushChanges(options?: {
+	repo?: string;
+	message?: string;
+}): Promise<PushResult> {
+	return apiFetch<PushResult>('/api/actions/push', {
+		method: 'POST',
+		body: JSON.stringify(options ?? {})
+	});
+}
+
+/** Full web deploy: build web + backend, commit + push, restart daemon */
+export async function pushWeb(): Promise<PushResult> {
+	return apiFetch<PushResult>('/api/actions/push-web', { method: 'POST' });
+}
+
+/** Check repo status (uncommitted changes, ahead of remote) */
+export async function getRepoStatus(): Promise<RepoStatus> {
+	return apiFetch<RepoStatus>('/api/actions/status');
+}
+
+// ============================================
 // Session Bridge
 // ============================================
 
