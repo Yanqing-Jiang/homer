@@ -62,7 +62,7 @@ export function createRoutes(
   registerSessionRoutes(server, stateManager);
 
   // Register streaming routes for chat
-  registerStreamingRoutes(server, stateManager);
+  registerStreamingRoutes(server, stateManager, cliRunManagerRef);
 
   // Register ideas routes
   registerIdeasRoutes(server, stateManager);
