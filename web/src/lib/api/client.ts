@@ -131,6 +131,34 @@ export interface ThreadLink {
 	createdAt: string;
 }
 
+// Search sessions by keyword (name + FTS5 on thread messages)
+export interface SessionSearchResult {
+	id: string;
+	name: string;
+	updatedAt: string;
+	threadCount: number;
+	snippet: string | null;
+	matchType: 'name' | 'content';
+}
+
+export interface SearchResponse {
+	sessions: SessionSearchResult[];
+	query: string;
+	totalMatches: number;
+}
+
+export async function searchSessions(
+	query: string,
+	options?: { limit?: number; includeArchived?: boolean }
+): Promise<SearchResponse> {
+	const params = new URLSearchParams({ q: query });
+	if (options?.limit) params.set('limit', String(options.limit));
+	if (options?.includeArchived) params.set('includeArchived', 'true');
+
+	const result = await apiFetch<SearchResponse | undefined>(`/api/chat-sessions/search?${params}`);
+	return result ?? { sessions: [], query, totalMatches: 0 };
+}
+
 // List sessions
 export async function listSessions(options?: {
 	includeArchived?: boolean;
