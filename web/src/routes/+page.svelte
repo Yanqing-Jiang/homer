@@ -3,14 +3,15 @@
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
 	import * as api from '$lib/api/client';
-	import { marked } from 'marked';
-	import DOMPurify from 'dompurify';
+	import { renderMarkdown, clearMarkdownCache, formatTime } from '$lib/utils/markdown';
 	import { useAuth } from '$lib/hooks/useAuth.svelte';
 	import { AuthOverlay } from '$lib/components';
 	import ExecutorBadge from '$lib/components/ExecutorBadge.svelte';
 	import ChatMessages from '$lib/components/ChatMessages.svelte';
 	import ChatInput from '$lib/components/ChatInput.svelte';
 	import SessionDropdown from '$lib/components/SessionDropdown.svelte';
+	import SearchDropdown from '$lib/components/SearchDropdown.svelte';
+	import { clickOutside } from '$lib/actions/clickOutside';
 
 	const auth = useAuth();
 
@@ -252,42 +253,6 @@
 		{ name: 'Trading', icon: 'chart', href: '/trading' }
 	];
 
-	// Configure marked for safe rendering
-	marked.setOptions({
-		breaks: true,
-		gfm: true
-	});
-
-	// DOMPurify configuration with explicit allowlist for XSS protection
-	const DOMPURIFY_CONFIG = {
-		ALLOWED_TAGS: ['p', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'em', 'b', 'i', 'a', 'code', 'pre', 'ul', 'ol', 'li', 'blockquote', 'img', 'table', 'thead', 'tbody', 'tr', 'td', 'th', 'hr', 'span', 'div'],
-		ALLOWED_ATTR: ['href', 'src', 'alt', 'class', 'target', 'rel', 'title'],
-		ALLOW_DATA_ATTR: false
-	};
-
-	// Hook to force safe link attributes on all anchors
-	DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-		if (node.tagName === 'A') {
-			node.setAttribute('target', '_blank');
-			node.setAttribute('rel', 'noopener noreferrer');
-		}
-	});
-
-	const markdownCache = new Map<string, string>();
-
-	function renderMarkdown(content: string): string {
-		const cached = markdownCache.get(content);
-		if (cached) return cached;
-		const html = marked.parse(content) as string;
-		const result = DOMPurify.sanitize(html, DOMPURIFY_CONFIG) as string;
-		markdownCache.set(content, result);
-		return result;
-	}
-
-	function formatTime(date: Date): string {
-		return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-	}
-
 	// Track if we've checked for context
 	let contextChecked = $state(false);
 
@@ -455,7 +420,7 @@
 
 	async function selectSession(session: api.ChatSession | null) {
 		showSessionDropdown = false;
-		markdownCache.clear();
+		clearMarkdownCache();
 		sessionExpired = false;
 
 		if (currentAbort) {
@@ -1026,7 +991,7 @@ Just confirm when done. Keep your response brief.`;
 					{/if}
 
 					<!-- Chat Messages Area -->
-					<ChatMessages {messages} {isStreaming} {streamingContent} {renderMarkdown} {formatTime} />
+					<ChatMessages {messages} {isStreaming} {streamingContent} />
 
 					<!-- Chat Input Area -->
 					<ChatInput
