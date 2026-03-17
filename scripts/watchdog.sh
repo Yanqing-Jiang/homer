@@ -599,9 +599,9 @@ write_docker_context_json() {
   local http_status="null"
 
   if [[ "$daemon_running" == "true" ]]; then
-    backend_state=$(docker inspect --format '{{.State.Status}}' ai-portfolio-backend-1 2>/dev/null || echo "not_found")
+    backend_state=$(docker inspect --format '{{.State.Status}}' portfolio-backend 2>/dev/null || echo "not_found")
     if [[ "$backend_state" == "running" ]]; then
-      backend_health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' ai-portfolio-backend-1 2>/dev/null || echo "unknown")
+      backend_health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' portfolio-backend 2>/dev/null || echo "unknown")
       local code
       code=$(/usr/bin/curl -s -o /dev/null -w '%{http_code}' --max-time "$DOCKER_HEALTH_TIMEOUT" "$DOCKER_HEALTH_URL" 2>/dev/null || echo "0")
       http_status="$code"
@@ -717,7 +717,7 @@ validate_docker_after_action() {
   fi
 
   local backend_state
-  backend_state=$(docker inspect --format '{{.State.Status}}' ai-portfolio-backend-1 2>/dev/null || echo "not_found")
+  backend_state=$(docker inspect --format '{{.State.Status}}' portfolio-backend 2>/dev/null || echo "not_found")
   if [[ "$backend_state" != "running" ]]; then
     VALIDATION_OUTCOME="same_signature_recurred"
     VALIDATION_SIGNATURE="docker_container_stopped"
@@ -740,7 +740,7 @@ check_docker_health() {
     need_action=true
   else
     local backend_state
-    backend_state=$(docker inspect --format '{{.State.Status}}' ai-portfolio-backend-1 2>/dev/null || echo "not_found")
+    backend_state=$(docker inspect --format '{{.State.Status}}' portfolio-backend 2>/dev/null || echo "not_found")
     if [[ "$backend_state" != "running" ]]; then
       need_action=true
     else
