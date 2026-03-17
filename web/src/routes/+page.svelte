@@ -70,6 +70,48 @@
 	let chatInputComponent = $state<ChatInput | null>(null);
 	let creatingAttachmentSession = $state<Promise<string | null> | null>(null);
 
+	// Deploy action state
+	let isDeploying = $state(false);
+
+	async function handlePush() {
+		if (isDeploying) return;
+		isDeploying = true;
+		messages = [...messages, { role: 'user', content: '/push', timestamp: new Date() }];
+		try {
+			const result = await api.pushChanges();
+			const msg = result.success
+				? result.message || 'Pushed successfully.'
+				: `Push failed: ${result.error}`;
+			messages = [...messages, { role: 'assistant', content: msg, timestamp: new Date() }];
+		} catch (e) {
+			messages = [...messages, { role: 'assistant', content: `Push failed: ${e instanceof Error ? e.message : 'Unknown error'}`, timestamp: new Date() }];
+		}
+		isDeploying = false;
+	}
+
+	async function handleDeploy() {
+		if (isDeploying) return;
+		isDeploying = true;
+		messages = [...messages, { role: 'user', content: '/push-web', timestamp: new Date() }];
+		messages = [...messages, { role: 'assistant', content: 'Building & deploying... This may take a minute.', timestamp: new Date() }];
+		try {
+			const result = await api.pushWeb();
+			const msg = result.success
+				? (result.message || 'Deployed successfully.') + (result.restarting ? '\n\nDaemon restarting — page will reconnect automatically.' : '')
+				: `Deploy failed: ${result.error}`;
+			messages = [...messages, { role: 'assistant', content: msg, timestamp: new Date() }];
+		} catch (e) {
+			const err = e instanceof Error ? e.message : 'Unknown error';
+			// Connection drop during daemon restart is expected
+			if (err.includes('fetch') || err.includes('network') || err.includes('Failed to fetch')) {
+				messages = [...messages, { role: 'assistant', content: 'Deploy sent. Daemon restarting — page will reconnect automatically.', timestamp: new Date() }];
+			} else {
+				messages = [...messages, { role: 'assistant', content: `Deploy failed: ${err}`, timestamp: new Date() }];
+			}
+		}
+		isDeploying = false;
+	}
+
 	// Full-page drag-drop state
 	let pageDragCounter = $state(0);
 
@@ -123,6 +165,8 @@
 	// Local-only commands (always available, not from API)
 	const localCommands: api.CommandDefinition[] = [
 		{ name: '/log-memory', category: 'memory', description: 'Log session summary to daily memory' },
+		{ name: '/push', category: 'system', description: 'Commit & push homer changes' },
+		{ name: '/push-web', category: 'system', description: 'Build + push + restart (full deploy)' },
 	];
 
 	// Use dynamic commands if loaded, otherwise fallback, and always include local commands
@@ -713,6 +757,20 @@ Just confirm when done. Keep your response brief.`;
 					const context = queryPart || 'work';
 					chatInput = buildLogMemoryMessage(context);
 					await handleSendMessage();
+					return;
+				}
+
+				// Handle /push command
+				if (matchedCmd.name === '/push') {
+					chatInput = '';
+					await handlePush();
+					return;
+				}
+
+				// Handle /push-web command
+				if (matchedCmd.name === '/push-web') {
+					chatInput = '';
+					await handleDeploy();
 					return;
 				}
 			}
