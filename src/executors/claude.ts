@@ -5,7 +5,7 @@ import { logger } from "../utils/logger.js";
 import { processRegistry } from "../process/registry.js";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
 
-const DEFAULT_TIMEOUT = 1200_000; // 20 minutes
+const DEFAULT_TIMEOUT = 1800_000; // 30 minutes
 const KILL_GRACE_MS = 5_000;
 const CLOSE_GRACE_MS = 1_000;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024; // 2MB capture cap
