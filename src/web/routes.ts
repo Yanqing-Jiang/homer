@@ -22,6 +22,7 @@ import { registerRunRoutes } from "./api/runs.js";
 import { registerTradingRoutes } from "./api/trading.js";
 import { registerThreadEventRoutes } from "./api/thread-events.js";
 import { registerWebhookRoutes } from "./api/webhooks.js";
+import { registerActionRoutes } from "./api/actions.js";
 import type { CLIRunManager } from "../executors/cli-runner.js";
 import type { Bot } from "grammy";
 import { investigate } from "../process/fallback-chain.js";
@@ -100,6 +101,9 @@ export function createRoutes(
 
   // Register webhook routes (ElevenLabs call-complete, Twilio inbound SMS)
   registerWebhookRoutes(server, stateManager, botRef, config.telegram.allowedChatId);
+
+  // Register action routes (push, push-web deploy)
+  registerActionRoutes(server);
 
   // Investigation endpoint (used by watchdog.sh and internal callers)
   server.post("/api/investigate", async (req, reply) => {
