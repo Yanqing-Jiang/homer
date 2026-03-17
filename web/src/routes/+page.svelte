@@ -16,6 +16,13 @@
 	const auth = useAuth();
 
 	let searchQuery = $state('');
+	let searchResults = $state<api.SessionSearchResult[]>([]);
+	let showSearchDropdown = $state(false);
+	let searchLoading = $state(false);
+	let selectedSearchIndex = $state(-1);
+	let searchDebounceTimer: ReturnType<typeof setTimeout> | undefined;
+	let searchVersion = 0;
+
 	let chatInput = $state('');
 	let messages = $state<Array<{ id?: string; role: 'user' | 'assistant'; content: string; timestamp: Date }>>([]);
 	let knownMessageIds = $state<Set<string>>(new Set());
@@ -418,6 +425,71 @@
 		}
 	}
 
+	// ============================================
+	// Search
+	// ============================================
+
+	$effect(() => {
+		const q = searchQuery.trim();
+
+		if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+
+		if (q.length < 2) {
+			searchResults = [];
+			showSearchDropdown = false;
+			searchLoading = false;
+			return;
+		}
+
+		searchLoading = true;
+		showSearchDropdown = true;
+		const version = ++searchVersion;
+
+		searchDebounceTimer = setTimeout(async () => {
+			try {
+				const response = await api.searchSessions(q, { limit: 10 });
+				if (version === searchVersion) {
+					searchResults = response.sessions;
+					showSearchDropdown = true;
+					selectedSearchIndex = -1;
+				}
+			} catch {
+				if (version === searchVersion) {
+					searchResults = [];
+				}
+			} finally {
+				if (version === searchVersion) {
+					searchLoading = false;
+				}
+			}
+		}, 300);
+	});
+
+	function handleSearchKeydown(e: KeyboardEvent) {
+		if (!showSearchDropdown) return;
+
+		if (e.key === 'ArrowDown') {
+			e.preventDefault();
+			selectedSearchIndex = Math.min(selectedSearchIndex + 1, searchResults.length - 1);
+		} else if (e.key === 'ArrowUp') {
+			e.preventDefault();
+			selectedSearchIndex = Math.max(selectedSearchIndex - 1, -1);
+		} else if (e.key === 'Enter' && selectedSearchIndex >= 0) {
+			e.preventDefault();
+			const result = searchResults[selectedSearchIndex];
+			if (result) handleSearchSelect(result);
+		} else if (e.key === 'Escape') {
+			showSearchDropdown = false;
+		}
+	}
+
+	function handleSearchSelect(result: api.SessionSearchResult) {
+		showSearchDropdown = false;
+		searchQuery = '';
+		searchResults = [];
+		selectSession({ id: result.id, name: result.name, updatedAt: result.updatedAt, createdAt: result.updatedAt, archivedAt: null });
+	}
+
 	async function selectSession(session: api.ChatSession | null) {
 		showSessionDropdown = false;
 		clearMarkdownCache();
@@ -811,7 +883,7 @@ Just confirm when done. Keep your response brief.`;
 				</div>
 			</div>
 
-			<div class="search-container">
+			<div class="search-container" use:clickOutside={() => showSearchDropdown = false}>
 				<svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 					<circle cx="11" cy="11" r="8"/>
 					<path d="M21 21l-4.35-4.35"/>
@@ -819,9 +891,21 @@ Just confirm when done. Keep your response brief.`;
 				<input
 					type="text"
 					class="search-input"
-					placeholder="Search resources, services, and docs (G+/)"
+					placeholder="Search sessions and messages..."
 					bind:value={searchQuery}
+					onkeydown={handleSearchKeydown}
+					onfocus={() => { if (searchResults.length > 0) showSearchDropdown = true; }}
 				/>
+				{#if showSearchDropdown}
+					<SearchDropdown
+						results={searchResults}
+						loading={searchLoading}
+						query={searchQuery}
+						bind:selectedIndex={selectedSearchIndex}
+						onselect={handleSearchSelect}
+						onclose={() => showSearchDropdown = false}
+					/>
+				{/if}
 			</div>
 
 			<div class="top-bar-right">
