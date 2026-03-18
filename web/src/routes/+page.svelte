@@ -38,6 +38,14 @@
 	let currentAbort = $state<{ abort: () => void } | null>(null);
 	let chatError = $state<string | null>(null);
 	let sessionExpired = $state(false);
+	let activeStreamGen = 0; // generation counter to guard stale callbacks
+
+	function resetStreamingState() {
+		isStreaming = false;
+		streamingContent = '';
+		streamingSteps = [];
+		currentAbort = null;
+	}
 
 	// Session dropdown state
 	let sessions = $state<api.ChatSession[]>([]);
@@ -223,10 +231,8 @@
 		try {
 			if (currentAbort) {
 				currentAbort.abort();
-				currentAbort = null;
 			}
-			isStreaming = false;
-			streamingContent = '';
+			resetStreamingState();
 			const result = await api.setExecutor(sessionId, executor, model);
 			currentExecutor = result.executor;
 			currentModel = result.model;
@@ -242,10 +248,8 @@
 		try {
 			if (currentAbort) {
 				currentAbort.abort();
-				currentAbort = null;
 			}
-			isStreaming = false;
-			streamingContent = '';
+			resetStreamingState();
 			const result = await api.clearExecutor(sessionId);
 			currentExecutor = result.executor;
 			currentModel = result.model;
@@ -317,8 +321,8 @@
 	onDestroy(() => {
 		if (currentAbort) {
 			currentAbort.abort();
-			currentAbort = null;
 		}
+		resetStreamingState();
 	});
 
 	// Stored context from sessionStorage (read once, use when auth completes)
@@ -542,10 +546,8 @@
 
 		if (currentAbort) {
 			currentAbort.abort();
-			currentAbort = null;
-			isStreaming = false;
-			streamingContent = '';
 		}
+		resetStreamingState();
 
 		if (!session) {
 			// New session - also reset executor
@@ -605,10 +607,8 @@
 			if (sessionId === id) {
 				if (currentAbort) {
 					currentAbort.abort();
-					currentAbort = null;
 				}
-				isStreaming = false;
-				streamingContent = '';
+				resetStreamingState();
 				sessionId = null;
 				threadId = null;
 				messages = [];
@@ -813,14 +813,18 @@ Just confirm when done. Keep your response brief.`;
 			isStreaming = true;
 			streamingContent = '';
 			streamingSteps = [];
+			const gen = ++activeStreamGen; // guard stale callbacks
+			const isStale = () => gen !== activeStreamGen;
 
 			if (currentExecutor === 'claude' || currentExecutor === 'chatgpt') {
 				// SSE streaming path with step indicators
 				const stream = api.streamMessage(threadId, executionMessage, {
 					onDelta: (data) => {
+						if (isStale()) return;
 						streamingContent += data.content;
 					},
 					onStep: (data) => {
+						if (isStale()) return;
 						if (data.type === 'tool_use') {
 							streamingSteps = [...streamingSteps, { ...data, startedAt: Date.now(), completed: false }];
 						} else if (data.type === 'tool_result' && data.id) {
@@ -832,54 +836,51 @@ Just confirm when done. Keep your response brief.`;
 						}
 					},
 					onComplete: (data) => {
-						// Fetch the final message from the thread for accurate content
-						if (threadId) {
+						if (isStale()) return;
+						const finalContent = streamingContent;
+						const expiredPattern = /session expired|session not found/i;
+						if (expiredPattern.test(finalContent)) {
+							sessionExpired = true;
+						}
+
+						// Use messageId from SSE complete event if available
+						const completeMsgId = (data as Record<string, unknown>).messageId as string | null;
+						if (completeMsgId && threadId) {
+							// Fetch the specific message by listing thread messages
 							api.getThread(threadId).then(thread => {
-								const lastMsg = thread.messages?.[thread.messages.length - 1];
-								if (lastMsg?.role === 'assistant') {
-									messages = [...messages, { id: lastMsg.id, role: 'assistant', content: lastMsg.content, timestamp: new Date(lastMsg.createdAt) }];
-								} else if (streamingContent) {
-									messages = [...messages, { role: 'assistant', content: streamingContent, timestamp: new Date() }];
+								if (isStale()) return;
+								const msg = thread.messages?.find(m => m.id === completeMsgId);
+								if (msg?.role === 'assistant') {
+									messages = [...messages, { id: msg.id, role: 'assistant', content: msg.content, timestamp: new Date(msg.createdAt) }];
+								} else if (finalContent) {
+									messages = [...messages, { role: 'assistant', content: finalContent, timestamp: new Date() }];
 								}
-								const expiredPattern = /session expired|session not found/i;
-								if (expiredPattern.test(streamingContent)) {
-									sessionExpired = true;
-								}
-								streamingContent = '';
-								streamingSteps = [];
-								isStreaming = false;
-								currentAbort = null;
+								resetStreamingState();
 								executorMessageCount++;
 							}).catch(() => {
-								if (streamingContent) {
-									messages = [...messages, { role: 'assistant', content: streamingContent, timestamp: new Date() }];
+								if (isStale()) return;
+								if (finalContent) {
+									messages = [...messages, { role: 'assistant', content: finalContent, timestamp: new Date() }];
 								}
-								streamingContent = '';
-								streamingSteps = [];
-								isStreaming = false;
-								currentAbort = null;
+								resetStreamingState();
 								executorMessageCount++;
 							});
 						} else {
-							if (streamingContent) {
-								messages = [...messages, { role: 'assistant', content: streamingContent, timestamp: new Date() }];
+							// No messageId — use streamed content directly
+							if (finalContent) {
+								messages = [...messages, { role: 'assistant', content: finalContent, timestamp: new Date() }];
 							}
-							streamingContent = '';
-							streamingSteps = [];
-							isStreaming = false;
-							currentAbort = null;
+							resetStreamingState();
 							executorMessageCount++;
 						}
 					},
 					onError: (data) => {
+						if (isStale()) return;
 						if (data.code === 'AUTH_EXPIRED') {
 							sessionExpired = true;
 						}
 						chatError = data.message;
-						streamingContent = '';
-						streamingSteps = [];
-						isStreaming = false;
-						currentAbort = null;
+						resetStreamingState();
 					},
 				}, {
 					attachments: currentAttachments.length > 0 ? currentAttachments : undefined,
