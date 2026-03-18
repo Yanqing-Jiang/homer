@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomUUID } from "crypto";
 import type { CLIRunManager } from "../../executors/cli-runner.js";
+import type { StreamStepEvent } from "../../executors/claude.js";
 import type { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
 import { webLane } from "../../utils/lanes.js";
@@ -266,6 +267,9 @@ export function registerStreamingRoutes(
             if (!delta) return;
             streamedContent += delta;
             sendEvent("delta", { content: delta });
+          },
+          onEvent: (stepEvent: StreamStepEvent) => {
+            sendEvent("step", stepEvent as unknown as Record<string, unknown>);
           },
         });
 

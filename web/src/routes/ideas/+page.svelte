@@ -246,6 +246,9 @@
 			}));
 			if (result.resumed) {
 				toast.success('Resuming exploration thread');
+			} else {
+				// Auto-trigger first AI response with insights (chat page reads this)
+				sessionStorage.setItem('pending_message', 'Go');
 			}
 			window.location.href = '/';
 		} catch (e) {

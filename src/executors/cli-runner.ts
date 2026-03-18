@@ -27,6 +27,8 @@ export interface CLIRunStartParams {
   suppressContext?: boolean;
   /** Called with cumulative text as Claude streams tokens */
   onPartial?: (text: string) => void;
+  /** Called with structured step events (tool_use, tool_result, thinking) */
+  onEvent?: (event: import("./claude.js").StreamStepEvent) => void;
 }
 
 export interface CLIRunResult {
@@ -276,6 +278,7 @@ ${pendingContext.context}
               model: executorKind === executor ? model ?? undefined : undefined,
               signal: abortController.signal,
               onPartial: params.onPartial,
+              onEvent: params.onEvent,
             });
             return {
               output: result.output,
@@ -404,6 +407,7 @@ ${pendingContext.context}
             model: model ?? undefined,
             signal: abortController.signal,
             onPartial: params.onPartial,
+            onEvent: params.onEvent,
           });
           output = result.output;
           exitCode = result.exitCode;
