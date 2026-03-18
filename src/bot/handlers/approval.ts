@@ -526,7 +526,7 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       await ctx.answerCallbackQuery("Invalid request");
       return;
     }
-    logger.info({ ideaId }, "Talk button clicked — starting Flash review");
+    logger.info({ ideaId }, "Talk button clicked — starting Sonnet review");
 
     try {
       await ctx.answerCallbackQuery("Starting review...");
@@ -544,7 +544,7 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       await ctx.editMessageText(
         formatScheduledTelegramHtml(
           `🔬 <b>Idea review</b>\n\n<b>${escapeHtml(idea.title)}</b>\n` +
-          `Running Gemini Flash direct review with the full idea payload.\n` +
+          `Running Sonnet review with the full idea payload.\n` +
           `Results should land in about 1-2 minutes.`,
         ),
         { parse_mode: "HTML" }
@@ -552,7 +552,7 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
 
       // Update status + append note
       dao.updateIdea(db, idea.id, { status: "discussion" });
-      dao.appendNote(db, idea.id, "Gemini Flash review started");
+      dao.appendNote(db, idea.id, "Sonnet review started");
       await logFeedback("talk", idea.title);
 
       // Auto-create Homer task for high-priority improvements
@@ -631,7 +631,7 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
           },
           notify
         ).then(() => {
-          try { if (db) dao.appendNote(db, idea.id, "Gemini Flash review complete"); } catch { /* best-effort */ }
+          try { if (db) dao.appendNote(db, idea.id, "Sonnet review complete"); } catch { /* best-effort */ }
         }).catch(async (err) => {
           const msg = err instanceof Error ? err.message : String(err);
           logger.error({ ideaId, error: msg }, "Idea analysis failed");

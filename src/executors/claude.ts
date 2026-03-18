@@ -40,6 +40,8 @@ export interface ClaudeExecutorOptions {
   timeout?: number; // Override default/subagent timeout
   /** Called with cumulative text as assistant content streams in */
   onPartial?: (text: string) => void;
+  /** Called with structured step events (tool_use, tool_result, thinking) */
+  onEvent?: (event: StreamStepEvent) => void;
 }
 
 export interface ClaudeExecutorResult extends ExecutorResult {
@@ -49,16 +51,70 @@ export interface ClaudeExecutorResult extends ExecutorResult {
 interface ContentBlock {
   type: string;
   text?: string;
+  thinking?: string;
+  id?: string;
+  name?: string;
+  input?: Record<string, unknown>;
+  tool_use_id?: string;
+  content?: string | ContentBlock[];
+  is_error?: boolean;
+}
+
+export interface StreamStepEvent {
+  type: "tool_use" | "tool_result" | "thinking";
+  id?: string;
+  tool?: string;
+  label: string;
+  labelDone: string;
+  preview?: string;
 }
 
 interface StreamEvent {
   type: string;
+  subtype?: string;
   session_id?: string;
   message?: {
+    role?: string;
     content?: string | ContentBlock[];
   };
   content?: string | ContentBlock[];
   result?: string;
+}
+
+function buildToolLabel(name: string, input?: Record<string, unknown>): { label: string; labelDone: string; preview?: string } {
+  // Handle MCP tools: mcp__server__tool → tool
+  const shortName = name.includes("__") ? name.split("__").pop()! : name;
+
+  const filePath = input?.file_path as string | undefined;
+  const command = input?.command as string | undefined;
+  const pattern = input?.pattern as string | undefined;
+  const description = input?.description as string | undefined;
+  const query = input?.query as string | undefined;
+
+  const shortPath = filePath ? filePath.split("/").pop() : undefined;
+
+  switch (shortName) {
+    case "Read":
+      return { label: `Reading ${shortPath ?? "file"}`, labelDone: `Read ${shortPath ?? "file"}`, preview: filePath?.slice(0, 220) };
+    case "Write":
+      return { label: `Writing ${shortPath ?? "file"}`, labelDone: `Wrote ${shortPath ?? "file"}`, preview: filePath?.slice(0, 220) };
+    case "Edit":
+      return { label: `Editing ${shortPath ?? "file"}`, labelDone: `Edited ${shortPath ?? "file"}`, preview: filePath?.slice(0, 220) };
+    case "Bash":
+      return { label: description ?? "Running command", labelDone: description ?? "Ran command", preview: command?.slice(0, 220) };
+    case "Glob":
+      return { label: `Searching files: ${pattern ?? ""}`, labelDone: `Searched files`, preview: pattern?.slice(0, 220) };
+    case "Grep":
+      return { label: `Searching for "${pattern ?? ""}"`, labelDone: `Searched code`, preview: pattern?.slice(0, 220) };
+    case "Agent":
+      return { label: description ?? "Running agent", labelDone: description ?? "Agent finished" };
+    case "WebFetch":
+      return { label: "Fetching URL", labelDone: "Fetched URL", preview: (input?.url as string)?.slice(0, 220) };
+    case "WebSearch":
+      return { label: `Searching: ${query ?? ""}`, labelDone: "Searched web", preview: query?.slice(0, 220) };
+    default:
+      return { label: `Using ${shortName}`, labelDone: `Used ${shortName}` };
+  }
 }
 
 function extractTextContent(content: string | ContentBlock[] | undefined): string {
@@ -204,11 +260,59 @@ export async function executeClaudeCommand(
           logger.debug({ sessionId: capturedSessionId }, "Captured Claude session ID");
         }
 
-        // Capture assistant message content
+        // Capture assistant message content + emit step events
         if (event.type === "assistant" && event.message?.content) {
-          resultContent += extractTextContent(event.message.content);
+          const content = event.message.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block.type === "text" && block.text) {
+                resultContent += block.text;
+              } else if (block.type === "tool_use" && block.name && options.onEvent) {
+                try {
+                  const labels = buildToolLabel(block.name, block.input);
+                  options.onEvent({
+                    type: "tool_use",
+                    id: block.id,
+                    tool: block.name,
+                    ...labels,
+                  });
+                } catch { /* don't crash executor */ }
+              } else if (block.type === "thinking" && options.onEvent) {
+                try {
+                  options.onEvent({ type: "thinking", label: "Thinking...", labelDone: "Thought" });
+                } catch { /* don't crash executor */ }
+              }
+            }
+          } else {
+            resultContent += extractTextContent(content);
+          }
           if (options.onPartial && resultContent) {
             try { options.onPartial(resultContent); } catch { /* don't crash executor */ }
+          }
+        }
+
+        // Capture user message tool_result events
+        if (event.type === "user" && options.onEvent) {
+          const content = event.message?.content ?? event.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block.type === "tool_result" && block.tool_use_id) {
+                try {
+                  const previewText = typeof block.content === "string"
+                    ? block.content
+                    : Array.isArray(block.content)
+                      ? extractTextContent(block.content)
+                      : "";
+                  options.onEvent({
+                    type: "tool_result",
+                    id: block.tool_use_id,
+                    label: "",
+                    labelDone: "",
+                    preview: previewText?.slice(0, 220),
+                  });
+                } catch { /* don't crash executor */ }
+              }
+            }
           }
         }
 
