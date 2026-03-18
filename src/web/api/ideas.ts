@@ -400,7 +400,7 @@ ${tagLine}${linkLine}
 ${idea.content}${notesLine}${enrichmentSummary}
 
 ---
-Send a message to start exploring — I'll kick off with insights on how this connects to your current work.`;
+Generating insights...`;
 
     stateManager.createThreadMessage({
       id: randomUUID(),

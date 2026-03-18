@@ -1,13 +1,10 @@
 import { config } from "../config/index.js";
-import {
-  executeGeminiCLIDirect,
-  GEMINI_CLI_FLASH_MODEL,
-} from "../executors/gemini-cli.js";
+import { executeClaudeCommand } from "../executors/claude.js";
 import { formatScheduledTelegramHtml } from "../notifications/telegram-router.js";
 import { buildCondensedContext } from "../scheduler/shared-context.js";
 import { logger } from "../utils/logger.js";
 
-export const IDEA_REVIEW_MODEL = GEMINI_CLI_FLASH_MODEL;
+export const IDEA_REVIEW_MODEL = "sonnet";
 
 export interface AnalysisIdea {
   id: string;
@@ -101,28 +98,28 @@ export async function analyzeIdea(
   notify: (text: string, parseMode?: string) => Promise<void>,
 ): Promise<void> {
   const startedAt = Date.now();
-  logger.info({ ideaId: idea.id, title: idea.title }, "Starting Flash idea review");
+  logger.info({ ideaId: idea.id, title: idea.title }, "Starting Sonnet idea review");
 
   const condensedContext = await buildCondensedContext();
   const prompt = buildIdeaReviewPrompt(idea, condensedContext);
-  const result = await executeGeminiCLIDirect(prompt, {
+  const result = await executeClaudeCommand(prompt, {
+    cwd: config.paths.homerRoot,
     model: IDEA_REVIEW_MODEL,
     timeout: 120_000,
-    cwd: config.paths.homerRoot,
   });
 
   if (result.exitCode !== 0) {
-    throw new Error(result.output.slice(0, 500) || "Gemini Flash review failed");
+    throw new Error(result.output.slice(0, 500) || "Sonnet idea review failed");
   }
 
   const review = cleanHtmlReview(result.output);
   if (!review) {
-    throw new Error("Gemini Flash returned an empty review");
+    throw new Error("Sonnet returned an empty review");
   }
 
   logger.info(
-    { ideaId: idea.id, duration: Date.now() - startedAt, model: result.model },
-    "Flash idea review complete",
+    { ideaId: idea.id, duration: Date.now() - startedAt, model: IDEA_REVIEW_MODEL },
+    "Sonnet idea review complete",
   );
 
   await notify(review, "HTML");

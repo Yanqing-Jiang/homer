@@ -34,6 +34,7 @@
 	let threadId = $state<string | null>(null);
 	let isStreaming = $state(false);
 	let streamingContent = $state('');
+	let streamingSteps = $state<Array<api.StepEvent & { startedAt: number; completed: boolean }>>([]);
 	let currentAbort = $state<{ abort: () => void } | null>(null);
 	let chatError = $state<string | null>(null);
 	let sessionExpired = $state(false);
@@ -809,50 +810,126 @@ Just confirm when done. Keep your response brief.`;
 					threadId = thread.id;
 				}
 
-			// Execute and poll for completion (no SSE streaming)
 			isStreaming = true;
-			streamingContent = 'Thinking...';
+			streamingContent = '';
+			streamingSteps = [];
 
-			try {
-				const result = await api.executeMessage(threadId, executionMessage, currentAttachments.length > 0 ? currentAttachments : undefined);
-				const runId = result.runId;
-
-				// Poll for completion instead of SSE
-				const pollInterval = setInterval(async () => {
-					try {
-						const run = await api.getRun(runId);
-						if (run.run.status === 'completed' || run.run.status === 'failed' || run.run.status === 'cancelled') {
-							clearInterval(pollInterval);
-							const output = run.run.output || (run.run.error ?? '');
-							const expiredPattern = /session expired|session not found/i;
-							if (expiredPattern.test(output) || expiredPattern.test(run.run.error ?? '')) {
-								sessionExpired = true;
-							}
-							if (output) {
-								messages = [...messages, { role: 'assistant', content: output, timestamp: new Date() }];
-							} else if (run.run.status === 'cancelled') {
-								chatError = 'Run cancelled.';
+			if (currentExecutor === 'claude' || currentExecutor === 'chatgpt') {
+				// SSE streaming path with step indicators
+				const stream = api.streamMessage(threadId, executionMessage, {
+					onDelta: (data) => {
+						streamingContent += data.content;
+					},
+					onStep: (data) => {
+						if (data.type === 'tool_use') {
+							streamingSteps = [...streamingSteps, { ...data, startedAt: Date.now(), completed: false }];
+						} else if (data.type === 'tool_result' && data.id) {
+							streamingSteps = streamingSteps.map(s =>
+								s.id === data.id ? { ...s, completed: true } : s
+							);
+						} else if (data.type === 'thinking') {
+							streamingSteps = [...streamingSteps, { ...data, startedAt: Date.now(), completed: true }];
+						}
+					},
+					onComplete: (data) => {
+						// Fetch the final message from the thread for accurate content
+						if (threadId) {
+							api.getThread(threadId).then(thread => {
+								const lastMsg = thread.messages?.[thread.messages.length - 1];
+								if (lastMsg?.role === 'assistant') {
+									messages = [...messages, { id: lastMsg.id, role: 'assistant', content: lastMsg.content, timestamp: new Date(lastMsg.createdAt) }];
+								} else if (streamingContent) {
+									messages = [...messages, { role: 'assistant', content: streamingContent, timestamp: new Date() }];
+								}
+								const expiredPattern = /session expired|session not found/i;
+								if (expiredPattern.test(streamingContent)) {
+									sessionExpired = true;
+								}
+								streamingContent = '';
+								streamingSteps = [];
+								isStreaming = false;
+								currentAbort = null;
+								executorMessageCount++;
+							}).catch(() => {
+								if (streamingContent) {
+									messages = [...messages, { role: 'assistant', content: streamingContent, timestamp: new Date() }];
+								}
+								streamingContent = '';
+								streamingSteps = [];
+								isStreaming = false;
+								currentAbort = null;
+								executorMessageCount++;
+							});
+						} else {
+							if (streamingContent) {
+								messages = [...messages, { role: 'assistant', content: streamingContent, timestamp: new Date() }];
 							}
 							streamingContent = '';
+							streamingSteps = [];
 							isStreaming = false;
 							currentAbort = null;
 							executorMessageCount++;
 						}
-					} catch (e) {
-						clearInterval(pollInterval);
-						chatError = e instanceof Error ? e.message : 'Failed to check run status';
+					},
+					onError: (data) => {
+						if (data.code === 'AUTH_EXPIRED') {
+							sessionExpired = true;
+						}
+						chatError = data.message;
 						streamingContent = '';
+						streamingSteps = [];
 						isStreaming = false;
 						currentAbort = null;
-					}
-				}, 2000);
+					},
+				}, {
+					attachments: currentAttachments.length > 0 ? currentAttachments : undefined,
+					sessionId: sessionId ?? undefined,
+				});
 
-				currentAbort = { abort: () => clearInterval(pollInterval) };
-			} catch (execError) {
-				console.error('Execute error:', execError);
-				chatError = execError instanceof Error ? execError.message : 'Execution failed';
-				streamingContent = '';
-				isStreaming = false;
+				currentAbort = stream;
+			} else {
+				// Non-Claude: execute + poll (no SSE streaming)
+				streamingContent = 'Thinking...';
+				try {
+					const result = await api.executeMessage(threadId, executionMessage, currentAttachments.length > 0 ? currentAttachments : undefined);
+					const runId = result.runId;
+
+					const pollInterval = setInterval(async () => {
+						try {
+							const run = await api.getRun(runId);
+							if (run.run.status === 'completed' || run.run.status === 'failed' || run.run.status === 'cancelled') {
+								clearInterval(pollInterval);
+								const output = run.run.output || (run.run.error ?? '');
+								const expiredPattern = /session expired|session not found/i;
+								if (expiredPattern.test(output) || expiredPattern.test(run.run.error ?? '')) {
+									sessionExpired = true;
+								}
+								if (output) {
+									messages = [...messages, { role: 'assistant', content: output, timestamp: new Date() }];
+								} else if (run.run.status === 'cancelled') {
+									chatError = 'Run cancelled.';
+								}
+								streamingContent = '';
+								isStreaming = false;
+								currentAbort = null;
+								executorMessageCount++;
+							}
+						} catch (e) {
+							clearInterval(pollInterval);
+							chatError = e instanceof Error ? e.message : 'Failed to check run status';
+							streamingContent = '';
+							isStreaming = false;
+							currentAbort = null;
+						}
+					}, 2000);
+
+					currentAbort = { abort: () => clearInterval(pollInterval) };
+				} catch (execError) {
+					console.error('Execute error:', execError);
+					chatError = execError instanceof Error ? execError.message : 'Execution failed';
+					streamingContent = '';
+					isStreaming = false;
+				}
 			}
 		} catch (e) {
 			console.error('Failed to send message:', e);
@@ -1133,7 +1210,7 @@ Just confirm when done. Keep your response brief.`;
 					{/if}
 
 					<!-- Chat Messages Area -->
-					<ChatMessages {messages} {isStreaming} {streamingContent} />
+					<ChatMessages {messages} {isStreaming} {streamingContent} steps={streamingSteps} />
 
 					<!-- Chat Input Area -->
 					<ChatInput
