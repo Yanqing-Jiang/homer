@@ -2,14 +2,18 @@
 	import { renderMarkdown, formatTime } from '$lib/utils/markdown';
 	import { highlightAction } from '$lib/actions/highlight';
 
+	import type { StepEvent } from '$lib/api/client';
+
 	let {
 		messages,
 		isStreaming,
-		streamingContent
+		streamingContent,
+		steps = []
 	}: {
 		messages: Array<{ id?: string; role: 'user' | 'assistant'; content: string; timestamp: Date }>;
 		isStreaming: boolean;
 		streamingContent: string;
+		steps?: Array<StepEvent & { startedAt: number; completed: boolean }>;
 	} = $props();
 
 	// Event delegation for copy buttons (avoids DOMPurify stripping onclick)
@@ -70,7 +74,7 @@
 				</div>
 			</div>
 		{/each}
-		{#if isStreaming && streamingContent}
+		{#if isStreaming}
 			<div class="message assistant streaming">
 				<div class="message-avatar">
 					<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
@@ -78,20 +82,29 @@
 					</svg>
 				</div>
 				<div class="message-content">
-					<div class="message-bubble markdown-content">
-						{@html renderMarkdown(streamingContent)}<span class="cursor">|</span>
-					</div>
-				</div>
-			</div>
-		{:else if isStreaming}
-			<div class="message assistant streaming">
-				<div class="message-avatar">
-					<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-						<path d="M12 2L9.5 9.5L2 12L9.5 14.5L12 22L14.5 14.5L22 12L14.5 9.5L12 2Z"/>
-					</svg>
-				</div>
-				<div class="message-content">
-					<div class="message-bubble"><span class="typing-indicator"><span></span><span></span><span></span></span></div>
+					{#if steps.length > 0}
+						<div class="step-pills">
+							{#each steps as step (step.id ?? step.label + step.startedAt)}
+								<div class="step-pill" class:completed={step.completed}>
+									{#if step.completed}
+										<svg class="step-check" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+											<path d="M20 6L9 17l-5-5"/>
+										</svg>
+									{:else}
+										<span class="step-spinner"></span>
+									{/if}
+									<span class="step-label">{step.completed ? step.labelDone : step.label}</span>
+								</div>
+							{/each}
+						</div>
+					{/if}
+					{#if streamingContent}
+						<div class="message-bubble markdown-content" use:highlightAction>
+							{@html renderMarkdown(streamingContent)}<span class="cursor">|</span>
+						</div>
+					{:else if steps.length === 0}
+						<div class="message-bubble"><span class="typing-indicator"><span></span><span></span><span></span></span></div>
+					{/if}
 				</div>
 			</div>
 		{/if}
@@ -186,6 +199,65 @@
 	@keyframes bounce {
 		0%, 80%, 100% { transform: scale(0); }
 		40% { transform: scale(1); }
+	}
+
+	/* Step Pills */
+	.step-pills {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		margin-bottom: 8px;
+	}
+
+	.step-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 12px;
+		color: #0078d4;
+		padding: 4px 10px;
+		border-radius: 12px;
+		background: linear-gradient(90deg, rgba(0, 120, 212, 0.08) 0%, rgba(0, 120, 212, 0.04) 50%, rgba(0, 120, 212, 0.08) 100%);
+		background-size: 200% 100%;
+		animation: shimmer 1.5s ease-in-out infinite;
+		width: fit-content;
+		max-width: 400px;
+	}
+
+	.step-pill.completed {
+		color: #8b949e;
+		background: rgba(139, 148, 158, 0.08);
+		animation: none;
+	}
+
+	.step-label {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.step-spinner {
+		width: 10px;
+		height: 10px;
+		border: 2px solid rgba(0, 120, 212, 0.3);
+		border-top-color: #0078d4;
+		border-radius: 50%;
+		animation: spin 0.8s linear infinite;
+		flex-shrink: 0;
+	}
+
+	.step-check {
+		flex-shrink: 0;
+		color: #8b949e;
+	}
+
+	@keyframes shimmer {
+		0% { background-position: 200% 0; }
+		100% { background-position: -200% 0; }
+	}
+
+	@keyframes spin {
+		to { transform: rotate(360deg); }
 	}
 
 	/* ========================================

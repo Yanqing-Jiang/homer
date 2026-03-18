@@ -695,9 +695,19 @@ export async function deleteUpload(sessionId: string, uploadId: string): Promise
 // SSE Streaming
 // ============================================
 
+export interface StepEvent {
+	type: 'tool_use' | 'tool_result' | 'thinking';
+	id?: string;
+	tool?: string;
+	label: string;
+	labelDone: string;
+	preview?: string;
+}
+
 export interface StreamCallbacks {
 	onStart?: (data: { userMessageId: string }) => void;
 	onDelta?: (data: { content: string }) => void;
+	onStep?: (data: StepEvent) => void;
 	onComplete?: (data: { messageId: string; exitCode?: number }) => void;
 	onError?: (data: { message: string; recoverable: boolean; code?: string }) => void;
 }
@@ -832,6 +842,9 @@ export function streamMessage(
 									break;
 								case 'delta':
 									callbacks.onDelta?.(parsed);
+									break;
+								case 'step':
+									callbacks.onStep?.(parsed);
 									break;
 								case 'complete':
 									callbacks.onComplete?.(parsed);
