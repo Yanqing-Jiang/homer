@@ -243,14 +243,20 @@ export function registerStreamingRoutes(
         updateLockHeartbeat(threadId, lockReqId);
       }, 60_000);
 
-      request.raw.on("close", () => {
-        logger.debug({ threadId, runId }, "SSE client disconnected");
-        cleanup({ cancelRun: true, reason: "sse client disconnected" });
+      // IMPORTANT: Listen on reply.raw (response), NOT request.raw (request).
+      // For POST requests, request.raw "close" fires when the body is fully read (~2ms),
+      // not when the client disconnects. reply.raw "close" fires on actual TCP disconnect.
+      reply.raw.on("close", () => {
+        if (finished || replyEnded) return; // Normal completion, not a disconnect
+        logger.info({ threadId, runId }, "SSE response stream closed by client");
+        // Don't cancel — let the run finish. Frontend can poll /api/runs/:id.
+        cleanup({ cancelRun: false, reason: "sse response closed" });
       });
 
       request.raw.on("aborted", () => {
-        logger.debug({ threadId, runId }, "SSE client aborted");
-        cleanup({ cancelRun: true, reason: "sse client aborted" });
+        logger.debug({ threadId, runId }, "SSE request upload aborted");
+        // Only cancel if the upload itself was aborted (body never fully received)
+        cleanup({ cancelRun: true, reason: "request upload aborted" });
       });
 
       try {
