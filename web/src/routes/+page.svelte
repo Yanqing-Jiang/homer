@@ -715,7 +715,8 @@ Just confirm when done. Keep your response brief.`;
 		if ((!chatInput.trim() && attachedFiles.length === 0) || hasPendingUploads || isStreaming) return;
 
 		const typedMessage = chatInput.trim();
-		const currentAttachments = attachedFiles.map((f) => f.path).filter(Boolean);
+		const currentAttachmentPaths = attachedFiles.map((f) => f.path).filter(Boolean);
+		const currentAttachmentIds = attachedFiles.map((f) => f.id).filter(Boolean);
 		const userMessage = typedMessage || `Attached files: ${attachedFiles.map((f) => f.filename).join(', ')}`;
 		const executionMessage = typedMessage || 'Please inspect the attached file(s).';
 
@@ -882,8 +883,37 @@ Just confirm when done. Keep your response brief.`;
 						chatError = data.message;
 						resetStreamingState();
 					},
+					onDisconnect: (data) => {
+						if (isStale() || !data.runId) return;
+						// SSE dropped (e.g. Cloudflare tunnel timeout) — fall back to polling
+						streamingContent = streamingContent || 'Reconnecting...';
+						const pollId = data.runId;
+						const pollInterval = setInterval(async () => {
+							try {
+								const run = await api.getRun(pollId);
+								if (run.run.status === 'completed' || run.run.status === 'failed' || run.run.status === 'cancelled') {
+									clearInterval(pollInterval);
+									const output = run.run.output || '';
+									if (output) {
+										messages = [...messages, { role: 'assistant', content: output, timestamp: new Date() }];
+									} else if (run.run.status === 'cancelled') {
+										chatError = 'Run cancelled.';
+									} else if (run.run.status === 'failed') {
+										chatError = run.run.error || 'Run failed.';
+									}
+									resetStreamingState();
+									executorMessageCount++;
+								}
+							} catch {
+								clearInterval(pollInterval);
+								chatError = 'Lost connection and failed to recover run status.';
+								resetStreamingState();
+							}
+						}, 3000);
+						currentAbort = { abort: () => clearInterval(pollInterval) };
+					},
 				}, {
-					attachments: currentAttachments.length > 0 ? currentAttachments : undefined,
+					attachments: currentAttachmentIds.length > 0 ? currentAttachmentIds : undefined,
 					sessionId: sessionId ?? undefined,
 				});
 
@@ -892,7 +922,7 @@ Just confirm when done. Keep your response brief.`;
 				// Non-Claude: execute + poll (no SSE streaming)
 				streamingContent = 'Thinking...';
 				try {
-					const result = await api.executeMessage(threadId, executionMessage, currentAttachments.length > 0 ? currentAttachments : undefined);
+					const result = await api.executeMessage(threadId, executionMessage, currentAttachmentPaths.length > 0 ? currentAttachmentPaths : undefined);
 					const runId = result.runId;
 
 					const pollInterval = setInterval(async () => {
