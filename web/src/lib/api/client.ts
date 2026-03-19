@@ -705,11 +705,13 @@ export interface StepEvent {
 }
 
 export interface StreamCallbacks {
-	onStart?: (data: { userMessageId: string }) => void;
+	onStart?: (data: { userMessageId: string; runId?: string }) => void;
 	onDelta?: (data: { content: string }) => void;
 	onStep?: (data: StepEvent) => void;
 	onComplete?: (data: { messageId: string; exitCode?: number }) => void;
 	onError?: (data: { message: string; recoverable: boolean; code?: string }) => void;
+	/** Called when SSE disconnects before completion — provides runId for poll fallback */
+	onDisconnect?: (data: { runId: string | null }) => void;
 }
 
 export interface StreamOptions {
@@ -768,7 +770,9 @@ export function streamMessage(
 	const controller = new AbortController();
 	const currentSession = get(session);
 	let isAborted = false;
+	let completed = false;
 	let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+	let activeRunId: string | null = null;
 
 	const url = `${API_BASE}/api/threads/${threadId}/stream`;
 
@@ -838,6 +842,7 @@ export function streamMessage(
 							// Route based on event type or infer from data shape
 							switch (sseEvent.event) {
 								case 'start':
+									if (parsed.runId) activeRunId = parsed.runId;
 									callbacks.onStart?.(parsed);
 									break;
 								case 'delta':
@@ -847,9 +852,11 @@ export function streamMessage(
 									callbacks.onStep?.(parsed);
 									break;
 								case 'complete':
+									completed = true;
 									callbacks.onComplete?.(parsed);
 									break;
 								case 'error':
+									completed = true;
 									callbacks.onError?.(parsed);
 									break;
 								default:
@@ -872,11 +879,20 @@ export function streamMessage(
 			} finally {
 				// Ensure reader is released
 				reader?.releaseLock();
+				// If stream ended without a complete/error event, notify for poll fallback
+				if (!completed && !isAborted && activeRunId) {
+					callbacks.onDisconnect?.({ runId: activeRunId });
+				}
 			}
 		})
 		.catch((error) => {
 			if (error.name !== 'AbortError' && !isAborted) {
-				callbacks.onError?.({ message: error.message, recoverable: false });
+				// If we had a runId, treat as disconnect so frontend can poll
+				if (activeRunId && !completed) {
+					callbacks.onDisconnect?.({ runId: activeRunId });
+				} else {
+					callbacks.onError?.({ message: error.message, recoverable: false });
+				}
 			}
 		});
 
