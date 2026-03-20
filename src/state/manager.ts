@@ -816,13 +816,17 @@ export class StateManager {
   cleanupOldScheduledJobRuns(maxAgeMs: number = 30 * 24 * 60 * 60 * 1000): number {
     const cutoffDate = new Date(Date.now() - maxAgeMs).toISOString();
     const txn = this._db.transaction(() => {
-      // Delete child rows first to satisfy FK constraints
+      // Delete/nullify child rows first to satisfy FK constraints
       this._db.prepare(
         `DELETE FROM failure_takeover_runs WHERE job_run_id IN
          (SELECT id FROM scheduled_job_runs WHERE completed_at < ?)`
       ).run(cutoffDate);
       this._db.prepare(
         `DELETE FROM job_artifacts WHERE job_run_id IN
+         (SELECT id FROM scheduled_job_runs WHERE completed_at < ?)`
+      ).run(cutoffDate);
+      this._db.prepare(
+        `UPDATE notification_events SET job_run_id = NULL WHERE job_run_id IN
          (SELECT id FROM scheduled_job_runs WHERE completed_at < ?)`
       ).run(cutoffDate);
       return this._db.prepare(

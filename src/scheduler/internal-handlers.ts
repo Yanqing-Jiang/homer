@@ -1166,18 +1166,36 @@ async function runHandler(
         );
       }
       case "session_maintenance": {
-        ctx.stateManager.cleanupExpiredSessions();
-        ctx.stateManager.cleanupOldJobs();
-        ctx.stateManager.cleanupOldReminders();
-        const cleanedRuns = ctx.stateManager.cleanupOldScheduledJobRuns();
-        const ttlMs = config.session.ttlHours * 60 * 60 * 1000;
-        await checkAndFlushExpiringSessions(ctx.stateManager, ttlMs);
+        const errors: string[] = [];
+        const steps: [string, () => void | Promise<void>][] = [
+          ["cleanupExpiredSessions", () => ctx.stateManager.cleanupExpiredSessions()],
+          ["cleanupOldJobs", () => ctx.stateManager.cleanupOldJobs()],
+          ["cleanupOldReminders", () => ctx.stateManager.cleanupOldReminders()],
+          ["cleanupOldScheduledJobRuns", () => { cleanedRuns = ctx.stateManager.cleanupOldScheduledJobRuns(); }],
+          ["checkAndFlushExpiringSessions", async () => {
+            const ttlMs = config.session.ttlHours * 60 * 60 * 1000;
+            await checkAndFlushExpiringSessions(ctx.stateManager, ttlMs);
+          }],
+        ];
+        let cleanedRuns = 0;
+        for (const [name, fn] of steps) {
+          try {
+            await fn();
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.error({ err, step: name }, `session_maintenance step failed: ${name}`);
+            errors.push(`${name}: ${msg}`);
+          }
+        }
+        const parts: string[] = ["Session maintenance done"];
+        if (cleanedRuns > 0) parts.push(`cleaned ${cleanedRuns} old runs`);
+        if (errors.length > 0) parts.push(`${errors.length} step(s) failed: ${errors.join("; ")}`);
         return buildResult(
           job,
           startedAt,
-          true,
-          `Session maintenance done${cleanedRuns > 0 ? `, cleaned ${cleanedRuns} old runs` : ""}`,
-          undefined,
+          errors.length === 0,
+          parts.join(", "),
+          errors.length > 0 ? errors.join("\n") : undefined,
           { notificationIntent: "operational_status" }
         );
       }
