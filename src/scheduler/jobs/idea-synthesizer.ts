@@ -17,7 +17,7 @@ import { join } from "path";
 import { z } from "zod";
 import type Database from "better-sqlite3";
 import { executeClaudeCommand } from "../../executors/claude.js";
-import { getUnprocessedScrapes, markProcessed, type StoredScrape } from "../../scraping/scrape-store.js";
+import { getUnprocessedScrapes, markProcessed, markScrapeFailedRetry, type StoredScrape } from "../../scraping/scrape-store.js";
 import type { ParsedIdea } from "../../ideas/parser.js";
 import * as ideaDao from "../../ideas/dao.js";
 import { smartSaveIdea, type SmartSaveResult } from "../../ideas/smart-save.js";
@@ -325,7 +325,7 @@ Return ONLY a valid JSON object matching the output format in the skill. No mark
           if (subResult) {
             batchResults.push(subResult);
           } else {
-            logger.error({ scrapeIds: subChunk.map(s => s.id) }, "Sub-batch also failed, marking scrapes as processed");
+            logger.error({ scrapeIds: subChunk.map(s => s.id) }, "Sub-batch also failed, incrementing fail count for retry");
             failedScrapeIds.push(...subChunk.map(s => s.id));
           }
         }
@@ -335,14 +335,14 @@ Return ONLY a valid JSON object matching the output format in the skill. No mark
       if (result) {
         batchResults.push(result);
       } else {
-        logger.error({ scrapeIds: chunk.map(s => s.id) }, "Batch failed (small batch), marking scrapes as processed");
+        logger.error({ scrapeIds: chunk.map(s => s.id) }, "Batch failed (small batch), incrementing fail count for retry");
         failedScrapeIds.push(...chunk.map(s => s.id));
       }
     }
 
-    // Mark double-failed scrapes as processed to prevent infinite retry
+    // Increment fail_count instead of marking processed — allows retry next run (up to max)
     for (const scrapeId of failedScrapeIds) {
-      markProcessed(db, scrapeId);
+      markScrapeFailedRetry(db, scrapeId);
     }
 
     if (batchResults.length === 0) {

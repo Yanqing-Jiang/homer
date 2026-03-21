@@ -231,7 +231,7 @@ Rules:
    */
   private callClaude(prompt: string): Promise<TriageDecision> {
     return new Promise((resolve) => {
-      const claudeBin = process.env.CLAUDE_BIN || "/Users/yj/.local/bin/claude";
+      const claudeBin = process.env.CLAUDE_BIN || process.env.CLAUDE_PATH || `${process.env.HOME ?? "/Users/yj"}/.local/bin/claude`;
       const child = execFile(
         claudeBin,
         ["-p", prompt, "--output-format", "text", "-m", "sonnet"],

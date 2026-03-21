@@ -13,68 +13,64 @@ import type { ClaudeExecutorOptions } from "../executors/claude.js";
 // ============================================
 
 export const AGENT_BROWSER_TOOLS = `TOOLS AVAILABLE (via bash):
-- agent-browser connect 9222          # connect to Chrome DevTools
-- agent-browser snapshot -i           # get interactive elements with @refs
-- agent-browser open <url>            # navigate to URL
-- agent-browser click @ref            # click element
-- agent-browser scroll down           # scroll page down`;
+- agent-browser connect 9222             # connect to Chrome DevTools
+- agent-browser snapshot -i -c           # interactive elements only, compact (smallest token footprint)
+- agent-browser snapshot -i -c -s "sel"  # scoped to CSS selector (use for targeted reads)
+- agent-browser open <url>               # navigate to URL
+- agent-browser click @ref               # click element by ref from snapshot
+- agent-browser scroll down [px]         # scroll down (optional pixel amount)
+- agent-browser scrollintoview @ref      # scroll element into view
+- agent-browser wait <sel|ms>            # wait for element or milliseconds
+- agent-browser screenshot [path]        # take screenshot (for visual debugging)
+- agent-browser eval <js>                # run JavaScript on page`;
 
 // ============================================
 // PROMPT BUILDERS
 // ============================================
 
 export function buildBookmarkScrapePrompt(maxItems: number): string {
-  return `Deep-scrape the top ${maxItems} Twitter/X bookmarks using agent-browser CLI and return them as JSON.
+  return `Scrape the top ${maxItems} Twitter/X bookmarks with deep-link enrichment. Return JSON.
 
 ${AGENT_BROWSER_TOOLS}
 
-HOMER DEEP-LINK TARGETS:
-- Homer Career OS
-- MAHORAGA
-- Shadow Data Pulse
-- PICE
-- ProfitSphere
-- Homer subsystems: idea-pipeline, morning-brief, scheduler, content-pipeline, new-mcp
+DEEP-LINK TARGETS:
+Homer Career OS | MAHORAGA | Shadow Data Pulse | PICE | ProfitSphere | idea-pipeline | morning-brief | scheduler | content-pipeline
 
 WORKFLOW:
-1. Connect to browser: agent-browser connect 9222
-2. Navigate to Twitter bookmarks: agent-browser open "https://x.com/i/bookmarks"
-3. Wait for page load, then snapshot -i
-4. Identify the top ${maxItems} bookmark articles currently visible on the page. Scroll only as needed to reach ${maxItems}.
-5. For each selected bookmark, extract:
-   - **Tweet text**: the main text content inside the article
-   - **Author username**: from the link like /@username (e.g. /OpenAIDevs → "OpenAIDevs")
-   - **Tweet ID**: CRITICAL — extract from the permalink URL like /@user/status/1234567890 — the numeric part is the ID. Do NOT invent IDs.
-   - **External URLs**: any https://t.co/ or other non-twitter links
-   - **Quoted/embedded post summary**: if the bookmark includes an embedded/quoted post or preview card, summarize its actual content
-   - **Image analysis**: if the bookmark contains images, describe what they show and include visible text/OCR when legible
-6. If a bookmark has an external article/repo/page link, open the most important external link in the same tab, read enough to understand it, then return to bookmarks and continue. Summarize the linked content in 2-4 sentences.
-7. Write a short hook analysis for why this bookmark is compelling enough to save.
-8. Add 0-3 Homer deep-link hints when there is a real fit. Use the targets above only when the connection is concrete, and explain the connection briefly.
+1. agent-browser connect 9222
+2. agent-browser open "https://x.com/i/bookmarks"
+3. agent-browser wait 3000
+4. agent-browser snapshot -i -c
+5. Parse the snapshot: extract each bookmark's tweet text, @username (from /@user links), tweet ID (from /status/DIGITS permalink), and any t.co or external URLs.
+6. Scroll if needed to reach ${maxItems}: agent-browser scroll down 800 && agent-browser wait 2000 && agent-browser snapshot -i -c
+7. DEEP-LINK ENRICHMENT — for each bookmark with an external URL:
+   a. agent-browser open "<external_url>"
+   b. agent-browser wait 3000
+   c. agent-browser snapshot -i -c -s "article, main, [role=main], .content, #content" (scope to article body; fall back to full snapshot -i -c if scoped snapshot is empty)
+   d. Read enough to summarize the linked content in 2-4 sentences
+   e. agent-browser open "https://x.com/i/bookmarks" (return to bookmarks)
+   f. agent-browser wait 2000 && agent-browser snapshot -i -c (re-anchor)
+8. For each bookmark: write a 1-sentence hook analysis and add 0-3 deep-link hints ONLY when the connection to a target above is concrete.
 
-CRITICAL RULES:
-- Tweet IDs MUST come from the actual permalink URLs in the snapshot (e.g. /username/status/2021725246244671606)
-- Do NOT guess or fabricate tweet IDs — if you can't find the permalink URL, omit the "id" field
-- Author usernames MUST come from the actual /@username links in the snapshot
-- Keep work to the top ${maxItems} bookmarks only
-- Do NOT force deep links. If there is no clear Homer fit, return an empty array.
-- Return structured data, not prose
+RULES:
+- Tweet IDs MUST come from actual /status/DIGITS URLs in the snapshot. Omit "id" if not found.
+- Author usernames MUST come from actual /@username links.
+- Do NOT fabricate IDs, usernames, or deep links.
+- If a deep-link fails to load, skip it and continue to the next bookmark.
+- Return structured data only — no prose.
 
-OUTPUT FORMAT:
-Return ONLY a JSON array, no other text:
+OUTPUT — Return ONLY a JSON array:
 [{
   "id": "tweet_id",
   "title": "short descriptive title",
   "text": "tweet content",
-  "content": "tweet content plus the most important quoted/article context",
+  "content": "tweet text + linked article context",
   "author": "username",
   "urls": ["https://..."],
-  "linked_summary": "summary of quoted post or external article",
-  "image_analysis": "what the images communicate, including visible text",
-  "hook_analysis": "why the bookmark's opening or framing is sticky",
-  "deep_link_hints": [
-    {"target": "Homer Career OS", "relationship": "accelerates", "why": "how this bookmark concretely connects"}
-  ]
+  "linked_summary": "2-4 sentence summary of external link",
+  "image_analysis": "what images show, including visible text",
+  "hook_analysis": "why this bookmark is compelling",
+  "deep_link_hints": [{"target": "Homer Career OS", "relationship": "accelerates", "why": "concrete connection"}]
 }]
 
 If bookmarks page is empty or requires login, return: []
@@ -92,13 +88,13 @@ You MUST execute these bash commands in sequence — do not just list them, actu
 
 Step 1: agent-browser connect 9222
 Step 2: agent-browser open "${url}"
-Step 3: sleep 2
-Step 4: agent-browser snapshot
+Step 3: agent-browser wait 3000
+Step 4: agent-browser snapshot -i -c
 
 Read the snapshot output carefully:
 - If it says "doesn't exist" or "Something went wrong", return ONLY the word: FAILED
 - Otherwise, extract ONLY tweets by @${author || "the original author"} — skip all replies and comments from other users
-- If the thread continues, run: agent-browser scroll down && sleep 1 && agent-browser snapshot
+- If the thread continues, run: agent-browser scroll down && agent-browser wait 2000 && agent-browser snapshot -i -c
 - Extract any additional tweets by the same author from the new snapshot
 
 Return the thread as plain text, one tweet per paragraph.
@@ -124,8 +120,8 @@ ${AGENT_BROWSER_TOOLS}
 
 Step 1: agent-browser connect 9222
 Step 2: agent-browser open "${MEDIUM_URL}"
-Step 3: sleep 3
-Step 4: agent-browser snapshot -i
+Step 3: agent-browser wait 3000
+Step 4: agent-browser snapshot -i -c
 
 Read the snapshot carefully. For each article card visible, extract:
 - **Title**: the article headline text
@@ -135,8 +131,8 @@ Read the snapshot carefully. For each article card visible, extract:
 - **Preview text**: the subtitle/preview snippet shown on the card
 
 Step 5: agent-browser scroll down
-Step 6: sleep 2
-Step 7: agent-browser snapshot -i
+Step 6: agent-browser wait 2000
+Step 7: agent-browser snapshot -i -c
 Step 8: Extract any NEW articles not already in your list (compare titles)
 Step 9: Repeat Steps 5-8 until no new articles appear in two consecutive scrolls
 
@@ -164,9 +160,9 @@ ${AGENT_BROWSER_TOOLS}
 
 Step 1: agent-browser connect 9222
 Step 2: agent-browser open "https://medium.com/"
-Step 3: sleep 4
-Step 4: agent-browser snapshot -i
-Step 5: If a "For you" tab or link is visible, click it, sleep 2, then snapshot -i again
+Step 3: agent-browser wait 4000
+Step 4: agent-browser snapshot -i -c
+Step 5: If a "For you" tab or link is visible, click it, agent-browser wait 2000, then snapshot -i -c again
 Step 6: Rank the visible "For you" article cards by prominence and interest. Work on the top ${maxItems}.
 Step 7: For each selected article, open it and try to extract:
   - title
@@ -176,7 +172,7 @@ Step 7: For each selected article, open it and try to extract:
   - as much body text as is accessible
 Step 8: If the article is member-only or partially blocked, retry via:
   agent-browser open "https://medium.com/m/global-identity?redirectUrl=<ENCODED_URL>"
-  then sleep 4, snapshot, scroll down, sleep 2, snapshot
+  then agent-browser wait 4000, snapshot -c, scroll down, agent-browser wait 2000, snapshot -c
 Step 9: If the body still is not accessible, keep the title plus first meaningful paragraph only
 Step 10: Analyze the hook: explain why the headline + opening paragraph are likely to pull readers in, or why they are weak
 
@@ -211,12 +207,12 @@ ${AGENT_BROWSER_TOOLS}
 
 Step 1: agent-browser connect 9222
 Step 2: agent-browser open "${LINKEDIN_URL}"
-Step 3: sleep 2
-Step 4: agent-browser snapshot -i
+Step 3: agent-browser wait 2000
+Step 4: agent-browser snapshot -i -c
 
 If the initial page has no post cards or redirects, try these alternate public activity URLs:
-- agent-browser open "${LINKEDIN_ALT_URL_1}" && sleep 2 && agent-browser snapshot -i
-- agent-browser open "${LINKEDIN_ALT_URL_2}" && sleep 2 && agent-browser snapshot -i
+- agent-browser open "${LINKEDIN_ALT_URL_1}" && agent-browser wait 2000 && agent-browser snapshot -i -c
+- agent-browser open "${LINKEDIN_ALT_URL_2}" && agent-browser wait 2000 && agent-browser snapshot -i -c
 
 FIRST: Check if the page shows "Sign in", "Join LinkedIn", or a login modal. If so, return ONLY the text: AUTH_REQUIRED
 
@@ -228,8 +224,8 @@ For each post visible:
 - **Links**: any external URLs in the post
 
 Step 5: agent-browser scroll down
-Step 6: sleep 1
-Step 7: agent-browser snapshot -i
+Step 6: agent-browser wait 1000
+Step 7: agent-browser snapshot -i -c
 Step 8: For any new posts with truncated text, click "see more" and capture the full text
 Step 9: Extract any NEW posts not already in your list (compare by first 10 words of content)
 Step 10: Repeat Steps 5-9 until no new posts appear in two consecutive scrolls
@@ -258,12 +254,12 @@ ${AGENT_BROWSER_TOOLS}
 
 Step 1: agent-browser connect 9222
 Step 2: agent-browser open "${LINKEDIN_URL}"
-Step 3: sleep 3
-Step 4: agent-browser snapshot -i
+Step 3: agent-browser wait 3000
+Step 4: agent-browser snapshot -i -c
 
 If the initial page has no post cards or redirects, try these alternate URLs:
-- agent-browser open "${LINKEDIN_ALT_URL_1}" && sleep 2 && agent-browser snapshot -i
-- agent-browser open "${LINKEDIN_ALT_URL_2}" && sleep 2 && agent-browser snapshot -i
+- agent-browser open "${LINKEDIN_ALT_URL_1}" && agent-browser wait 2000 && agent-browser snapshot -i -c
+- agent-browser open "${LINKEDIN_ALT_URL_2}" && agent-browser wait 2000 && agent-browser snapshot -i -c
 
 If the page shows "Sign in", "Join LinkedIn", or a login modal, return ONLY: AUTH_REQUIRED
 If a verification wall or CAPTCHA appears, return ONLY: BOT_DETECTED
@@ -370,7 +366,7 @@ export function buildArticleDeepFetchPrompt(url: string): string {
 - Do NOT return PAYWALL just because "Member-only story" badge is visible.
 - If no article body found after scrolling, retry with canonical Medium URL:
   open "https://medium.com/m/global-identity?redirectUrl=${encodeURIComponent(url)}"
-  Then: sleep 4 → snapshot → scroll down → sleep 2 → snapshot.
+  Then: agent-browser wait 4000 → snapshot -c → scroll down → agent-browser wait 2000 → snapshot -c.
   Re-apply BODY-FIRST DECISION LOGIC after retry.`
     : `If redirected to a partner publication domain, still apply body-first logic before deciding PAYWALL.`;
 
@@ -382,14 +378,15 @@ ${AGENT_BROWSER_TOOLS}
 
 Step 1: agent-browser connect 9222
 Step 2: agent-browser open "${url}"
-Step 3: sleep 5
-Step 4: agent-browser snapshot
+Step 3: agent-browser wait 5000
+Step 4: agent-browser snapshot -c -s "article, main, [role=main], .content, #content"
+   (If scoped snapshot is empty, fall back to: agent-browser snapshot -c)
 Step 5: agent-browser scroll down
-Step 6: sleep 2
-Step 7: agent-browser snapshot
+Step 6: agent-browser wait 2000
+Step 7: agent-browser snapshot -c -s "article, main, [role=main], .content, #content"
 Step 8: agent-browser scroll down
-Step 9: sleep 2
-Step 10: agent-browser snapshot
+Step 9: agent-browser wait 2000
+Step 10: agent-browser snapshot -c -s "article, main, [role=main], .content, #content"
 
 BODY-FIRST DECISION LOGIC (apply after all 3 snapshots):
 1. Determine if article body exists: look for multiple paragraphs of article prose

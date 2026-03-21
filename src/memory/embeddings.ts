@@ -125,13 +125,13 @@ export async function generateEmbeddingsBatch(texts: string[]): Promise<Float32A
  *
  * @param vectorResults - Results from vector search (already sorted by similarity)
  * @param ftsResults - Results from FTS5 (already sorted by rank)
- * @param k - RRF constant (default 60)
+ * @param k - RRF constant (default 20, lower = more rank discrimination)
  * @param limit - Max results to return
  */
 export function mergeRRF<T extends { filePath: string; chunkIndex: number }>(
   vectorResults: T[],
   ftsResults: T[],
-  k: number = 60,
+  k: number = 20,
   limit: number = 10
 ): Array<T & { rrfScore: number; source: "vector" | "fts" | "both" }> {
   const scoreMap = new Map<string, { item: T; vectorRank?: number; ftsRank?: number }>();

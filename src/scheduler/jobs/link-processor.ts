@@ -22,7 +22,8 @@ import { storeJobArtifact } from "./artifact-store.js";
 import type { StateManager } from "../../state/manager.js";
 
 const SKILL_PATH = "/Users/yj/.claude/skills/link-processor/SKILLS.md";
-const PROCESS_TIMEOUT = 120_000; // 2min per link
+const PROCESS_TIMEOUT = 300_000; // 5min per link (YouTube/Medium need more time)
+const MAX_LINK_RETRIES = 3;
 
 interface ExtractedContent {
   title: string;
@@ -67,7 +68,7 @@ export async function runLinkProcessor(
 ): Promise<{ success: boolean; output: string; error?: string }> {
   try {
     const db = stateManager.db;
-    const pending = getPendingLinks(db, 10);
+    const pending = getPendingLinks(db, 10, MAX_LINK_RETRIES);
 
     if (pending.length === 0) {
       return { success: true, output: "No pending links to process" };

@@ -351,6 +351,40 @@ If nothing to promote, use an empty array.`;
     if (writeErrors.length > 0) {
       parts.push(`errors: ${writeErrors.join("; ")}`);
     }
+    // ── Nightly maintenance: purge old executor feedback, archive stale skills ──
+    try {
+      const { purgeOldFeedback } = await import("../../executors/router.js");
+      const purged = purgeOldFeedback();
+      if (purged > 0) {
+        logger.info({ purged }, "Purged old executor feedback records (>90 days)");
+        parts.push(`purged ${purged} old feedback records`);
+      }
+    } catch (err) {
+      logger.debug({ error: err }, "Executor feedback purge skipped");
+    }
+
+    try {
+      // Archive skills inactive for >30 days
+      const archiveRows = stateManager.getDb().prepare(`
+        SELECT id FROM skills_catalog
+        WHERE status = 'active'
+          AND (last_used_at IS NULL OR last_used_at < datetime('now', '-30 days'))
+      `).all() as Array<{ id: string }>;
+      if (archiveRows.length > 0) {
+        const cms = getCanonicalMemoryService(stateManager, getMemoryIndexer());
+        let archived = 0;
+        for (const row of archiveRows) {
+          if (cms.archiveSkill(row.id)) archived++;
+        }
+        if (archived > 0) {
+          logger.info({ archived }, "Auto-archived inactive skills (>30 days)");
+          parts.push(`archived ${archived} stale skills`);
+        }
+      }
+    } catch (err) {
+      logger.debug({ error: err }, "Skill auto-archive skipped");
+    }
+
     const output = parts.length > 0
       ? `${parts.join(", ")} from ${yesterday}`
       : `No new facts from ${yesterday}`;
