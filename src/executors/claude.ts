@@ -9,8 +9,15 @@ const DEFAULT_TIMEOUT = 1800_000; // 30 minutes
 const KILL_GRACE_MS = 5_000;
 const CLOSE_GRACE_MS = 1_000;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024; // 2MB capture cap
-const runtimePaths = getRuntimePaths();
-const CLAUDE_PATH = runtimePaths.claudeBinaryPath;
+/** Resolve Claude binary path at call time, not module load time.
+ * This handles CLI auto-updates that change the symlink target after daemon start. */
+function resolveClaudePath(): string {
+  const envPath = process.env.CLAUDE_PATH;
+  if (envPath) return envPath;
+  const paths = getRuntimePaths();
+  return paths.claudeBinaryPath;
+}
+
 
 // Note: Keychain token extraction was removed.
 // In Aqua session, Claude CLI can access keychain directly and handle
@@ -175,10 +182,10 @@ export async function executeClaudeCommand(
     NO_COLOR: process.env.NO_COLOR ?? "1",
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
     TMPDIR: process.env.TMPDIR ?? "/tmp",
-    HOME: runtimePaths.homeDir,
+    HOME: getRuntimePaths().homeDir,
   };
   // Load OAuth token from file if not in env
-  const tokenFile = runtimePaths.claudeTokenFile;
+  const tokenFile = getRuntimePaths().claudeTokenFile;
   if (!env.CLAUDE_CODE_OAUTH_TOKEN && existsSync(tokenFile)) {
     try {
       const token = readFileSync(tokenFile, "utf-8").trim();
@@ -200,8 +207,9 @@ export async function executeClaudeCommand(
     "Spawning Claude CLI"
   );
 
+  const claudeBin = resolveClaudePath();
   return new Promise((resolve, reject) => {
-    const proc = spawn(CLAUDE_PATH, args, {
+    const proc = spawn(claudeBin, args, {
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],

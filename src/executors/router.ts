@@ -153,6 +153,100 @@ export function estimateCost(
 }
 
 // ============================================
+// EXECUTOR FEEDBACK (DB-backed, persistent)
+// ============================================
+
+/**
+ * Record an executor attempt result for adaptive routing.
+ */
+export function recordExecutorFeedback(
+  taskType: string,
+  executor: string,
+  success: boolean,
+  durationMs?: number,
+  errorCategory?: string,
+  model?: string,
+  promptTokens?: number,
+): void {
+  try {
+    const db = _db ?? (getRouterState(), _db);
+    if (!db) return;
+    db.prepare(`
+      INSERT INTO executor_feedback (id, task_type, executor, model, success, duration_ms, error_category, prompt_tokens)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      `ef_${Date.now()}_${randomUUID().slice(0, 8)}`,
+      taskType, executor, model ?? null, success ? 1 : 0,
+      durationMs ?? null, errorCategory ?? null, promptTokens ?? null,
+    );
+  } catch (err) {
+    logger.debug({ error: err }, "Failed to record executor feedback (table may not exist yet)");
+  }
+}
+
+/**
+ * Get success rate for an executor on a task type (last 30 days).
+ * Returns null if no data available.
+ */
+export function getExecutorSuccessRate(
+  taskType: string,
+  executor: string,
+): number | null {
+  try {
+    const db = _db ?? (getRouterState(), _db);
+    if (!db) return null;
+    const row = db.prepare(`
+      SELECT AVG(success) as rate, COUNT(*) as cnt
+      FROM executor_feedback
+      WHERE task_type = ? AND executor = ?
+        AND created_at > datetime('now', '-30 days')
+    `).get(taskType, executor) as { rate: number | null; cnt: number } | undefined;
+    if (!row || row.cnt < 3) return null; // Need at least 3 data points
+    return row.rate;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get executors to avoid for a task type (success rate < 30% in last 30 days).
+ */
+export function getWeakExecutors(taskType: string): Set<string> {
+  const weak = new Set<string>();
+  try {
+    const db = _db ?? (getRouterState(), _db);
+    if (!db) return weak;
+    const rows = db.prepare(`
+      SELECT executor, AVG(success) as rate, COUNT(*) as cnt
+      FROM executor_feedback
+      WHERE task_type = ? AND created_at > datetime('now', '-30 days')
+      GROUP BY executor
+      HAVING cnt >= 3 AND rate < 0.30
+    `).all(taskType) as Array<{ executor: string; rate: number; cnt: number }>;
+    for (const r of rows) weak.add(r.executor);
+  } catch {
+    // table may not exist yet
+  }
+  return weak;
+}
+
+/**
+ * Purge executor feedback older than 90 days.
+ */
+export function purgeOldFeedback(): number {
+  try {
+    const db = _db ?? (getRouterState(), _db);
+    if (!db) return 0;
+    const result = db.prepare(`
+      DELETE FROM executor_feedback WHERE created_at < datetime('now', '-90 days')
+    `).run();
+    return result.changes;
+  } catch {
+    return 0;
+  }
+}
+
+// ============================================
 // GEMINI CLI ACCOUNT STATUS (DB-backed)
 // ============================================
 
@@ -329,7 +423,9 @@ export function makeRoutingDecision(request: RoutingRequest): RoutingDecision {
 
   // Deterministic fast-path for common patterns
   const cliStatus = getGeminiCLIPoolStatus();
-  const defaultFallbackChain: ExecutorType[] = ["codex", "kimi", "opencode"];
+  const weakExecutors = getWeakExecutors(taskType);
+  const defaultFallbackChain: ExecutorType[] = ["codex", "kimi", "opencode"]
+    .filter(e => !weakExecutors.has(e)) as ExecutorType[];
   if (cliStatus.allExhausted) {
     const idx = defaultFallbackChain.indexOf("opencode");
     if (idx >= 0) defaultFallbackChain.splice(idx, 1);
@@ -648,6 +744,18 @@ export async function executeWithRouting(
   const lastResult = fallbackResult.result;
   const executorUsed = mapExecutorKindToType(fallbackResult.executorUsed);
   const fallbacksAttempted = fallbackResult.attempts.length;
+
+  // Record executor feedback for adaptive routing
+  const success = lastResult != null && lastResult.exitCode === 0 && !fallbackResult.failed;
+  recordExecutorFeedback(
+    request.taskType ?? "general",
+    executorUsed,
+    success,
+    Date.now() - startTime,
+    success ? undefined : "execution_failure",
+    request.model,
+    request.estimatedTokens,
+  );
 
   if (!lastResult || lastResult.exitCode !== 0 || fallbackResult.failed) {
     const lastOutput = lastResult?.output ?? "No output";
