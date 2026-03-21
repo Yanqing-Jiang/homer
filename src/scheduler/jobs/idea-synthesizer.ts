@@ -17,6 +17,7 @@ import { join } from "path";
 import { z } from "zod";
 import type Database from "better-sqlite3";
 import { executeClaudeCommand } from "../../executors/claude.js";
+import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { getUnprocessedScrapes, markProcessed, markScrapeFailedRetry, type StoredScrape } from "../../scraping/scrape-store.js";
 import type { ParsedIdea } from "../../ideas/parser.js";
 import * as ideaDao from "../../ideas/dao.js";
@@ -180,26 +181,6 @@ export function loadRecentMdFiles(maxDays = 7, maxTotalChars = 6000, perFileCap 
   return parts.join("\n\n---\n\n");
 }
 
-function parseJsonFromOutput(output: string): unknown {
-  // Try direct parse first
-  try {
-    return JSON.parse(output);
-  } catch { /* continue */ }
-
-  // Extract JSON from markdown fences or mixed output
-  const fenceMatch = output.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenceMatch?.[1]) {
-    try { return JSON.parse(fenceMatch[1].trim()); } catch { /* continue */ }
-  }
-
-  // Find the largest JSON object
-  const jsonMatch = output.match(/\{[\s\S]*"ideas"[\s\S]*\}/);
-  if (jsonMatch) {
-    try { return JSON.parse(jsonMatch[0]); } catch { /* continue */ }
-  }
-
-  return null;
-}
 
 // ============================================
 // MAIN
@@ -288,16 +269,10 @@ Return ONLY a valid JSON object matching the output format in the skill. No mark
         return null;
       }
 
-      const rawParsed = parseJsonFromOutput(result.output);
-      if (!rawParsed) {
-        logger.error({ outputLen: result.output.length, sample: result.output.slice(0, 500) }, "Failed to parse Sonnet batch JSON");
-        return null;
-      }
-
       try {
-        return SonnetOutputSchema.parse(rawParsed);
+        return parseSwarmJSON(result.output, SonnetOutputSchema);
       } catch (err) {
-        logger.error({ error: err, sample: JSON.stringify(rawParsed).slice(0, 500) }, "Sonnet batch schema validation failed");
+        logger.error({ error: err instanceof Error ? err.message : String(err), outputLen: result.output.length, sample: result.output.slice(0, 500) }, "Failed to parse/validate Sonnet batch output");
         return null;
       }
     }
