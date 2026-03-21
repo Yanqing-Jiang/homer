@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { createHash } from "crypto";
 import { readFile } from "fs/promises";
 import { existsSync, readdirSync } from "fs";
 import { logger } from "../utils/logger.js";
@@ -172,24 +173,46 @@ export class MemoryIndexer {
       }
     }
 
-    // Daily log files — SKIPPED (session data is searchable via session_summaries_fts)
-    // Purge any previously-indexed daily log chunks from memory_fts
-    try {
-      const purged = this.db.prepare(
-        `DELETE FROM memory_fts WHERE file_path LIKE '${PATHS.daily}/%'`
-      ).run();
-      const purgedMeta = this.db.prepare(
-        `DELETE FROM memory_index_meta WHERE file_path LIKE '${PATHS.daily}/%'`
-      ).run();
-      // Also purge orphaned embeddings for daily logs
-      const purgedEmbed = this.db.prepare(
-        `DELETE FROM memory_embeddings WHERE file_path LIKE '${PATHS.daily}/%'`
-      ).run();
-      if (purged.changes > 0 || purgedMeta.changes > 0 || purgedEmbed.changes > 0) {
-        logger.info({ ftsChunks: purged.changes, metaFiles: purgedMeta.changes, embeddings: purgedEmbed.changes }, "Purged stale daily log entries from memory indexes");
+    // Daily log files — index last 7 days for recency, purge older entries
+    const dailyDir = PATHS.daily;
+    if (existsSync(dailyDir)) {
+      const now = new Date();
+      const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      const cutoffDate = sevenDaysAgo.toISOString().slice(0, 10);
+
+      // Purge daily logs older than 7 days from FTS
+      try {
+        const dailyFiles = readdirSync(dailyDir).filter(f => f.endsWith(".md"));
+        const oldFiles = dailyFiles
+          .filter(f => f.slice(0, 10) < cutoffDate)
+          .map(f => `${dailyDir}/${f}`);
+
+        for (const oldPath of oldFiles) {
+          this.db.prepare("DELETE FROM memory_fts WHERE file_path = ?").run(oldPath);
+          this.db.prepare("DELETE FROM memory_index_meta WHERE file_path = ?").run(oldPath);
+          this.db.prepare("DELETE FROM memory_embeddings WHERE file_path = ?").run(oldPath);
+        }
+
+        // Index recent daily logs (last 7 days)
+        const recentFiles = dailyFiles
+          .filter(f => /^\d{4}-\d{2}-\d{2}\.md$/.test(f) && f.slice(0, 10) >= cutoffDate)
+          .sort()
+          .reverse(); // Most recent first
+
+        for (const file of recentFiles) {
+          const entryDate = file.slice(0, 10);
+          const filePath = `${dailyDir}/${file}`;
+          try {
+            const indexed = await this.indexFile(filePath, "general", entryDate);
+            if (indexed) stats.indexed++;
+            else stats.skipped++;
+          } catch {
+            stats.errors++;
+          }
+        }
+      } catch (err) {
+        logger.warn({ error: err }, "Failed to index daily log files");
       }
-    } catch (err) {
-      logger.warn({ error: err }, "Failed to purge stale daily log entries");
     }
 
     // Meeting transcripts
@@ -213,6 +236,39 @@ export class MemoryIndexer {
       }
     }
 
+    // Skills directory — recursive scan of ~/memory/skills/
+    const skillsDir = PATHS.skills;
+    if (existsSync(skillsDir)) {
+      const collectSkillFiles = (dir: string): string[] => {
+        const results: string[] = [];
+        try {
+          const entries = readdirSync(dir, { withFileTypes: true });
+          for (const entry of entries) {
+            const fullPath = `${dir}/${entry.name}`;
+            if (entry.isDirectory()) {
+              results.push(...collectSkillFiles(fullPath));
+            } else if (entry.name.endsWith(".md")) {
+              results.push(fullPath);
+            }
+          }
+        } catch {
+          // directory read error
+        }
+        return results;
+      };
+
+      const skillFiles = collectSkillFiles(skillsDir);
+      for (const filePath of skillFiles) {
+        try {
+          const indexed = await this.indexFile(filePath, "general");
+          if (indexed) stats.indexed++;
+          else stats.skipped++;
+        } catch {
+          stats.errors++;
+        }
+      }
+    }
+
     logger.info(stats, "Completed memory file indexing");
     return stats;
   }
@@ -224,6 +280,7 @@ export class MemoryIndexer {
     try {
       // Escape special FTS5 characters
       const escapedQuery = this.escapeFtsQuery(query);
+      if (!escapedQuery) return []; // Guard: empty query would crash FTS5 MATCH
 
       let sql = `
         SELECT
@@ -437,6 +494,8 @@ export class MemoryIndexer {
       type SearchItem = { filePath: string; chunkIndex: number; content: string; context: "work" | "life" | "general"; entryDate: string | null };
       type SearchItemWithScore = SearchItem & { _similarity: number };
 
+      const SIMILARITY_FLOOR = 0.40; // Filter garbage vector matches
+
       const vectorResults: SearchItem[] = allEmbeddingRows
         .map(row => {
           try {
@@ -455,7 +514,7 @@ export class MemoryIndexer {
             return null;
           }
         })
-        .filter((r): r is SearchItemWithScore => r !== null)
+        .filter((r): r is SearchItemWithScore => r !== null && r._similarity >= SIMILARITY_FLOOR)
         .sort((a, b) => b._similarity - a._similarity)
         .slice(0, limit * 2)
         .map(({ _similarity: _, ...rest }) => rest);
@@ -470,7 +529,7 @@ export class MemoryIndexer {
       }));
 
       // Merge using RRF (both arrays are already sorted by their respective scores)
-      const merged = mergeRRF(vectorResults, ftsItems, 60, limit);
+      const merged = mergeRRF(vectorResults, ftsItems, 20, limit);
 
       // Map back to result format + deduplicate by content snippet
       const seen = new Set<string>();
@@ -538,36 +597,46 @@ export class MemoryIndexer {
   }
 
   /**
-   * Simple hash function for content comparison
+   * SHA256 hash for content comparison (collision-resistant)
    */
   private hashContent(content: string): string {
-    let hash = 0;
-    for (let i = 0; i < content.length; i++) {
-      const char = content.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32bit integer
-    }
-    return hash.toString(16);
+    return createHash("sha256").update(content).digest("hex");
   }
 
   /**
-   * Escape special FTS5 query characters
+   * Escape special FTS5 query characters.
+   * Space-separated terms use implicit AND (FTS5 default).
+   * Quoted phrases are preserved for exact matching.
    */
   private escapeFtsQuery(query: string): string {
-    // For simple queries, just quote the terms
-    // FTS5 uses double quotes for phrase matching
-    const terms = query
-      .split(/\s+/)
-      .filter(Boolean)
-      .map((term) => {
-        // Remove special characters that might break FTS5
-        const cleaned = term.replace(/[*()":^$]/g, "");
-        return cleaned;
-      })
-      .filter(Boolean);
+    // Preserve quoted phrases, clean individual terms
+    const tokens: string[] = [];
+    const phraseRegex = /"([^"]+)"/g;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
 
-    // Join with OR for broader matching
-    return terms.join(" OR ");
+    while ((match = phraseRegex.exec(query)) !== null) {
+      // Process unquoted text before this phrase
+      const before = query.slice(lastIndex, match.index);
+      for (const term of before.split(/\s+/).filter(Boolean)) {
+        const cleaned = term.replace(/[*()\^$]/g, "");
+        if (cleaned) tokens.push(cleaned);
+      }
+      // Keep the quoted phrase intact
+      const phraseContent = (match[1] ?? "").replace(/[*()\^$]/g, "");
+      if (phraseContent.trim()) tokens.push(`"${phraseContent}"`);
+      lastIndex = match.index + match[0].length;
+    }
+
+    // Process remaining unquoted text
+    const remaining = query.slice(lastIndex);
+    for (const term of remaining.split(/\s+/).filter(Boolean)) {
+      const cleaned = term.replace(/[*()\^$":]/g, "");
+      if (cleaned) tokens.push(cleaned);
+    }
+
+    // Space = implicit AND in FTS5 (default behavior)
+    return tokens.join(" ");
   }
 
   /**

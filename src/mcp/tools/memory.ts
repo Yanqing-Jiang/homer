@@ -8,6 +8,7 @@ import { PATHS } from "../../config/paths.js";
 import { logger } from "../../utils/logger.js";
 import * as ideaDao from "../../ideas/dao.js";
 import { loadPlansFromDir } from "../../plans/parser.js";
+import { getTopPreferences } from "../../preferences/engine.js";
 import type { ToolResult, ToolDeps, ToolDefinition } from "./types.js";
 
 const MEMORY_BASE = PATHS.memory;
@@ -138,12 +139,29 @@ export async function handle(
       let youtubeResults: Array<{ video_id: string; title: string; channel_name: string; relevance_score: number; processed_at: string; content: string; rank: number }> = [];
       try {
         const sm = deps.getSharedStateManager();
-        const escapedTerms = query
-          .split(/\s+/)
-          .filter(Boolean)
-          .map((t) => t.replace(/[*()":^$]/g, ""))
-          .filter(Boolean)
-          .join(" OR ");
+        // Escape FTS5 query: preserve quoted phrases, implicit AND for terms
+        const escapedTerms = (() => {
+          const tokens: string[] = [];
+          const phraseRegex = /"([^"]+)"/g;
+          let lastIdx = 0;
+          let m: RegExpExecArray | null;
+          while ((m = phraseRegex.exec(query)) !== null) {
+            const before = query.slice(lastIdx, m.index);
+            for (const t of before.split(/\s+/).filter(Boolean)) {
+              const c = t.replace(/[*()\^$]/g, "");
+              if (c) tokens.push(c);
+            }
+            const phrase = (m[1] ?? "").replace(/[*()\^$]/g, "");
+            if (phrase.trim()) tokens.push(`"${phrase}"`);
+            lastIdx = m.index + m[0].length;
+          }
+          const rest = query.slice(lastIdx);
+          for (const t of rest.split(/\s+/).filter(Boolean)) {
+            const c = t.replace(/[*()\^$":]/g, "");
+            if (c) tokens.push(c);
+          }
+          return tokens.join(" "); // Space = implicit AND in FTS5
+        })();
 
         if (escapedTerms) {
           if (include_archived) {
@@ -246,6 +264,24 @@ export async function handle(
         logger.debug({ error: err }, "Session summaries FTS search failed (table may not exist yet)");
       }
 
+      // ── Cross-table BM25 normalization ──────────────────────────
+      // BM25 returns negative scores (more negative = better match).
+      // Normalize per-table using absolute values so positive scores (weak matches) don't invert ranking.
+      function normalizeBM25<T extends { rank: number }>(results: T[]): (T & { normalizedRank: number })[] {
+        if (results.length === 0) return [];
+        // Filter out non-negative ranks (marginal/no matches) — BM25 should be negative for real matches
+        const validResults = results.filter(r => r.rank < 0);
+        if (validResults.length === 0) {
+          // All results are marginal — give them uniform low scores
+          return results.map(r => ({ ...r, normalizedRank: 0.1 }));
+        }
+        const bestRank = Math.min(...validResults.map(r => r.rank)); // most negative = best
+        return results.map(r => ({
+          ...r,
+          normalizedRank: r.rank >= 0 ? 0.05 : r.rank / bestRank, // 1.0 = best, non-negative → near zero
+        }));
+      }
+
       const indexStats = deps.indexer.getStats();
       const metaMap = new Map(indexStats.fileStats.map(f => [f.filePath, f.indexedAt]));
       const enrichedMemory = memoryResults.map(r => ({
@@ -254,33 +290,128 @@ export async function handle(
         indexed_at: metaMap.get(r.filePath) ?? null,
       }));
 
+      // Normalize each table's BM25 scores independently
+      const normSessions = normalizeBM25(sessionResults);
+      const normThreads = normalizeBM25(threadResults);
+      const normTakeovers = normalizeBM25(takeoverResults);
+      const normScrapes = normalizeBM25(scrapeResults);
+      const normIdeas = normalizeBM25(ideaResults);
+      const normYoutube = normalizeBM25(youtubeResults);
+
+      // Build unified ranked results across all tables
+      type UnifiedResult = { type: string; normalizedRank: number; data: Record<string, unknown> };
+      const unified: UnifiedResult[] = [];
+
+      for (const r of enrichedMemory) {
+        // Memory results from hybrid/FTS search already have their own scoring
+        unified.push({
+          type: "memory",
+          normalizedRank: r.rank === 0 ? 0 : 1.0, // Memory results are pre-ranked
+          data: { ...r },
+        });
+      }
+      for (const r of normSessions) {
+        unified.push({
+          type: "session", normalizedRank: r.normalizedRank,
+          data: { id: r.id, title: r.title, summary: r.summary, project: r.project, agent: r.agent, startedAt: r.started_at, rank: r.rank },
+        });
+      }
+      for (const r of normThreads) {
+        unified.push({
+          type: "thread", normalizedRank: r.normalizedRank,
+          data: { id: r.id, threadId: r.thread_id, role: r.role, content: r.content, createdAt: r.created_at, rank: r.rank },
+        });
+      }
+      for (const r of normTakeovers) {
+        unified.push({
+          type: "takeover", normalizedRank: r.normalizedRank,
+          data: { id: r.id, jobId: r.job_id, diagnosis: r.diagnosis, fixDescription: r.fix_description, decision: r.decision, retrySuccess: r.retry_success, createdAt: r.created_at, rank: r.rank },
+        });
+      }
+      for (const r of normScrapes) {
+        unified.push({
+          type: "scrape", normalizedRank: r.normalizedRank,
+          data: { id: r.id, source: r.source, title: r.title, url: r.url, scrapedAt: r.scraped_at, rank: r.rank },
+        });
+      }
+      for (const r of normIdeas) {
+        unified.push({
+          type: "idea", normalizedRank: r.normalizedRank,
+          data: { id: r.id, title: r.title, status: r.status, source: r.source, link: r.link, content: r.content, createdAt: r.created_at, rank: r.rank },
+        });
+      }
+      for (const r of normYoutube) {
+        unified.push({
+          type: "youtube", normalizedRank: r.normalizedRank,
+          data: { videoId: r.video_id, title: r.title, channelName: r.channel_name, relevanceScore: r.relevance_score, content: r.content, processedAt: r.processed_at, rank: r.rank },
+        });
+      }
+
+      // ── Preference-based boost (30% max influence) ──────────────
+      try {
+        const sm = deps.getSharedStateManager();
+        const prefs = getTopPreferences(sm.getDb(), 15);
+        if (prefs.length > 0) {
+          const prefTerms = prefs.map(p => ({
+            term: p.dimension.split(":").slice(1).join(":").toLowerCase() || p.dimension.toLowerCase(),
+            weight: p.score - 0.5, // positive = likes, negative = dislikes
+          })).filter(p => p.term.length > 0);
+
+          for (const u of unified) {
+            const text = JSON.stringify(u.data).toLowerCase();
+            let boost = 0;
+            let matches = 0;
+            for (const pref of prefTerms) {
+              if (text.includes(pref.term)) {
+                boost += pref.weight;
+                matches++;
+              }
+            }
+            if (matches > 0) {
+              // Normalize and cap at 30% influence
+              const normalizedBoost = Math.min(0.3, Math.max(-0.3, boost / matches));
+              u.normalizedRank *= (1 + normalizedBoost);
+            }
+          }
+        }
+      } catch {
+        // preference_model table may not exist yet
+      }
+
+      // Sort globally by normalized rank (descending — 1.0 is best)
+      unified.sort((a, b) => b.normalizedRank - a.normalizedRank);
+
+      // Return both the unified ranked list AND the legacy grouped format for backward compatibility
       const combined = {
+        // Unified ranking: top results across all tables, sorted by relevance
+        ranked: unified.slice(0, maxResults).map(u => ({ type: u.type, normalizedRank: u.normalizedRank, ...u.data })),
+        // Legacy grouped format (preserved for existing consumers)
         memory: enrichedMemory,
-        sessions: sessionResults.map((r) => ({
+        sessions: normSessions.map((r) => ({
           type: "session" as const, id: r.id, title: r.title, summary: r.summary,
-          project: r.project, agent: r.agent, startedAt: r.started_at, rank: r.rank,
+          project: r.project, agent: r.agent, startedAt: r.started_at, rank: r.rank, normalizedRank: r.normalizedRank,
         })),
-        threads: threadResults.map((r) => ({
+        threads: normThreads.map((r) => ({
           type: "thread" as const, id: r.id, threadId: r.thread_id, role: r.role,
-          content: r.content, createdAt: r.created_at, rank: r.rank,
+          content: r.content, createdAt: r.created_at, rank: r.rank, normalizedRank: r.normalizedRank,
         })),
-        takeovers: takeoverResults.map((r) => ({
+        takeovers: normTakeovers.map((r) => ({
           type: "takeover" as const, id: r.id, jobId: r.job_id, diagnosis: r.diagnosis,
           fixDescription: r.fix_description, decision: r.decision,
-          retrySuccess: r.retry_success, createdAt: r.created_at, rank: r.rank,
+          retrySuccess: r.retry_success, createdAt: r.created_at, rank: r.rank, normalizedRank: r.normalizedRank,
         })),
-        scrapes: scrapeResults.map((r) => ({
+        scrapes: normScrapes.map((r) => ({
           type: "scrape" as const, id: r.id, source: r.source, title: r.title,
-          url: r.url, scrapedAt: r.scraped_at, rank: r.rank,
+          url: r.url, scrapedAt: r.scraped_at, rank: r.rank, normalizedRank: r.normalizedRank,
         })),
-        ideas: ideaResults.map((r) => ({
+        ideas: normIdeas.map((r) => ({
           type: "idea" as const, id: r.id, title: r.title, status: r.status,
-          source: r.source, link: r.link, content: r.content, createdAt: r.created_at, rank: r.rank,
+          source: r.source, link: r.link, content: r.content, createdAt: r.created_at, rank: r.rank, normalizedRank: r.normalizedRank,
         })),
-        youtube: youtubeResults.map((r) => ({
+        youtube: normYoutube.map((r) => ({
           type: "youtube" as const, videoId: r.video_id, title: r.title,
           channelName: r.channel_name, relevanceScore: r.relevance_score,
-          content: r.content, processedAt: r.processed_at, rank: r.rank,
+          content: r.content, processedAt: r.processed_at, rank: r.rank, normalizedRank: r.normalizedRank,
         })),
       };
 

@@ -6,12 +6,15 @@
  * so the Scheduler can debounce reactive triggers.
  */
 
-import { appendFile, writeFile } from "fs/promises";
+import { appendFile, writeFile, mkdir } from "fs/promises";
+import { createHash } from "crypto";
 import { watch, type FSWatcher } from "fs";
 import { basename } from "path";
 import { PATHS } from "../config/paths.js";
 import { logger } from "../utils/logger.js";
 import { memoryEvents } from "../events/memory-events.js";
+import { serializeSkillMarkdown } from "../skills/markdown.js";
+import type { SkillFrontmatter, SkillStatus } from "../skills/types.js";
 import type { StateManager } from "../state/manager.js";
 import type { MemoryIndexer } from "./indexer.js";
 
@@ -113,6 +116,149 @@ export class CanonicalMemoryService {
   insertSessionEvent(title: string, content: string, context?: string): void {
     this.sm.insertDaemonEvent(title, content, context || "general");
     this.markDirty("embeddings", "session_event");
+  }
+
+  // ── Skill operations ──────────────────────────────────────
+
+  /**
+   * Create or update a skill in the catalog and write its markdown file.
+   */
+  async upsertSkill(frontmatter: SkillFrontmatter, body: string): Promise<void> {
+    const filePath = `${PATHS.skills}/${frontmatter.id}.md`;
+    const content = serializeSkillMarkdown(frontmatter, body);
+    const contentHash = createHash("sha256").update(content).digest("hex");
+
+    // Ensure skills directory exists
+    await mkdir(PATHS.skills, { recursive: true });
+
+    // Write the file
+    await writeFile(filePath, content, "utf-8");
+    this.trackSelfWrite(`${frontmatter.id}.md`);
+
+    // Upsert into skills_catalog
+    try {
+      this.sm.getDb().prepare(`
+        INSERT INTO skills_catalog (id, title, status, trigger_pattern, category, source, content_hash, file_path, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(id) DO UPDATE SET
+          title = excluded.title,
+          status = excluded.status,
+          trigger_pattern = excluded.trigger_pattern,
+          category = excluded.category,
+          source = excluded.source,
+          content_hash = excluded.content_hash,
+          file_path = excluded.file_path
+      `).run(
+        frontmatter.id, frontmatter.title, frontmatter.status,
+        frontmatter.trigger, frontmatter.category, frontmatter.source,
+        contentHash, filePath,
+      );
+    } catch (err) {
+      logger.warn({ err, skillId: frontmatter.id }, "Failed to upsert skill catalog entry (table may not exist)");
+    }
+
+    // Index for FTS search
+    try {
+      await this.indexer.indexFile(filePath, "general");
+    } catch (err) {
+      logger.warn({ err, filePath }, "Failed to index skill file");
+    }
+
+    this.markDirty("reindex", `skill:${frontmatter.id}`);
+    this.markDirty("embeddings", `skill:${frontmatter.id}`);
+    logger.info({ skillId: frontmatter.id, status: frontmatter.status }, "Upserted skill");
+  }
+
+  /**
+   * Archive a skill (soft-delete, restorable on match).
+   */
+  archiveSkill(skillId: string): boolean {
+    try {
+      const result = this.sm.getDb().prepare(`
+        UPDATE skills_catalog
+        SET status = 'archived', archived_at = datetime('now')
+        WHERE id = ? AND status != 'archived'
+      `).run(skillId);
+      if (result.changes > 0) {
+        logger.info({ skillId }, "Archived skill");
+        return true;
+      }
+      return false;
+    } catch (err) {
+      logger.warn({ err, skillId }, "Failed to archive skill");
+      return false;
+    }
+  }
+
+  /**
+   * Record a skill usage (success or failure).
+   */
+  recordSkillUsage(skillId: string, success: boolean): void {
+    try {
+      const col = success ? "success_count" : "failure_count";
+      this.sm.getDb().prepare(`
+        UPDATE skills_catalog
+        SET ${col} = ${col} + 1, last_used_at = datetime('now')
+        WHERE id = ?
+      `).run(skillId);
+    } catch (err) {
+      logger.debug({ err, skillId }, "Failed to record skill usage");
+    }
+  }
+
+  /**
+   * Get active skills for session injection.
+   */
+  getActiveSkills(limit = 50): Array<{ id: string; title: string; trigger_pattern: string; category: string; success_count: number; failure_count: number }> {
+    try {
+      return this.sm.getDb().prepare(`
+        SELECT id, title, trigger_pattern, category, success_count, failure_count
+        FROM skills_catalog
+        WHERE status = 'active'
+        ORDER BY last_used_at DESC NULLS LAST
+        LIMIT ?
+      `).all(limit) as Array<{ id: string; title: string; trigger_pattern: string; category: string; success_count: number; failure_count: number }>;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Promote a skill from draft/observation to active if it meets thresholds.
+   */
+  promoteSkillIfReady(skillId: string): SkillStatus | null {
+    try {
+      const row = this.sm.getDb().prepare(`
+        SELECT status, success_count, failure_count, requires_approval
+        FROM skills_catalog WHERE id = ?
+      `).get(skillId) as { status: string; success_count: number; failure_count: number; requires_approval?: number } | undefined;
+
+      if (!row || row.status === "active" || row.status === "archived") return null;
+
+      const total = row.success_count + row.failure_count;
+      const rate = total > 0 ? row.success_count / total : 0;
+
+      if (row.success_count >= 3 && rate >= 0.60) {
+        const newStatus: SkillStatus = "active";
+        this.sm.getDb().prepare(`
+          UPDATE skills_catalog SET status = ?, last_promoted_at = datetime('now') WHERE id = ?
+        `).run(newStatus, skillId);
+        logger.info({ skillId, successCount: row.success_count, rate }, "Promoted skill to active");
+        return newStatus;
+      }
+
+      // Auto-promote from draft to observation after first use
+      if (row.status === "draft" && total > 0) {
+        this.sm.getDb().prepare(`
+          UPDATE skills_catalog SET status = 'observation' WHERE id = ?
+        `).run(skillId);
+        return "observation";
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   // ── File change detection ──────────────────────────────────

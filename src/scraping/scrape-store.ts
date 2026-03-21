@@ -90,6 +90,27 @@ export function markProcessed(
   `).run(ideaId ?? null, qualityScore ?? null, scrapeId);
 }
 
+const MAX_SCRAPE_RETRIES = 3;
+
+/**
+ * Increment fail_count instead of marking processed. If fail_count reaches max,
+ * mark as processed to prevent infinite retries (with null idea_id = data loss acknowledged).
+ */
+export function markScrapeFailedRetry(
+  db: Database.Database,
+  scrapeId: string,
+): void {
+  const row = db.prepare(`SELECT fail_count FROM scrapes WHERE id = ?`).get(scrapeId) as { fail_count: number } | undefined;
+  const newCount = (row?.fail_count ?? 0) + 1;
+  if (newCount >= MAX_SCRAPE_RETRIES) {
+    logger.warn({ scrapeId, failCount: newCount }, "Scrape exhausted retries, marking as processed (data loss)");
+    markProcessed(db, scrapeId);
+  } else {
+    db.prepare(`UPDATE scrapes SET fail_count = ? WHERE id = ?`).run(newCount, scrapeId);
+    logger.info({ scrapeId, failCount: newCount, maxRetries: MAX_SCRAPE_RETRIES }, "Scrape synthesis failed, will retry next run");
+  }
+}
+
 /**
  * Set quality_score and deep-linker enrichment WITHOUT marking as processed.
  * Used by deep-linker to pre-score scrapes for the synthesizer's cross-source synthesis.
@@ -213,11 +234,13 @@ export function addToLinkInbox(
   }
 }
 
-/** Get pending links from the inbox. */
-export function getPendingLinks(db: Database.Database, limit = 20): LinkInboxItem[] {
+/** Get pending links from the inbox, including failed links eligible for retry. */
+export function getPendingLinks(db: Database.Database, limit = 20, maxRetries = 3): LinkInboxItem[] {
   return db.prepare(`
-    SELECT * FROM link_inbox WHERE status = 'pending' ORDER BY submitted_at ASC LIMIT ?
-  `).all(limit) as LinkInboxItem[];
+    SELECT * FROM link_inbox
+    WHERE status = 'pending' OR (status = 'failed' AND fail_count < ?)
+    ORDER BY status ASC, submitted_at ASC LIMIT ?
+  `).all(maxRetries, limit) as LinkInboxItem[];
 }
 
 /** Mark a link as processing. */
@@ -232,9 +255,9 @@ export function markLinkDone(db: Database.Database, id: string, scrapeId: string
   `).run(scrapeId, id);
 }
 
-/** Mark a link as failed. */
+/** Mark a link as failed and increment fail_count for retry eligibility. */
 export function markLinkFailed(db: Database.Database, id: string, error: string): void {
   db.prepare(`
-    UPDATE link_inbox SET status = 'failed', error = ?, processed_at = datetime('now') WHERE id = ?
+    UPDATE link_inbox SET status = 'failed', error = ?, processed_at = datetime('now'), fail_count = fail_count + 1 WHERE id = ?
   `).run(error, id);
 }
