@@ -35,6 +35,7 @@ export const PATHS = {
   plans: `${mem}/plans`,
   scrapes: `${mem}/scrapes`,
   backups: `${mem}/backups`,
+  skills: `${mem}/skills`,
 
   // Legacy files (may be removed)
   ideasMd: `${mem}/ideas.md`,
