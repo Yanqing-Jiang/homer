@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
 import type Database from "better-sqlite3";
+import { z } from "zod";
 import { parseIdeasMd, type ParsedIdea } from "./parser.js";
 import * as dao from "./dao.js";
 import { logger } from "../utils/logger.js";
@@ -7,12 +8,17 @@ import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
 import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { executeCodexBrowserScrape } from "../executors/codex-browser.js";
-import { buildBookmarkScrapePrompt, buildTweetReadPrompt, SCRAPE_OPTIONS, DEEP_FETCH_OPTIONS } from "../scraping/browser-prompts.js";
+import {
+  buildBookmarkScrapePrompt, buildTweetReadPrompt,
+  BOOKMARK_JSON_START, BOOKMARK_JSON_END,
+  SCRAPE_OPTIONS, DEEP_FETCH_OPTIONS,
+} from "../scraping/browser-prompts.js";
 import { ensureCDP } from "../scraping/chrome-launcher.js";
 import { cleanAgentOutput } from "../scraping/clean-output.js";
+import { parseSwarmJSON } from "../executors/model-swarm.js";
 import { insertScrape } from "../scraping/scrape-store.js";
 import { PATHS } from "../config/paths.js";
-import { X_BOOKMARK_CODEX_SKILLS, TWEETER_BOOKMARK_SKILL_PATH } from "../scraping/skill-paths.js";
+import { X_BOOKMARK_CODEX_SKILLS, TWITTER_SCRAPE_SKILL_PATH } from "../scraping/skill-paths.js";
 
 const IDEAS_FILE = PATHS.ideasMd;
 const DENY_HISTORY_FILE = PATHS.denyHistory;
@@ -33,32 +39,96 @@ interface IngestResult {
   errors: string[];
 }
 
+// ============================================
+// BOOKMARK EXTRACTION — Zod Schema + Parsing
+// ============================================
+
+const ScrapedBookmarkSchema = z.object({
+  id: z.string().regex(/^\d{8,25}$/),
+  author: z.string().min(1).max(30),
+  url: z.string().url(),
+  text: z.string().min(15),
+  external_urls: z.array(z.string().url()).optional().default([]),
+});
+const ScrapedBookmarksSchema = z.array(ScrapedBookmarkSchema);
+type ScrapedBookmark = z.infer<typeof ScrapedBookmarkSchema>;
+
 interface TwitterBookmark {
   id: string;
   text: string;
   author: string;
-  title?: string;
-  content?: string;
-  linked_summary?: string;
-  image_analysis?: string;
-  hook_analysis?: string;
-  deep_link_hints?: Array<{
-    target: string;
-    relationship: string;
-    why: string;
-  }>;
-  created_at?: string;
-  urls?: string[];
+  title: string;
+  urls: string[];
 }
 
-function formatBookmarkDeepLinkHints(
-  hints?: Array<{ target: string; relationship: string; why: string }>,
-): string {
-  if (!hints?.length) return "";
-  return hints
-    .slice(0, 3)
-    .map((hint) => `- ${hint.target} (${hint.relationship}): ${hint.why}`)
-    .join("\n");
+/** Extract content between unique markers from LLM output. */
+function extractMarkedBlock(raw: string, startMarker: string, endMarker: string): string | null {
+  const startIdx = raw.indexOf(startMarker);
+  if (startIdx === -1) return null;
+  const from = startIdx + startMarker.length;
+  const endIdx = raw.indexOf(endMarker, from);
+  if (endIdx === -1) return null;
+  return raw.slice(from, endIdx).trim();
+}
+
+/** Generate a clean title from tweet text in TypeScript (deterministic). */
+function deriveBookmarkTitle(text: string, author: string): string {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (!clean || clean.length < 5) return `X: @${author} bookmark`;
+  const firstSentence = clean.split(/[.!?\n]/)[0]?.trim() || clean;
+  return firstSentence.length > 80
+    ? `${firstSentence.slice(0, 77)}...`
+    : firstSentence;
+}
+
+/** Parse bookmark scrape output: try markers first, fall back to parseSwarmJSON. */
+function parseBookmarkOutput(raw: string): TwitterBookmark[] {
+  // Tier 1: Extract from markers
+  const marked = extractMarkedBlock(raw, BOOKMARK_JSON_START, BOOKMARK_JSON_END);
+  // Tier 2: Clean raw output and try parsing
+  const candidate = marked ?? cleanAgentOutput(raw);
+
+  let parsed: ScrapedBookmark[];
+  try {
+    parsed = parseSwarmJSON(candidate, ScrapedBookmarksSchema);
+  } catch {
+    // Tier 2b: Try the full raw output if marker extraction failed
+    if (marked) {
+      try {
+        parsed = parseSwarmJSON(cleanAgentOutput(raw), ScrapedBookmarksSchema);
+      } catch {
+        return [];
+      }
+    } else {
+      return [];
+    }
+  }
+
+  // Normalize + dedup
+  const seen = new Set<string>();
+  return parsed
+    .map((b): TwitterBookmark | null => {
+      const author = b.author.replace(/^@/, "");
+      const text = b.text.replace(/\s+/g, " ").trim();
+      if (text.length < 15) return null;
+      if (seen.has(b.id)) return null;
+      seen.add(b.id);
+
+      const externalUrls = [...new Set(
+        (b.external_urls ?? [])
+          .map(u => u.trim())
+          .filter(u => u && !u.includes("twitter.com") && !u.includes("x.com")),
+      )];
+
+      return {
+        id: b.id,
+        author,
+        text,
+        title: deriveBookmarkTitle(text, author),
+        urls: externalUrls,
+      };
+    })
+    .filter((b): b is TwitterBookmark => b !== null);
 }
 
 // ============================================
@@ -88,123 +158,81 @@ function ensureIdeaId(idea: ParsedIdea): void {
 }
 
 // ============================================
-// TWITTER/X SCRAPING (via Codex + agent-browser)
+// TWITTER/X SCRAPING (via Claude Sonnet + agent-browser)
 // ============================================
 
+/**
+ * Run bookmark extraction with a given target count.
+ * Returns validated TwitterBookmark[] or throws.
+ */
+async function runBookmarkExtraction(maxItems: number): Promise<TwitterBookmark[]> {
+  const skillContent = existsSync(TWITTER_SCRAPE_SKILL_PATH)
+    ? readFileSync(TWITTER_SCRAPE_SKILL_PATH, "utf-8")
+    : "";
+
+  const prompt = `${skillContent ? `SKILL REFERENCE:\n${skillContent}\n\n` : ""}${buildBookmarkScrapePrompt(maxItems)}`;
+
+  const result = await executeClaudeCommand(prompt, {
+    ...SCRAPE_OPTIONS,
+    model: "sonnet",
+    timeout: 300_000, // 5 min — extraction only, no deep-fetch
+  });
+
+  if (result.exitCode !== 0) {
+    throw new Error(`Claude bookmark scrape failed (exit ${result.exitCode}): ${result.output?.slice(0, 200)}`);
+  }
+
+  const bookmarks = parseBookmarkOutput(result.output ?? "");
+  if (bookmarks.length === 0) {
+    throw new Error(`No valid bookmarks parsed from output (${(result.output ?? "").length} chars)`);
+  }
+
+  return bookmarks;
+}
+
 async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
-  logger.info("Scraping Twitter/X bookmarks via Claude Sonnet + agent-browser");
+  logger.info("Scraping Twitter/X bookmarks via Claude Sonnet + agent-browser (extraction-only)");
 
   try {
-    // Primary: Claude Sonnet with tweeter_bookmark skill
-    const skillContent = existsSync(TWEETER_BOOKMARK_SKILL_PATH)
-      ? readFileSync(TWEETER_BOOKMARK_SKILL_PATH, "utf-8")
-      : "";
-
-    const sonnetPrompt = `${skillContent ? `SKILL REFERENCE:\n${skillContent}\n\n` : ""}${buildBookmarkScrapePrompt(10)}`;
-
-    const result = await executeClaudeCommand(sonnetPrompt, {
-      ...SCRAPE_OPTIONS,
-      model: "sonnet",
-      timeout: 600_000,
-    });
-
-    if (result.exitCode !== 0) {
-      logger.warn({ exitCode: result.exitCode, output: result.output?.slice(0, 300) }, "Browser bookmark scrape failed");
-      return [];
-    }
-
-    // Extract JSON array from output with structured fallback
-    const output = result.output ?? "";
     let bookmarks: TwitterBookmark[] = [];
+    let lastError = "";
 
-    // Attempt 1: Direct JSON array match
-    const arrayMatch = output.match(/\[[\s\S]*\]/);
-    if (arrayMatch) {
+    // Retry strategy: try full count, then smaller if it fails
+    for (const maxItems of [10, 6]) {
       try {
-        bookmarks = JSON.parse(arrayMatch[0]);
-      } catch {
-        // Attempt 2: Extract from markdown code block
-        const codeBlockMatch = output.match(/```json\n?([\s\S]*?)\n?```/);
-        if (codeBlockMatch?.[1]) {
-          try {
-            bookmarks = JSON.parse(codeBlockMatch[1]);
-          } catch {
-            logger.warn("Failed to parse bookmark JSON from code block");
-          }
-        }
+        bookmarks = await runBookmarkExtraction(maxItems);
+        logger.info({ count: bookmarks.length, target: maxItems }, "Bookmark extraction succeeded");
+        break;
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        logger.warn({ maxItems, error: lastError }, "Bookmark extraction attempt failed, retrying smaller");
       }
     }
 
-    // Attempt 3: Regex extraction fallback — extract URLs + surrounding text
-    if (bookmarks.length === 0 && output.length > 100) {
-      const urlPattern = /https?:\/\/(?:twitter\.com|x\.com)\/(\w+)\/status\/(\d+)/g;
-      let match;
-      while ((match = urlPattern.exec(output)) !== null) {
-        const author = match[1] ?? "unknown";
-        const tweetId = match[2] ?? "";
-        // Extract surrounding text as content (50 chars before/after URL)
-        const idx = match.index;
-        const contextStart = Math.max(0, idx - 100);
-        const contextEnd = Math.min(output.length, idx + match[0].length + 100);
-        const surrounding = output.slice(contextStart, contextEnd).replace(/["\n\r]/g, " ").trim();
-
-        bookmarks.push({
-          id: tweetId,
-          text: surrounding,
-          author,
-          created_at: new Date().toISOString(),
-        });
-      }
-      if (bookmarks.length > 0) {
-        logger.warn({ count: bookmarks.length }, "Used regex fallback for bookmark extraction");
-      }
-    }
-
+    // Fail closed — no regex fallback, no garbage scrapes
     if (bookmarks.length === 0) {
-      logger.warn({ outputLen: output.length }, "No bookmarks extracted from browser output");
+      logger.warn({ error: lastError }, "All bookmark extraction attempts failed — returning empty");
       return [];
     }
 
-    const ideas: ParsedIdea[] = [];
     const now = new Date();
     const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
 
-    for (const bookmark of bookmarks) {
-      const urls = bookmark.urls || [];
-      const hasExternalLink = urls.some(u => !u.includes("twitter.com") && !u.includes("x.com"));
-      const title = bookmark.title?.trim()
-        || `X: ${bookmark.text.slice(0, 60)}${bookmark.text.length > 60 ? "..." : ""}`;
-      const contentParts = [
-        `**@${bookmark.author}**: ${bookmark.content?.trim() || bookmark.text}`,
-        bookmark.linked_summary ? `## Linked Content\n\n${bookmark.linked_summary.trim()}` : "",
-        bookmark.image_analysis ? `## Image Read\n\n${bookmark.image_analysis.trim()}` : "",
-        bookmark.hook_analysis ? `## Hook Analysis\n\n${bookmark.hook_analysis.trim()}` : "",
-        bookmark.deep_link_hints?.length ? `## Homer Deep Links\n\n${formatBookmarkDeepLinkHints(bookmark.deep_link_hints)}` : "",
-      ].filter(Boolean);
-
+    return bookmarks.map((bookmark) => {
+      const externalUrl = bookmark.urls[0];
       const idea: ParsedIdea = {
         id: `tweet_${bookmark.id}`,
-        title,
+        title: bookmark.title,
         status: "draft",
         source: "x-bookmarks",
-        content: contentParts.join("\n\n"),
+        content: `**@${bookmark.author}**: ${bookmark.text}`,
         link: `https://x.com/${bookmark.author}/status/${bookmark.id}`,
         tags: ["x-bookmark"],
         timestamp,
+        ...(externalUrl ? { context: `External link: ${externalUrl}` } : {}),
       };
-
-      if (hasExternalLink) {
-        const externalUrl = urls.find(u => !u.includes("twitter.com") && !u.includes("x.com"));
-        if (externalUrl) {
-          idea.context = `External link: ${externalUrl}`;
-        }
-      }
-
-      ideas.push(idea);
-    }
-
-    logger.info({ count: ideas.length }, "Extracted ideas from Twitter bookmarks via Codex");
-    return ideas;
+      return idea;
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.warn({ error: msg }, "Browser bookmark scrape error");
@@ -389,7 +417,9 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
           const threadContent = await deepFetchUrl(idea.link, idea.title);
           if (threadContent) {
             const author = idea.link.split("/")[3] ?? "";
-            idea.content = `**@${author}**: ${threadContent}`;
+            // Merge thread content with existing content instead of overwriting
+            const existingContent = idea.content || "";
+            idea.content = `**@${author}**: ${threadContent}\n\n${existingContent}`;
             // Fix title if it was empty from bookmark list (X Articles, long threads)
             if (idea.title === "X: " || idea.title === "X:" || !idea.title.replace(/^X:\s*/, "").trim()) {
               const firstLine = threadContent.split("\n")[0]?.trim() ?? "";

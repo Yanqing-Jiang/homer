@@ -186,6 +186,186 @@ export function pruneOldScrapes(db: Database.Database, days: number = 30): numbe
 }
 
 // ============================================
+// PIPELINE STATE (v2 sequential pipeline)
+// ============================================
+
+export type PipelineStep = "pending" | "scored" | "clustered" | "extracted" | "critiqued" | "enriched" | "saved" | "skipped" | "rejected";
+
+export interface ClusterState {
+  clusterId: string;
+  role: "primary" | "secondary";
+  memberIds: string[];
+}
+
+export interface PipelineState {
+  version: number;
+  step: PipelineStep;
+  score?: { value: number; dimensions: string[]; summary: string };
+  cluster?: ClusterState;
+  candidate?: { title: string; content: string; tags: string[]; link: string; relevance: string; confidence: number; source: string };
+  critique?: { passed: boolean; novelty: number; goalAlignment: number; feasibility: number; reason: string };
+  enrichment?: Record<string, unknown>;
+  attempts: { score: number; candidate: number; critique: number; enrich: number; synthesize: number };
+  completed_at?: string;
+}
+
+function getMetadata(db: Database.Database, scrapeId: string): Record<string, unknown> {
+  const row = db.prepare(`SELECT metadata FROM scrapes WHERE id = ?`).get(scrapeId) as { metadata: string | null } | undefined;
+  return row?.metadata ? JSON.parse(row.metadata) : {};
+}
+
+function setMetadata(db: Database.Database, scrapeId: string, meta: Record<string, unknown>): void {
+  db.prepare(`UPDATE scrapes SET metadata = ? WHERE id = ?`).run(JSON.stringify(meta), scrapeId);
+}
+
+/** Get pipeline state for a scrape, or null if not started. */
+export function getPipelineState(db: Database.Database, scrapeId: string): PipelineState | null {
+  const meta = getMetadata(db, scrapeId);
+  return (meta.pipeline as PipelineState) ?? null;
+}
+
+/** Update pipeline state for a specific step. Merges into existing state. */
+export function updatePipelineStep(
+  db: Database.Database,
+  scrapeId: string,
+  step: PipelineStep,
+  stepData?: Record<string, unknown>,
+): void {
+  const meta = getMetadata(db, scrapeId);
+  const existing: PipelineState = (meta.pipeline as PipelineState) ?? {
+    version: 2,
+    step: "pending",
+    attempts: { score: 0, candidate: 0, critique: 0, enrich: 0, synthesize: 0 },
+  };
+  // Backfill synthesize counter for pre-clustering scrapes
+  if (existing.attempts.synthesize === undefined) existing.attempts.synthesize = 0;
+
+  existing.step = step;
+  if (stepData) {
+    const stepKey = step === "scored" ? "score"
+      : step === "clustered" ? "cluster"
+      : step === "extracted" ? "candidate"
+      : step === "critiqued" ? "critique"
+      : step === "enriched" ? "enrichment"
+      : undefined;
+    if (stepKey) {
+      (existing as unknown as Record<string, unknown>)[stepKey] = stepData;
+    }
+  }
+
+  meta.pipeline = existing;
+  setMetadata(db, scrapeId, meta);
+}
+
+/** Increment attempt counter for a specific pipeline step. */
+export function incrementPipelineAttempt(
+  db: Database.Database,
+  scrapeId: string,
+  stepName: "score" | "candidate" | "critique" | "enrich" | "synthesize",
+): number {
+  const meta = getMetadata(db, scrapeId);
+  const existing: PipelineState = (meta.pipeline as PipelineState) ?? {
+    version: 2,
+    step: "pending",
+    attempts: { score: 0, candidate: 0, critique: 0, enrich: 0, synthesize: 0 },
+  };
+  if (existing.attempts.synthesize === undefined) existing.attempts.synthesize = 0;
+
+  existing.attempts[stepName] = (existing.attempts[stepName] ?? 0) + 1;
+  meta.pipeline = existing;
+  setMetadata(db, scrapeId, meta);
+  return existing.attempts[stepName];
+}
+
+/** Get scrapes that need a specific pipeline step. */
+export function getScrapesForStep(
+  db: Database.Database,
+  targetStep: PipelineStep,
+  hoursWindow = 48,
+): StoredScrape[] {
+  // Get unprocessed scrapes within the time window
+  const all = getUnprocessedScrapes(db, hoursWindow);
+
+  // Filter by pipeline state
+  return all.filter((s) => {
+    const meta = s.metadata ? JSON.parse(s.metadata) : {};
+    const pipeline = meta.pipeline as PipelineState | undefined;
+
+    switch (targetStep) {
+      case "pending": // Needs scoring
+        return !pipeline || pipeline.step === "pending";
+      case "scored": // Already scored, needs clustering
+        return pipeline?.step === "scored" && (pipeline.score?.value ?? 0) >= 6;
+      case "clustered": // Clustered primary, needs synthesis/extraction
+        return pipeline?.step === "clustered" && pipeline.cluster?.role === "primary";
+      case "extracted": // Has candidate, needs critique
+        return pipeline?.step === "extracted";
+      case "critiqued": // Critiqued + passed, needs enrichment
+        return pipeline?.step === "critiqued" && pipeline.critique?.passed === true;
+      case "enriched": // Enriched, needs saving
+        return pipeline?.step === "enriched";
+      default:
+        return false;
+    }
+  });
+}
+
+const MAX_STEP_RETRIES = 3;
+
+/** Mark a scrape with a terminal decision. Only terminal decisions mark scrapes as processed. */
+export function markScrapeTerminal(
+  db: Database.Database,
+  scrapeId: string,
+  reason: "saved" | "skipped" | "rejected" | "exhausted",
+  ideaId?: string,
+  qualityScore?: number,
+): void {
+  const step: PipelineStep = reason === "saved" ? "saved" : reason === "rejected" ? "rejected" : "skipped";
+  updatePipelineStep(db, scrapeId, step);
+
+  // Now mark as processed
+  markProcessed(db, scrapeId, ideaId, qualityScore);
+  logger.info({ scrapeId, reason, ideaId }, "Scrape reached terminal state");
+}
+
+/** Check if a step has exhausted retries. */
+export function isStepExhausted(
+  db: Database.Database,
+  scrapeId: string,
+  stepName: "score" | "candidate" | "critique" | "enrich" | "synthesize",
+): boolean {
+  const pipeline = getPipelineState(db, scrapeId);
+  return (pipeline?.attempts[stepName] ?? 0) >= MAX_STEP_RETRIES;
+}
+
+/** Get all scrapes belonging to a cluster (by clusterId in metadata). */
+export function getClusterMembers(db: Database.Database, clusterId: string): StoredScrape[] {
+  const all = getUnprocessedScrapes(db, 48);
+  return all.filter((s) => {
+    const meta = s.metadata ? JSON.parse(s.metadata) : {};
+    const pipeline = meta.pipeline as PipelineState | undefined;
+    return pipeline?.cluster?.clusterId === clusterId;
+  });
+}
+
+/** Mark all secondary members of a cluster as terminal. */
+export function markClusterSecondariesTerminal(
+  db: Database.Database,
+  clusterId: string,
+  reason: "saved" | "skipped" | "rejected",
+  ideaId?: string,
+): void {
+  const members = getClusterMembers(db, clusterId);
+  for (const m of members) {
+    const meta = m.metadata ? JSON.parse(m.metadata) : {};
+    const pipeline = meta.pipeline as PipelineState | undefined;
+    if (pipeline?.cluster?.role === "secondary") {
+      markScrapeTerminal(db, m.id, reason, ideaId, pipeline.score?.value);
+    }
+  }
+}
+
+// ============================================
 // LINK INBOX
 // ============================================
 

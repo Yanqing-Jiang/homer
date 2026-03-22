@@ -65,9 +65,24 @@ function enhanceOrSkipDB(db: Database.Database, existing: ParsedIdea, incoming: 
     };
   }
 
+  // Merge enrichment JSON when enhancing
+  let mergedEnrichment = existing.enrichment;
+  if (incoming.enrichment) {
+    try {
+      const existingEnr = existing.enrichment ? JSON.parse(existing.enrichment) : {};
+      const incomingEnr = JSON.parse(incoming.enrichment);
+      // Incoming enrichment wins for each top-level key, preserving existing keys not in incoming
+      mergedEnrichment = JSON.stringify({ ...existingEnr, ...incomingEnr });
+    } catch {
+      // If parse fails, prefer incoming
+      mergedEnrichment = incoming.enrichment;
+    }
+  }
+
   dao.updateIdea(db, existing.id, {
     content: existing.content + result.enhancement,
     tags: [...new Set([...(existing.tags ?? []), ...(incoming.tags ?? [])])],
+    enrichment: mergedEnrichment,
   });
 
   return {

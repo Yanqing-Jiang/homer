@@ -960,13 +960,13 @@ async function runGeminiProcess(
   outputFormat?: "text" | "json" | "stream-json",
 ): Promise<GeminiProcessResult> {
   return new Promise((resolve) => {
+    // Pass prompt via stdin to avoid OS ARG_MAX / yargs parsing failures on large prompts.
+    // Gemini CLI reads from stdin when -p is not provided.
     const args = [
       "-m",
       model,
       "-y",
       ...(outputFormat ? ["-o", outputFormat] : []),
-      "-p",
-      prompt,
     ];
     const childEnv: Record<string, string | undefined> = {
       ...process.env,
@@ -990,6 +990,10 @@ async function runGeminiProcess(
       cwd,
       env: childEnv,
     });
+
+    // Write prompt to stdin instead of CLI arg
+    child.stdin.write(prompt);
+    child.stdin.end();
 
     // Register with process lifecycle management
     processRegistry.register(child, {
