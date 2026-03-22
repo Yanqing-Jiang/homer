@@ -42,11 +42,10 @@ export const EXECUTOR_MODELS: Record<ExecutorType, string | undefined> = {
 
 /**
  * Per-platform default Claude model.
- * Web UI → opus[1m], Telegram → sonnet[1m]
+ * All platforms → opus[1m]
  */
-export function getClaudeDefaultModel(lane?: string): string {
-  if (lane?.startsWith("tg:")) return "sonnet[1m]";
-  return "opus[1m]"; // web UI and other contexts
+export function getClaudeDefaultModel(_lane?: string): string {
+  return "opus[1m]";
 }
 
 /**
@@ -66,7 +65,7 @@ export const COMMANDS: CommandDefinition[] = [
     category: "executor",
     description: "Switch to Claude (default, tool use)",
     executor: "claude",
-    model: "sonnet[1m]",
+    model: "opus[1m]",
   },
   {
     name: "/gemini",
