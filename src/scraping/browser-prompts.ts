@@ -25,56 +25,61 @@ export const AGENT_BROWSER_TOOLS = `TOOLS AVAILABLE (via bash):
 - agent-browser eval <js>                # run JavaScript on page`;
 
 // ============================================
+// BOOKMARK EXTRACTION — MARKERS
+// ============================================
+
+export const BOOKMARK_JSON_START = "__HOMER_X_BOOKMARKS_JSON_START__";
+export const BOOKMARK_JSON_END = "__HOMER_X_BOOKMARKS_JSON_END__";
+
+// ============================================
 // PROMPT BUILDERS
 // ============================================
 
+/**
+ * Phase 1: Extraction-only bookmark scrape.
+ * No deep-fetching, no enrichment, no analysis.
+ * Returns marker-wrapped JSON array of raw bookmark facts.
+ */
 export function buildBookmarkScrapePrompt(maxItems: number): string {
-  return `Scrape the top ${maxItems} Twitter/X bookmarks with deep-link enrichment. Return JSON.
+  return `Extract up to ${maxItems} visible bookmarks from X bookmarks page. EXTRACTION ONLY — no analysis.
 
 ${AGENT_BROWSER_TOOLS}
 
-DEEP-LINK TARGETS:
-Homer Career OS | MAHORAGA | Shadow Data Pulse | PICE | ProfitSphere | idea-pipeline | morning-brief | scheduler | content-pipeline
-
-WORKFLOW:
+STEPS:
 1. agent-browser connect 9222
 2. agent-browser open "https://x.com/i/bookmarks"
 3. agent-browser wait 3000
 4. agent-browser snapshot -i -c
-5. Parse the snapshot: extract each bookmark's tweet text, @username (from /@user links), tweet ID (from /status/DIGITS permalink), and any t.co or external URLs.
-6. Scroll if needed to reach ${maxItems}: agent-browser scroll down 800 && agent-browser wait 2000 && agent-browser snapshot -i -c
-7. DEEP-LINK ENRICHMENT — for each bookmark with an external URL:
-   a. agent-browser open "<external_url>"
-   b. agent-browser wait 3000
-   c. agent-browser snapshot -i -c -s "article, main, [role=main], .content, #content" (scope to article body; fall back to full snapshot -i -c if scoped snapshot is empty)
-   d. Read enough to summarize the linked content in 2-4 sentences
-   e. agent-browser open "https://x.com/i/bookmarks" (return to bookmarks)
-   f. agent-browser wait 2000 && agent-browser snapshot -i -c (re-anchor)
-8. For each bookmark: write a 1-sentence hook analysis and add 0-3 deep-link hints ONLY when the connection to a target above is concrete.
+5. From the snapshot, extract each visible bookmark:
+   - id: the numeric tweet ID from /status/DIGITS in the permalink (REQUIRED — skip bookmark if not found)
+   - author: the username from /@username link (REQUIRED — skip if not found)
+   - url: canonical tweet URL https://x.com/{author}/status/{id}
+   - text: full visible tweet text content (REQUIRED — min 15 chars, skip if too short)
+   - external_urls: array of non-X URLs visible in the tweet (empty array if none)
+6. If fewer than ${maxItems} valid bookmarks found, scroll and extract more:
+   - agent-browser scroll down 900
+   - agent-browser wait 2500
+   - agent-browser snapshot -i -c
+   - Extract new bookmarks (skip duplicates by id)
+7. Repeat step 6 up to 2 more times or until ${maxItems} reached.
 
 RULES:
-- Tweet IDs MUST come from actual /status/DIGITS URLs in the snapshot. Omit "id" if not found.
-- Author usernames MUST come from actual /@username links.
-- Do NOT fabricate IDs, usernames, or deep links.
-- If a deep-link fails to load, skip it and continue to the next bookmark.
-- Return structured data only — no prose.
+- id MUST come from actual /status/DIGITS URLs in the snapshot. SKIP any bookmark without a real numeric ID.
+- author MUST come from actual /@username links. Never fabricate.
+- text must be the complete visible tweet text, not truncated.
+- external_urls must exclude x.com and twitter.com URLs. Use empty array [] if none.
+- Do NOT open tweet detail pages — extract only from bookmark card snapshots.
+- Do NOT open external URLs — that happens in a separate step.
+- Do NOT add analysis, summaries, titles, hook analysis, or deep-link hints.
+- If bookmarks page requires login or is empty, return an empty array.
+- If browser connection fails, return an empty array.
 
-OUTPUT — Return ONLY a JSON array:
-[{
-  "id": "tweet_id",
-  "title": "short descriptive title",
-  "text": "tweet content",
-  "content": "tweet text + linked article context",
-  "author": "username",
-  "urls": ["https://..."],
-  "linked_summary": "2-4 sentence summary of external link",
-  "image_analysis": "what images show, including visible text",
-  "hook_analysis": "why this bookmark is compelling",
-  "deep_link_hints": [{"target": "Homer Career OS", "relationship": "accelerates", "why": "concrete connection"}]
-}]
+OUTPUT CONTRACT — output exactly these 3 sections:
+${BOOKMARK_JSON_START}
+[{"id":"1234567890","author":"example","url":"https://x.com/example/status/1234567890","text":"Visible tweet text here","external_urls":["https://example.com/article"]}]
+${BOOKMARK_JSON_END}
 
-If bookmarks page is empty or requires login, return: []
-If you can't connect to the browser, return: []`;
+No markdown fences. No prose. No commentary outside the markers.`;
 }
 
 export function buildTweetReadPrompt(url: string): string {

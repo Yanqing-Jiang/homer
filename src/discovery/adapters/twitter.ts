@@ -2,29 +2,39 @@
  * Twitter Bookmarks Adapter
  *
  * Fetches bookmarks from Twitter/X using Codex + agent-browser via Chrome CDP.
+ * Uses marker-wrapped extraction-only prompt (no deep-fetch, no enrichment).
  */
 
 import type { SourceConfig, RawDiscoveryItem } from "../types.js";
 import { BaseAdapter } from "./base.js";
 import { executeCodexBrowserScrape } from "../../executors/codex-browser.js";
-import { buildBookmarkScrapePrompt, SCRAPE_OPTIONS } from "../../scraping/browser-prompts.js";
+import {
+  buildBookmarkScrapePrompt,
+  BOOKMARK_JSON_START, BOOKMARK_JSON_END,
+  SCRAPE_OPTIONS,
+} from "../../scraping/browser-prompts.js";
 import { X_BOOKMARK_CODEX_SKILLS } from "../../scraping/skill-paths.js";
+import { cleanAgentOutput } from "../../scraping/clean-output.js";
+import { parseSwarmJSON } from "../../executors/model-swarm.js";
+import { z } from "zod";
 
-interface BrowserBookmark {
-  id: string;
-  text: string;
-  author: string;
-  title?: string;
-  content?: string;
-  linked_summary?: string;
-  image_analysis?: string;
-  hook_analysis?: string;
-  deep_link_hints?: Array<{
-    target: string;
-    relationship: string;
-    why: string;
-  }>;
-  urls?: string[];
+const BookmarkSchema = z.object({
+  id: z.string().regex(/^\d{8,25}$/),
+  author: z.string().min(1).max(30),
+  url: z.string().url(),
+  text: z.string().min(15),
+  external_urls: z.array(z.string().url()).optional().default([]),
+});
+const BookmarksArraySchema = z.array(BookmarkSchema);
+type ParsedBookmark = z.infer<typeof BookmarkSchema>;
+
+function extractMarkedBlock(raw: string, start: string, end: string): string | null {
+  const si = raw.indexOf(start);
+  if (si === -1) return null;
+  const from = si + start.length;
+  const ei = raw.indexOf(end, from);
+  if (ei === -1) return null;
+  return raw.slice(from, ei).trim();
 }
 
 export class TwitterAdapter extends BaseAdapter {
@@ -56,72 +66,55 @@ export class TwitterAdapter extends BaseAdapter {
     }
 
     const output = result.output ?? "";
-    const arrayMatch = output.match(/\[[\s\S]*\]/);
-    if (!arrayMatch) {
-      return [];
-    }
 
-    let bookmarks: BrowserBookmark[];
+    // Try markers first, fall back to cleaning raw output
+    const marked = extractMarkedBlock(output, BOOKMARK_JSON_START, BOOKMARK_JSON_END);
+    const candidate = marked ?? cleanAgentOutput(output);
+
+    let bookmarks: ParsedBookmark[];
     try {
-      bookmarks = JSON.parse(arrayMatch[0]);
+      bookmarks = parseSwarmJSON(candidate, BookmarksArraySchema);
     } catch {
-      throw new Error("Failed to parse browser bookmark output as JSON");
+      if (marked) {
+        try {
+          bookmarks = parseSwarmJSON(cleanAgentOutput(output), BookmarksArraySchema);
+        } catch {
+          return [];
+        }
+      } else {
+        return [];
+      }
     }
 
-    return bookmarks.map(bookmark => this.transformBookmark(bookmark));
+    return bookmarks.map(b => this.transformBookmark(b));
   }
 
-  private transformBookmark(bookmark: BrowserBookmark): RawDiscoveryItem {
-    const urlMatch = bookmark.text.match(/https?:\/\/[^\s]+/);
-    const linkedUrl = urlMatch?.[0];
-    const tweetUrl = `https://x.com/${bookmark.author}/status/${bookmark.id}`;
-    const description = [
-      bookmark.content || bookmark.text,
-      bookmark.linked_summary,
-      bookmark.image_analysis,
-      bookmark.hook_analysis,
-      bookmark.deep_link_hints?.length
-        ? bookmark.deep_link_hints
-          .slice(0, 3)
-          .map((hint) => `${hint.target} (${hint.relationship}): ${hint.why}`)
-          .join("\n")
-        : "",
-    ]
-      .filter(Boolean)
-      .join("\n\n");
+  private transformBookmark(bookmark: ParsedBookmark): RawDiscoveryItem {
+    const author = bookmark.author.replace(/^@/, "");
+    const tweetUrl = `https://x.com/${author}/status/${bookmark.id}`;
+    const externalUrl = (bookmark.external_urls ?? []).find(
+      u => !u.includes("x.com") && !u.includes("twitter.com"),
+    );
+
+    // Generate title from text (deterministic)
+    const clean = bookmark.text.replace(/\s+/g, " ").trim();
+    const firstSentence = clean.split(/[.!?\n]/)[0]?.trim() || clean;
+    const title = firstSentence.length > 80
+      ? `${firstSentence.slice(0, 77)}...`
+      : firstSentence;
 
     return {
       id: this.generateId(tweetUrl, this.type),
       source: this.type,
       fetchedAt: new Date(),
-      title: this.extractTitle(bookmark),
-      description: this.cleanText(description || bookmark.text),
-      url: linkedUrl || tweetUrl,
-      author: `@${bookmark.author}`,
+      title: title || `@${author} bookmark`,
+      description: this.cleanText(bookmark.text),
+      url: externalUrl || tweetUrl,
+      author: `@${author}`,
       metadata: {
         tweetId: bookmark.id,
       },
       rawContent: JSON.stringify(bookmark),
     };
-  }
-
-  private extractTitle(bookmark: BrowserBookmark): string {
-    if (bookmark.title?.trim()) return bookmark.title.trim();
-
-    const text = bookmark.content?.trim() || bookmark.text;
-
-    const urlMatch = text.match(/https?:\/\/[^\s]+/);
-    if (urlMatch) {
-      const beforeUrl = text.slice(0, text.indexOf(urlMatch[0])).trim();
-      if (beforeUrl.length > 10 && beforeUrl.length < 200) {
-        return beforeUrl;
-      }
-    }
-
-    if (text.length > 100) {
-      return text.slice(0, 100) + "...";
-    }
-
-    return text || `Tweet by @${bookmark.author}`;
   }
 }

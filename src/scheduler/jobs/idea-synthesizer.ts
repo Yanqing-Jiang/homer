@@ -1,15 +1,18 @@
 /**
- * Idea Synthesizer — The Brain
+ * Idea Synthesizer v3 — Multi-Scrape Clustering Pipeline
  *
- * Architecture: Single-pass Claude Sonnet with SKILLS.md
- *   - Loads unprocessed scrapes + context
- *   - Sends everything to Claude Sonnet in one call
- *   - Sonnet scores, synthesizes, critiques, and enriches in a single pass
- *   - Post-processes the JSON output into ideas via smartSaveIdea()
+ * Architecture: 6-step pipeline with cross-source clustering
+ *   Step 1: SCORE (Gemini Flash) — score scrape against goals
+ *   Step 2: CLUSTER (deterministic) — group related scored scrapes
+ *   Step 3: SYNTHESIZE (Claude Sonnet) — cross-source idea from cluster
+ *   Step 4: CRITIQUE (Gemini Flash) — pass/fail gate
+ *   Step 5: ENRICH (Claude Sonnet) — deep dive + cross-links
+ *   Step 6: SAVE (code only) — smartSaveIdea + mark terminal
  *
- * Pre-scored/pre-enriched scrapes from deep-linker are passed through as context.
+ * State persisted in scrapes.metadata.pipeline for resumability.
+ * Each step has its own small Zod schema with defaults on brittle fields.
  *
- * Schedule: 30 1 * * * (daily at 1:30am, after deep-linker at 1:00am)
+ * Schedule: 30 1 * * * (daily at 1:30am)
  */
 
 import { readFileSync, readdirSync, statSync, existsSync } from "fs";
@@ -17,8 +20,21 @@ import { join } from "path";
 import { z } from "zod";
 import type Database from "better-sqlite3";
 import { executeClaudeCommand } from "../../executors/claude.js";
+import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
-import { getUnprocessedScrapes, markProcessed, markScrapeFailedRetry, type StoredScrape } from "../../scraping/scrape-store.js";
+import {
+  getUnprocessedScrapes,
+  getScrapesForStep,
+  updatePipelineStep,
+  incrementPipelineAttempt,
+  isStepExhausted,
+  markScrapeTerminal,
+  getPipelineState,
+  getClusterMembers,
+  markClusterSecondariesTerminal,
+  type StoredScrape,
+} from "../../scraping/scrape-store.js";
+import { createFingerprint, fingerprintSimilarity } from "../../ideas/fingerprint.js";
 import type { ParsedIdea } from "../../ideas/parser.js";
 import * as ideaDao from "../../ideas/dao.js";
 import { smartSaveIdea, type SmartSaveResult } from "../../ideas/smart-save.js";
@@ -29,75 +45,82 @@ import { storeJobArtifact } from "./artifact-store.js";
 import { PATHS } from "../../config/paths.js";
 
 const DENY_HISTORY = PATHS.denyHistory;
-const SKILL_PATH = "/Users/yj/.claude/skills/idea-synthesizer/SKILLS.md";
-const SONNET_TIMEOUT = 1_200_000; // 20 min for single-pass
-const MAX_SCRAPES_PER_BATCH = 10;
-const RETRY_BATCH_SIZE = 5;
+const SCORE_THRESHOLD = 6;
+const CONFIDENCE_THRESHOLD = 0.5;
+const CRITIQUE_AVG_THRESHOLD = 6;
+const CLUSTER_SIMILARITY_THRESHOLD = 0.3; // Related (lower than dedup's 0.8)
+const NEAR_DUPLICATE_THRESHOLD = 0.75;    // Near-duplicate scrapes to skip
+const MAX_CLUSTER_SIZE = 3;
+const STEP_TIMEOUT = 120_000; // 2 min per step
+const FLASH_TIMEOUT = 60_000; // 1 min for Flash calls
+
+// Skill file paths
+const SKILL_SCORE = join(process.env.HOME ?? "/Users/yj", ".claude/skills/idea-score/SKILLS.md");
+const SKILL_SYNTHESIZE = join(process.env.HOME ?? "/Users/yj", ".claude/skills/idea-synthesize/SKILLS.md");
+const SKILL_CRITIQUE = join(process.env.HOME ?? "/Users/yj", ".claude/skills/idea-critique/SKILLS.md");
+const SKILL_ENRICH = join(process.env.HOME ?? "/Users/yj", ".claude/skills/idea-enrich/SKILLS.md");
 
 // ============================================
-// SCHEMAS
+// SCHEMAS — small, per-step, with defaults
 // ============================================
+
+const ScoreSchema = z.object({
+  score: z.number().min(0).max(10),
+  summary: z.string(),
+  dimensions: z.array(z.string()),
+});
+
+const CandidateSchema = z.object({
+  title: z.string().min(5).max(150),
+  content: z.string().min(50),
+  relevance: z.string(),
+  confidence: z.number().min(0).max(1),
+  tags: z.array(z.string()),
+  link: z.string().optional().default(""),
+  source: z.string(),
+});
+
+const CritiqueSchema = z.object({
+  passed: z.boolean(),
+  novelty: z.number().min(0).max(10),
+  goalAlignment: z.number().min(0).max(10),
+  feasibility: z.number().min(0).max(10),
+  reason: z.string().optional().default(""),
+});
+
+const IMPROVEMENT_AREAS = [
+  "idea-pipeline", "morning-brief", "scheduler", "career-os",
+  "mahoraga", "content-pipeline", "new-mcp", "none",
+] as const;
 
 const EnrichmentSchema = z.object({
   deep_dive: z.object({
     core_claim: z.string(),
-    evidence: z.string(),
-    risks: z.array(z.string()).max(3),
-    validation_path: z.string(),
+    evidence: z.string().optional().default(""),
+    risks: z.array(z.string()).max(3).optional().default([]),
+    validation_path: z.string().optional().default(""),
   }),
   deep_links: z.array(z.object({
     target: z.string(),
     relationship: z.string(),
     strength: z.number().min(0).max(1),
-  })).max(5),
+  })).max(5).optional().default([]),
   homer_improvement: z.object({
-    relevant: z.boolean(),
-    summary: z.string(),
-    area: z.enum(["idea-pipeline", "morning-brief", "scheduler", "career-os", "mahoraga", "content-pipeline", "new-mcp", "none"]),
-    priority: z.enum(["high", "medium", "low"]),
-    user_context: z.string(),
+    relevant: z.boolean().optional().default(false),
+    summary: z.string().optional().default(""),
+    area: z.enum(IMPROVEMENT_AREAS).catch("none"),
+    priority: z.enum(["high", "medium", "low"]).optional().default("low"),
+    user_context: z.string().optional().default(""),
     plan: z.array(z.object({
       step: z.number(),
       action: z.string(),
       file: z.string(),
-      effort: z.enum(["S", "M", "L"]),
-    })).max(5),
-    automation_potential: z.string(),
-  }),
-});
-
-const SonnetIdeaSchema = z.object({
-  title: z.string(),
-  content: z.string(),
-  source: z.string(),
-  link: z.string(),
-  tags: z.array(z.string()),
-  relevance: z.string(),
-  confidenceScore: z.number().min(0).max(1),
-  scrapeIds: z.array(z.string()),
-  critic: z.object({
-    novelty: z.number(),
-    goalAlignment: z.number(),
-    feasibility: z.number(),
-  }),
-  enrichment: EnrichmentSchema,
-});
-
-const SonnetOutputSchema = z.object({
-  scores: z.array(z.object({
-    scrapeId: z.string(),
-    score: z.number(),
-    summary: z.string(),
-    dimensions: z.array(z.string()),
-  })),
-  ideas: z.array(SonnetIdeaSchema),
-  stats: z.object({
-    totalScraped: z.number(),
-    scored: z.number(),
-    aboveThreshold: z.number(),
-    synthesized: z.number(),
-    criticPassed: z.number(),
-    enriched: z.number(),
+      effort: z.enum(["S", "M", "L"]).catch("M"),
+    })).max(5).optional().default([]),
+    automation_potential: z.string().optional().default(""),
+  }).optional().default({
+    relevant: false, summary: "", area: "none", priority: "low",
+    user_context: "", plan: [], automation_potential: "",
   }),
 });
 
@@ -111,21 +134,13 @@ function loadFileIfExists(path: string, maxChars?: number): string {
   return maxChars ? content.slice(0, maxChars) : content;
 }
 
-function formatScrapesForPrompt(scrapes: StoredScrape[]): string {
-  return scrapes.map((s, i) => {
-    const meta = s.metadata ? JSON.parse(s.metadata) : {};
-    const preScore = s.quality_score != null ? ` | Pre-score: ${s.quality_score}` : "";
-    let preEnrichment = "";
-    if (meta.deep_linker?.enrichment) {
-      preEnrichment = `\nPre-enrichment (from deep-linker): ${JSON.stringify(meta.deep_linker.enrichment).slice(0, 500)}`;
-    }
-    return `### [${i + 1}] ${s.title || "(no title)"} (ID: ${s.id})
-Source: ${s.source} | URL: ${s.url || "N/A"} | Author: ${s.author || "N/A"}${preScore}
-${meta.stars ? `Stars: ${meta.stars} | ` : ""}${meta.language ? `Language: ${meta.language} | ` : ""}${meta.topic ? `Topic: ${meta.topic}` : ""}${preEnrichment}
+function formatScrapeForPrompt(s: StoredScrape): string {
+  const meta = s.metadata ? JSON.parse(s.metadata) : {};
+  return `## ${s.title || "(no title)"} (ID: ${s.id})
+Source: ${s.source} | URL: ${s.url || "N/A"} | Author: ${s.author || "N/A"}
+${meta.stars ? `Stars: ${meta.stars} | ` : ""}${meta.language ? `Language: ${meta.language} | ` : ""}${meta.topic ? `Topic: ${meta.topic}` : ""}
 
-${(s.raw_content || "").slice(0, 2000)}
-`;
-  }).join("\n---\n");
+${(s.raw_content || "").slice(0, 3000)}`;
 }
 
 /**
@@ -181,6 +196,618 @@ export function loadRecentMdFiles(maxDays = 7, maxTotalChars = 6000, perFileCap 
   return parts.join("\n\n---\n\n");
 }
 
+// ============================================
+// CLUSTERING
+// ============================================
+
+interface ScoredScrapeInfo {
+  scrape: StoredScrape;
+  score: number;
+  dimensions: string[];
+  summary: string;
+  titleFp: ReturnType<typeof createFingerprint>;
+}
+
+/**
+ * Extract dimension tags by prefix (e.g., "project:homer" → "homer").
+ */
+function extractDimsByPrefix(dimensions: string[], prefix: string): string[] {
+  return dimensions
+    .filter(d => d.startsWith(prefix + ":"))
+    .map(d => d.slice(prefix.length + 1));
+}
+
+/**
+ * Compute relatedness between two scored scrapes using:
+ * 1. Shared project dimensions (strongest signal)
+ * 2. Shared topic dimensions
+ * 3. Title fingerprint similarity
+ */
+function scrapeRelatedness(a: ScoredScrapeInfo, b: ScoredScrapeInfo): number {
+  const aProjects = extractDimsByPrefix(a.dimensions, "project");
+  const bProjects = extractDimsByPrefix(b.dimensions, "project");
+  const sharedProjects = aProjects.filter(p => bProjects.includes(p)).length;
+
+  const aTopics = extractDimsByPrefix(a.dimensions, "topic");
+  const bTopics = extractDimsByPrefix(b.dimensions, "topic");
+  const sharedTopics = aTopics.filter(t => bTopics.includes(t)).length;
+
+  const titleSim = fingerprintSimilarity(a.titleFp, b.titleFp);
+
+  // Weighted combination: project match is strongest
+  let score = 0;
+  if (sharedProjects > 0) score += 0.5;   // Same project = strong signal
+  if (sharedTopics > 0) score += 0.2;     // Same topic = moderate signal
+  score += titleSim * 0.3;                 // Title similarity = supporting signal
+
+  return Math.min(1, score);
+}
+
+/**
+ * Deterministic clustering of scored scrapes using union-find.
+ * Returns clusters (arrays of ScoredScrapeInfo) sorted by max score.
+ */
+function buildClusters(scrapes: ScoredScrapeInfo[]): ScoredScrapeInfo[][] {
+  if (scrapes.length === 0) return [];
+  if (scrapes.length === 1) return [scrapes];
+
+  // Union-find
+  const parent = new Map<string, string>();
+  const find = (id: string): string => {
+    if (!parent.has(id)) parent.set(id, id);
+    let root = parent.get(id)!;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    // Path compression
+    let cur = id;
+    while (cur !== root) {
+      const next = parent.get(cur)!;
+      parent.set(cur, root);
+      cur = next;
+    }
+    return root;
+  };
+  const union = (a: string, b: string) => {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent.set(rb, ra);
+  };
+
+  // Initialize
+  for (const s of scrapes) parent.set(s.scrape.id, s.scrape.id);
+
+  // Pairwise relatedness
+  for (let i = 0; i < scrapes.length; i++) {
+    for (let j = i + 1; j < scrapes.length; j++) {
+      const a = scrapes[i]!;
+      const b = scrapes[j]!;
+      const rel = scrapeRelatedness(a, b);
+      if (rel >= CLUSTER_SIMILARITY_THRESHOLD) {
+        union(a.scrape.id, b.scrape.id);
+      }
+    }
+  }
+
+  // Group by root
+  const groups = new Map<string, ScoredScrapeInfo[]>();
+  for (const s of scrapes) {
+    const root = find(s.scrape.id);
+    const group = groups.get(root);
+    if (group) group.push(s);
+    else groups.set(root, [s]);
+  }
+
+  // Sort within each group by score desc, cap at MAX_CLUSTER_SIZE
+  const clusters: ScoredScrapeInfo[][] = [];
+  for (const [, members] of groups) {
+    members.sort((a, b) => b.score - a.score);
+    clusters.push(members.slice(0, MAX_CLUSTER_SIZE));
+  }
+
+  // Sort clusters by max score desc
+  clusters.sort((a, b) => (b[0]?.score ?? 0) - (a[0]?.score ?? 0));
+  return clusters;
+}
+
+/**
+ * Step 2: Cluster scored scrapes deterministically.
+ * - Groups related scrapes by project/topic/title similarity
+ * - Skips near-duplicate scrapes (similarity >= 0.75)
+ * - Assigns primary (highest score) and secondary roles
+ * Returns stats about clustering.
+ */
+function stepCluster(
+  db: Database.Database,
+  scoredScrapes: StoredScrape[],
+): { clustersFormed: number; nearDuplicatesSkipped: number; singletons: number } {
+  // Build scored info for all scrapes
+  const infos: ScoredScrapeInfo[] = scoredScrapes.map(s => {
+    const pipeline = getPipelineState(db, s.id);
+    return {
+      scrape: s,
+      score: pipeline?.score?.value ?? 0,
+      dimensions: pipeline?.score?.dimensions ?? [],
+      summary: pipeline?.score?.summary ?? "",
+      titleFp: createFingerprint(s.title || ""),
+    };
+  });
+
+  // Near-duplicate detection: skip lower-scored duplicates
+  let nearDuplicatesSkipped = 0;
+  const survived = new Set(infos.map(i => i.scrape.id));
+
+  for (let i = 0; i < infos.length; i++) {
+    const infoA = infos[i]!;
+    if (!survived.has(infoA.scrape.id)) continue;
+    for (let j = i + 1; j < infos.length; j++) {
+      const infoB = infos[j]!;
+      if (!survived.has(infoB.scrape.id)) continue;
+      const titleSim = fingerprintSimilarity(infoA.titleFp, infoB.titleFp);
+      if (titleSim >= NEAR_DUPLICATE_THRESHOLD) {
+        // Keep higher-scored, skip lower
+        const loser = infoA.score >= infoB.score ? infoB : infoA;
+        survived.delete(loser.scrape.id);
+        markScrapeTerminal(db, loser.scrape.id, "skipped", undefined, loser.score);
+        logger.info({
+          scrapeId: loser.scrape.id,
+          title: loser.scrape.title,
+          similarity: titleSim.toFixed(2),
+        }, "Near-duplicate scrape skipped");
+        nearDuplicatesSkipped++;
+      }
+    }
+  }
+
+  const remainingInfos = infos.filter(i => survived.has(i.scrape.id));
+  const clusters = buildClusters(remainingInfos);
+
+  let singletons = 0;
+  let clustersFormed = 0;
+
+  for (const cluster of clusters) {
+    const now = Date.now();
+    const memberIds = cluster.map(c => c.scrape.id);
+    const clusterId = `cluster_${now}_${memberIds.join("_").slice(0, 60)}`;
+
+    if (cluster.length === 1) {
+      singletons++;
+    } else {
+      clustersFormed++;
+      logger.info({
+        clusterId,
+        size: cluster.length,
+        members: memberIds,
+        topics: cluster.flatMap(c => extractDimsByPrefix(c.dimensions, "topic")).filter((v, i, a) => a.indexOf(v) === i),
+      }, "Cluster formed");
+    }
+
+    // Primary = highest score (already sorted)
+    for (let i = 0; i < cluster.length; i++) {
+      const member = cluster[i]!;
+      const role = i === 0 ? "primary" as const : "secondary" as const;
+      updatePipelineStep(db, member.scrape.id, "clustered", {
+        clusterId,
+        role,
+        memberIds,
+      });
+    }
+  }
+
+  return { clustersFormed, nearDuplicatesSkipped, singletons };
+}
+
+// ============================================
+// PIPELINE STEPS
+// ============================================
+
+async function stepScore(
+  db: Database.Database,
+  scrape: StoredScrape,
+  sharedContext: string,
+): Promise<boolean> {
+  const attempts = incrementPipelineAttempt(db, scrape.id, "score");
+  if (attempts > 3) {
+    markScrapeTerminal(db, scrape.id, "exhausted");
+    return false;
+  }
+
+  const skill = loadFileIfExists(SKILL_SCORE);
+  const prompt = `${skill}
+
+---
+
+## Context
+${sharedContext.slice(0, 3000)}
+
+## Scrape to Score
+
+${formatScrapeForPrompt(scrape)}
+
+---
+
+Score this scrape. Return ONLY the JSON object.`;
+
+  try {
+    const result = await executeGeminiCLIDirect(prompt, { timeout: FLASH_TIMEOUT });
+    if (result.exitCode !== 0 || !result.output) {
+      logger.warn({ scrapeId: scrape.id, exitCode: result.exitCode }, "Score step: Flash call failed");
+      return false;
+    }
+
+    const parsed = parseSwarmJSON(result.output, ScoreSchema);
+    updatePipelineStep(db, scrape.id, "scored", {
+      value: parsed.score,
+      dimensions: parsed.dimensions,
+      summary: parsed.summary,
+    });
+
+    // Also set quality_score for SQL filtering
+    db.prepare(`UPDATE scrapes SET quality_score = ? WHERE id = ?`).run(parsed.score, scrape.id);
+
+    if (parsed.score < SCORE_THRESHOLD) {
+      markScrapeTerminal(db, scrape.id, "skipped", undefined, parsed.score);
+      logger.info({ scrapeId: scrape.id, score: parsed.score }, "Score below threshold, skipping");
+    } else {
+      logger.info({ scrapeId: scrape.id, score: parsed.score, dims: parsed.dimensions }, "Scored");
+    }
+    return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ scrapeId: scrape.id, error: msg, attempt: attempts }, "Score step failed");
+    return false;
+  }
+}
+
+/**
+ * Step 3: Synthesize a candidate idea from a cluster (1-3 scrapes).
+ * Operates on the primary scrape; loads cluster members for multi-source synthesis.
+ */
+async function stepSynthesize(
+  db: Database.Database,
+  primaryScrape: StoredScrape,
+  sharedContext: string,
+): Promise<boolean> {
+  const attempts = incrementPipelineAttempt(db, primaryScrape.id, "synthesize");
+  if (attempts > 3) {
+    markScrapeTerminal(db, primaryScrape.id, "exhausted");
+    return false;
+  }
+
+  const pipeline = getPipelineState(db, primaryScrape.id);
+  const clusterId = pipeline?.cluster?.clusterId;
+  const memberIds = pipeline?.cluster?.memberIds ?? [primaryScrape.id];
+
+  // Load all cluster members for multi-source context
+  let clusterScrapes: StoredScrape[];
+  if (clusterId) {
+    clusterScrapes = getClusterMembers(db, clusterId);
+    // Ensure primary is first
+    clusterScrapes.sort((a, b) => (a.id === primaryScrape.id ? -1 : b.id === primaryScrape.id ? 1 : 0));
+  } else {
+    clusterScrapes = [primaryScrape];
+  }
+
+  // Build per-scrape context with score summaries
+  const scrapeBlocks = clusterScrapes.map(s => {
+    const p = getPipelineState(db, s.id);
+    return `${formatScrapeForPrompt(s)}
+
+**Score:** ${p?.score?.value ?? "N/A"}/10 — ${p?.score?.summary ?? ""}
+**Dimensions:** ${p?.score?.dimensions?.join(", ") ?? "none"}`;
+  });
+
+  const skill = loadFileIfExists(SKILL_SYNTHESIZE);
+  const prompt = `${skill}
+
+---
+
+## Context
+${sharedContext.slice(0, 4000)}
+
+## Scrapes to Synthesize (${clusterScrapes.length} source${clusterScrapes.length > 1 ? "s" : ""})
+
+${scrapeBlocks.join("\n\n---\n\n")}
+
+---
+
+${clusterScrapes.length > 1
+    ? "Synthesize ONE sharp idea from these related sources. Find the THREAD that connects them."
+    : "Extract a focused candidate idea from this scrape."}
+Return ONLY the JSON object.`;
+
+  try {
+    const result = await executeClaudeCommand(prompt, {
+      cwd: "/tmp",
+      model: "sonnet",
+      timeout: STEP_TIMEOUT,
+    });
+
+    if (result.exitCode !== 0 || !result.output) {
+      logger.warn({ scrapeId: primaryScrape.id, exitCode: result.exitCode }, "Synthesize step: Sonnet call failed");
+      return false;
+    }
+
+    const parsed = parseSwarmJSON(result.output, CandidateSchema);
+
+    // Quality gate: reject low-confidence candidates
+    if (parsed.confidence < CONFIDENCE_THRESHOLD) {
+      updatePipelineStep(db, primaryScrape.id, "extracted", {
+        title: parsed.title,
+        content: parsed.content,
+        tags: parsed.tags,
+        link: parsed.link,
+        relevance: parsed.relevance,
+        confidence: parsed.confidence,
+        source: parsed.source,
+      });
+      markScrapeTerminal(db, primaryScrape.id, "rejected");
+      // Also reject cluster secondaries
+      if (clusterId) markClusterSecondariesTerminal(db, clusterId, "rejected");
+      logger.info({
+        scrapeId: primaryScrape.id,
+        title: parsed.title,
+        confidence: parsed.confidence,
+        clusterSize: clusterScrapes.length,
+      }, "Candidate rejected: low confidence");
+      return true; // Step succeeded, but candidate was gated
+    }
+
+    // Tag multi-source ideas
+    const tags = [...parsed.tags];
+    if (clusterScrapes.length > 1 && !tags.includes("multi-source")) {
+      tags.push("multi-source");
+    }
+
+    updatePipelineStep(db, primaryScrape.id, "extracted", {
+      title: parsed.title,
+      content: parsed.content,
+      tags,
+      link: parsed.link,
+      relevance: parsed.relevance,
+      confidence: parsed.confidence,
+      source: parsed.source,
+    });
+
+    logger.info({
+      scrapeId: primaryScrape.id,
+      title: parsed.title,
+      confidence: parsed.confidence,
+      clusterSize: clusterScrapes.length,
+      memberIds,
+    }, "Candidate synthesized");
+    return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ scrapeId: primaryScrape.id, error: msg, attempt: attempts }, "Synthesize step failed");
+    return false;
+  }
+}
+
+async function stepCritique(
+  db: Database.Database,
+  scrape: StoredScrape,
+  sharedContext: string,
+): Promise<boolean> {
+  const attempts = incrementPipelineAttempt(db, scrape.id, "critique");
+  if (attempts > 3) {
+    markScrapeTerminal(db, scrape.id, "exhausted");
+    return false;
+  }
+
+  const pipeline = getPipelineState(db, scrape.id);
+  const candidate = pipeline?.candidate;
+  if (!candidate) {
+    logger.warn({ scrapeId: scrape.id }, "Critique step: no candidate found");
+    return false;
+  }
+
+  const skill = loadFileIfExists(SKILL_CRITIQUE);
+  const prompt = `${skill}
+
+---
+
+## Candidate Idea
+
+**Title:** ${candidate.title}
+**Content:** ${candidate.content}
+**Relevance:** ${candidate.relevance}
+**Confidence:** ${candidate.confidence}
+**Tags:** ${candidate.tags?.join(", ") ?? "none"}
+
+## Context
+${sharedContext.slice(0, 2000)}
+
+---
+
+Critique this candidate. Return ONLY the JSON object.`;
+
+  try {
+    const result = await executeGeminiCLIDirect(prompt, { timeout: FLASH_TIMEOUT });
+    if (result.exitCode !== 0 || !result.output) {
+      logger.warn({ scrapeId: scrape.id, exitCode: result.exitCode }, "Critique step: Flash call failed");
+      return false;
+    }
+
+    const parsed = parseSwarmJSON(result.output, CritiqueSchema);
+
+    // Quality gate: enforce minimum critique score average
+    const avg = (parsed.novelty + parsed.goalAlignment + parsed.feasibility) / 3;
+    const passed = parsed.passed && avg >= CRITIQUE_AVG_THRESHOLD;
+
+    updatePipelineStep(db, scrape.id, "critiqued", {
+      passed,
+      novelty: parsed.novelty,
+      goalAlignment: parsed.goalAlignment,
+      feasibility: parsed.feasibility,
+      reason: parsed.reason,
+    });
+
+    if (!passed) {
+      markScrapeTerminal(db, scrape.id, "rejected");
+      // Also reject cluster secondaries
+      const clusterId = pipeline?.cluster?.clusterId;
+      if (clusterId) markClusterSecondariesTerminal(db, clusterId, "rejected");
+      logger.info({
+        scrapeId: scrape.id,
+        title: candidate.title,
+        scores: { n: parsed.novelty, g: parsed.goalAlignment, f: parsed.feasibility, avg: avg.toFixed(1) },
+        reason: parsed.reason,
+        llmPassed: parsed.passed,
+      }, "Critique rejected");
+    } else {
+      logger.info({
+        scrapeId: scrape.id,
+        title: candidate.title,
+        scores: { n: parsed.novelty, g: parsed.goalAlignment, f: parsed.feasibility, avg: avg.toFixed(1) },
+      }, "Critique passed");
+    }
+    return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ scrapeId: scrape.id, error: msg, attempt: attempts }, "Critique step failed");
+    return false;
+  }
+}
+
+async function stepEnrich(
+  db: Database.Database,
+  scrape: StoredScrape,
+  sharedContext: string,
+): Promise<boolean> {
+  const attempts = incrementPipelineAttempt(db, scrape.id, "enrich");
+  if (attempts > 3) {
+    markScrapeTerminal(db, scrape.id, "exhausted");
+    return false;
+  }
+
+  const pipeline = getPipelineState(db, scrape.id);
+  const candidate = pipeline?.candidate;
+  const critique = pipeline?.critique;
+  if (!candidate || !critique) {
+    logger.warn({ scrapeId: scrape.id }, "Enrich step: missing candidate or critique");
+    return false;
+  }
+
+  const existingIdeas = ideaDao.getAllIdeas(db);
+  const existingTitles = existingIdeas.slice(0, 50).map(i => i.title).join("\n");
+
+  // For multi-source clusters, include all source scrapes in enrichment context
+  const clusterId = pipeline?.cluster?.clusterId;
+  let sourceContext: string;
+  if (clusterId) {
+    const members = getClusterMembers(db, clusterId);
+    sourceContext = members.map(s => formatScrapeForPrompt(s).slice(0, 800)).join("\n---\n");
+  } else {
+    sourceContext = formatScrapeForPrompt(scrape).slice(0, 1500);
+  }
+
+  const skill = loadFileIfExists(SKILL_ENRICH);
+  const prompt = `${skill}
+
+---
+
+## Idea to Enrich
+
+**Title:** ${candidate.title}
+**Content:** ${candidate.content}
+**Relevance:** ${candidate.relevance}
+**Critique:** Novelty ${critique.novelty}/10, Goal Alignment ${critique.goalAlignment}/10, Feasibility ${critique.feasibility}/10
+
+## Context
+${sharedContext.slice(0, 3000)}
+
+## Existing Ideas (for deep_links.target references)
+${existingTitles.slice(0, 1500)}
+
+## Source Scrape(s)
+${sourceContext.slice(0, 2000)}
+
+---
+
+Enrich this idea. Return ONLY the JSON object. Omit optional fields if not applicable.`;
+
+  try {
+    const result = await executeClaudeCommand(prompt, {
+      cwd: "/tmp",
+      model: "sonnet",
+      timeout: STEP_TIMEOUT,
+    });
+
+    if (result.exitCode !== 0 || !result.output) {
+      logger.warn({ scrapeId: scrape.id, exitCode: result.exitCode }, "Enrich step: Sonnet call failed");
+      return false;
+    }
+
+    const parsed = parseSwarmJSON(result.output, EnrichmentSchema);
+    updatePipelineStep(db, scrape.id, "enriched", parsed);
+
+    logger.info({ scrapeId: scrape.id, title: candidate.title, hasImprovement: parsed.homer_improvement?.relevant }, "Enriched");
+    return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ scrapeId: scrape.id, error: msg, attempt: attempts }, "Enrich step failed");
+    return false;
+  }
+}
+
+function stepSave(
+  db: Database.Database,
+  scrape: StoredScrape,
+): SmartSaveResult | null {
+  const pipeline = getPipelineState(db, scrape.id);
+  if (!pipeline?.candidate || !pipeline.critique?.passed || !pipeline.enrichment) {
+    logger.warn({ scrapeId: scrape.id }, "Save step: missing required pipeline data");
+    return null;
+  }
+
+  const candidate = pipeline.candidate;
+  const critique = pipeline.critique;
+  const cluster = pipeline.cluster;
+  const memberIds = cluster?.memberIds ?? [scrape.id];
+
+  const now = new Date();
+  const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
+  const slug = candidate.title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40);
+  const id = `synth_${now.toISOString().slice(5, 10).replace("-", "")}_${slug}`;
+
+  const parsed: ParsedIdea = {
+    id,
+    title: candidate.title,
+    status: "draft",
+    source: candidate.source,
+    content: `${candidate.content}\n\n**Why this matters:** ${candidate.relevance}`,
+    context: `Confidence: ${candidate.confidence.toFixed(2)} | Critic: N${critique.novelty}/G${critique.goalAlignment}/F${critique.feasibility} | Provenance: ${memberIds.join(", ")}`,
+    link: candidate.link || undefined,
+    tags: [...(candidate.tags || []), "synthesized"],
+    timestamp,
+    enrichment: JSON.stringify(pipeline.enrichment),
+  };
+
+  try {
+    const saveResult = smartSaveIdea(parsed, db);
+    markScrapeTerminal(db, scrape.id, "saved", saveResult.ideaId, candidate.confidence);
+
+    // Mark cluster secondaries as saved too
+    if (cluster?.clusterId) {
+      markClusterSecondariesTerminal(db, cluster.clusterId, "saved", saveResult.ideaId);
+    }
+
+    logger.info({
+      scrapeId: scrape.id,
+      ideaId: saveResult.ideaId,
+      action: saveResult.action,
+      title: candidate.title,
+      clusterSize: memberIds.length,
+    }, "Idea saved");
+    return saveResult;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ scrapeId: scrape.id, error: msg }, "Save step failed");
+    return null;
+  }
+}
 
 // ============================================
 // MAIN
@@ -198,229 +825,221 @@ export async function runIdeaSynthesizer(db: Database.Database, jobRunId?: numbe
       return { success: true, output: "No unprocessed scrapes to synthesize" };
     }
 
-    logger.info({ count: unprocessed.length }, "Starting idea synthesis via Sonnet");
+    logger.info({ count: unprocessed.length }, "Starting idea synthesis pipeline v3");
 
-    // Load context in parallel
-    const [condensedContext, preferences, existingIdeas] = await Promise.all([
+    // Load shared context once
+    const [condensedContext, preferences] = await Promise.all([
       buildCondensedContext(),
       (async () => {
         try { return getPreferenceContext(db); }
         catch { return ""; }
       })(),
-      Promise.resolve(ideaDao.getAllIdeas(db)),
     ]);
 
-    const denyHistory = loadFileIfExists(DENY_HISTORY, 5000);
+    const denyHistory = loadFileIfExists(DENY_HISTORY, 3000);
+    const existingIdeas = ideaDao.getAllIdeas(db);
     const existingTitles = existingIdeas.slice(0, 100).map(i => i.title).join("\n");
-    const recentOutputs = loadRecentMdFiles(7, 4000, 600);
 
-    // Load SKILLS.md
-    const skillContent = existsSync(SKILL_PATH)
-      ? readFileSync(SKILL_PATH, "utf-8")
-      : "";
-
-    // Shared context for all batches
-    const sharedContext = `${skillContent}
-
----
-
-## Context for Scoring & Synthesis
-
-### Yanqing's Goals & Context
-${condensedContext.slice(0, 5000)}
+    const sharedContext = `### Yanqing's Goals & Context
+${condensedContext.slice(0, 4000)}
 
 ### Learned Preferences
 ${preferences || "(no preferences yet)"}
 
-### Deny History (topics/patterns to AVOID)
-${denyHistory.slice(0, 3000)}
+### Deny History (topics to AVOID)
+${denyHistory.slice(0, 2000)}
 
 ### Existing Idea Titles (AVOID duplicates)
-${existingTitles.slice(0, 2000)}
+${existingTitles.slice(0, 1500)}`;
 
-### Recent Agent Outputs (last 7 days)
-${recentOutputs.slice(0, 3000) || "(none)"}
-
----`;
-
-    // Helper: synthesize a single batch of scrapes
-    async function synthesizeBatch(scrapes: StoredScrape[]): Promise<z.infer<typeof SonnetOutputSchema> | null> {
-      const prompt = `${sharedContext}
-
-## Scrapes to Process (${scrapes.length} items)
-
-${formatScrapesForPrompt(scrapes)}
-
----
-
-Process all ${scrapes.length} scrapes through the full pipeline (score → synthesize → critic → enrich).
-Return ONLY a valid JSON object matching the output format in the skill. No markdown fences.`;
-
-      logger.info({ scrapeCount: scrapes.length, promptChars: prompt.length }, "Calling Sonnet for batch");
-
-      const result = await executeClaudeCommand(prompt, {
-        cwd: "/tmp",
-        model: "sonnet",
-        timeout: SONNET_TIMEOUT,
-      });
-
-      if (result.exitCode !== 0 || !result.output) {
-        logger.error({ exitCode: result.exitCode, output: result.output?.slice(0, 500) }, "Sonnet batch call failed");
-        return null;
-      }
-
-      try {
-        return parseSwarmJSON(result.output, SonnetOutputSchema);
-      } catch (err) {
-        logger.error({ error: err instanceof Error ? err.message : String(err), outputLen: result.output.length, sample: result.output.slice(0, 500) }, "Failed to parse/validate Sonnet batch output");
-        return null;
-      }
-    }
-
-    // Process scrapes in chunks with retry
-    const chunks: StoredScrape[][] = [];
-    for (let i = 0; i < unprocessed.length; i += MAX_SCRAPES_PER_BATCH) {
-      chunks.push(unprocessed.slice(i, i + MAX_SCRAPES_PER_BATCH));
-    }
-
-    logger.info({ totalScrapes: unprocessed.length, batchCount: chunks.length, batchSize: MAX_SCRAPES_PER_BATCH }, "Processing scrapes in batches");
-
-    const batchResults: z.infer<typeof SonnetOutputSchema>[] = [];
-    const failedScrapeIds: string[] = [];
-
-    for (const chunk of chunks) {
-      let result = await synthesizeBatch(chunk);
-
-      if (!result && chunk.length > RETRY_BATCH_SIZE) {
-        // Retry by splitting into smaller sub-batches
-        logger.warn({ chunkSize: chunk.length, retrySize: RETRY_BATCH_SIZE }, "Batch failed, retrying with smaller sub-batches");
-        for (let i = 0; i < chunk.length; i += RETRY_BATCH_SIZE) {
-          const subChunk = chunk.slice(i, i + RETRY_BATCH_SIZE);
-          const subResult = await synthesizeBatch(subChunk);
-          if (subResult) {
-            batchResults.push(subResult);
-          } else {
-            logger.error({ scrapeIds: subChunk.map(s => s.id) }, "Sub-batch also failed, incrementing fail count for retry");
-            failedScrapeIds.push(...subChunk.map(s => s.id));
-          }
-        }
-        continue;
-      }
-
-      if (result) {
-        batchResults.push(result);
-      } else {
-        logger.error({ scrapeIds: chunk.map(s => s.id) }, "Batch failed (small batch), incrementing fail count for retry");
-        failedScrapeIds.push(...chunk.map(s => s.id));
-      }
-    }
-
-    // Increment fail_count instead of marking processed — allows retry next run (up to max)
-    for (const scrapeId of failedScrapeIds) {
-      markScrapeFailedRetry(db, scrapeId);
-    }
-
-    if (batchResults.length === 0) {
-      return { success: false, output: "", error: "All batches failed to produce valid output" };
-    }
-
-    // Merge batch results
-    const sonnetResult: z.infer<typeof SonnetOutputSchema> = {
-      scores: batchResults.flatMap(r => r.scores),
-      ideas: batchResults.flatMap(r => r.ideas),
-      stats: {
-        totalScraped: batchResults.reduce((sum, r) => sum + r.stats.totalScraped, 0),
-        scored: batchResults.reduce((sum, r) => sum + r.stats.scored, 0),
-        aboveThreshold: batchResults.reduce((sum, r) => sum + r.stats.aboveThreshold, 0),
-        synthesized: batchResults.reduce((sum, r) => sum + r.stats.synthesized, 0),
-        criticPassed: batchResults.reduce((sum, r) => sum + r.stats.criticPassed, 0),
-        enriched: batchResults.reduce((sum, r) => sum + r.stats.enriched, 0),
-      },
+    // Stats tracking
+    const stats = {
+      totalScrapes: unprocessed.length,
+      scored: 0,
+      aboveThreshold: 0,
+      clustersFormed: 0,
+      singletonClusters: 0,
+      nearDuplicatesSkipped: 0,
+      synthesized: 0,
+      confidenceGateRejected: 0,
+      critiquePassed: 0,
+      critiqueScoreRejected: 0,
+      enriched: 0,
+      saved: 0,
+      enhanced: 0,
+      multiSourceIdeas: 0,
+      skipped: 0,
+      failed: 0,
     };
 
-    logger.info({
-      scores: sonnetResult.scores.length,
-      ideas: sonnetResult.ideas.length,
-      stats: sonnetResult.stats,
-    }, "Sonnet synthesis complete");
-
-    // Store artifacts
-    if (jobRunId) {
-      storeJobArtifact(db, jobRunId, "idea-synthesizer", "sonnet-scores", "json",
-        JSON.stringify(sonnetResult.scores), { count: sonnetResult.scores.length });
-      if (sonnetResult.ideas.length > 0) {
-        storeJobArtifact(db, jobRunId, "idea-synthesizer", "sonnet-ideas", "json",
-          JSON.stringify(sonnetResult.ideas), sonnetResult.stats);
-      }
-    }
-
-    // Save ideas
-    const now = new Date();
-    const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
     const saveResults: SmartSaveResult[] = [];
 
-    for (const idea of sonnetResult.ideas) {
-      const slug = idea.title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-|-$/g, "")
-        .slice(0, 40);
-      const id = `synth_${now.toISOString().slice(5, 10).replace("-", "")}_${slug}`;
+    // ========================================
+    // STEP 1: Score all unscored scrapes
+    // ========================================
+    const needsScoring = getScrapesForStep(db, "pending", 48);
+    logger.info({ count: needsScoring.length }, "Step 1: Scoring scrapes");
 
-      const parsed: ParsedIdea = {
-        id,
-        title: idea.title,
-        status: "draft",
-        source: idea.source,
-        content: `${idea.content}\n\n**Why this matters:** ${idea.relevance}`,
-        context: `Confidence: ${idea.confidenceScore.toFixed(2)} | Critic: N${idea.critic.novelty}/G${idea.critic.goalAlignment}/F${idea.critic.feasibility} | Provenance: ${idea.scrapeIds.join(", ")}`,
-        link: idea.link || undefined,
-        tags: [...idea.tags, "synthesized"],
-        timestamp,
-        enrichment: JSON.stringify(idea.enrichment),
-      };
-
-      const saveResult = smartSaveIdea(parsed, db);
-      saveResults.push(saveResult);
-
-      for (const scrapeId of idea.scrapeIds) {
-        markProcessed(db, scrapeId, saveResult.ideaId, idea.confidenceScore);
+    for (const scrape of needsScoring) {
+      if (isStepExhausted(db, scrape.id, "score")) {
+        markScrapeTerminal(db, scrape.id, "exhausted");
+        stats.failed++;
+        continue;
       }
-
-      logger.info({ id, title: idea.title, action: saveResult.action, confidence: idea.confidenceScore }, "Idea saved");
-    }
-
-    // Mark remaining scrapes as processed
-    const usedScrapeIds = new Set(sonnetResult.ideas.flatMap(i => i.scrapeIds));
-    for (const scrape of unprocessed) {
-      if (!usedScrapeIds.has(scrape.id)) {
-        markProcessed(db, scrape.id);
+      const ok = await stepScore(db, scrape, sharedContext);
+      if (ok) {
+        stats.scored++;
+        const pipeline = getPipelineState(db, scrape.id);
+        if (pipeline?.score && pipeline.score.value >= SCORE_THRESHOLD) {
+          stats.aboveThreshold++;
+        }
+      } else {
+        stats.failed++;
       }
     }
 
-    const created = saveResults.filter(r => r.action === "created").length;
-    const enhanced = saveResults.filter(r => r.action === "enhanced").length;
-    const skipped = saveResults.filter(r => r.action === "skipped").length;
+    // ========================================
+    // STEP 2: Cluster scored scrapes
+    // ========================================
+    const needsClustering = getScrapesForStep(db, "scored", 48);
+    logger.info({ count: needsClustering.length }, "Step 2: Clustering scored scrapes");
 
+    if (needsClustering.length > 0) {
+      const clusterResult = stepCluster(db, needsClustering);
+      stats.clustersFormed = clusterResult.clustersFormed;
+      stats.nearDuplicatesSkipped = clusterResult.nearDuplicatesSkipped;
+      stats.singletonClusters = clusterResult.singletons;
+      logger.info({
+        clusters: clusterResult.clustersFormed,
+        singletons: clusterResult.singletons,
+        nearDups: clusterResult.nearDuplicatesSkipped,
+      }, "Clustering complete");
+    }
+
+    // ========================================
+    // STEP 3: Synthesize candidates from clusters
+    // ========================================
+    const needsSynthesis = getScrapesForStep(db, "clustered", 48);
+    logger.info({ count: needsSynthesis.length }, "Step 3: Synthesizing candidates");
+
+    for (const scrape of needsSynthesis) {
+      if (isStepExhausted(db, scrape.id, "synthesize")) {
+        markScrapeTerminal(db, scrape.id, "exhausted");
+        stats.failed++;
+        continue;
+      }
+      const ok = await stepSynthesize(db, scrape, sharedContext);
+      if (ok) {
+        const pipeline = getPipelineState(db, scrape.id);
+        if (pipeline?.step === "rejected") {
+          stats.confidenceGateRejected++;
+        } else {
+          stats.synthesized++;
+          if ((pipeline?.cluster?.memberIds?.length ?? 1) > 1) {
+            stats.multiSourceIdeas++;
+          }
+        }
+      } else {
+        stats.failed++;
+      }
+    }
+
+    // ========================================
+    // STEP 4: Critique synthesized candidates
+    // ========================================
+    const needsCritique = getScrapesForStep(db, "extracted", 48);
+    logger.info({ count: needsCritique.length }, "Step 4: Critiquing candidates");
+
+    for (const scrape of needsCritique) {
+      if (isStepExhausted(db, scrape.id, "critique")) {
+        markScrapeTerminal(db, scrape.id, "exhausted");
+        stats.failed++;
+        continue;
+      }
+      const ok = await stepCritique(db, scrape, sharedContext);
+      if (ok) {
+        const pipeline = getPipelineState(db, scrape.id);
+        if (pipeline?.critique?.passed) {
+          stats.critiquePassed++;
+        } else {
+          stats.critiqueScoreRejected++;
+        }
+      } else {
+        stats.failed++;
+      }
+    }
+
+    // ========================================
+    // STEP 5: Enrich critique-passed candidates
+    // ========================================
+    const needsEnrichment = getScrapesForStep(db, "critiqued", 48);
+    logger.info({ count: needsEnrichment.length }, "Step 5: Enriching passed candidates");
+
+    for (const scrape of needsEnrichment) {
+      if (isStepExhausted(db, scrape.id, "enrich")) {
+        markScrapeTerminal(db, scrape.id, "exhausted");
+        stats.failed++;
+        continue;
+      }
+      const ok = await stepEnrich(db, scrape, sharedContext);
+      if (ok) stats.enriched++;
+      else stats.failed++;
+    }
+
+    // ========================================
+    // STEP 6: Save enriched ideas
+    // ========================================
+    const needsSaving = getScrapesForStep(db, "enriched", 48);
+    logger.info({ count: needsSaving.length }, "Step 6: Saving enriched ideas");
+
+    for (const scrape of needsSaving) {
+      const result = stepSave(db, scrape);
+      if (result) {
+        saveResults.push(result);
+        if (result.action === "created") stats.saved++;
+        else if (result.action === "enhanced") stats.enhanced++;
+        else stats.skipped++;
+      } else {
+        stats.failed++;
+      }
+    }
+
+    // ========================================
+    // Artifacts & Summary
+    // ========================================
     if (jobRunId) {
-      storeJobArtifact(db, jobRunId, "idea-synthesizer", "final-decisions", "json",
-        JSON.stringify(saveResults.map(r => ({ id: r.ideaId, action: r.action }))),
-        { created, enhanced, skipped });
+      storeJobArtifact(db, jobRunId, "idea-synthesizer", "pipeline-stats", "json",
+        JSON.stringify(stats), stats);
+      if (saveResults.length > 0) {
+        storeJobArtifact(db, jobRunId, "idea-synthesizer", "save-results", "json",
+          JSON.stringify(saveResults.map(r => ({ id: r.ideaId, action: r.action }))),
+          { created: stats.saved, enhanced: stats.enhanced, skipped: stats.skipped });
+      }
     }
 
     const parts: string[] = [];
-    parts.push(`${unprocessed.length} scrapes → Sonnet`);
-    parts.push(`${sonnetResult.stats.aboveThreshold} above threshold`);
-    parts.push(`${sonnetResult.stats.criticPassed} critic-passed`);
-    if (created > 0) parts.push(`${created} new ideas`);
-    if (enhanced > 0) parts.push(`${enhanced} enhanced`);
-    if (skipped > 0) parts.push(`${skipped} skipped (duplicate)`);
+    parts.push(`Pipeline v3: ${unprocessed.length} scrapes`);
+    parts.push(`${stats.scored} scored (${stats.aboveThreshold} above threshold)`);
+    if (stats.clustersFormed > 0) parts.push(`${stats.clustersFormed} clusters + ${stats.singletonClusters} singletons`);
+    if (stats.nearDuplicatesSkipped > 0) parts.push(`${stats.nearDuplicatesSkipped} near-dups skipped`);
+    if (stats.synthesized > 0) parts.push(`${stats.synthesized} synthesized`);
+    if (stats.multiSourceIdeas > 0) parts.push(`${stats.multiSourceIdeas} multi-source`);
+    if (stats.confidenceGateRejected > 0) parts.push(`${stats.confidenceGateRejected} low-confidence rejected`);
+    if (stats.critiquePassed > 0) parts.push(`${stats.critiquePassed} critique-passed`);
+    if (stats.critiqueScoreRejected > 0) parts.push(`${stats.critiqueScoreRejected} critique-rejected`);
+    if (stats.enriched > 0) parts.push(`${stats.enriched} enriched`);
+    if (stats.saved > 0) parts.push(`${stats.saved} new ideas`);
+    if (stats.enhanced > 0) parts.push(`${stats.enhanced} enhanced`);
+    if (stats.failed > 0) parts.push(`${stats.failed} step failures`);
 
     const output = `Synthesizer: ${parts.join(", ")}`;
-    return { success: true, output };
+    logger.info({ stats }, "Idea synthesis pipeline v3 complete");
+
+    const success = stats.scored > 0 || stats.synthesized > 0 || stats.saved > 0 || stats.enhanced > 0 || unprocessed.length === 0;
+    return { success, output, error: success ? undefined : "All pipeline steps failed" };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    logger.error({ error: msg }, "Idea synthesizer failed");
+    logger.error({ error: msg }, "Idea synthesizer pipeline v3 failed");
     return { success: false, output: "", error: msg };
   }
 }
