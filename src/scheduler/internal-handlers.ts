@@ -1096,16 +1096,8 @@ async function runHandler(
         );
       }
       case "idea_deep_linker": {
-        const { runIdeaDeepLinker } = await import("./jobs/idea-deep-linker.js");
-        const result = await runIdeaDeepLinker(ctx.stateManager, ctx.jobRunId);
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          result.success ? { notificationIntent: "operational_status" } : {}
-        );
+        // Deep-linker removed — its work is now absorbed into idea-synthesizer v2 pipeline
+        return buildResult(job, startedAt, true, "Deep-linker disabled: absorbed into synthesizer v2 pipeline", "");
       }
       case "link_processor": {
         const { runLinkProcessor } = await import("./jobs/link-processor.js");
