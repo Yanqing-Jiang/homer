@@ -39,7 +39,7 @@ export function insertScrape(db: Database.Database, scrape: ScrapeRecord): boole
     `).run(
       scrape.id,
       scrape.source,
-      scrape.url ?? null,
+      scrape.url?.toLowerCase() ?? null,
       scrape.title ?? null,
       scrape.author ?? null,
       scrape.raw_content,
@@ -406,7 +406,7 @@ export function addToLinkInbox(
     const result = db.prepare(`
       INSERT OR IGNORE INTO link_inbox (id, url, source, link_type, title, notes, submitted_by)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, url, opts?.source ?? "manual", linkType, opts?.title ?? null, opts?.notes ?? null, opts?.submittedBy ?? "user");
+    `).run(id, url.toLowerCase(), opts?.source ?? "manual", linkType, opts?.title ?? null, opts?.notes ?? null, opts?.submittedBy ?? "user");
     return result.changes > 0;
   } catch (err) {
     logger.warn({ error: err, url }, "Failed to add to link inbox");
@@ -414,11 +414,17 @@ export function addToLinkInbox(
   }
 }
 
-/** Get pending links from the inbox, including failed links eligible for retry. */
+/** Get pending links from the inbox, including failed links eligible for retry with exponential backoff. */
 export function getPendingLinks(db: Database.Database, limit = 20, maxRetries = 3): LinkInboxItem[] {
   return db.prepare(`
     SELECT * FROM link_inbox
-    WHERE status = 'pending' OR (status = 'failed' AND fail_count < ?)
+    WHERE status = 'pending'
+       OR (status = 'failed' AND fail_count < ? AND (
+            processed_at IS NULL
+            OR (fail_count = 1 AND processed_at < datetime('now', '-30 minutes'))
+            OR (fail_count = 2 AND processed_at < datetime('now', '-2 hours'))
+            OR (fail_count >= 3 AND processed_at < datetime('now', '-8 hours'))
+          ))
     ORDER BY status ASC, submitted_at ASC LIMIT ?
   `).all(maxRetries, limit) as LinkInboxItem[];
 }
@@ -435,8 +441,14 @@ export function markLinkDone(db: Database.Database, id: string, scrapeId: string
   `).run(scrapeId, id);
 }
 
-/** Mark a link as failed and increment fail_count for retry eligibility. */
-export function markLinkFailed(db: Database.Database, id: string, error: string): void {
+/** Mark a link as failed, increment fail_count. Pass permanent=true for non-retryable errors. */
+export function markLinkFailed(db: Database.Database, id: string, error: string, permanent = false): void {
+  if (permanent) {
+    db.prepare(`
+      UPDATE link_inbox SET status = 'failed', error = ?, processed_at = datetime('now'), fail_count = 99 WHERE id = ?
+    `).run(error, id);
+    return;
+  }
   db.prepare(`
     UPDATE link_inbox SET status = 'failed', error = ?, processed_at = datetime('now'), fail_count = fail_count + 1 WHERE id = ?
   `).run(error, id);

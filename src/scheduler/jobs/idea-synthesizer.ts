@@ -43,6 +43,7 @@ import { buildCondensedContext } from "../shared-context.js";
 import { logger } from "../../utils/logger.js";
 import { storeJobArtifact } from "./artifact-store.js";
 import { PATHS } from "../../config/paths.js";
+import { deepFetchScrapes } from "../../scraping/deep-fetch.js";
 
 const DENY_HISTORY = PATHS.denyHistory;
 const SCORE_THRESHOLD = 6;
@@ -873,6 +874,24 @@ ${existingTitles.slice(0, 1500)}`;
     };
 
     const saveResults: SmartSaveResult[] = [];
+
+    // ========================================
+    // STEP 0: Deep-fetch external URLs (Readability.js, zero LLM tokens)
+    // ========================================
+    const needsFetch = unprocessed.filter(s => {
+      const meta = s.metadata ? JSON.parse(s.metadata) : {};
+      return !meta.deep_fetch?.completed;
+    });
+    if (needsFetch.length > 0) {
+      logger.info({ count: needsFetch.length }, "Step 0: Deep-fetching external URLs");
+      try {
+        const fetchStats = await deepFetchScrapes(db, needsFetch);
+        logger.info(fetchStats, "Step 0: Deep-fetch complete");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn({ error: msg }, "Step 0: Deep-fetch failed (non-fatal, continuing)");
+      }
+    }
 
     // ========================================
     // STEP 1: Score all unscored scrapes

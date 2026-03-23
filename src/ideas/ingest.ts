@@ -4,21 +4,18 @@ import { z } from "zod";
 import { parseIdeasMd, type ParsedIdea } from "./parser.js";
 import * as dao from "./dao.js";
 import { logger } from "../utils/logger.js";
-import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
-import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
-import { executeCodexBrowserScrape } from "../executors/codex-browser.js";
 import {
-  buildBookmarkScrapePrompt, buildTweetReadPrompt,
+  buildBookmarkScrapePrompt,
   BOOKMARK_JSON_START, BOOKMARK_JSON_END,
-  SCRAPE_OPTIONS, DEEP_FETCH_OPTIONS,
+  SCRAPE_OPTIONS,
 } from "../scraping/browser-prompts.js";
 import { ensureCDP } from "../scraping/chrome-launcher.js";
 import { cleanAgentOutput } from "../scraping/clean-output.js";
 import { parseSwarmJSON } from "../executors/model-swarm.js";
 import { insertScrape } from "../scraping/scrape-store.js";
 import { PATHS } from "../config/paths.js";
-import { X_BOOKMARK_CODEX_SKILLS, TWITTER_SCRAPE_SKILL_PATH } from "../scraping/skill-paths.js";
+import { TWITTER_SCRAPE_SKILL_PATH } from "../scraping/skill-paths.js";
 
 const IDEAS_FILE = PATHS.ideasMd;
 const DENY_HISTORY_FILE = PATHS.denyHistory;
@@ -243,80 +240,7 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
 // YouTube scraping has been moved to Telegram → overnight pipeline.
 // See src/youtube/transcript.ts and src/youtube/summarizer.ts
 
-// ============================================
-// DEEP URL FETCHING
-// ============================================
-
-// cleanAgentOutput imported from ../scraping/clean-output.js
-
-async function deepFetchUrl(url: string, ideaTitle: string): Promise<string | null> {
-  if (!url) return null;
-
-  // Handle Twitter/X URLs via agent-browser
-  if (url.includes("twitter.com") || url.includes("x.com")) {
-    try {
-      const result = await executeCodexBrowserScrape(
-        buildTweetReadPrompt(url),
-        { ...DEEP_FETCH_OPTIONS, skillPaths: X_BOOKMARK_CODEX_SKILLS },
-      );
-      if (result.exitCode === 0 && result.output && result.output.length > 50 && !result.output.includes("FAILED")) {
-        const cleaned = cleanAgentOutput(result.output);
-        return cleaned.slice(0, 10000) || null;
-      }
-    } catch {
-      // Fall through to return null
-    }
-    return null;
-  }
-
-  // YouTube URLs are now handled by the Telegram → overnight pipeline
-  if (url.includes("youtube.com") || url.includes("youtu.be")) {
-    return null;
-  }
-
-  // Handle other URLs with standard fetch
-  const prompt = `Fetch and analyze this URL: ${url}
-
-Context: This is linked from an idea titled "${ideaTitle}"
-
-Instructions:
-1. Fetch the URL content
-2. Extract the key information (what is it about, main features, why it matters)
-3. Summarize in 2-3 paragraphs
-4. If it's a GitHub repo, include: stars, language, main purpose, notable features
-5. If it's an article, include: main thesis, key points, author's conclusion
-
-Return ONLY the analysis, no preamble.`;
-
-  try {
-    // Primary: OpenCode Gemini Flash
-    const result = await executeOpenCodeCLI(prompt, "", {
-      model: `google/${GEMINI_CLI_FLASH_MODEL}`,
-      researchOnly: true,
-      timeout: 60000,
-    });
-
-    if (result.exitCode === 0 && result.output && result.output.length > 100) {
-      return result.output.trim();
-    }
-
-    // Fallback: Claude Code Sonnet
-    const fallback = await executeClaudeCommand(prompt, {
-      cwd: process.env.HOME ?? "/Users/yj",
-      model: "sonnet",
-      timeout: 60000,
-    });
-
-    if (fallback.exitCode === 0 && fallback.output && fallback.output.length > 100) {
-      return fallback.output.trim();
-    }
-
-    return null;
-  } catch (error) {
-    logger.warn({ url, error }, "Deep fetch failed");
-    return null;
-  }
-}
+// Deep URL fetching removed — handled by synthesizer pipeline (deep-fetch.ts)
 
 // ============================================
 // DENY HISTORY MANAGEMENT
@@ -407,42 +331,12 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
     );
     result.skipped += twitterIdeas.length - newIdeas.length;
 
-    // Deep-link tweet threads + external URLs in parallel (3 at a time)
-    const CONCURRENCY = 3;
-    for (let i = 0; i < newIdeas.length; i += CONCURRENCY) {
-      const batch = newIdeas.slice(i, i + CONCURRENCY);
-      await Promise.all(batch.map(async (idea) => {
-        // Deep-link the tweet thread itself for full content
-        if (idea.link) {
-          const threadContent = await deepFetchUrl(idea.link, idea.title);
-          if (threadContent) {
-            const author = idea.link.split("/")[3] ?? "";
-            // Merge thread content with existing content instead of overwriting
-            const existingContent = idea.content || "";
-            idea.content = `**@${author}**: ${threadContent}\n\n${existingContent}`;
-            // Fix title if it was empty from bookmark list (X Articles, long threads)
-            if (idea.title === "X: " || idea.title === "X:" || !idea.title.replace(/^X:\s*/, "").trim()) {
-              const firstLine = threadContent.split("\n")[0]?.trim() ?? "";
-              const titleText = firstLine.slice(0, 80).replace(/[#*_~`]/g, "").trim();
-              idea.title = titleText ? `X: ${titleText}${firstLine.length > 80 ? "..." : ""}` : `X: @${author} thread`;
-            }
-            result.enriched++;
-          }
-        }
-
-        // Also deep-fetch external links if present
-        if (idea.context?.startsWith("External link:")) {
-          const externalUrl = idea.context.replace("External link: ", "");
-          const enriched = await deepFetchUrl(externalUrl, idea.title);
-          if (enriched) {
-            idea.content += `\n\n## Linked Content\n\n${enriched}`;
-          }
-        }
-      }));
-    }
-
+    // Write new bookmarks to scrapes table only — synthesizer handles idea creation
     for (const idea of newIdeas) {
-      // Write to scrapes table for provenance tracking
+      const externalUrls = idea.context?.startsWith("External link:")
+        ? [idea.context.replace("External link: ", "")]
+        : [];
+
       insertScrape(db, {
         id: idea.id,
         source: "x-bookmark",
@@ -450,13 +344,9 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
         title: idea.title,
         author: idea.content.match(/@(\w+)/)?.[1] ?? undefined,
         raw_content: idea.content,
-        metadata: JSON.stringify({ tags: idea.tags }),
+        metadata: JSON.stringify({ tags: idea.tags, external_urls: externalUrls }),
       });
 
-      // Save idea to DB (+ mirror file)
-      if (process.env.LEGACY_INGEST !== "0") {
-        dao.createIdea(db, idea);
-      }
       existingIds.add(idea.id);
       existingTitles.add(idea.title.toLowerCase());
       result.ingested++;
@@ -515,16 +405,7 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
 
           ensureIdeaId(idea);
 
-          // Deep fetch linked URL
-          if (idea.link) {
-            const enriched = await deepFetchUrl(idea.link, idea.title);
-            if (enriched) {
-              idea.content = (idea.content || "") + `\n\n## Deep Fetch Analysis\n\n${enriched}`;
-              result.enriched++;
-            }
-          }
-
-          // Write to scrapes table
+          // Write to scrapes table only — synthesizer handles idea creation
           insertScrape(db, {
             id: idea.id,
             source: "legacy-ideas-md",
@@ -532,11 +413,6 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
             title: idea.title,
             raw_content: idea.content || "",
           });
-
-          // Save idea to DB (+ mirror file)
-          if (process.env.LEGACY_INGEST !== "0") {
-            dao.createIdea(db, idea);
-          }
           existingIds.add(idea.id);
           existingTitles.add(idea.title.toLowerCase());
           result.ingested++;
