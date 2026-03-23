@@ -25,6 +25,18 @@ const SKILL_PATH = "/Users/yj/.claude/skills/link-processor/SKILLS.md";
 const PROCESS_TIMEOUT = 300_000; // 5min per link (YouTube/Medium need more time)
 const MAX_LINK_RETRIES = 3;
 
+// Backoff is handled in getPendingLinks SQL (30min, 2h, 8h)
+
+const PERMANENT_ERRORS = [
+  "404", "not found", "account suspended", "page doesn't exist",
+  "this account doesn't exist", "something went wrong",
+];
+
+function isPermanentError(error: string): boolean {
+  const lower = error.toLowerCase();
+  return PERMANENT_ERRORS.some(p => lower.includes(p));
+}
+
 interface ExtractedContent {
   title: string;
   author?: string;
@@ -96,7 +108,8 @@ export async function runLinkProcessor(
         });
 
         if (result.exitCode !== 0 || !result.output) {
-          markLinkFailed(db, link.id, `Exit code ${result.exitCode}: ${result.output?.slice(0, 200) ?? "no output"}`);
+          const errMsg = `Exit code ${result.exitCode}: ${result.output?.slice(0, 200) ?? "no output"}`;
+          markLinkFailed(db, link.id, errMsg, isPermanentError(errMsg));
           failed++;
           results.push({ url: link.url, status: "failed" });
           continue;
@@ -139,7 +152,7 @@ export async function runLinkProcessor(
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        markLinkFailed(db, link.id, msg.slice(0, 500));
+        markLinkFailed(db, link.id, msg.slice(0, 500), isPermanentError(msg));
         failed++;
         results.push({ url: link.url, status: "error" });
         logger.warn({ url: link.url, error: msg }, "Link processing failed");
