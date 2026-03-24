@@ -10,7 +10,7 @@ import { getUploadPath } from "./uploads.js";
 const HEARTBEAT_INTERVAL = 30_000; // 30 seconds
 const LOCK_TTL_MS = 32 * 60 * 1000; // 32 minutes (slightly above Claude timeout)
 const FILE_OUTPUT_HINT =
-  "If you create files (html, csv, xlsx, docx, etc.), upload them to Azure Blob Storage (homer-data container) using the MCP tools (blob_upload or blob_upload_content). Use the prefix 'reports/' for reports and 'exports/' for data exports. Always include the blob URL in your response so the user can download it.";
+  "If you create files (html, csv, xlsx, docx, etc.), upload them to Azure Blob Storage (homer-data container) using the MCP tools (blob_upload or blob_upload_content). Upload directly to the container root — do NOT use any prefix or subfolder. Always include the blob URL in your response so the user can download it.";
 
 /**
  * Thread lock management for preventing concurrent streams

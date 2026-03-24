@@ -5,6 +5,7 @@
  * this module independently (avoids stale ESM module cache issues).
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 
 /**

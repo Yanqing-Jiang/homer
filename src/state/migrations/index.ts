@@ -1,6 +1,8 @@
 import { readFileSync, readdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+// @ts-ignore
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { logger } from "../../utils/logger.js";
 

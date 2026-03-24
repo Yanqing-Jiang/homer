@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync, existsSync } from "fs";
 import { join } from "path";
 import { createHash } from "crypto";
+// @ts-ignore
 import Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
 import { SONNET_MODEL } from "../models.js";

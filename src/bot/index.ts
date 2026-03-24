@@ -40,7 +40,9 @@ import {
 } from "../reminders/index.js";
 import { MeetingManager, formatDuration } from "../meetings/index.js";
 import { CLIRunManager } from "../executors/cli-runner.js";
+import type { StreamStepEvent } from "../executors/claude.js";
 import { telegramLane } from "../utils/lanes.js";
+import { escapeHtml } from "../utils/telegram-format.js";
 import { buildConversationContext } from "../executors/context-builder.js";
 import { mkdirSync, existsSync } from "fs";
 import { writeFile } from "fs/promises";
@@ -1076,6 +1078,13 @@ async function handleNewExecution(
   let draftStream: TelegramDraftStream | null = null;
   let typingLoop: TelegramTypingLoop | null = null;
 
+  // Track streamed content with step markers to preserve multi-turn context.
+  // onPartial receives monotonically growing cumulative text; we extract deltas
+  // and interleave step markers so the final message preserves all turns.
+  let lastPartialLen = 0;
+  let compositeStreamContent = "";
+  const toolSteps: Array<{ label: string; labelDone: string; id?: string; completed: boolean }> = [];
+
   if (!returnResponse) {
     if (ENABLE_STREAMING) {
       streamingMsg = await sendThinkingIndicator(ctx);
@@ -1138,7 +1147,44 @@ async function handleNewExecution(
       threadId: thread.id,
       contextBeforeMessageId: userMessageId ?? undefined,
       suppressContext: parsed.isNewSession,
-      onPartial: draftStream ? (text) => draftStream!.update(text) : undefined,
+      onPartial: draftStream
+        ? (cumulativeText: string) => {
+            // Extract delta and append to composite (which includes step markers)
+            const delta = cumulativeText.slice(lastPartialLen);
+            lastPartialLen = cumulativeText.length;
+            if (delta) {
+              compositeStreamContent += delta;
+              draftStream!.update(compositeStreamContent);
+            }
+          }
+        : undefined,
+      onEvent: draftStream
+        ? (event: StreamStepEvent) => {
+            if (event.type === "tool_use") {
+              toolSteps.push({
+                label: event.label,
+                labelDone: event.labelDone,
+                id: event.id,
+                completed: false,
+              });
+              // Inject step marker into streaming display between turns
+              compositeStreamContent += `\n\n🔧 ${event.label}`;
+              draftStream!.update(compositeStreamContent);
+            } else if (event.type === "tool_result" && event.id) {
+              const step = toolSteps.find((s) => s.id === event.id);
+              if (step) {
+                step.completed = true;
+                // Update inline marker from spinning to done
+                compositeStreamContent = compositeStreamContent.replace(
+                  `🔧 ${step.label}`,
+                  `✓ ${step.labelDone}`
+                );
+                compositeStreamContent += "\n\n";
+                draftStream!.update(compositeStreamContent);
+              }
+            }
+          }
+        : undefined,
     });
 
     const runResult = await result;
@@ -1155,7 +1201,25 @@ async function handleNewExecution(
     }
 
     if (ENABLE_STREAMING && streamingMsg) {
-      await editWithResponse(ctx, streamingMsg, runResult.output);
+      // Build expandable blockquote with tool steps (if any)
+      let stepsHtml: string | undefined;
+      if (toolSteps.length > 0) {
+        const stepsText = toolSteps
+          .map((s) => `${s.completed ? "✓" : "…"} ${s.completed ? s.labelDone : s.label}`)
+          .join("\n");
+        stepsHtml = `<blockquote expandable>${escapeHtml(stepsText)}</blockquote>`;
+      }
+
+      // Use composite streamed content (preserves all turns) if tool steps
+      // were present, otherwise fall back to runResult.output
+      const finalText = toolSteps.length > 0 && compositeStreamContent.trim()
+        ? compositeStreamContent
+            .replace(/^(?:🔧|✓) [^\n]+$/gm, "")  // Strip inline step marker lines
+            .replace(/\n{3,}/g, "\n\n")                // Collapse excessive newlines
+            .trim()
+        : runResult.output;
+
+      await editWithResponse(ctx, streamingMsg, finalText, stepsHtml);
     } else {
       await sendFinalResponse(ctx, runResult.output);
     }

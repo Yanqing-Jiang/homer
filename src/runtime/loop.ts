@@ -9,6 +9,7 @@
  */
 
 import { Bot } from "grammy";
+// @ts-ignore
 import Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
 import { EventBus, getEventBus, type Signal } from "./event-bus.js";
