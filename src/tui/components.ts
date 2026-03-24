@@ -1,14 +1,15 @@
 import blessed from "blessed";
+// @ts-ignore
 import type { Widgets } from "blessed";
 import type { Session } from "../state/manager.js";
 import type { Job } from "../state/manager.js";
 
 export interface TuiComponents {
-  screen: Widgets.Screen;
-  sessionsBox: Widgets.BoxElement;
-  jobsBox: Widgets.BoxElement;
-  logsBox: Widgets.Log;
-  statsBar: Widgets.BoxElement;
+  screen: any;
+  sessionsBox: any;
+  jobsBox: any;
+  logsBox: any;
+  statsBar: any;
 }
 
 const LANE_COLORS: Record<string, string> = {
@@ -116,7 +117,7 @@ export function createTuiComponents(): TuiComponents {
 }
 
 export function updateSessions(
-  box: Widgets.BoxElement,
+  box: any,
   sessions: Session[],
   getClaudeSessionId: (lane: string) => string | null
 ): void {
@@ -136,7 +137,7 @@ export function updateSessions(
   box.setContent(lines.join("\n"));
 }
 
-export function updateJobs(box: Widgets.BoxElement, jobs: Job[]): void {
+export function updateJobs(box: any, jobs: Job[]): void {
   if (jobs.length === 0) {
     box.setContent(" No jobs");
     return;
@@ -161,7 +162,7 @@ export function updateJobs(box: Widgets.BoxElement, jobs: Job[]): void {
 }
 
 export function updateStats(
-  bar: Widgets.BoxElement,
+  bar: any,
   activeSessions: number,
   jobStats: { pending: number; running: number; completed: number; failed: number }
 ): void {
@@ -182,7 +183,7 @@ export function updateStats(
   );
 }
 
-export function addLog(box: Widgets.Log, entry: string): void {
+export function addLog(box: any, entry: string): void {
   // Parse JSON log if possible
   try {
     const parsed = JSON.parse(entry);

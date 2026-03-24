@@ -11,6 +11,7 @@
  *   content:tutorial, project:mahoraga, project:homer
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
 

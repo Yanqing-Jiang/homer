@@ -1,3 +1,4 @@
+// @ts-ignore
 import type Database from "better-sqlite3";
 import type { Bot } from "grammy";
 import { logger } from "../utils/logger.js";

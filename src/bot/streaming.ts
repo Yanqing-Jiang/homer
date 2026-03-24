@@ -171,15 +171,19 @@ export async function sendThinkingIndicator(ctx: Context): Promise<StreamingMess
 }
 
 /**
- * Edit a message with the final response, handling Telegram's character limit
+ * Edit a message with the final response, handling Telegram's character limit.
+ * If prefixHtml is provided (e.g. expandable blockquote with tool steps),
+ * it is prepended to the converted response without further escaping.
  */
 export async function editWithResponse(
   ctx: Context,
   streamingMsg: StreamingMessage,
-  response: string
+  response: string,
+  prefixHtml?: string
 ): Promise<void> {
   const html = mdToTelegramHtml(response);
-  const chunks = chunkForTelegram(html);
+  const fullHtml = prefixHtml ? `${prefixHtml}\n\n${html}` : html;
+  const chunks = chunkForTelegram(fullHtml);
 
   try {
     // Edit the thinking message with first chunk

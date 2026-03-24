@@ -15,6 +15,7 @@
 
 import { existsSync, readFileSync } from "fs";
 import { createHash } from "crypto";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { logger } from "../../utils/logger.js";
 

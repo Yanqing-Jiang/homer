@@ -13,6 +13,7 @@ import { execSync } from "child_process";
 import { processRegistry } from "./registry.js";
 import type { ProcessRecord } from "./registry.js";
 import { logger } from "../utils/logger.js";
+// @ts-ignore
 import type Database from "better-sqlite3";
 
 const IDLE_THRESHOLD_MS = 30 * 60 * 1000; // 30 min no activity

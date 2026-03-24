@@ -5,6 +5,7 @@
  * in the job_artifacts table for lineage tracking and recovery.
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { createHash } from "crypto";
 import { logger } from "../../utils/logger.js";

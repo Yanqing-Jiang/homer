@@ -18,6 +18,7 @@ import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { buildSchedulerContext } from "../shared-context.js";
 import { loadIdeasFromDir } from "../../ideas/parser.js";
 import { logger } from "../../utils/logger.js";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { trackImprovement } from "../../outcomes/hooks.js";
 import { storeJobArtifact } from "./artifact-store.js";

@@ -22,10 +22,7 @@ import {
 } from "fs";
 import { join } from "path";
 import { extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
-import {
-  executeGeminiCLIDirect,
-  GEMINI_CLI_FLASH_MODEL,
-} from "../../executors/gemini-cli.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
 import { hashContextBridgeValue } from "../../state/context-bridge-state.js";
 import { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
@@ -36,8 +33,7 @@ const HOMER_END = "<!-- HOMER:END -->";
 const HOMER_TARGET_LINES = 50;
 const HOMER_MAX_LINES = 60;
 const CURATION_TIMEOUT_MS = 120_000;
-const CONTEXT_BRIDGE_MODEL =
-  process.env.HOMER_CONTEXT_BRIDGE_MODEL?.trim() || GEMINI_CLI_FLASH_MODEL;
+const CONTEXT_BRIDGE_MODEL = "sonnet";
 const PERIODIC_TRIGGER_SOURCES = new Set(["context-bridge-refresh"]);
 
 const TARGET_DIRS = [
@@ -378,17 +374,16 @@ ${topicFiles.map((file) => `\n### ${file.fileName}\n${file.content}`).join("\n")
 `;
 
   try {
-    const result = await executeGeminiCLIDirect(prompt, {
+    const result = await executeClaudeCommand(prompt, {
       cwd: process.env.HOME ?? "/Users/yj",
       model: CONTEXT_BRIDGE_MODEL,
       timeout: CURATION_TIMEOUT_MS,
-      role: "general",
     });
 
     if (result.exitCode !== 0 || !result.output) {
       logger.warn(
-        { exitCode: result.exitCode, model: result.model },
-        "Context bridge Gemini curation failed, falling back to mechanical index",
+        { exitCode: result.exitCode },
+        "Context bridge Sonnet curation failed, falling back to mechanical index",
       );
       return null;
     }
@@ -396,7 +391,7 @@ ${topicFiles.map((file) => `\n### ${file.fileName}\n${file.content}`).join("\n")
     let content = stripCodeFences(result.output);
     const headerIdx = content.indexOf("# Homer Context");
     if (headerIdx < 0) {
-      logger.warn({ model: result.model }, "Context bridge output missing header, falling back");
+      logger.warn("Context bridge output missing header, falling back");
       return null;
     }
 
@@ -406,14 +401,14 @@ ${topicFiles.map((file) => `\n### ${file.fileName}\n${file.content}`).join("\n")
     content = enforceLineCap(content, HOMER_MAX_LINES);
 
     logger.info(
-      { lines: content.split("\n").length, duration: result.duration, model: result.model },
-      "Context bridge curated with Gemini",
+      { lines: content.split("\n").length },
+      "Context bridge curated with Sonnet",
     );
 
     return content;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    logger.warn({ error: message, model: CONTEXT_BRIDGE_MODEL }, "Context bridge curation threw");
+    logger.warn({ error: message }, "Context bridge curation threw");
     return null;
   }
 }
@@ -514,7 +509,7 @@ export async function runContextBridge(
 
     const topicFiles = renderTopicFiles(data);
     let homerContent = await buildCuratedIndex(data, topicFiles);
-    let method = `gemini-curated:${CONTEXT_BRIDGE_MODEL}`;
+    let method = "claude-curated:sonnet";
 
     if (!homerContent) {
       homerContent = buildMechanicalIndex(data, topicFiles);
