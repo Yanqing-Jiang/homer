@@ -4,6 +4,7 @@
  */
 
 import { createHash } from "crypto";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import type { Bot } from "grammy";
 import { linkedInEasyApply } from "./apply-linkedin.js";

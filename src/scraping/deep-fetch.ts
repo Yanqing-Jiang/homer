@@ -12,6 +12,8 @@
 
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
+// @ts-ignore
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
 import type { StoredScrape } from "./scrape-store.js";

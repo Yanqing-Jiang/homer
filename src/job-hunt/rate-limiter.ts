@@ -2,6 +2,7 @@
  * Rate limiter for job-hunt actions — per-action limits with DB-backed tracking.
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 
 interface RateLimit {

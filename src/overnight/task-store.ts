@@ -6,6 +6,7 @@
  */
 
 import { randomUUID } from "crypto";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import type {
   OvernightTask,

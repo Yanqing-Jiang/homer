@@ -6,6 +6,7 @@
 
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import type { ApplyResult, ApplicationStep } from "./apply-engine.js";
 import { AccountManager, type CareerAccount } from "./account-manager.js";

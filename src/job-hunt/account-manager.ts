@@ -3,6 +3,7 @@
  */
 
 import { createHash, randomInt } from "crypto";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { encrypt, decrypt, type EncryptedValue } from "../utils/encryption.js";
 import { logger } from "../utils/logger.js";

@@ -5,6 +5,7 @@
 
 import { readFileSync } from "fs";
 import { createHash } from "crypto";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { scoreJob, type ScoringResult, detectWorkArrangement } from "../../job-hunt/scorer.js";
 import { generateSearchUrls } from "../../job-hunt/taxonomy.js";

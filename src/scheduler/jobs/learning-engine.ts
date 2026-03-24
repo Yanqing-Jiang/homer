@@ -1,13 +1,10 @@
 /**
- * Learning Engine — Multi-model swarm job
+ * Learning Engine — Content Pattern Discovery
  *
- * Context-aware swarm that finds content patterns specifically useful
- * for Yanqing's career and content strategy.
+ * Analyzes recent scrapes and existing patterns to update Yanqing's
+ * content playbook. No web search — uses existing scraped content only.
  *
- * Uses Claude Sonnet (pattern analysis + web research),
- * consolidated via Gemini Flash API.
- *
- * Post-consolidation: updates ~/memory/patterns.md and writes content ideas
+ * Post-analysis: updates ~/memory/patterns.md and writes content ideas
  * as idea files.
  */
 
@@ -15,14 +12,12 @@ import { readFileSync, writeFileSync, existsSync } from "fs";
 import { z } from "zod";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { executeClaudeCommand } from "../../executors/claude.js";
-import { RESEARCH_ONLY_PREFIX } from "../../executors/opencode-cli.js";
-import type Database from "better-sqlite3";
-import { buildCondensedContext, extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
-import { getRecentJobOutputs } from "../job-outputs.js";
-import { StateManager } from "../../state/manager.js";
+import { extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
+import { getRecentScrapes } from "../../scraping/scrape-store.js";
 import { storeJobArtifact } from "./artifact-store.js";
 import type { ParsedIdea } from "../../ideas/parser.js";
 import { smartSaveIdea, type SmartSaveResult } from "../../ideas/smart-save.js";
+import { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
 import { PATHS } from "../../config/paths.js";
 
@@ -76,7 +71,6 @@ async function getRecentTopics(): Promise<string> {
 
     if (existsSync(logPath)) {
       const content = readFileSync(logPath, "utf-8");
-      // Extract headers and first few lines as topic signals
       const headers = content.match(/^##\s+.+$/gm);
       if (headers) {
         topics.push(`### ${dateStr}\n${headers.slice(0, 10).join("\n")}`);
@@ -89,6 +83,22 @@ async function getRecentTopics(): Promise<string> {
     : "(No recent daily logs found)";
 }
 
+/**
+ * Build a digest from recent scrapes for the LLM to analyze.
+ */
+function buildScrapeDigest(db: Database.Database): string {
+  const scrapes = getRecentScrapes(db, undefined, 48);
+  if (scrapes.length === 0) return "(No recent scrapes found)";
+
+  return scrapes
+    .slice(0, 40)
+    .map((s) => {
+      const snippet = (s.raw_content ?? "").replace(/\s+/g, " ").slice(0, 600);
+      return `## ${s.source} | ${s.title || "(untitled)"}\nURL: ${s.url || "N/A"}\n${snippet}`;
+    })
+    .join("\n\n---\n\n");
+}
+
 // ============================================
 // MAIN
 // ============================================
@@ -99,60 +109,32 @@ export async function runLearningEngine(db?: Database.Database, jobRunId?: numbe
   error?: string;
 }> {
   try {
-    // Pre-swarm: gather context
-    const [condensedContext, goals, projects] = await Promise.all([
-      buildCondensedContext(),
+    const [goals, projects] = await Promise.all([
       extractCurrentGoals(),
       extractActiveProjects(),
     ]);
 
     const patternsFile = loadFileIfExists(PATTERNS_PATH);
     const recentTopics = await getRecentTopics();
+    const scrapeDigest = db ? buildScrapeDigest(db) : "(No database available)";
 
-    // Unified prompt for both agents (same task, different perspectives)
-    const swarmPrompt = `Search the web for viral/trending content from the last 48 hours and analyze content patterns for Yanqing to build visibility as a thought leader.
+    const prompt = `You are analyzing recent scraped content and existing patterns to update Yanqing's content playbook.
 
-## Domains to Search
-- AI/ML engineering
-- Career growth for senior engineers → director track
-- Personal AI assistants / agent frameworks
-- Algorithmic trading / quant finance
-- Content creation strategy for technical professionals
+Use only the provided material. Do not invent external examples.
 
-## For Each Trending Content Found
-1. Title and URL
-2. Why it went viral (hook formula, format, timing)
-3. Content structure (length, formatting, media)
-4. How Yanqing could create similar content from his unique angle
-5. Specific content idea for Yanqing (LinkedIn post, Medium article, or X thread) he could write THIS WEEK
+## Recent Scrapes (last 48 hours)
+${scrapeDigest.slice(0, 24_000)}
+
+## Existing Patterns (update, don't repeat)
+${patternsFile.slice(0, 2_000)}
 
 ## What Yanqing is working on this week
 ${recentTopics}
 
 ## Yanqing's Goals & Projects
-${goals.slice(0, 1500)}
+${goals.slice(0, 1_500)}
 ${projects.slice(0, 800)}
 
-## Existing patterns (update, don't repeat)
-${patternsFile.slice(0, 2000)}`;
-
-    // Cross-job intelligence
-    const recentActivity = db ? getRecentJobOutputs(db) : "";
-
-    // Single Flash call with web search — replaces duplicate 2-agent swarm
-    const fullPrompt = `${swarmPrompt}
-
-## Additional Context
-
-### Who is Yanqing
-${condensedContext.slice(0, 2500)}
-
-### What Yanqing worked on this week
-${recentTopics}
-
-### Existing patterns (update, don't repeat)
-${patternsFile.slice(0, 1500)}
-${recentActivity ? `\n${recentActivity}\n` : ""}
 ## Output Format
 
 Return ONLY a valid JSON object (no markdown, no preamble):
@@ -160,20 +142,18 @@ Return ONLY a valid JSON object (no markdown, no preamble):
 
 If no patterns or ideas found, use empty arrays.`;
 
-    const constrainedPrompt = RESEARCH_ONLY_PREFIX + fullPrompt;
-    const result = await executeClaudeCommand(constrainedPrompt, {
+    const result = await executeClaudeCommand(prompt, {
       cwd: process.env.HOME ?? "/Users/yj",
       model: "sonnet",
-      timeout: 300_000,
+      timeout: 1_200_000, // 20 min — matches schedule.json config
     });
 
     if (result.exitCode !== 0 || !result.output || result.output.length < 50) {
-      logger.warn({ exitCode: result.exitCode, outputLen: result.output?.length }, "Learning engine Sonnet call failed, retrying...");
-      // Single retry with higher timeout
-      const retry = await executeClaudeCommand(constrainedPrompt, {
+      // Single retry with same timeout
+      const retry = await executeClaudeCommand(prompt, {
         cwd: process.env.HOME ?? "/Users/yj",
         model: "sonnet",
-        timeout: 600_000,
+        timeout: 1_200_000,
       });
       if (retry.exitCode !== 0 || !retry.output || retry.output.length < 50) {
         return { success: false, output: "", error: `Learning engine failed after retry: ${retry.output?.slice(0, 200)}` };
@@ -181,12 +161,10 @@ If no patterns or ideas found, use empty arrays.`;
       result.output = retry.output;
     }
 
-    const consolidated = result.output ?? "";
-
     // Parse and validate
     let output: { patterns: z.infer<typeof PatternSchema>[]; contentIdeas: z.infer<typeof ContentIdeaSchema>[] };
     try {
-      const raw = parseSwarmJSON(consolidated, LearningOutputSchema);
+      const raw = parseSwarmJSON(result.output ?? "", LearningOutputSchema);
       output = {
         patterns: raw.patterns ?? [],
         contentIdeas: raw.contentIdeas ?? [],
@@ -203,7 +181,7 @@ If no patterns or ideas found, use empty arrays.`;
         JSON.stringify(output), { patternsCount: output.patterns.length, ideasCount: output.contentIdeas.length });
     }
 
-    // Post-consolidation: overwrite patterns.md (consolidation already merges existing)
+    // Post-consolidation: overwrite patterns.md
     let patternsWritten = 0;
     if (output.patterns.length > 0) {
       // Snapshot patterns.md before overwriting
@@ -232,7 +210,7 @@ If no patterns or ideas found, use empty arrays.`;
       logger.info({ count: patternsWritten }, "Overwrote patterns.md");
     }
 
-    // Post-consolidation: write content ideas via smart-save (dedup-at-write)
+    // Post-consolidation: write content ideas via smart-save
     const ideaSaveResults: SmartSaveResult[] = [];
     const now = new Date();
     const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
@@ -257,9 +235,9 @@ If no patterns or ideas found, use empty arrays.`;
       };
 
       try {
-        const result = smartSaveIdea(parsed, db);
-        ideaSaveResults.push(result);
-        logger.info({ id, title: idea.title, platform: idea.platform, action: result.action }, "Learning engine idea processed");
+        const saveResult = smartSaveIdea(parsed, db);
+        ideaSaveResults.push(saveResult);
+        logger.info({ id, title: idea.title, platform: idea.platform, action: saveResult.action }, "Learning engine idea processed");
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.warn({ error: msg, title: idea.title }, "Failed to write content idea");

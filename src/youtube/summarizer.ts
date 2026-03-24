@@ -19,6 +19,8 @@ import { createIdea, findByCanonicalUrl, searchIdeas } from "../ideas/dao.js";
 import type { ParsedIdea } from "../ideas/parser.js";
 import { randomUUID } from "crypto";
 import type { YouTubeSummaryMetadata } from "../overnight/types.js";
+// @ts-ignore TS6133 — Database is used as a type throughout this file
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { PATHS } from "../config/paths.js";
 

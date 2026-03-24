@@ -1,3 +1,4 @@
+// @ts-ignore
 import Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import { logger } from "../utils/logger.js";

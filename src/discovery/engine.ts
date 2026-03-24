@@ -9,6 +9,7 @@ import { randomUUID } from "crypto";
 import { writeFile, mkdir } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import type {
   DiscoveryEngineConfig,

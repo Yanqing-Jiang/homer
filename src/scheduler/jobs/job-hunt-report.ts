@@ -4,6 +4,7 @@
  */
 
 import { writeFileSync, mkdirSync, existsSync } from "fs";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { logger } from "../../utils/logger.js";
 

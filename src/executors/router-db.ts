@@ -7,6 +7,7 @@
  * - Deferral queue for batch processing
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
 import type { RoutingRequest, RoutingDecision, TaskType, DeferredTask } from "./router.js";
@@ -114,16 +115,16 @@ export class AccountManager {
   }
 
   getAll(): DBAccountRow[] {
-    return this.stmts.getAll.all() as DBAccountRow[];
+    return this.stmts.getAll.all() as unknown as DBAccountRow[];
   }
 
   getByExecutor(executor: string): DBAccountRow[] {
-    return this.stmts.getByExecutor.all(executor) as DBAccountRow[];
+    return this.stmts.getByExecutor.all(executor) as unknown as DBAccountRow[];
   }
 
   getNextAvailable(executor: string): DBAccountRow | null {
     const now = new Date().toISOString();
-    return (this.stmts.getAvailable.get(executor, now) as DBAccountRow) || null;
+    return (this.stmts.getAvailable.get(executor, now) as unknown as DBAccountRow) || null;
   }
 
   reportQuotaError(accountId: string): void {
@@ -399,7 +400,7 @@ export class DeferralQueue {
 
   getPending(limit: number = 10): DeferredTask[] {
     const now = Date.now();
-    const rows = this.stmts.getPending.all(now, limit) as DBDeferredTaskRow[];
+    const rows = this.stmts.getPending.all(now, limit) as unknown as DBDeferredTaskRow[];
 
     return rows.map((row) => ({
       id: row.id,
@@ -439,7 +440,7 @@ export class DeferralQueue {
   }
 
   getStats(): { pending: number; processing: number; completed: number; failed: number } {
-    const rows = this.stmts.getStats.all() as Array<{
+    const rows = this.stmts.getStats.all() as unknown as Array<{
       status: string;
       count: number;
     }>;

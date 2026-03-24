@@ -1,17 +1,18 @@
 /**
- * Ideas Explore — GitHub Trending Scraper
+ * Ideas Explore — GitHub Trending Discovery
  *
- * Scrapes GitHub trending repos and writes to the scrapes table.
- * X bookmark scraping has been moved to idea-ingest (single source of truth).
- * The idea-synthesizer reads from scrapes and creates ideas.
+ * Deterministic fetch via `gh api`, then Claude Sonnet filters for relevance.
+ * Code fetches data, LLM decides what's relevant.
  *
  * Schedule: 30 0 * * * (daily at 00:30, also triggered by idea-ingest)
  */
 
+import { execFileSync } from "child_process";
 import { readFileSync, existsSync } from "fs";
 import { z } from "zod";
+// @ts-ignore
 import type Database from "better-sqlite3";
-import { executeGeminiCLIDirect, GEMINI_CLI_PRO_MODEL } from "../../executors/gemini-cli.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import * as ideaDao from "../../ideas/dao.js";
 import { insertScrape } from "../../scraping/scrape-store.js";
@@ -20,6 +21,7 @@ import { logger } from "../../utils/logger.js";
 import { PATHS } from "../../config/paths.js";
 
 const DENY_HISTORY = PATHS.denyHistory;
+const GH_BIN = "/opt/homebrew/bin/gh";
 
 // ============================================
 // SCHEMAS
@@ -39,6 +41,30 @@ const ReposArraySchema = z.array(RepoSchema);
 function loadFileIfExists(path: string): string {
   if (!existsSync(path)) return "(file not found)";
   return readFileSync(path, "utf-8");
+}
+
+/**
+ * Fetch trending repos from GitHub API deterministically.
+ * Returns raw JSON string of repo objects.
+ */
+function fetchTrendingRepos(): string {
+  const since = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+  try {
+    return execFileSync(
+      GH_BIN,
+      [
+        "api",
+        `search/repositories?q=created:>${since}+stars:>50&sort=stars&order=desc&per_page=30`,
+        "--jq",
+        `.items[] | {name: .full_name, description: .description, stars: .stargazers_count, language: .language, url: .html_url}`,
+      ],
+      { encoding: "utf-8", timeout: 30_000 },
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ error: msg }, "GitHub API fetch failed");
+    return "";
+  }
 }
 
 // ============================================
@@ -64,23 +90,25 @@ export async function runIdeasExplore(db?: Database.Database): Promise<{
       extractActiveProjects(),
     ]);
 
-    // Single Gemini Flash agent — GitHub trending discovery
-    const discoveryPrompt = `You are a GitHub trending discovery agent.
+    // Step 1: Deterministic fetch — code gathers data
+    const rawRepos = fetchTrendingRepos();
+    if (!rawRepos.trim()) {
+      return { success: false, output: "", error: "GitHub API returned no results" };
+    }
 
-Search GitHub trending repositories from the last 7 days that match Yanqing's interests.
+    // Step 2: Sonnet filters for relevance — LLM makes decisions
+    const filterPrompt = `You are filtering GitHub trending repos for relevance to Yanqing's work.
 
-Use this command to find trending repos (run via shell):
-gh api "search/repositories?q=created:>${new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10)}+stars:>50&sort=stars&order=desc&per_page=20" --jq '.items[] | {name: .full_name, description: .description, stars: .stargazers_count, language: .language, url: .html_url}'
+## Repos fetched from GitHub (last 7 days, sorted by stars)
+${rawRepos.slice(0, 20_000)}
 
-Filter criteria — MATCH repos related to Yanqing's active projects:
+## Filter criteria — keep repos related to:
 - Quant trading, algorithmic finance, IBKR integration (MAHORAGA project)
 - Resume optimization, job search automation, career tools (Career OS)
 - Data pipelines, DuckDB, Parquet, analytics dashboards (Work Analytics)
 - Personal AI agents, memory systems, orchestration (Homer)
 - Content creation tools, LinkedIn/Medium automation (Frontend-Slides)
 - General: AI/ML, TypeScript/Python CLI tools, personal automation
-
-AVOID: gaming, mobile-only, frontend-only frameworks, anything in deny history.
 
 ## Yanqing's Active Goals
 ${goals.slice(0, 1500)}
@@ -91,71 +119,31 @@ ${projects.slice(0, 1000)}
 ## Deny History (skip these)
 ${denyHistory.slice(0, 3000)}
 
-## Output Format
-Return ONLY a JSON array (no markdown, no commentary):
-[{"name": "owner/repo", "url": "https://github.com/...", "description": "what it does", "stars": 1234, "language": "TypeScript", "relevance": "connects to Yanqing's X project because..."}]
-
+## Output
+Return ONLY a JSON array of repos worth tracking. For each, add a "relevance" field explaining why it matters.
+Format: [{"name": "owner/repo", "url": "https://github.com/...", "description": "...", "stars": 1234, "language": "TypeScript", "relevance": "connects to X because..."}]
 If nothing relevant, return: []`;
 
-    const flashResult = await executeGeminiCLIDirect(discoveryPrompt, {
+    const result = await executeClaudeCommand(filterPrompt, {
+      cwd: process.env.HOME ?? "/Users/yj",
+      model: "sonnet",
       timeout: 180_000,
     });
 
-    if (flashResult.exitCode !== 0 || !flashResult.output) {
-      return { success: false, output: "", error: `GitHub discovery failed: exit ${flashResult.exitCode}` };
+    if (result.exitCode !== 0 || !result.output) {
+      return { success: false, output: "", error: `Sonnet filter failed: exit ${result.exitCode}` };
     }
 
-    // Also run Gemini 3.1 Pro competitive gap analysis via API (non-blocking)
-    let gapAnalysisInserted = 0;
-    const opusPromise = (async () => {
-      try {
-        const proResult = await executeGeminiCLIDirect(
-          `Perform a focused competitive analysis: identify 3-5 personal AI assistant projects similar to Homer (a personal AI with Telegram bot, memory system, and job scheduler). For each, describe 1-2 feature gaps Homer doesn't have. Return ONLY a JSON array, no markdown:
-[{"name": "owner/repo", "url": "https://github.com/owner/repo", "description": "feature gap description", "relevance": "why Homer should have this"}]
-
-Base your analysis on your knowledge of open-source personal AI assistant projects. Focus on actionable gaps like: voice interfaces, proactive goal tracking, calendar integration, smart notifications, context-aware reminders, multi-modal inputs.`,
-          {
-            model: GEMINI_CLI_PRO_MODEL,  // gemini-3.1-pro-preview via CLI with account rotation
-            timeout: 180_000,
-          },
-        );
-
-        if (proResult.exitCode === 0 && proResult.output) {
-          try {
-            const gaps = parseSwarmJSON(proResult.output, ReposArraySchema);
-            for (const gap of gaps) {
-              if (!existingUrls.has(gap.url)) {
-                const inserted = insertScrape(db, {
-                  id: `gap_${Date.now()}_${gap.name.replace(/[^a-z0-9]/gi, "_").slice(0, 20)}`,
-                  source: "github-gap-analysis",
-                  url: gap.url,
-                  title: `Gap: ${gap.name} — ${gap.description.slice(0, 60)}`,
-                  raw_content: `${gap.description}\n\nRelevance: ${gap.relevance}`,
-                  metadata: JSON.stringify({ stars: gap.stars, language: gap.language }),
-                });
-                if (inserted) gapAnalysisInserted++;
-              }
-            }
-          } catch {
-            // Parse failure is OK — gap analysis is best-effort
-          }
-        }
-      } catch {
-        // Pro failure is non-blocking
-      }
-    })();
-
-    // Parse Flash results
     let repos: z.infer<typeof ReposArraySchema>;
     try {
-      repos = parseSwarmJSON(flashResult.output, ReposArraySchema);
+      repos = parseSwarmJSON(result.output, ReposArraySchema);
     } catch (parseErr) {
       const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
       logger.error({ error: msg }, "Failed to parse GitHub trending output");
       return { success: false, output: "", error: `Parse failed: ${msg}` };
     }
 
-    // Filter duplicates and write to scrapes table
+    // Step 3: Write to scrapes table — code executes
     let inserted = 0;
     for (const repo of repos) {
       if (existingUrls.has(repo.url)) continue;
@@ -171,10 +159,7 @@ Base your analysis on your knowledge of open-source personal AI assistant projec
       if (scrapeInserted) inserted++;
     }
 
-    // Wait for Opus gap analysis to complete
-    await opusPromise;
-
-    const output = `GitHub trending: ${repos.length} found, ${inserted} new scrapes stored${gapAnalysisInserted > 0 ? `, ${gapAnalysisInserted} gap analysis scrapes` : ""}`;
+    const output = `GitHub trending: ${repos.length} found, ${inserted} new scrapes stored`;
     return { success: true, output };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);

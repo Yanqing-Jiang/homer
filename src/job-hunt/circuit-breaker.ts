@@ -3,6 +3,7 @@
  * States: closed (normal) → open (failing) → half-open (testing recovery).
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
 

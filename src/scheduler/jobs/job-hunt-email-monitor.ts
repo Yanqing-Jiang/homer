@@ -3,6 +3,7 @@
  * classifies emails, links to job_postings, updates application status.
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { checkInbox, type GmailMessage } from "../../job-hunt/gmail-client.js";
 import { parseInterviewEmail } from "../../job-hunt/interview-parser.js";

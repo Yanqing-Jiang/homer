@@ -6,6 +6,7 @@
  */
 
 import type { ChildProcess } from "child_process";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
 

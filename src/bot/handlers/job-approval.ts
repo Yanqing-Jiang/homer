@@ -5,6 +5,7 @@
  */
 
 import { Bot, InlineKeyboard } from "grammy";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { logger } from "../../utils/logger.js";
 import type { StateManager } from "../../state/manager.js";

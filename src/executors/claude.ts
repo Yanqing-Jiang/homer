@@ -276,6 +276,11 @@ export async function executeClaudeCommand(
               if (block.type === "text" && block.text) {
                 resultContent += block.text;
               } else if (block.type === "tool_use" && block.name && options.onEvent) {
+                // Flush accumulated text via onPartial BEFORE emitting tool_use,
+                // so consumers see the text delta before the step marker.
+                if (options.onPartial && resultContent) {
+                  try { options.onPartial(resultContent); } catch { /* don't crash executor */ }
+                }
                 try {
                   const labels = buildToolLabel(block.name, block.input);
                   options.onEvent({

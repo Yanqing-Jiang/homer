@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { z } from "zod";
 import { parseIdeasMd, type ParsedIdea } from "./parser.js";

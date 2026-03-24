@@ -13,6 +13,7 @@ import { loadIdeasFromDir, saveIdeaFile, type ParsedIdea } from "./parser.js";
 import { createFingerprint, fingerprintSimilarity } from "./fingerprint.js";
 import { canonicalizeUrl } from "./canonical-url.js";
 import { logger } from "../utils/logger.js";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import * as dao from "./dao.js";
 

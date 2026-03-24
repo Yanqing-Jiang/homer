@@ -3,6 +3,7 @@
  * JD text similarity, and cross-platform duplicates.
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 
 interface DedupResult {

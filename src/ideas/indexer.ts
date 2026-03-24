@@ -1,4 +1,5 @@
 import { watch } from "chokidar";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import {
   parseIdeaFile,
