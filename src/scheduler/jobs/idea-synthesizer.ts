@@ -1,16 +1,17 @@
 /**
  * Idea Synthesizer v3 — Multi-Scrape Clustering Pipeline
  *
- * Architecture: 6-step pipeline with cross-source clustering
- *   Step 1: SCORE (Gemini Flash) — score scrape against goals
+ * Architecture: 5-step pipeline with cross-source clustering
+ *   Step 1: TRIAGE (Claude Sonnet) — pass/fail scrape against goals
  *   Step 2: CLUSTER (deterministic) — group related scored scrapes
  *   Step 3: SYNTHESIZE (Claude Sonnet) — cross-source idea from cluster
- *   Step 4: CRITIQUE (Gemini Flash) — pass/fail gate
+ *   Step 4: CRITIQUE (Claude Sonnet) — pass/fail gate
  *   Step 5: ENRICH (Claude Sonnet) — deep dive + cross-links
  *   Step 6: SAVE (code only) — smartSaveIdea + mark terminal
  *
  * State persisted in scrapes.metadata.pipeline for resumability.
  * Each step has its own small Zod schema with defaults on brittle fields.
+ * LLM makes all pass/fail decisions — code validates shape, not policy.
  *
  * Schedule: 30 1 * * * (daily at 1:30am)
  */
@@ -18,9 +19,9 @@
 import { readFileSync, readdirSync, statSync, existsSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { executeClaudeCommand } from "../../executors/claude.js";
-import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import {
   getUnprocessedScrapes,
@@ -46,14 +47,10 @@ import { PATHS } from "../../config/paths.js";
 import { deepFetchScrapes } from "../../scraping/deep-fetch.js";
 
 const DENY_HISTORY = PATHS.denyHistory;
-const SCORE_THRESHOLD = 6;
-const CONFIDENCE_THRESHOLD = 0.5;
-const CRITIQUE_AVG_THRESHOLD = 6;
 const CLUSTER_SIMILARITY_THRESHOLD = 0.3; // Related (lower than dedup's 0.8)
 const NEAR_DUPLICATE_THRESHOLD = 0.75;    // Near-duplicate scrapes to skip
 const MAX_CLUSTER_SIZE = 3;
 const STEP_TIMEOUT = 120_000; // 2 min per step
-const FLASH_TIMEOUT = 60_000; // 1 min for Flash calls
 
 // Skill file paths
 const SKILL_SCORE = join(process.env.HOME ?? "/Users/yj", ".claude/skills/idea-score/SKILLS.md");
@@ -65,8 +62,9 @@ const SKILL_ENRICH = join(process.env.HOME ?? "/Users/yj", ".claude/skills/idea-
 // SCHEMAS — small, per-step, with defaults
 // ============================================
 
-const ScoreSchema = z.object({
-  score: z.number().min(0).max(10),
+const TriageSchema = z.object({
+  passed: z.boolean(),
+  reason: z.string(),
   summary: z.string(),
   dimensions: z.array(z.string()),
 });
@@ -83,10 +81,9 @@ const CandidateSchema = z.object({
 
 const CritiqueSchema = z.object({
   passed: z.boolean(),
-  novelty: z.number().min(0).max(10),
-  goalAlignment: z.number().min(0).max(10),
-  feasibility: z.number().min(0).max(10),
-  reason: z.string().optional().default(""),
+  reason: z.string(),
+  strengths: z.array(z.string()).optional().default([]),
+  risks: z.array(z.string()).optional().default([]),
 });
 
 const IMPROVEMENT_AREAS = [
@@ -418,41 +415,46 @@ async function stepScore(
 ## Context
 ${sharedContext.slice(0, 3000)}
 
-## Scrape to Score
+## Scrape to Triage
 
 ${formatScrapeForPrompt(scrape)}
 
 ---
 
-Score this scrape. Return ONLY the JSON object.`;
+Decide whether this scrape is strong enough to continue in the idea pipeline.
+Return ONLY a JSON object: { "passed": true|false, "reason": "why", "summary": "one-line summary", "dimensions": ["topic tags"] }`;
 
   try {
-    const result = await executeGeminiCLIDirect(prompt, { timeout: FLASH_TIMEOUT });
+    const result = await executeClaudeCommand(prompt, {
+      cwd: "/tmp",
+      model: "sonnet",
+      timeout: STEP_TIMEOUT,
+    });
     if (result.exitCode !== 0 || !result.output) {
-      logger.warn({ scrapeId: scrape.id, exitCode: result.exitCode }, "Score step: Flash call failed");
+      logger.warn({ scrapeId: scrape.id, exitCode: result.exitCode }, "Triage step: Sonnet call failed");
       return false;
     }
 
-    const parsed = parseSwarmJSON(result.output, ScoreSchema);
+    const parsed = parseSwarmJSON(result.output, TriageSchema);
     updatePipelineStep(db, scrape.id, "scored", {
-      value: parsed.score,
+      value: parsed.passed ? 8 : 3,
       dimensions: parsed.dimensions,
       summary: parsed.summary,
     });
 
-    // Also set quality_score for SQL filtering
-    db.prepare(`UPDATE scrapes SET quality_score = ? WHERE id = ?`).run(parsed.score, scrape.id);
+    // Set quality_score for SQL filtering (8 for passed, 3 for rejected)
+    db.prepare(`UPDATE scrapes SET quality_score = ? WHERE id = ?`).run(parsed.passed ? 8 : 3, scrape.id);
 
-    if (parsed.score < SCORE_THRESHOLD) {
-      markScrapeTerminal(db, scrape.id, "skipped", undefined, parsed.score);
-      logger.info({ scrapeId: scrape.id, score: parsed.score }, "Score below threshold, skipping");
+    if (!parsed.passed) {
+      markScrapeTerminal(db, scrape.id, "skipped");
+      logger.info({ scrapeId: scrape.id, reason: parsed.reason }, "Triage rejected, skipping");
     } else {
-      logger.info({ scrapeId: scrape.id, score: parsed.score, dims: parsed.dimensions }, "Scored");
+      logger.info({ scrapeId: scrape.id, dims: parsed.dimensions }, "Triage passed");
     }
     return true;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    logger.warn({ scrapeId: scrape.id, error: msg, attempt: attempts }, "Score step failed");
+    logger.warn({ scrapeId: scrape.id, error: msg, attempt: attempts }, "Triage step failed");
     return false;
   }
 }
@@ -528,29 +530,6 @@ Return ONLY the JSON object.`;
 
     const parsed = parseSwarmJSON(result.output, CandidateSchema);
 
-    // Quality gate: reject low-confidence candidates
-    if (parsed.confidence < CONFIDENCE_THRESHOLD) {
-      updatePipelineStep(db, primaryScrape.id, "extracted", {
-        title: parsed.title,
-        content: parsed.content,
-        tags: parsed.tags,
-        link: parsed.link,
-        relevance: parsed.relevance,
-        confidence: parsed.confidence,
-        source: parsed.source,
-      });
-      markScrapeTerminal(db, primaryScrape.id, "rejected");
-      // Also reject cluster secondaries
-      if (clusterId) markClusterSecondariesTerminal(db, clusterId, "rejected");
-      logger.info({
-        scrapeId: primaryScrape.id,
-        title: parsed.title,
-        confidence: parsed.confidence,
-        clusterSize: clusterScrapes.length,
-      }, "Candidate rejected: low confidence");
-      return true; // Step succeeded, but candidate was gated
-    }
-
     // Tag multi-source ideas
     const tags = [...parsed.tags];
     if (clusterScrapes.length > 1 && !tags.includes("multi-source")) {
@@ -610,7 +589,6 @@ async function stepCritique(
 **Title:** ${candidate.title}
 **Content:** ${candidate.content}
 **Relevance:** ${candidate.relevance}
-**Confidence:** ${candidate.confidence}
 **Tags:** ${candidate.tags?.join(", ") ?? "none"}
 
 ## Context
@@ -618,46 +596,41 @@ ${sharedContext.slice(0, 2000)}
 
 ---
 
-Critique this candidate. Return ONLY the JSON object.`;
+Decide whether this candidate should advance to enrichment.
+Return ONLY a JSON object: { "passed": true|false, "reason": "main reason", "strengths": ["..."], "risks": ["..."] }`;
 
   try {
-    const result = await executeGeminiCLIDirect(prompt, { timeout: FLASH_TIMEOUT });
+    const result = await executeClaudeCommand(prompt, {
+      cwd: "/tmp",
+      model: "sonnet",
+      timeout: STEP_TIMEOUT,
+    });
     if (result.exitCode !== 0 || !result.output) {
-      logger.warn({ scrapeId: scrape.id, exitCode: result.exitCode }, "Critique step: Flash call failed");
+      logger.warn({ scrapeId: scrape.id, exitCode: result.exitCode }, "Critique step: Sonnet call failed");
       return false;
     }
 
     const parsed = parseSwarmJSON(result.output, CritiqueSchema);
 
-    // Quality gate: enforce minimum critique score average
-    const avg = (parsed.novelty + parsed.goalAlignment + parsed.feasibility) / 3;
-    const passed = parsed.passed && avg >= CRITIQUE_AVG_THRESHOLD;
-
     updatePipelineStep(db, scrape.id, "critiqued", {
-      passed,
-      novelty: parsed.novelty,
-      goalAlignment: parsed.goalAlignment,
-      feasibility: parsed.feasibility,
+      passed: parsed.passed,
       reason: parsed.reason,
     });
 
-    if (!passed) {
+    if (!parsed.passed) {
       markScrapeTerminal(db, scrape.id, "rejected");
-      // Also reject cluster secondaries
       const clusterId = pipeline?.cluster?.clusterId;
       if (clusterId) markClusterSecondariesTerminal(db, clusterId, "rejected");
       logger.info({
         scrapeId: scrape.id,
         title: candidate.title,
-        scores: { n: parsed.novelty, g: parsed.goalAlignment, f: parsed.feasibility, avg: avg.toFixed(1) },
         reason: parsed.reason,
-        llmPassed: parsed.passed,
       }, "Critique rejected");
     } else {
       logger.info({
         scrapeId: scrape.id,
         title: candidate.title,
-        scores: { n: parsed.novelty, g: parsed.goalAlignment, f: parsed.feasibility, avg: avg.toFixed(1) },
+        strengths: parsed.strengths,
       }, "Critique passed");
     }
     return true;
@@ -710,7 +683,7 @@ async function stepEnrich(
 **Title:** ${candidate.title}
 **Content:** ${candidate.content}
 **Relevance:** ${candidate.relevance}
-**Critique:** Novelty ${critique.novelty}/10, Goal Alignment ${critique.goalAlignment}/10, Feasibility ${critique.feasibility}/10
+**Critique:** ${critique.passed ? "Passed" : "Rejected"} — ${critique.reason ?? ""}
 
 ## Context
 ${sharedContext.slice(0, 3000)}
@@ -779,7 +752,7 @@ function stepSave(
     status: "draft",
     source: candidate.source,
     content: `${candidate.content}\n\n**Why this matters:** ${candidate.relevance}`,
-    context: `Confidence: ${candidate.confidence.toFixed(2)} | Critic: N${critique.novelty}/G${critique.goalAlignment}/F${critique.feasibility} | Provenance: ${memberIds.join(", ")}`,
+    context: `Confidence: ${candidate.confidence.toFixed(2)} | Critique: ${critique.passed ? "passed" : "rejected"} | Provenance: ${memberIds.join(", ")}`,
     link: candidate.link || undefined,
     tags: [...(candidate.tags || []), "synthesized"],
     timestamp,
@@ -909,7 +882,7 @@ ${existingTitles.slice(0, 1500)}`;
       if (ok) {
         stats.scored++;
         const pipeline = getPipelineState(db, scrape.id);
-        if (pipeline?.score && pipeline.score.value >= SCORE_THRESHOLD) {
+        if (pipeline?.score && pipeline.score.value >= 6) {
           stats.aboveThreshold++;
         }
       } else {

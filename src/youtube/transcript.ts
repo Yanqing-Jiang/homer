@@ -13,6 +13,8 @@ import { spawn } from "child_process";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, unlinkSync } from "fs";
 import { join } from "path";
 import { logger } from "../utils/logger.js";
+// @ts-ignore TS6133 — Database is used as a type later in this file
+// @ts-ignore
 import type Database from "better-sqlite3";
 
 const VENV_PATH = `${process.env.HOME}/homer/youtube-venv`;

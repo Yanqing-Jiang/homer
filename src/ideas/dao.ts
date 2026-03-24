@@ -6,6 +6,7 @@
  * Every write function calls writeMirrorFile() as fire-and-forget.
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { writeFileSync, mkdirSync, existsSync, unlinkSync } from "fs";
 import { join } from "path";

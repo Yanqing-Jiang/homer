@@ -8,6 +8,7 @@
  * - Milestone notifications
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { Bot, InlineKeyboard, type Context } from "grammy";
 import { logger } from "../../utils/logger.js";

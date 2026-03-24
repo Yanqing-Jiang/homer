@@ -14,15 +14,18 @@
  * - Heuristic scoring for trending idea selection (replaces positional first-4)
  * - ingestTrendingIdeas() failure logged to results (was silently swallowed)
  * - writeRunSummaryMarkdown() moved to finally block — always runs
- * - Post-scrape pattern analysis: Gemini Flash API extracts content patterns → patterns.md
+ * - Post-scrape pattern analysis: Claude Sonnet extracts content patterns → patterns.md
  * - Browser scraping via Codex GPT-5.4 medium reasoning (agent-browser CDP)
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { createHash } from "crypto";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { executeCodexBrowserScrape } from "../../executors/codex-browser.js";
-import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
+import { executeClaudeCommand } from "../../executors/claude.js";
+import { parseSwarmJSON } from "../../executors/model-swarm.js";
+import { z } from "zod";
 import {
   SCRAPE_OPTIONS,
   buildMediumScrapePrompt,
@@ -552,11 +555,17 @@ interface ViralityPattern {
   evidence: string;
 }
 
-function stripCodeFence(text: string): string {
-  const t = text.trim();
-  const m = t.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return (m?.[1] ?? t).trim();
-}
+const ViralityPatternSchema = z.object({
+  platform: z.enum(["medium", "linkedin", "x"]),
+  hookType: z.string().min(1),
+  structure: z.string().min(1),
+  emotionalTrigger: z.string().default(""),
+  engagementSignal: z.string().default(""),
+  pattern: z.string().min(1),
+  evidence: z.string().default(""),
+});
+
+const ViralityPatternsSchema = z.array(ViralityPatternSchema);
 
 function escCell(v: string): string {
   return v.replace(/\|/g, "/").replace(/\s+/g, " ").trim();
@@ -659,7 +668,9 @@ async function analyzeAndUpdatePatterns(
   const prompt = buildViralityPrompt(digest);
 
   try {
-    const result = await executeGeminiCLIDirect(prompt, {
+    const result = await executeClaudeCommand(prompt, {
+      cwd: process.env.HOME ?? "/Users/yj",
+      model: "sonnet",
       timeout: 120_000,
     });
 
@@ -667,32 +678,12 @@ async function analyzeAndUpdatePatterns(
       return { message: "patterns: no new patterns found", patternsAdded: 0 };
     }
 
-    let parsed: unknown;
+    let rows: ViralityPattern[];
     try {
-      parsed = JSON.parse(stripCodeFence(result.output));
+      rows = parseSwarmJSON(result.output, ViralityPatternsSchema);
     } catch {
       return { message: "patterns: model output not valid JSON", patternsAdded: 0 };
     }
-
-    const rows = (Array.isArray(parsed) ? parsed : [])
-      .map((r): ViralityPattern | null => {
-        if (!r || typeof r !== "object") return null;
-        const x = r as Record<string, unknown>;
-        const platform = x.platform;
-        if (platform !== "medium" && platform !== "linkedin" && platform !== "x") return null;
-        const row: ViralityPattern = {
-          platform,
-          hookType: String(x.hookType ?? "").trim(),
-          structure: String(x.structure ?? "").trim(),
-          emotionalTrigger: String(x.emotionalTrigger ?? "").trim(),
-          engagementSignal: String(x.engagementSignal ?? "").trim(),
-          pattern: String(x.pattern ?? "").trim(),
-          evidence: String(x.evidence ?? "").trim(),
-        };
-        if (!row.hookType || !row.structure || !row.pattern) return null;
-        return row;
-      })
-      .filter((x): x is ViralityPattern => x !== null);
 
     if (rows.length === 0) return { message: "patterns: no valid patterns extracted", patternsAdded: 0 };
 

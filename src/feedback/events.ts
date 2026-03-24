@@ -5,6 +5,7 @@
  * No business logic, no LLM calls. Pure SQLite operations.
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 

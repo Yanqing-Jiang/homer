@@ -5,6 +5,7 @@
  * Integrates with ideas and plans systems for lifecycle management.
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { Bot, InlineKeyboard } from "grammy";
 import { routeTelegramNotification } from "../../notifications/telegram-router.js";

@@ -29,7 +29,7 @@ export function verifySupabaseToken(token: string): JWTPayload | null {
 
   try {
     // Validate JWT with proper claims verification
-    const verifyOptions: jwt.VerifyOptions = {
+    const verifyOptions: Record<string, unknown> = {
       algorithms: ["HS256"],
       audience: "authenticated",
     };

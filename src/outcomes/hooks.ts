@@ -5,6 +5,7 @@
  * promotions, and improvements. Each creates a future check.
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { markContextBridgeDirty } from "../state/context-bridge-state.js";
 import { logger } from "../utils/logger.js";

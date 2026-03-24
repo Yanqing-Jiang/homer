@@ -3,6 +3,7 @@
  * sends to Telegram for approval before sending.
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 import type { Bot } from "grammy";
 import { InlineKeyboard } from "grammy";

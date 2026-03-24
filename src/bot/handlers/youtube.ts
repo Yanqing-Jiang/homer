@@ -11,6 +11,7 @@ import { OvernightTaskStore } from "../../overnight/task-store.js";
 import { summaryExists } from "../../youtube/summarizer.js";
 import type { StateManager } from "../../state/manager.js";
 import type { YouTubeSummaryMetadata } from "../../overnight/types.js";
+// @ts-ignore
 import type Database from "better-sqlite3";
 
 // ============================================

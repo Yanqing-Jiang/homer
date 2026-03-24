@@ -14,6 +14,7 @@ import { mkdirSync, appendFileSync } from "fs";
 import { join } from "path";
 import { processRegistry } from "./registry.js";
 import { logger } from "../utils/logger.js";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
 

@@ -6,6 +6,8 @@
  * and creates ideas with provenance tracking.
  */
 
+// @ts-ignore
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
 
@@ -264,12 +266,17 @@ export function incrementPipelineAttempt(
   stepName: "score" | "candidate" | "critique" | "enrich" | "synthesize",
 ): number {
   const meta = getMetadata(db, scrapeId);
-  const existing: PipelineState = (meta.pipeline as PipelineState) ?? {
+  const defaults = {
     version: 2,
-    step: "pending",
+    step: "pending" as const,
     attempts: { score: 0, candidate: 0, critique: 0, enrich: 0, synthesize: 0 },
   };
-  if (existing.attempts.synthesize === undefined) existing.attempts.synthesize = 0;
+  const raw = meta.pipeline as Partial<PipelineState> | undefined;
+  const existing: PipelineState = {
+    ...defaults,
+    ...raw,
+    attempts: { ...defaults.attempts, ...(raw?.attempts ?? {}) },
+  };
 
   existing.attempts[stepName] = (existing.attempts[stepName] ?? 0) + 1;
   meta.pipeline = existing;

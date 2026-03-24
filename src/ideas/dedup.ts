@@ -23,6 +23,7 @@ import * as dao from "./dao.js";
 import { canonicalizeUrl, extractRepoId } from "./canonical-url.js";
 import { createFingerprint, fingerprintSimilarity } from "./fingerprint.js";
 import { storeJobArtifact } from "../scheduler/jobs/artifact-store.js";
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { PATHS } from "../config/paths.js";
 

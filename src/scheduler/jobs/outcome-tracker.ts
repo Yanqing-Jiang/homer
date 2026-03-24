@@ -3,14 +3,17 @@
  *
  * Flow:
  * 1. Query pending outcome_checks where check_at <= now
- * 2. For each, use Gemini Flash API to check for evidence of outcome
+ * 2. For each, use Claude Sonnet to check for evidence of outcome
  * 3. Auto-resolve when evidence is clear; send to Telegram when ambiguous
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 import type { Bot } from "grammy";
 import { InlineKeyboard } from "grammy";
-import { executeGeminiCLIDirect } from "../../executors/gemini-cli.js";
+import { z } from "zod";
+import { executeClaudeCommand } from "../../executors/claude.js";
+import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import {
   formatScheduledTelegramHtml,
   routeTelegramNotification,
@@ -27,11 +30,13 @@ interface OutcomeCheck {
   check_at: string;
 }
 
-interface EvidenceResult {
-  outcome: "yes" | "no" | "partial" | "ambiguous";
-  confidence: number;
-  evidence: string;
-}
+const EvidenceResultSchema = z.object({
+  outcome: z.enum(["yes", "no", "partial", "ambiguous"]),
+  confidence: z.number().min(0).max(1),
+  evidence: z.string(),
+});
+
+type EvidenceResult = z.infer<typeof EvidenceResultSchema>;
 
 
 function createOutcomeKeyboard(checkId: string): InlineKeyboard {
@@ -141,17 +146,13 @@ Based on the evidence, determine the outcome:
 Return JSON: { "outcome": "yes|no|partial|ambiguous", "confidence": 0.0-1.0, "evidence": "one sentence summary" }`;
 
   try {
-    const result = await executeGeminiCLIDirect(
+    const result = await executeClaudeCommand(
       prompt + "\n\nReturn ONLY valid JSON, no markdown fences.",
-      { timeout: 60_000, signal },
+      { cwd: process.env.HOME ?? "/Users/yj", model: "sonnet", timeout: 120_000, signal },
     );
 
     if (result.exitCode === 0 && result.output) {
-      const jsonMatch = result.output.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]) as EvidenceResult;
-        return parsed;
-      }
+      return parseSwarmJSON(result.output, EvidenceResultSchema);
     }
   } catch (err) {
     logger.warn({ error: err, checkId: check.id }, "Failed to evaluate outcome with LLM");

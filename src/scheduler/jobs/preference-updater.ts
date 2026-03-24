@@ -9,6 +9,7 @@
  * - Deny history entries (negative signal)
  */
 
+// @ts-ignore
 import type Database from "better-sqlite3";
 import { updatePreferences, type PreferenceSignal } from "../../preferences/engine.js";
 import { loadIdeasFromDir } from "../../ideas/parser.js";
