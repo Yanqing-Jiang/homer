@@ -36,9 +36,9 @@ import {
   type StoredScrape,
 } from "../../scraping/scrape-store.js";
 import { createFingerprint, fingerprintSimilarity } from "../../ideas/fingerprint.js";
-import type { ParsedIdea } from "../../ideas/parser.js";
 import * as ideaDao from "../../ideas/dao.js";
-import { smartSaveIdea, type SmartSaveResult } from "../../ideas/smart-save.js";
+import type { SmartSaveResult } from "../../ideas/smart-save.js";
+import * as packetDao from "../../ideas/source-packets.js";
 import { formatForPrompt as getPreferenceContext } from "../../preferences/engine.js";
 import { buildCondensedContext } from "../shared-context.js";
 import { logger } from "../../utils/logger.js";
@@ -722,6 +722,13 @@ Enrich this idea. Return ONLY the JSON object. Omit optional fields if not appli
   }
 }
 
+/**
+ * stepSave — now creates a source_packet (queued for morning review)
+ * instead of immediately committing an idea.
+ *
+ * Ideas are only created when the user explicitly promotes a packet.
+ * This preserves full provenance and delays commitment until after exploration.
+ */
 function stepSave(
   db: Database.Database,
   scrape: StoredScrape,
@@ -738,44 +745,104 @@ function stepSave(
   const memberIds = cluster?.memberIds ?? [scrape.id];
 
   const now = new Date();
-  const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
   const slug = candidate.title
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 40);
-  const id = `synth_${now.toISOString().slice(5, 10).replace("-", "")}_${slug}`;
-
-  const parsed: ParsedIdea = {
-    id,
-    title: candidate.title,
-    status: "draft",
-    source: candidate.source,
-    content: `${candidate.content}\n\n**Why this matters:** ${candidate.relevance}`,
-    context: `Confidence: ${candidate.confidence.toFixed(2)} | Critique: ${critique.passed ? "passed" : "rejected"} | Provenance: ${memberIds.join(", ")}`,
-    link: candidate.link || undefined,
-    tags: [...(candidate.tags || []), "synthesized"],
-    timestamp,
-    enrichment: JSON.stringify(pipeline.enrichment),
-  };
+  const packetId = `pkt_${now.toISOString().slice(5, 10).replace("-", "")}_${slug}`;
 
   try {
-    const saveResult = smartSaveIdea(parsed, db);
-    markScrapeTerminal(db, scrape.id, "saved", saveResult.ideaId, candidate.confidence);
+    // Create source_packet with full provenance — NOT an idea
+    const enrichmentData = pipeline.enrichment as any;
+    packetDao.createPacket(db, {
+      id: packetId,
+      clusterId: cluster?.clusterId ?? undefined,
+      sourceType: candidate.source || scrape.source,
+      primaryUrl: candidate.link || scrape.url || undefined,
+      title: candidate.title,
+      summary: `${candidate.content.slice(0, 300)}${candidate.content.length > 300 ? "..." : ""}`,
+      rawContent: scrape.raw_content,
+      deepFetchContent: (() => {
+        try {
+          const meta = scrape.metadata ? JSON.parse(scrape.metadata) : null;
+          return meta?.pipeline?.deepFetch?.content ?? null;
+        } catch { return null; }
+      })(),
+      metadata: {
+        author: scrape.author ?? undefined,
+        externalUrls: candidate.link ? [candidate.link] : undefined,
+        extractedTopics: candidate.tags ?? [],
+        scrapeIds: memberIds,
+      },
+      enrichment: {
+        candidate: {
+          title: candidate.title,
+          content: candidate.content,
+          relevance: candidate.relevance,
+          confidence: candidate.confidence,
+          tags: candidate.tags ?? [],
+          link: candidate.link ?? undefined,
+          source: candidate.source,
+        },
+        critique: {
+          passed: critique.passed,
+          reason: critique.reason,
+          strengths: (critique as any).strengths ?? [],
+          risks: (critique as any).risks ?? [],
+        },
+        deepDive: enrichmentData.deep_dive ? {
+          coreClaim: enrichmentData.deep_dive.core_claim,
+          evidence: enrichmentData.deep_dive.evidence,
+          risks: enrichmentData.deep_dive.risks,
+          validationPath: enrichmentData.deep_dive.validation_path,
+        } : undefined,
+        deepLinks: enrichmentData.deep_links?.map((l: any) => ({
+          target: l.target,
+          relationship: l.relationship,
+          strength: l.strength,
+        })),
+        homerImprovement: enrichmentData.homer_improvement ? {
+          relevant: enrichmentData.homer_improvement.relevant,
+          summary: enrichmentData.homer_improvement.summary,
+          area: enrichmentData.homer_improvement.area,
+          priority: enrichmentData.homer_improvement.priority,
+          plan: enrichmentData.homer_improvement.plan?.map((s: any) => s.action),
+        } : undefined,
+      },
+      status: "queued",  // Ready for morning review — NOT a committed idea
+    });
 
-    // Mark cluster secondaries as saved too
+    // Link scrapes to the packet
+    packetDao.linkScrapesToPacket(db, packetId, memberIds, "primary");
+
+    // Mark scrape as saved, linking to the PACKET (not an idea)
+    markScrapeTerminal(db, scrape.id, "saved", packetId, candidate.confidence);
+
     if (cluster?.clusterId) {
-      markClusterSecondariesTerminal(db, cluster.clusterId, "saved", saveResult.ideaId);
+      markClusterSecondariesTerminal(db, cluster.clusterId, "saved", packetId);
+    }
+
+    // Update scrapes with packet reference
+    for (const memberId of memberIds) {
+      try {
+        db.prepare("UPDATE scrapes SET source_packet_id = ? WHERE id = ?").run(packetId, memberId);
+      } catch { /* best-effort */ }
     }
 
     logger.info({
       scrapeId: scrape.id,
-      ideaId: saveResult.ideaId,
-      action: saveResult.action,
+      packetId,
       title: candidate.title,
       clusterSize: memberIds.length,
-    }, "Idea saved");
-    return saveResult;
+    }, "Source packet created (queued for review)");
+
+    // Return a SmartSaveResult-compatible object for stats tracking
+    return {
+      action: "created",
+      ideaId: packetId,  // Use packet ID in place of idea ID for backward compat
+      title: candidate.title,
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error({ scrapeId: scrape.id, error: msg }, "Save step failed");
