@@ -243,4 +243,16 @@ export function registerRunRoutes(
       sendEvent("status", { runId, status: initial.status, executor: initial.executor });
     }
   });
+
+  // Get persisted step events for a run
+  server.get("/api/runs/:runId/steps", async (request: FastifyRequest, reply: FastifyReply) => {
+    const { runId } = request.params as { runId: string };
+    const run = stateManager.getCliRun(runId);
+    if (!run) {
+      reply.status(404);
+      return { error: "Run not found" };
+    }
+    const events = stateManager.getRunEvents(runId);
+    return { events };
+  });
 }
