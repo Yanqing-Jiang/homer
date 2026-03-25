@@ -259,8 +259,13 @@ export function registerStreamingRoutes(
         cleanup({ cancelRun: true, reason: "request upload aborted" });
       });
 
+      // Buffer step events until runId is known, then flush
+      const bufferedSteps: StreamStepEvent[] = [];
+      let runIdKnown = false;
+
       try {
         const query = `${FILE_OUTPUT_HINT}\n\n${body.content}`;
+
         const startedRun = await runManager.startRun({
           lane,
           query,
@@ -276,11 +281,48 @@ export function registerStreamingRoutes(
           },
           onEvent: (stepEvent: StreamStepEvent) => {
             sendEvent("step", stepEvent as unknown as Record<string, unknown>);
+            // Persist step event for replay after navigation
+            if (runIdKnown && runId) {
+              try {
+                stateManager.createRunEvent({
+                  id: randomUUID(),
+                  runId,
+                  threadId,
+                  kind: stepEvent.type,
+                  label: stepEvent.label,
+                  labelDone: stepEvent.labelDone,
+                  payload: stepEvent.id ? { toolId: stepEvent.id } : undefined,
+                });
+              } catch (e) {
+                logger.warn({ error: e }, "Failed to persist run event");
+              }
+            } else {
+              bufferedSteps.push(stepEvent);
+            }
           },
         });
 
         runId = startedRun.runId;
+        runIdKnown = true;
         sendEvent("start", { userMessageId, runId });
+
+        // Flush buffered step events now that runId is known
+        for (const step of bufferedSteps) {
+          try {
+            stateManager.createRunEvent({
+              id: randomUUID(),
+              runId,
+              threadId,
+              kind: step.type,
+              label: step.label,
+              labelDone: step.labelDone,
+              payload: step.id ? { toolId: step.id } : undefined,
+            });
+          } catch (e) {
+            logger.warn({ error: e }, "Failed to persist buffered run event");
+          }
+        }
+        bufferedSteps.length = 0;
 
         const result = await startedRun.result;
         finished = true;
@@ -309,6 +351,8 @@ export function registerStreamingRoutes(
         });
         endReply();
       } catch (error) {
+        // Discard buffered step events if run never started (runId never assigned)
+        bufferedSteps.length = 0;
         cleanup({ cancelRun: true, reason: "stream setup failed" });
         logger.error({ error, threadId, runId }, "Streaming error");
         sendEvent("error", {

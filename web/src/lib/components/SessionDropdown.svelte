@@ -143,8 +143,11 @@
 						>
 							<button class="session-item-main" onclick={() => { isOpen = false; onSelectSession(sess); }}>
 								<span class="session-item-name">{sess.name}</span>
-								{#if hasUnread(sess)}<span class="unread-dot"></span>{/if}
-								<span class="session-item-date">{new Date(sess.updatedAt).toLocaleDateString()}</span>
+								<span class="session-item-meta">
+									{#if hasUnread(sess)}<span class="unread-dot" aria-label="Unread activity"></span>{/if}
+									{#if sess.activeRunId}<span class="running-indicator" aria-label="Processing"></span>{/if}
+									<span class="session-item-date">{new Date(sess.activityAt ?? sess.updatedAt).toLocaleDateString()}</span>
+								</span>
 							</button>
 							<button class="session-rename-btn" onclick={(e) => startRenaming(sess, e)} title="Rename" aria-label="Rename session {sess.name}">
 								<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12">
@@ -288,12 +291,35 @@
 		min-width: 0;
 	}
 
+	.session-item-meta {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		flex-shrink: 0;
+	}
+
 	.unread-dot {
 		width: 8px;
 		height: 8px;
 		border-radius: 50%;
 		background: #dc2626;
+		display: inline-block;
 		flex-shrink: 0;
+	}
+
+	.running-indicator {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: #f59e0b;
+		display: inline-block;
+		flex-shrink: 0;
+		animation: pulse 1.5s ease-in-out infinite;
+	}
+
+	@keyframes pulse {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.4; }
 	}
 
 	.session-rename-btn {

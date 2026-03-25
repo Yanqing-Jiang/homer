@@ -12,6 +12,7 @@
 	import SessionDropdown from '$lib/components/SessionDropdown.svelte';
 	import SearchDropdown from '$lib/components/SearchDropdown.svelte';
 	import { clickOutside } from '$lib/actions/clickOutside';
+	import { toast } from '$lib/stores/toasts.svelte';
 
 	const auth = useAuth();
 
@@ -52,27 +53,7 @@
 	let showSessionDropdown = $state(false);
 	let currentSessionName = $state('New Session');
 
-	// Notification state — track when user last viewed each session
-	const SEEN_KEY = 'homer_session_last_seen';
-	let sessionLastSeen = $state<Record<string, string>>(loadSessionLastSeen());
-
-	function loadSessionLastSeen(): Record<string, string> {
-		try {
-			return JSON.parse(localStorage.getItem(SEEN_KEY) || '{}');
-		} catch { return {}; }
-	}
-
-	function markSessionSeen(sid: string) {
-		sessionLastSeen[sid] = new Date().toISOString();
-		localStorage.setItem(SEEN_KEY, JSON.stringify(sessionLastSeen));
-	}
-
-	function hasUnread(sess: api.ChatSession): boolean {
-		if (sess.id === sessionId) return false; // Active session is always "seen"
-		const seen = sessionLastSeen[sess.id];
-		if (!seen) return true; // Never opened = unread
-		return new Date(sess.updatedAt) > new Date(seen);
-	}
+	// Unread state is now server-authoritative (no more localStorage)
 
 	// File upload state
 	let attachedFiles = $state<api.Upload[]>([]);
@@ -333,11 +314,31 @@
 	// Check for context passed from Ideas or Sessions pages
 	// Read values immediately but defer removal until auth confirms
 	onMount(() => {
-		// Check for session resume
+		// Check URL params first (preferred), then fallback to sessionStorage
+		const urlParams = new URLSearchParams(window.location.search);
+		const urlSession = urlParams.get('session');
+		const urlThread = urlParams.get('thread');
+		const urlMessage = urlParams.get('message');
+
+		if (urlSession) {
+			pendingContext = { type: 'session', data: JSON.stringify({
+				sessionId: urlSession,
+				threadId: urlThread,
+			}) };
+			if (urlMessage) {
+				pendingMessage = urlMessage;
+			}
+			// Clean URL params without reload
+			const cleanUrl = window.location.pathname;
+			window.history.replaceState({}, '', cleanUrl);
+			contextChecked = true;
+			return;
+		}
+
+		// Fallback: check sessionStorage (legacy support)
 		const resumeSession = sessionStorage.getItem('resume_session');
 		if (resumeSession) {
 			pendingContext = { type: 'session', data: resumeSession };
-			// Also check for a pending message to auto-send
 			const storedMessage = sessionStorage.getItem('pending_message');
 			if (storedMessage) {
 				pendingMessage = storedMessage;
@@ -409,7 +410,7 @@
 		if (!auth.loading && auth.isAuthorized) {
 			const interval = setInterval(() => {
 				if (!document.hidden) loadSessions();
-			}, 15000);
+			}, 5000);
 			return () => clearInterval(interval);
 		}
 	});
@@ -446,6 +447,7 @@
 			sessions = loadedSessions;
 		} catch (e) {
 			console.error('Failed to load sessions:', e);
+			toast.error('Failed to load sessions');
 		}
 	}
 
@@ -460,7 +462,7 @@
 			const session = await api.getSession(loadedSessions[0].id);
 			sessionId = session.id;
 			currentSessionName = session.name;
-			markSessionSeen(session.id);
+			api.markSessionRead(session.id);
 
 			if (session.threads.length === 0) return;
 
@@ -566,7 +568,7 @@
 			const fullSession = await api.getSession(session.id);
 			sessionId = fullSession.id;
 			currentSessionName = fullSession.name;
-			markSessionSeen(fullSession.id);
+			api.markSessionRead(fullSession.id);
 
 			// Clear messages immediately to prevent stale flash
 			messages = [];
@@ -596,6 +598,7 @@
 			}
 		} catch (e) {
 			console.error('Failed to rename session:', e);
+			toast.error('Failed to rename session');
 		}
 	}
 
@@ -620,6 +623,7 @@
 			}
 		} catch (e) {
 			console.error('Failed to delete session:', e);
+			toast.error('Failed to delete session');
 		}
 	}
 
@@ -635,8 +639,22 @@
 				content: m.content,
 				timestamp: m.createdAt ? new Date(m.createdAt) : new Date()
 			}));
+
+			// Restore active run step state from persisted run events
+			if (thread.activeRun && thread.activeRun.status === 'running') {
+				streamingSteps = thread.activeRun.events.map((e: api.RunEvent) => ({
+					type: e.kind as 'tool_use' | 'tool_result' | 'thinking',
+					id: e.payloadJson ? JSON.parse(e.payloadJson).toolId : undefined,
+					label: e.label ?? '',
+					labelDone: e.labelDone ?? '',
+					startedAt: new Date(e.createdAt).getTime(),
+					completed: e.kind === 'tool_result',
+				}));
+				isStreaming = true;
+			}
 		} catch (e) {
 			console.error('Failed to load thread messages:', e);
+			toast.error('Failed to load messages');
 		}
 	}
 
@@ -965,6 +983,7 @@ Just confirm when done. Keep your response brief.`;
 			}
 		} catch (e) {
 			console.error('Failed to send message:', e);
+			toast.error('Failed to send message');
 			chatError = e instanceof Error ? e.message : 'Failed to send message. Check if the daemon is running.';
 
 			// Rollback optimistic update on failure
@@ -991,7 +1010,7 @@ Just confirm when done. Keep your response brief.`;
 					const session = await api.createSession('Web Chat');
 					sessionId = session.id;
 					currentSessionName = session.name;
-					markSessionSeen(session.id);
+					api.markSessionRead(session.id);
 					loadSessions();
 					return session.id;
 				} catch (error) {
@@ -1211,7 +1230,7 @@ Just confirm when done. Keep your response brief.`;
 								currentSessionId={sessionId}
 								{currentSessionName}
 								bind:isOpen={showSessionDropdown}
-								{hasUnread}
+								hasUnread={(sess) => sess.id !== sessionId && sess.hasUnread}
 								onSelectSession={(sess) => selectSession(sess)}
 								onNewSession={() => selectSession(null)}
 								onRenameSession={handleRenameSession}

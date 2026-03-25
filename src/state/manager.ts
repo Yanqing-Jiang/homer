@@ -3,6 +3,7 @@ import { randomUUID, createHash } from "crypto";
 import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
 import { threadEvents } from "../events/thread-events.js";
+import { sessionEvents } from "../events/session-events.js";
 import {
   ensureContextBridgeStateTable,
   getContextBridgeState as loadContextBridgeState,
@@ -1049,6 +1050,21 @@ export class StateManager {
       .run(...params, id);
   }
 
+  markSessionRead(sessionId: string): void {
+    const now = new Date().toISOString();
+    this._db.prepare(
+      `INSERT INTO session_reads (session_id, read_at) VALUES (?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET read_at = ?`
+    ).run(sessionId, now, now);
+  }
+
+  getSessionReadAt(sessionId: string): string | null {
+    const row = this._db.prepare(
+      `SELECT read_at FROM session_reads WHERE session_id = ?`
+    ).get(sessionId) as { read_at: string } | undefined;
+    return row?.read_at ?? null;
+  }
+
   deleteChatSession(id: string): void {
     this._db.prepare("DELETE FROM chat_sessions WHERE id = ?").run(id);
   }
@@ -1253,13 +1269,13 @@ export class StateManager {
       )
       .run(message.id, message.threadId, message.role, message.content, metadataJson, now);
 
-    // Update thread + session timestamps
+    // Update thread + session timestamps (activity_at only bumped by messages, not rename/archive)
     this._db.prepare(`UPDATE threads SET last_message_at = ? WHERE id = ?`).run(now, message.threadId);
     this._db.prepare(
-        `UPDATE chat_sessions SET updated_at = ?
+        `UPDATE chat_sessions SET updated_at = ?, activity_at = ?
          WHERE id = (SELECT chat_session_id FROM threads WHERE id = ?)`
       )
-      .run(now, message.threadId);
+      .run(now, now, message.threadId);
 
     const result: ThreadMessage = {
       id: message.id,
@@ -1275,6 +1291,20 @@ export class StateManager {
       threadEvents.emitMessage(message.threadId, result);
     } catch (e) {
       logger.warn({ error: e, threadId: message.threadId }, "Thread event emission failed");
+    }
+
+    // Emit session-level activity event
+    try {
+      const thread = this.getThread(message.threadId);
+      if (thread) {
+        sessionEvents.emitSessionEvent({
+          type: "activity",
+          sessionId: thread.chatSessionId,
+          data: { threadId: message.threadId, messageId: result.id },
+        });
+      }
+    } catch (e) {
+      logger.warn({ error: e }, "Session event emission failed");
     }
 
     return result;
@@ -1678,6 +1708,70 @@ export class StateManager {
     ).get(lane) as CLIRunRecord | undefined;
     return row ?? null;
 
+  }
+
+  // ============================================
+  // Run Events (step persistence for replay)
+  // ============================================
+
+  createRunEvent(event: {
+    id: string;
+    runId: string;
+    threadId: string;
+    kind: string;
+    label?: string;
+    labelDone?: string;
+    payload?: Record<string, unknown>;
+  }): void {
+    const payloadJson = event.payload
+      ? JSON.stringify(event.payload).slice(0, 4096)
+      : null;
+    this._db.prepare(
+      `INSERT INTO run_events (id, run_id, thread_id, kind, label, label_done, payload_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(event.id, event.runId, event.threadId, event.kind,
+          event.label ?? null, event.labelDone ?? null, payloadJson,
+          new Date().toISOString());
+  }
+
+  getRunEvents(runId: string): Array<{
+    id: string; runId: string; threadId: string; kind: string;
+    label: string | null; labelDone: string | null; payloadJson: string | null; createdAt: string;
+  }> {
+    return this._db.prepare(
+      `SELECT id, run_id as runId, thread_id as threadId, kind, label, label_done as labelDone,
+              payload_json as payloadJson, created_at as createdAt
+       FROM run_events WHERE run_id = ? ORDER BY created_at ASC`
+    ).all(runId) as Array<{
+      id: string; runId: string; threadId: string; kind: string;
+      label: string | null; labelDone: string | null; payloadJson: string | null; createdAt: string;
+    }>;
+  }
+
+  getLatestRunEventsForThread(threadId: string, limit = 50): Array<{
+    id: string; runId: string; threadId: string; kind: string;
+    label: string | null; labelDone: string | null; payloadJson: string | null; createdAt: string;
+  }> {
+    return this._db.prepare(
+      `SELECT re.id, re.run_id as runId, re.thread_id as threadId, re.kind, re.label,
+              re.label_done as labelDone, re.payload_json as payloadJson, re.created_at as createdAt
+       FROM run_events re
+       JOIN cli_runs cr ON cr.id = re.run_id
+       WHERE re.thread_id = ?
+       ORDER BY re.created_at DESC
+       LIMIT ?`
+    ).all(threadId, limit) as Array<{
+      id: string; runId: string; threadId: string; kind: string;
+      label: string | null; labelDone: string | null; payloadJson: string | null; createdAt: string;
+    }>;
+  }
+
+  cleanupOldRunEvents(daysToKeep = 7): number {
+    const cutoff = new Date(Date.now() - daysToKeep * 86400000).toISOString();
+    const result = this._db.prepare(
+      `DELETE FROM run_events WHERE created_at < ?`
+    ).run(cutoff);
+    return result.changes;
   }
 
   // ============================================

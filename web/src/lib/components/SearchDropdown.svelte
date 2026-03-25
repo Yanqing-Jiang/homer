@@ -25,6 +25,11 @@
 		if (text.length <= length) return text;
 		return text.substring(0, length) + '...';
 	}
+
+	/** Strip all HTML tags except <mark> (from FTS5 snippet) to prevent XSS */
+	function sanitizeSnippet(html: string): string {
+		return html.replace(/<(?!\/?mark\b)[^>]*>/gi, '');
+	}
 </script>
 
 <div class="dropdown-container" transition:fade={{ duration: 100 }}>
@@ -59,7 +64,7 @@
 							<span class="timestamp">{formatRelativeTime(session.updatedAt)}</span>
 						</div>
 						{#if session.snippet}
-							<div class="snippet">{@html truncate(session.snippet)}</div>
+							<div class="snippet">{@html sanitizeSnippet(truncate(session.snippet))}</div>
 						{:else}
 							<div class="snippet meta">{session.threadCount} thread{session.threadCount !== 1 ? 's' : ''}</div>
 						{/if}

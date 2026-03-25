@@ -96,6 +96,13 @@ export interface ChatSession {
 	createdAt: string;
 	updatedAt: string;
 	archivedAt: string | null;
+	activityAt: string | null;
+	lastReadAt: string | null;
+	hasUnread: boolean;
+	activeRunId: string | null;
+	runStatus: string | null;
+	runExecutor: string | null;
+	runStartedAt: string | null;
 	threadCount?: number;
 	activeThreadCount?: number;
 }
@@ -137,6 +144,7 @@ export interface SessionSearchResult {
 	name: string;
 	updatedAt: string;
 	threadCount: number;
+	threadId: string | null;
 	snippet: string | null;
 	matchType: 'name' | 'content';
 }
@@ -200,6 +208,11 @@ export async function updateSession(
 	});
 }
 
+// Mark session as read (server-authoritative unread tracking)
+export async function markSessionRead(sessionId: string): Promise<void> {
+	await apiFetch(`/api/chat-sessions/${sessionId}/read`, { method: 'POST' });
+}
+
 // Delete session
 export async function deleteSession(id: string): Promise<void> {
 	return apiFetch(`/api/chat-sessions/${id}`, { method: 'DELETE' });
@@ -233,9 +246,17 @@ export async function createThread(
 }
 
 // Get thread with messages
+export interface ThreadActiveRun {
+	id: string;
+	status: string;
+	executor: string;
+	startedAt: string;
+	events: RunEvent[];
+}
+
 export async function getThread(
 	id: string
-): Promise<Thread & { messages: ThreadMessage[]; links: ThreadLink[] }> {
+): Promise<Thread & { messages: ThreadMessage[]; links: ThreadLink[]; activeRun: ThreadActiveRun | null }> {
 	return apiFetch(`/api/threads/${id}`);
 }
 
@@ -704,6 +725,21 @@ export interface StepEvent {
 	preview?: string;
 }
 
+export interface RunEvent {
+	id: string;
+	runId: string;
+	threadId: string;
+	kind: string;
+	label: string | null;
+	labelDone: string | null;
+	payloadJson: string | null;
+	createdAt: string;
+}
+
+export async function getRunSteps(runId: string): Promise<{ events: RunEvent[] }> {
+	return apiFetch(`/api/runs/${runId}/steps`);
+}
+
 export interface StreamCallbacks {
 	onStart?: (data: { userMessageId: string; runId?: string }) => void;
 	onDelta?: (data: { content: string }) => void;
@@ -725,6 +761,7 @@ export interface StreamOptions {
 interface SSEEvent {
 	event: string;
 	data: string;
+	id?: string;
 }
 
 function parseSSEStream(buffer: string): { events: SSEEvent[]; remaining: string } {
@@ -736,6 +773,7 @@ function parseSSEStream(buffer: string): { events: SSEEvent[]; remaining: string
 		if (!block.trim()) continue;
 
 		let eventType = 'message';
+		let eventId: string | undefined;
 		const dataLines: string[] = [];
 
 		for (const line of block.split('\n')) {
@@ -743,13 +781,16 @@ function parseSSEStream(buffer: string): { events: SSEEvent[]; remaining: string
 				eventType = line.slice(6).trim();
 			} else if (line.startsWith('data:')) {
 				dataLines.push(line.slice(5).trim());
+			} else if (line.startsWith('id:')) {
+				eventId = line.slice(3).trim();
 			}
 		}
 
 		if (dataLines.length > 0) {
 			events.push({
 				event: eventType,
-				data: dataLines.join('\n')
+				data: dataLines.join('\n'),
+				id: eventId
 			});
 		}
 	}
@@ -915,6 +956,107 @@ export function streamMessage(
  * Uses fetch + ReadableStream (same pattern as streamRunEvents) to support auth headers.
  * Returns an object with abort function for cleanup.
  */
+export interface SessionSSEEvent {
+	type: 'activity' | 'run-started' | 'run-completed' | 'renamed' | 'unread-changed';
+	sessionId: string;
+	data?: Record<string, unknown>;
+}
+
+/**
+ * Subscribe to session-level SSE events (activity, run state changes).
+ * Returns an abort function to close the connection.
+ */
+export function subscribeToSessionEvents(
+	callbacks: {
+		onEvent?: (event: SessionSSEEvent) => void;
+		onConnected?: () => void;
+		onError?: (err: Error) => void;
+	}
+): { abort: () => void } {
+	const controller = new AbortController();
+	let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+	let isAborted = false;
+	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+	let reconnectAttempts = 0;
+
+	const connect = () => {
+		if (isAborted) return;
+		const currentSession = get(session);
+
+		fetch(`${API_BASE}/api/chat-sessions/events`, {
+			headers: {
+				...(currentSession?.access_token
+					? { Authorization: `Bearer ${currentSession.access_token}` }
+					: {})
+			},
+			signal: controller.signal
+		})
+			.then(async (response) => {
+				if (!response.ok) {
+					callbacks.onError?.(new Error(`Session SSE failed: ${response.status}`));
+					scheduleReconnect();
+					return;
+				}
+				reconnectAttempts = 0;
+				reader = response.body?.getReader() || null;
+				if (!reader) return;
+
+				const decoder = new TextDecoder();
+				let buffer = '';
+
+				try {
+					while (!isAborted) {
+						const { done, value } = await reader.read();
+						if (done) break;
+						buffer += decoder.decode(value, { stream: true });
+						const { events, remaining } = parseSSEStream(buffer);
+						buffer = remaining;
+						for (const sseEvent of events) {
+							try {
+								const parsed = JSON.parse(sseEvent.data);
+								if (sseEvent.event === 'connected') {
+									callbacks.onConnected?.();
+								} else {
+									callbacks.onEvent?.(parsed as SessionSSEEvent);
+								}
+							} catch { /* ignore parse errors */ }
+						}
+					}
+				} finally {
+					reader?.releaseLock();
+				}
+				if (!isAborted) scheduleReconnect();
+			})
+			.catch((error) => {
+				if (error.name !== 'AbortError' && !isAborted) {
+					callbacks.onError?.(error);
+					scheduleReconnect();
+				}
+			});
+	};
+
+	const scheduleReconnect = () => {
+		if (isAborted) return;
+		const baseDelay = Math.min(1000 * Math.pow(2, reconnectAttempts), 60000);
+		const jitter = Math.random() * baseDelay * 0.3;
+		reconnectAttempts++;
+		reconnectTimer = setTimeout(() => {
+			if (!isAborted) connect();
+		}, baseDelay + jitter);
+	};
+
+	connect();
+
+	return {
+		abort: () => {
+			isAborted = true;
+			controller.abort();
+			reader?.cancel().catch(() => {});
+			if (reconnectTimer) clearTimeout(reconnectTimer);
+		}
+	};
+}
+
 export function subscribeToThread(
 	threadId: string,
 	callbacks: {
@@ -927,6 +1069,8 @@ export function subscribeToThread(
 	let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 	let isAborted = false;
 	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+	let lastEventId: string | null = null;
+	let reconnectAttempts = 0;
 
 	const connect = () => {
 		if (isAborted) return;
@@ -934,7 +1078,12 @@ export function subscribeToThread(
 		// Get fresh token on each reconnect attempt
 		const currentSession = get(session);
 
-		fetch(`${API_BASE}/api/threads/${threadId}/events`, {
+		// Send Last-Event-ID as query param for replay support
+		const url = lastEventId
+			? `${API_BASE}/api/threads/${threadId}/events?lastEventId=${encodeURIComponent(lastEventId)}`
+			: `${API_BASE}/api/threads/${threadId}/events`;
+
+		fetch(url, {
 			headers: {
 				...(currentSession?.access_token
 					? { Authorization: `Bearer ${currentSession.access_token}` }
@@ -948,6 +1097,9 @@ export function subscribeToThread(
 					scheduleReconnect();
 					return;
 				}
+
+				// Connected successfully — reset backoff
+				reconnectAttempts = 0;
 
 				reader = response.body?.getReader() || null;
 				if (!reader) return;
@@ -965,6 +1117,9 @@ export function subscribeToThread(
 						buffer = remaining;
 
 						for (const sseEvent of events) {
+							// Track last event ID for replay on reconnect
+							if (sseEvent.id) lastEventId = sseEvent.id;
+
 							try {
 								const parsed = JSON.parse(sseEvent.data);
 								if (sseEvent.event === 'connected') {
@@ -996,9 +1151,15 @@ export function subscribeToThread(
 
 	const scheduleReconnect = () => {
 		if (isAborted) return;
+		// Exponential backoff with jitter: 1s, 2s, 4s, 8s, ... max 60s
+		const baseDelay = Math.min(1000 * Math.pow(2, reconnectAttempts), 60000);
+		const jitter = Math.random() * baseDelay * 0.3;
+		const delay = baseDelay + jitter;
+		reconnectAttempts++;
+
 		reconnectTimer = setTimeout(() => {
 			if (!isAborted) connect();
-		}, 3000);
+		}, delay);
 	};
 
 	// Initial connection
