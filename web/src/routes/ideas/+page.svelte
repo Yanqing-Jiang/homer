@@ -221,12 +221,8 @@
 		startingResearch = true;
 		try {
 			const result = await api.startIdeaResearch(idea.id);
-			// Navigate to chat with the new thread
-			sessionStorage.setItem('resume_session', JSON.stringify({
-				sessionId: result.sessionId,
-				threadId: result.threadId
-			}));
-			window.location.href = '/';
+			// Navigate to chat with URL params (no sessionStorage needed)
+			window.location.href = `/?session=${result.sessionId}&thread=${result.threadId}`;
 		} catch (e) {
 			console.error('Failed to start research:', e);
 			toast.error(`Failed to start research: ${e instanceof Error ? e.message : 'Unknown error'}`);
@@ -238,19 +234,8 @@
 	async function startExploration(idea: api.Idea) {
 		startingExploration = true;
 		try {
-			const result = await api.startIdeaExploration(idea.id);
-			// Navigate to chat with the exploration thread
-			sessionStorage.setItem('resume_session', JSON.stringify({
-				sessionId: result.sessionId,
-				threadId: result.threadId
-			}));
-			if (result.resumed) {
-				toast.success('Resuming exploration thread');
-			} else {
-				// Auto-trigger first AI response with insights (chat page reads this)
-				sessionStorage.setItem('pending_message', 'Go');
-			}
-			window.location.href = '/';
+			// Navigate to the dedicated explore route
+			window.location.href = `/ideas/${idea.id}/explore`;
 		} catch (e) {
 			console.error('Failed to start exploration:', e);
 			toast.error(`Failed to start exploration: ${e instanceof Error ? e.message : 'Unknown error'}`);

@@ -385,6 +385,17 @@ If nothing to promote, use an empty array.`;
       logger.debug({ error: err }, "Skill auto-archive skipped");
     }
 
+    // Cleanup old run events (7 day retention)
+    try {
+      const cleaned = stateManager.cleanupOldRunEvents(7);
+      if (cleaned > 0) {
+        logger.info({ cleaned }, "Cleaned up old run events");
+        parts.push(`cleaned ${cleaned} old run events`);
+      }
+    } catch (err) {
+      logger.warn({ error: err }, "Run event cleanup failed");
+    }
+
     const output = parts.length > 0
       ? `${parts.join(", ")} from ${yesterday}`
       : `No new facts from ${yesterday}`;

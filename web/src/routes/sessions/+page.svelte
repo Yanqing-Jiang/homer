@@ -3,6 +3,7 @@
 	import { StatusBadge, EmptyState, AuthOverlay } from '$lib/components';
 	import { useAuth } from '$lib/hooks/useAuth.svelte';
 	import * as api from '$lib/api/client';
+	import { toast } from '$lib/stores/toasts.svelte';
 
 	const auth = useAuth();
 
@@ -84,6 +85,7 @@
 			sessions = result.sessions;
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to load sessions';
+			toast.error('Failed to load sessions');
 		} finally {
 			loading = false;
 		}
@@ -376,6 +378,7 @@
 			sendingMessage = false;
 			streamingContent = '';
 			error = err instanceof Error ? err.message : 'Execution failed';
+			toast.error('Execution failed');
 			messageInput = typedContent;
 			attachedFiles = filesToUpload;
 		}

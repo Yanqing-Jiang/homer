@@ -2,6 +2,8 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomUUID } from "crypto";
 import type { StateManager } from "../../state/manager.js";
 import { bridgeThread } from "../../cli-sessions/bridge.js";
+import { sessionEvents, type SessionEvent } from "../../events/session-events.js";
+import { logger } from "../../utils/logger.js";
 
 interface CreateSessionBody {
   name: string;
@@ -36,6 +38,7 @@ interface SearchResultRow {
   name: string;
   updatedAt: string;
   threadCount?: number;
+  threadId?: string | null;
   snippet?: string | null;
   rank?: number;
 }
@@ -45,6 +48,7 @@ interface SessionSearchResult {
   name: string;
   updatedAt: string;
   threadCount: number;
+  threadId: string | null;
   snippet: string | null;
   matchType: "name" | "content";
 }
@@ -63,6 +67,7 @@ function mergeSearchResults(
         name: row.name,
         updatedAt: row.updatedAt,
         threadCount: row.threadCount ?? 0,
+        threadId: null,
         snippet: null,
         matchType: "name",
       });
@@ -77,11 +82,13 @@ function mergeSearchResults(
         name: row.name,
         updatedAt: row.updatedAt,
         threadCount: row.threadCount ?? 0,
+        threadId: row.threadId ?? null,
         snippet: row.snippet ?? null,
         matchType: "content",
       });
-    } else if (!existing.snippet && row.snippet) {
-      existing.snippet = row.snippet;
+    } else {
+      if (!existing.snippet && row.snippet) existing.snippet = row.snippet;
+      if (!existing.threadId && row.threadId) existing.threadId = row.threadId;
     }
   }
 
@@ -100,6 +107,53 @@ export function registerSessionRoutes(
   server: FastifyInstance,
   stateManager: StateManager
 ): void {
+  // ============================================
+  // Session-Level SSE (must be before /:id route)
+  // ============================================
+
+  server.get("/api/chat-sessions/events", async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const origin = request.headers.origin;
+    const headers: Record<string, string> = {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    };
+    if (origin) {
+      headers["Access-Control-Allow-Origin"] = origin;
+      headers["Access-Control-Allow-Credentials"] = "true";
+    }
+
+    reply.raw.writeHead(200, headers);
+
+    // Send initial connected event
+    reply.raw.write(`event: connected\ndata: ${JSON.stringify({ type: "connected" })}\n\n`);
+
+    // Subscribe to session events
+    const unsubscribe = sessionEvents.onSessionEvent((event: SessionEvent) => {
+      try {
+        reply.raw.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      } catch {
+        // Client disconnected
+      }
+    });
+
+    // Heartbeat
+    const heartbeat = setInterval(() => {
+      try {
+        reply.raw.write(`:heartbeat\n\n`);
+      } catch {
+        clearInterval(heartbeat);
+      }
+    }, 30000);
+
+    // Cleanup on disconnect
+    request.raw.on("close", () => {
+      unsubscribe();
+      clearInterval(heartbeat);
+      logger.debug("Session SSE client disconnected");
+    });
+  });
+
   // ============================================
   // Session Search (must be before /:id route)
   // ============================================
@@ -160,6 +214,7 @@ export function registerSessionRoutes(
             cs.id,
             cs.name,
             cs.updated_at AS updatedAt,
+            th.id AS threadId,
             snippet(thread_messages_fts, 0, '<mark>', '</mark>', '...', 24) AS snippet,
             bm25(thread_messages_fts) AS rank
           FROM thread_messages_fts
@@ -190,7 +245,7 @@ export function registerSessionRoutes(
   // Chat Sessions
   // ============================================
 
-  // List sessions
+  // List sessions (single aggregate query — no N+1)
   server.get("/api/chat-sessions", async (request: FastifyRequest) => {
     const query = request.query as {
       includeArchived?: string;
@@ -198,26 +253,70 @@ export function registerSessionRoutes(
       cursor?: string;
     };
 
-    const sessions = stateManager.listChatSessions({
-      includeArchived: query.includeArchived === "true",
-      limit: query.limit ? parseInt(query.limit, 10) : undefined,
-      cursor: query.cursor,
-    });
+    const limit = Math.min(parseInt(query.limit ?? "50", 10), 100);
+    const includeArchived = query.includeArchived === "true";
+    const cursor = query.cursor;
+    const db = stateManager.getDb();
 
-    // Get thread counts for each session
-    const sessionsWithCounts = sessions.map((session) => {
-      const threads = stateManager.listThreads(session.id);
-      return {
-        ...session,
-        threadCount: threads.length,
-        activeThreadCount: threads.filter((t) => t.status === "active").length,
-      };
-    });
+    const whereClauses: string[] = [];
+    const params: Array<string | number> = [];
+
+    if (!includeArchived) {
+      whereClauses.push("cs.archived_at IS NULL");
+    }
+    if (cursor) {
+      whereClauses.push("COALESCE(cs.activity_at, cs.updated_at) < ?");
+      params.push(cursor);
+    }
+
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+
+    const enriched = db.prepare(`
+      SELECT
+        cs.id, cs.name, cs.created_at as createdAt, cs.updated_at as updatedAt,
+        cs.archived_at as archivedAt, cs.activity_at as activityAt,
+        sr.read_at as lastReadAt,
+        COUNT(DISTINCT th.id) as threadCount,
+        COUNT(DISTINCT CASE WHEN th.status = 'active' THEN th.id END) as activeThreadCount,
+        MAX(cr.id) as activeRunId,
+        MAX(cr.status) as runStatus,
+        MAX(cr.executor) as runExecutor,
+        MAX(cr.started_at) as runStartedAt
+      FROM chat_sessions cs
+      LEFT JOIN session_reads sr ON sr.session_id = cs.id
+      LEFT JOIN threads th ON th.chat_session_id = cs.id
+      LEFT JOIN cli_runs cr ON cr.lane = ('web:' || cs.id) AND cr.status = 'running'
+      ${whereSql}
+      GROUP BY cs.id
+      ORDER BY COALESCE(cs.activity_at, cs.updated_at) DESC
+      LIMIT ?
+    `).all(...params, limit) as Array<{
+      id: string; name: string; createdAt: string; updatedAt: string;
+      archivedAt: string | null; activityAt: string | null;
+      lastReadAt: string | null; threadCount: number; activeThreadCount: number;
+      activeRunId: string | null; runStatus: string | null;
+      runExecutor: string | null; runStartedAt: string | null;
+    }>;
+
+    const sessions = enriched.map(s => ({
+      ...s,
+      hasUnread: s.activityAt != null && s.activityAt > (s.lastReadAt ?? s.createdAt),
+    }));
 
     return {
-      sessions: sessionsWithCounts,
-      nextCursor: sessions.length > 0 ? sessions[sessions.length - 1]?.updatedAt ?? null : null,
+      sessions,
+      nextCursor: sessions.length > 0
+        ? (sessions[sessions.length - 1]?.activityAt ?? sessions[sessions.length - 1]?.updatedAt ?? null)
+        : null,
     };
+  });
+
+  // Mark session as read (server-authoritative)
+  server.post("/api/chat-sessions/:id/read", async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    stateManager.markSessionRead(id);
+    reply.status(204);
+    return;
   });
 
   // Create session
@@ -359,7 +458,7 @@ export function registerSessionRoutes(
     }
   );
 
-  // Get thread
+  // Get thread (includes active run + step events for replay)
   server.get("/api/threads/:id", async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = request.params as { id: string };
     const thread = stateManager.getThread(id);
@@ -372,10 +471,21 @@ export function registerSessionRoutes(
     const messages = stateManager.listThreadMessages(id);
     const links = stateManager.getThreadLinks(id);
 
+    // Check for active run on this thread's session
+    const activeRun = stateManager.getActiveCliRunForLane(`web:${thread.chatSessionId}`);
+    const runEvents = activeRun ? stateManager.getRunEvents(activeRun.id) : [];
+
     return {
       ...thread,
       messages,
       links,
+      activeRun: activeRun ? {
+        id: activeRun.id,
+        status: activeRun.status,
+        executor: activeRun.executor,
+        startedAt: activeRun.startedAt,
+        events: runEvents,
+      } : null,
     };
   });
 
