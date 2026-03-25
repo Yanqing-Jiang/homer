@@ -8,6 +8,8 @@ import {
   type ParsedIdea,
 } from "../../ideas/parser.js";
 import * as dao from "../../ideas/dao.js";
+import * as packetDao from "../../ideas/source-packets.js";
+import * as discussionDao from "../../ideas/discussions.js";
 import { join } from "path";
 import { recordFeedback } from "../../feedback/events.js";
 import { PATHS } from "../../config/paths.js";
@@ -558,5 +560,208 @@ Generating insights...`;
       legacyFile: paths.legacyFile,
       directory: paths.directory,
     };
+  });
+
+  // ============================================
+  // Source Packets API
+  // ============================================
+
+  // List source packets
+  server.get("/api/packets", async (request: FastifyRequest) => {
+    const query = request.query as { status?: string; limit?: string; source_type?: string };
+    const statusFilter = query.status?.split(",") as packetDao.PacketStatus[] | undefined;
+
+    const packets = packetDao.getPackets(db, {
+      status: statusFilter && statusFilter.length === 1 ? statusFilter[0] : statusFilter as any,
+      sourceType: query.source_type,
+      limit: query.limit ? parseInt(query.limit, 10) : undefined,
+    });
+
+    return {
+      packets: packets.map(p => ({
+        id: p.id,
+        clusterId: p.clusterId,
+        sourceType: p.sourceType,
+        primaryUrl: p.primaryUrl,
+        title: p.title,
+        summary: p.summary,
+        status: p.status,
+        promotedIdeaId: p.promotedIdeaId,
+        enrichment: p.enrichment,
+        metadata: p.metadata,
+        createdAt: p.createdAt,
+        updatedAt: p.updatedAt,
+        reviewedAt: p.reviewedAt,
+        promotedAt: p.promotedAt,
+      })),
+    };
+  });
+
+  // Get single packet with full content
+  server.get("/api/packets/:id", async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const packet = packetDao.getPacket(db, id);
+    if (!packet) {
+      reply.status(404);
+      return { error: "Packet not found" };
+    }
+
+    const scrapeIds = packetDao.getPacketScrapeIds(db, packet.id);
+    const discussions = discussionDao.getDiscussions(db, { packetId: packet.id });
+
+    return {
+      ...packet,
+      scrapeIds,
+      discussions: discussions.map(d => ({
+        id: d.id,
+        title: d.title,
+        status: d.status,
+        createdAt: d.createdAt,
+        updatedAt: d.updatedAt,
+      })),
+    };
+  });
+
+  // Update packet status
+  server.patch("/api/packets/:id", async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const body = request.body as { status?: string; title?: string; summary?: string };
+
+    const updated = packetDao.updatePacket(db, id, {
+      status: body.status as packetDao.PacketStatus,
+      title: body.title,
+      summary: body.summary,
+    });
+
+    if (!updated) {
+      reply.status(404);
+      return { error: "Packet not found" };
+    }
+
+    return { id: updated.id, status: updated.status, title: updated.title };
+  });
+
+  // Promote packet to idea
+  server.post("/api/packets/:id/promote", async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const body = request.body as { title?: string; content?: string; tags?: string[] } | undefined;
+
+    const result = packetDao.promotePacket(db, id, body);
+    if (!result) {
+      reply.status(400);
+      return { error: "Failed to promote packet" };
+    }
+
+    return {
+      packetId: result.packetId,
+      ideaId: result.ideaId,
+      message: "Packet promoted to idea",
+    };
+  });
+
+  // Get packet stats
+  server.get("/api/packets/stats", async () => {
+    return packetDao.countByStatus(db);
+  });
+
+  // Search packets
+  server.get("/api/packets/search", async (request: FastifyRequest) => {
+    const { q, limit } = request.query as { q?: string; limit?: string };
+    if (!q) return { packets: [] };
+
+    const packets = packetDao.searchPackets(db, q, limit ? parseInt(limit, 10) : 10);
+    return {
+      packets: packets.map(p => ({
+        id: p.id,
+        title: p.title,
+        summary: p.summary,
+        status: p.status,
+        sourceType: p.sourceType,
+        createdAt: p.createdAt,
+      })),
+    };
+  });
+
+  // ============================================
+  // Discussions API
+  // ============================================
+
+  // List discussions
+  server.get("/api/discussions", async (request: FastifyRequest) => {
+    const query = request.query as { status?: string; packet_id?: string; idea_id?: string; limit?: string };
+
+    const discussions = discussionDao.getDiscussions(db, {
+      status: query.status as discussionDao.DiscussionStatus,
+      packetId: query.packet_id,
+      ideaId: query.idea_id,
+      limit: query.limit ? parseInt(query.limit, 10) : undefined,
+    });
+
+    return { discussions };
+  });
+
+  // Get discussion with messages
+  server.get("/api/discussions/:id", async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const discussion = discussionDao.getDiscussionWithMessages(db, id);
+    if (!discussion) {
+      reply.status(404);
+      return { error: "Discussion not found" };
+    }
+    return discussion;
+  });
+
+  // Create or resume discussion
+  server.post("/api/discussions", async (request: FastifyRequest, reply: FastifyReply) => {
+    const body = request.body as { packetId?: string; ideaId?: string; title?: string };
+
+    const discussion = discussionDao.getOrCreateDiscussion(db, {
+      packetId: body.packetId,
+      ideaId: body.ideaId,
+      title: body.title,
+    });
+
+    reply.status(201);
+    return discussion;
+  });
+
+  // Add message to discussion
+  server.post("/api/discussions/:id/messages", async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const body = request.body as { role?: string; content: string; metadata?: Record<string, unknown> };
+
+    const discussion = discussionDao.getDiscussion(db, id);
+    if (!discussion) {
+      reply.status(404);
+      return { error: "Discussion not found" };
+    }
+
+    const message = discussionDao.addMessage(db, {
+      discussionId: id,
+      role: (body.role as discussionDao.MessageRole) ?? "user",
+      content: body.content,
+      metadata: body.metadata,
+    });
+
+    reply.status(201);
+    return message;
+  });
+
+  // Update discussion status
+  server.patch("/api/discussions/:id", async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const body = request.body as { status?: string; title?: string };
+
+    const updated = discussionDao.updateDiscussion(db, id, {
+      status: body.status as discussionDao.DiscussionStatus,
+      title: body.title,
+    });
+
+    if (!updated) {
+      reply.status(404);
+      return { error: "Discussion not found" };
+    }
+
+    return updated;
   });
 }

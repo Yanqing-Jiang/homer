@@ -146,8 +146,9 @@
 	function handlePageDrop(e: DragEvent) {
 		e.preventDefault();
 		pageDragCounter = 0;
-		if (e.dataTransfer?.files.length) {
-			chatInputComponent?.addFiles(e.dataTransfer.files);
+		const droppedFiles = e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : [];
+		if (droppedFiles.length > 0) {
+			void chatInputComponent?.addFiles(droppedFiles);
 		}
 	}
 
