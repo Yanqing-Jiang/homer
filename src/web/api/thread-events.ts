@@ -44,9 +44,9 @@ export function registerThreadEventRoutes(
       reply.raw.writeHead(200, headers);
 
       // Handle reconnection: replay missed messages since Last-Event-ID
-      const lastEventId = request.headers["last-event-id"] as
-        | string
-        | undefined;
+      // Accept via header (standard) or query param (fetch-based SSE fallback)
+      const lastEventId = (request.headers["last-event-id"] as string | undefined)
+        || (request.query as { lastEventId?: string }).lastEventId;
       if (lastEventId) {
         const allMessages = stateManager.listThreadMessages(threadId);
         let foundLastEvent = false;
