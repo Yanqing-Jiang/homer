@@ -140,10 +140,10 @@
 	async function handleFiles(files: FileList | File[] | null) {
 		if (!files || files.length === 0) return;
 
+		// Snapshot immediately so transient drag/drop FileLists survive async session creation.
+		const fileArray = Array.from(files);
 		const resolvedSessionId = sessionId || await ensureSessionForAttachments?.();
 		if (!resolvedSessionId) return;
-
-		const fileArray = Array.from(files);
 
 		// Create DisplayFile entries immediately (optimistic)
 		const newDisplayFiles: DisplayFile[] = fileArray.map(file => ({
