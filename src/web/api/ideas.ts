@@ -339,6 +339,33 @@ export function registerIdeasRoutes(
     const lane = webLane(sessionId);
     stateManager.setCurrentExecutor(lane, "claude", "sonnet[1m]");
 
+    // Load linked source packet for full context
+    let packetContext = "";
+    try {
+      const row = db.prepare("SELECT source_packet_id FROM ideas WHERE id = ?").get(idea.id) as { source_packet_id: string | null } | undefined;
+      if (row?.source_packet_id) {
+        const packet = packetDao.getPacket(db, row.source_packet_id);
+        if (packet) {
+          const parts: string[] = [];
+          if (packet.rawContent) parts.push(`## Original Source Content\n${packet.rawContent}`);
+          if (packet.deepFetchContent) parts.push(`## Deep-Fetched Content\n${packet.deepFetchContent}`);
+          if (packet.metadata?.externalUrls?.length) {
+            parts.push(`## External Links\n${packet.metadata.externalUrls.join("\n")}`);
+          }
+          if (packet.metadata?.extractedTopics?.length) {
+            parts.push(`## Extracted Topics\n${packet.metadata.extractedTopics.join(", ")}`);
+          }
+          if (packet.enrichment?.deepDive?.coreClaim) {
+            parts.push(`## Core Claim\n${packet.enrichment.deepDive.coreClaim}`);
+          }
+          if (packet.enrichment?.deepLinks?.length) {
+            parts.push(`## Connections\n${packet.enrichment.deepLinks.map((l: any) => `- ${l.target} (${l.relationship})`).join("\n")}`);
+          }
+          packetContext = parts.join("\n\n");
+        }
+      }
+    } catch { /* best-effort packet loading */ }
+
     // System message — hidden from UI but included as anchor context for the model
     const enrichment = idea.enrichment ? JSON.parse(idea.enrichment) : null;
     const systemMessage = `# Idea Exploration — ${idea.id}
@@ -373,8 +400,8 @@ When exploring ideas, consider which Homer capabilities could be leveraged or ex
 **${idea.title}** (${idea.status})
 ${idea.link ? `**Link:** ${idea.link}` : ""}${idea.tags?.length ? `**Tags:** ${idea.tags.join(", ")}` : ""}
 
-${idea.content}
-${idea.context ? `\n### Context\n${idea.context}` : ""}${idea.notes ? `\n### Notes\n${idea.notes}` : ""}${idea.exploration ? `\n### Previous Exploration\n${idea.exploration}` : ""}${enrichment ? `\n### Enrichment Data\n${JSON.stringify(enrichment, null, 2)}` : ""}
+${packetContext || idea.content}
+${!packetContext && idea.context ? `\n### Context\n${idea.context}` : ""}${idea.notes ? `\n### Notes\n${idea.notes}` : ""}${idea.exploration ? `\n### Previous Exploration\n${idea.exploration}` : ""}${enrichment ? `\n### Enrichment Data\n${JSON.stringify(enrichment, null, 2)}` : ""}
 
 ## Your Role
 1. On first message, provide 2-3 sharp insights connecting this idea to Yanqing's goals/projects and Homer's capabilities

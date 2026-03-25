@@ -12,7 +12,6 @@ import {
   recordImpression,
 } from "../../feedback/events.js";
 import {
-  loadIdeasFromDir,
   parseIdeasMd,
   type ParsedIdea,
 } from "../../ideas/parser.js";
@@ -796,11 +795,29 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
 
       await ctx.editMessageText(formatScheduledTelegramHtml(headerMsg), { parse_mode: "HTML" });
 
-      // Record system message in the discussion
+      // Record system message with full source context
+      const contextParts: string[] = [`Discussion ${msgCount > 0 ? "resumed" : "started"} from Telegram on idea: ${idea.title}`];
+      if (packetContent) {
+        contextParts.push(packetContent);
+      } else {
+        // Fall back to idea content if no packet linked
+        if (idea.content) contextParts.push(`## Idea Content\n${idea.content}`);
+        if (idea.context) contextParts.push(`## Context\n${idea.context}`);
+      }
+      if (idea.notes) contextParts.push(`## Notes\n${idea.notes}`);
+      if (idea.enrichment) {
+        try {
+          const enrichment = JSON.parse(idea.enrichment);
+          if (enrichment.deep_links?.length) {
+            contextParts.push(`## Connections\n${enrichment.deep_links.map((l: any) => `- ${l.target} (${l.relationship})`).join("\n")}`);
+          }
+        } catch { /* ignore parse errors */ }
+      }
+
       discussionDao.addMessage(db, {
         discussionId: discussion.id,
         role: "system",
-        content: `Discussion ${msgCount > 0 ? "resumed" : "started"} from Telegram on idea: ${idea.title}`,
+        content: contextParts.join("\n\n"),
         metadata: { source: "telegram", ideaId: idea.id },
       });
 
@@ -864,11 +881,28 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
 
       await ctx.editMessageText(formatScheduledTelegramHtml(headerMsg), { parse_mode: "HTML" });
 
-      // Record system message
+      // Record system message with full packet context
+      const packetParts: string[] = [`Discussion ${msgCount > 0 ? "resumed" : "started"} from Telegram on packet: ${packet.title ?? packet.id}`];
+      if (packet.rawContent) packetParts.push(`## Original Source Content\n${packet.rawContent}`);
+      if (packet.deepFetchContent) packetParts.push(`## Deep-Fetched Content\n${packet.deepFetchContent}`);
+      if (packet.metadata?.externalUrls?.length) {
+        packetParts.push(`## External Links\n${packet.metadata.externalUrls.join("\n")}`);
+      }
+      if (packet.metadata?.extractedTopics?.length) {
+        packetParts.push(`## Extracted Topics\n${packet.metadata.extractedTopics.join(", ")}`);
+      }
+      if (packet.enrichment) {
+        const e = packet.enrichment;
+        if (e.deepDive?.coreClaim) packetParts.push(`## Core Claim\n${e.deepDive.coreClaim}`);
+        if (e.deepLinks?.length) {
+          packetParts.push(`## Connections\n${e.deepLinks.map(l => `- ${l.target} (${l.relationship})`).join("\n")}`);
+        }
+      }
+
       discussionDao.addMessage(db, {
         discussionId: discussion.id,
         role: "system",
-        content: `Discussion ${msgCount > 0 ? "resumed" : "started"} from Telegram on packet: ${packet.title ?? packet.id}`,
+        content: packetParts.join("\n\n"),
         metadata: { source: "telegram", packetId: packet.id },
       });
     } catch (error) {
@@ -1208,20 +1242,6 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
  * Sends all ideas simultaneously as separate messages with Talk+Archive buttons.
  * Returns the number of ideas sent.
  */
-/**
- * Score an idea for ranking in morning review.
- * Combines confidence (from synthesizer), freshness, and source diversity.
- */
-function scoreIdeaForReview(idea: ParsedIdea): number {
-  const confidence = extractConfidence(idea) ?? 0.5; // default for non-synthesized ideas
-
-  // Freshness: ideas from last 24h get a boost
-  const ageMs = Date.now() - new Date(idea.timestamp).getTime();
-  const ageHours = ageMs / (1000 * 60 * 60);
-  const freshness = ageHours < 24 ? 1.0 : ageHours < 48 ? 0.8 : 0.6;
-
-  return confidence * 0.6 + freshness * 0.4;
-}
 
 export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLimit: number = 3): Promise<number> {
   // Check remaining daily quota
@@ -1306,135 +1326,8 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
     }
   }
 
-  // ========================================
-  // PHASE 2: Fill remaining slots with legacy draft ideas
-  // ========================================
-  if (remaining <= 0) {
-    if (stateManagerRef && sent > 0) stateManagerRef.incrementIdeaReviewCount(sent);
-    return sent;
-  }
-
-  // Load drafts — DB primary, legacy fallback
-  const dirDrafts = db
-    ? dao.getAllIdeas(db, { status: "draft" })
-    : loadIdeasFromDir().filter(i => i.status === "draft");
-
-  let legacyDrafts: ParsedIdea[] = [];
-  if (existsSync(IDEAS_FILE)) {
-    const content = await readFile(IDEAS_FILE, "utf-8");
-    const legacyIdeas = parseIdeasMd(content);
-    const existingIds = new Set(dirDrafts.map(i => i.id));
-    legacyDrafts = legacyIdeas.filter(i => i.status === "draft" && !existingIds.has(i.id));
-  }
-
-  const allDrafts = [...dirDrafts, ...legacyDrafts];
-
-  if (allDrafts.length > 0) {
-    // Ranked selection with diversity
-    const scored = allDrafts.map(idea => ({
-      idea,
-      score: scoreIdeaForReview(idea),
-      primaryTag: idea.tags?.[0] ?? idea.source,
-    })).sort((a, b) => b.score - a.score);
-
-    const selected: ParsedIdea[] = [];
-    const usedTags = new Set<string>();
-
-    for (const entry of scored) {
-      if (selected.length >= remaining) break;
-      if (usedTags.has(entry.primaryTag)) continue;
-      selected.push(entry.idea);
-      usedTags.add(entry.primaryTag);
-    }
-
-    if (selected.length < remaining) {
-      const selectedIds = new Set(selected.map(s => s.id));
-      for (const entry of scored) {
-        if (selected.length >= remaining) break;
-        if (selectedIds.has(entry.idea.id)) continue;
-        selected.push(entry.idea);
-      }
-    }
-
-    if (selected.length > 0) {
-      let reviewSessionId: string | undefined;
-      if (db) {
-        try {
-          reviewSessionId = createReviewSession(db, "idea_review", selected.length);
-        } catch (err) {
-          logger.warn({ error: err }, "Failed to create review session");
-        }
-      }
-
-      // Only send header if we didn't already send packets
-      if (sent === 0) {
-        await bot.api.sendMessage(
-          chatId,
-          formatScheduledTelegramHtml(`📋 <b>想法审阅</b> (${selected.length})`),
-          { parse_mode: "HTML" }
-        );
-      }
-
-      for (let i = 0; i < selected.length; i++) {
-        const idea = selected[i]!;
-        const message = formatIdeaForTelegram(idea, sent + i);
-        const keyboard = createIdeaKeyboard(idea.id, !!idea.enrichment);
-
-        try {
-          await bot.api.sendMessage(chatId, message, {
-            parse_mode: "HTML",
-            reply_markup: keyboard,
-          });
-          sent++;
-
-          if (db && reviewSessionId) {
-            try {
-              const impressionId = recordImpression(db, {
-                sessionId: reviewSessionId,
-                contentType: "idea",
-                contentId: idea.id,
-                position: i,
-                scoreAtDisplay: scored.find(s => s.idea.id === idea.id)?.score,
-                metadata: { primaryTag: scored.find(s => s.idea.id === idea.id)?.primaryTag },
-              });
-              pendingImpressions.set(idea.id, { impressionId, displayedAt: Date.now() });
-            } catch (err) {
-              logger.warn({ error: err, ideaId: idea.id }, "Failed to record impression");
-            }
-          }
-
-          if (db) {
-            dao.updateIdea(db, idea.id, { status: "review" });
-          } else {
-            const isFileBased = dirDrafts.some(d => d.id === idea.id);
-            if (!isFileBased) idea.status = "review";
-          }
-        } catch (error) {
-          logger.error({ error, ideaId: idea.id }, "Failed to send idea for review");
-        }
-
-        if (i < selected.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-      }
-
-      // Write legacy file once if any legacy ideas were updated
-      const updatedLegacy = selected.filter(i => i.status === "review" && legacyDrafts.some(l => l.id === i.id));
-      if (updatedLegacy.length > 0 && existsSync(IDEAS_FILE)) {
-        const content = await readFile(IDEAS_FILE, "utf-8");
-        const legacyIdeas = parseIdeasMd(content);
-        for (const updated of updatedLegacy) {
-          const found = findIdea(legacyIdeas, updated.id);
-          if (found) found.status = "review";
-        }
-        await writeFile(IDEAS_FILE, rebuildIdeasFile(legacyIdeas), "utf-8");
-      }
-
-      if (db && reviewSessionId) {
-        try { completeReviewSession(db, reviewSessionId); } catch { /* best-effort */ }
-      }
-    }
-  }
+  // Legacy Phase 2 removed — morning review is packets-only now.
+  // Ideas are only created via explicit Promote action.
 
   if (stateManagerRef && sent > 0) {
     stateManagerRef.incrementIdeaReviewCount(sent);
