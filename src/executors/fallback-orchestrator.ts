@@ -479,6 +479,28 @@ export async function runWithFallbackChain<T extends ExecutorAttemptResult>(
       });
     }
 
+    // Rate limit: skip same-executor retry AND skip LLM diagnosis — immediately switch
+    if (errorType === "rate_limit") {
+      logger.info(
+        { jobId: job.id, executor: current, errorType },
+        "Rate limit detected — skipping retry and diagnosis, switching executor"
+      );
+      const nextIdx: number = chain.indexOf(current) + 1;
+      if (nextIdx < chain.length) {
+        const nextExecutor: ExecutorKind = chain[nextIdx]!;
+        if (!notifiedFallback && notify) {
+          notifiedFallback = true;
+          await notify(`⚠️ ${current} rate-limited for ${job.name}. Switching to ${nextExecutor}.`);
+        }
+        fallbackUsed = true;
+        current = nextExecutor;
+        queryOverride = job.query;
+        continue;
+      }
+      // No more executors — fall through to end-of-loop failure
+      break;
+    }
+
     // Retry same executor up to MAX_RETRIES_PER_EXECUTOR times before switching
     if (attemptNum < MAX_RETRIES_PER_EXECUTOR) {
       logger.info(
