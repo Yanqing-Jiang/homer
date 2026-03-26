@@ -20,6 +20,9 @@ import {
 import { logger } from "../../utils/logger.js";
 import { storeJobArtifact } from "./artifact-store.js";
 import type { StateManager } from "../../state/manager.js";
+import { extractVideoId } from "../../youtube/utils.js";
+import { summarizeYouTubeVideo, geminiSemaphore, videoExistsInDb } from "../../youtube/summarizer.js";
+import type { YouTubeSummaryMetadata } from "../../overnight/types.js";
 
 const SKILL_PATH = "/Users/yj/.claude/skills/link-processor/SKILLS.md";
 const PROCESS_TIMEOUT = 300_000; // 5min per link (YouTube/Medium need more time)
@@ -100,6 +103,79 @@ export async function runLinkProcessor(
       markLinkProcessing(db, link.id);
 
       try {
+        // YouTube links: route through dedicated pipeline (cheaper + more reliable)
+        if (link.link_type === "youtube") {
+          const videoId = extractVideoId(link.url);
+          if (!videoId) {
+            markLinkFailed(db, link.id, "Could not extract video ID from URL", true);
+            failed++;
+            results.push({ url: link.url, status: "bad_url" });
+            continue;
+          }
+
+          // Dedup: check if already in youtube_videos
+          if (videoExistsInDb(db, videoId)) {
+            markLinkDone(db, link.id, `yt_dedup_${videoId}`);
+            processed++;
+            results.push({ url: link.url, status: "duplicate" });
+            logger.info({ url: link.url, videoId }, "YouTube link already processed, skipping");
+            continue;
+          }
+
+          // Run through dedicated pipeline
+          const now = new Date();
+          const metadata: YouTubeSummaryMetadata = {
+            videoUrl: link.url,
+            videoId,
+            queuedAt: now.toISOString(),
+            queueSource: "link-inbox",
+            queueLocalHour: now.getHours(),
+            queueLocalDow: now.getDay(),
+          };
+
+          await geminiSemaphore.acquire();
+          let ytResult;
+          try {
+            ytResult = await summarizeYouTubeVideo(metadata, db);
+          } finally {
+            geminiSemaphore.release();
+          }
+
+          if (ytResult.success) {
+            // Create a thin scrapes row (summary pointer, not full transcript)
+            const scrapeId = `inbox_${link.id}`;
+            const summaryText = ytResult.pass2
+              ? `[YouTube] ${ytResult.pass2.videoTitle ?? videoId}: ${ytResult.pass2.intentHypothesis ?? ""}`
+              : `[YouTube] ${videoId} — processed via dedicated pipeline`;
+
+            insertScrape(db, {
+              id: scrapeId,
+              source: "link-inbox-youtube",
+              url: link.url,
+              title: ytResult.pass2?.videoTitle ?? videoId,
+              raw_content: summaryText,
+              metadata: JSON.stringify({
+                youtube_video_id: videoId,
+                inbox_id: link.id,
+                submitted_by: link.submitted_by,
+                relevance_score: ytResult.pass2?.overallRelevance,
+                pipeline: "youtube_v2_direct",
+              }),
+            });
+
+            markLinkDone(db, link.id, scrapeId);
+            processed++;
+            results.push({ url: link.url, status: "done", title: ytResult.pass2?.videoTitle });
+            logger.info({ url: link.url, videoId, relevance: ytResult.pass2?.overallRelevance }, "YouTube link processed via dedicated pipeline");
+          } else {
+            markLinkFailed(db, link.id, ytResult.error ?? "YouTube pipeline failed");
+            failed++;
+            results.push({ url: link.url, status: "failed" });
+          }
+          continue;
+        }
+
+        // Non-YouTube links: process via Claude Sonnet skill
         const prompt = buildPrompt(link, skillContent);
         const result = await executeClaudeCommand(prompt, {
           cwd: "/tmp",
