@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomUUID } from "crypto";
-import type { StateManager } from "../../state/manager.js";
+import type { StateManager, ThreadMessage } from "../../state/manager.js";
 import { bridgeThread } from "../../cli-sessions/bridge.js";
 import { sessionEvents, type SessionEvent } from "../../events/session-events.js";
 import { logger } from "../../utils/logger.js";
@@ -41,6 +41,14 @@ interface SearchResultRow {
   threadId?: string | null;
   snippet?: string | null;
   rank?: number;
+}
+
+/** Project metadata.attachments to a top-level field for API consumers */
+function projectAttachments(messages: ThreadMessage[]) {
+  return messages.map((m) => {
+    const attachments = m.metadata?.attachments;
+    return attachments ? { ...m, attachments } : m;
+  });
 }
 
 interface SessionSearchResult {
@@ -468,7 +476,7 @@ export function registerSessionRoutes(
       return { error: "Thread not found" };
     }
 
-    const messages = stateManager.listThreadMessages(id);
+    const messages = projectAttachments(stateManager.listThreadMessages(id));
     const links = stateManager.getThreadLinks(id);
 
     // Check for active run on this thread's session
@@ -519,10 +527,10 @@ export function registerSessionRoutes(
       return { error: "Thread not found" };
     }
 
-    const messages = stateManager.listThreadMessages(threadId, {
+    const messages = projectAttachments(stateManager.listThreadMessages(threadId, {
       limit: query.limit ? parseInt(query.limit, 10) : undefined,
       beforeId: query.beforeId,
-    });
+    }));
 
     return { messages };
   });

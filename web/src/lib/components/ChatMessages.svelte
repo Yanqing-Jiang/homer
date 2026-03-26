@@ -2,7 +2,9 @@
 	import { renderMarkdown, formatTime } from '$lib/utils/markdown';
 	import { highlightAction } from '$lib/actions/highlight';
 
-	import type { StepEvent } from '$lib/api/client';
+	import type { StepEvent, MessageAttachment } from '$lib/api/client';
+
+	const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3000';
 
 	let {
 		messages,
@@ -10,11 +12,34 @@
 		streamingContent,
 		steps = []
 	}: {
-		messages: Array<{ id?: string; role: 'user' | 'assistant'; content: string; timestamp: Date }>;
+		messages: Array<{ id?: string; role: 'user' | 'assistant'; content: string; timestamp: Date; attachments?: MessageAttachment[] }>;
 		isStreaming: boolean;
 		streamingContent: string;
 		steps?: Array<StepEvent & { startedAt: number; completed: boolean }>;
 	} = $props();
+
+	function formatFileSize(bytes: number): string {
+		if (bytes < 1024) return `${bytes} B`;
+		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+		return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+	}
+
+	function getFileIcon(mimeType: string): string {
+		if (mimeType.startsWith('image/')) return '\u{1F5BC}\uFE0F';
+		if (mimeType === 'application/pdf') return '\u{1F4C4}';
+		if (mimeType.startsWith('text/') || mimeType === 'application/json') return '\u{1F4DD}';
+		return '\u{1F4CE}';
+	}
+
+	function rawUrl(att: MessageAttachment): string {
+		return `${API_BASE}/api/uploads/${att.sessionId}/${att.id}/raw`;
+	}
+
+	/** Filter out legacy string[] attachments — only render structured objects */
+	function richAttachments(atts: unknown[] | undefined): MessageAttachment[] {
+		if (!atts) return [];
+		return atts.filter((a): a is MessageAttachment => typeof a === 'object' && a !== null && 'id' in a && 'mimeType' in a);
+	}
 
 	// Event delegation for copy buttons (avoids DOMPurify stripping onclick)
 	function handleChatClick(e: MouseEvent) {
@@ -68,6 +93,22 @@
 							{@html renderMarkdown(message.content)}
 						</div>
 					{:else}
+						{@const atts = richAttachments(message.attachments)}
+						{#if atts.length > 0}
+							<div class="msg-attachments">
+								{#each atts as att (att.id)}
+									<a class="msg-attachment-chip" href={rawUrl(att)} target="_blank" rel="noopener" download={att.filename}>
+										{#if att.mimeType.startsWith('image/')}
+											<img class="msg-attachment-thumb" src={rawUrl(att)} alt={att.filename} loading="lazy" />
+										{:else}
+											<span class="msg-attachment-icon">{getFileIcon(att.mimeType)}</span>
+										{/if}
+										<span class="msg-attachment-name" title={att.filename}>{att.filename}</span>
+										<span class="msg-attachment-size">{formatFileSize(att.size)}</span>
+									</a>
+								{/each}
+							</div>
+						{/if}
 						<div class="message-bubble">{message.content}</div>
 					{/if}
 					<span class="message-timestamp">{formatTime(message.timestamp)}</span>
@@ -178,6 +219,60 @@
 
 	.message.user .message-timestamp { text-align: right; }
 	.message.assistant .message-timestamp { text-align: left; }
+
+	/* Attachment chips on user messages */
+	.msg-attachments {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		justify-content: flex-end;
+		margin-bottom: 4px;
+	}
+
+	.msg-attachment-chip {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		background: #d6d3d0;
+		border-radius: 6px;
+		padding: 4px 8px;
+		font-size: 12px;
+		color: #1b1b1b;
+		text-decoration: none;
+		transition: background 0.15s;
+		max-width: 220px;
+	}
+
+	.msg-attachment-chip:hover {
+		background: #c8c4c0;
+	}
+
+	.msg-attachment-thumb {
+		width: 32px;
+		height: 32px;
+		object-fit: cover;
+		border-radius: 4px;
+	}
+
+	.msg-attachment-icon {
+		font-size: 14px;
+		flex-shrink: 0;
+	}
+
+	.msg-attachment-name {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		flex: 1;
+		min-width: 0;
+	}
+
+	.msg-attachment-size {
+		color: #666;
+		font-size: 11px;
+		white-space: nowrap;
+		flex-shrink: 0;
+	}
 
 	/* Streaming */
 	.streaming .message-bubble { border-color: #0078d4; }

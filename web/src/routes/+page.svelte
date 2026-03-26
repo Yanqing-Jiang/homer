@@ -25,7 +25,7 @@
 	let searchVersion = 0;
 
 	let chatInput = $state('');
-	let messages = $state<Array<{ id?: string; role: 'user' | 'assistant'; content: string; timestamp: Date }>>([]);
+	let messages = $state<Array<{ id?: string; role: 'user' | 'assistant'; content: string; timestamp: Date; attachments?: api.MessageAttachment[] }>>([]);
 	let knownMessageIds = $state<Set<string>>(new Set());
 	let sidebarOpen = $state(false);
 	let userMenuOpen = $state(false);
@@ -644,7 +644,8 @@
 				id: m.id,
 				role: m.role as 'user' | 'assistant',
 				content: m.content,
-				timestamp: m.createdAt ? new Date(m.createdAt) : new Date()
+				timestamp: m.createdAt ? new Date(m.createdAt) : new Date(),
+				attachments: m.attachments,
 			}));
 
 			// Restore active run step state from persisted run events
@@ -748,6 +749,16 @@ Just confirm when done. Keep your response brief.`;
 		lastFailedMessage = typedMessage || null;
 		const currentAttachmentPaths = attachedFiles.map((f) => f.path).filter(Boolean);
 		const currentAttachmentIds = attachedFiles.map((f) => f.id).filter(Boolean);
+		const currentRichAttachments: api.MessageAttachment[] = attachedFiles
+			.filter((f) => f.id && f.path)
+			.map((f) => ({
+				id: f.id,
+				sessionId: f.sessionId,
+				filename: f.filename,
+				mimeType: f.mimeType,
+				size: f.size,
+				path: f.path,
+			}));
 		const userMessage = typedMessage || `Attached files: ${attachedFiles.map((f) => f.filename).join(', ')}`;
 		const executionMessage = typedMessage || 'Please inspect the attached file(s).';
 
@@ -817,7 +828,12 @@ Just confirm when done. Keep your response brief.`;
 		// Optimistic update
 		chatInput = '';
 		chatError = null;
-		messages = [...messages, { role: 'user', content: userMessage, timestamp: new Date() }];
+		messages = [...messages, {
+			role: 'user',
+			content: userMessage,
+			timestamp: new Date(),
+			attachments: currentRichAttachments.length > 0 ? currentRichAttachments : undefined,
+		}];
 
 		// Reset textarea height and clear attachments
 		chatInputComponent?.resetHeight();
@@ -948,6 +964,7 @@ Just confirm when done. Keep your response brief.`;
 					},
 				}, {
 					attachments: currentAttachmentIds.length > 0 ? currentAttachmentIds : undefined,
+					richAttachments: currentRichAttachments.length > 0 ? currentRichAttachments : undefined,
 					sessionId: sessionId ?? undefined,
 				});
 
@@ -956,7 +973,12 @@ Just confirm when done. Keep your response brief.`;
 				// Non-Claude: execute + poll (no SSE streaming)
 				streamingContent = 'Thinking...';
 				try {
-					const result = await api.executeMessage(threadId, executionMessage, currentAttachmentPaths.length > 0 ? currentAttachmentPaths : undefined);
+					const result = await api.executeMessage(
+						threadId,
+						executionMessage,
+						currentAttachmentPaths.length > 0 ? currentAttachmentPaths : undefined,
+						currentRichAttachments.length > 0 ? currentRichAttachments : undefined,
+					);
 					const runId = result.runId;
 
 					const pollInterval = setInterval(async () => {

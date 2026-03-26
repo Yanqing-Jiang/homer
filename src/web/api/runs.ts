@@ -7,10 +7,12 @@ import { logger } from "../../utils/logger.js";
 import { webLane } from "../../utils/lanes.js";
 import { config } from "../../config/index.js";
 import { parseCommand, getExecutorModel } from "../../commands/index.js";
+import { type MessageAttachment } from "./streaming.js";
 
 interface ExecuteBody {
   content: string;
   attachments?: string[]; // file paths
+  richAttachments?: MessageAttachment[]; // structured attachment objects
 }
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -124,15 +126,23 @@ export function registerRunRoutes(
         return { error: "A run is already in progress for this session" };
       }
 
-      // Create user message
+      // Create user message — prefer rich attachments for metadata, fall back to paths
       const attachments = filterAttachmentPaths(body.attachments);
+      const richAtts = body.richAttachments?.filter((a) =>
+        typeof a.path === "string" && existsSync(a.path)
+      ) ?? [];
+      const messageMetadata = richAtts.length > 0
+        ? { attachments: richAtts }
+        : attachments.length > 0
+          ? { attachments }
+          : undefined;
       const userMessageId = randomUUID();
       stateManager.createThreadMessage({
         id: userMessageId,
         threadId,
         role: "user",
         content: body.content,
-        metadata: attachments.length > 0 ? { attachments } : undefined,
+        metadata: messageMetadata,
       });
 
       const query =
