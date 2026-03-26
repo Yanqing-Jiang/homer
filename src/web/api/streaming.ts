@@ -7,6 +7,16 @@ import { logger } from "../../utils/logger.js";
 import { webLane } from "../../utils/lanes.js";
 import { getUploadPath } from "./uploads.js";
 
+/** Structured attachment stored in thread_messages.metadata */
+export interface MessageAttachment {
+  id: string;
+  sessionId: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  path: string;
+}
+
 const HEARTBEAT_INTERVAL = 30_000; // 30 seconds
 const LOCK_TTL_MS = 32 * 60 * 1000; // 32 minutes (slightly above Claude timeout)
 const FILE_OUTPUT_HINT =
@@ -52,7 +62,8 @@ function updateLockHeartbeat(threadId: string, reqId: string): void {
 
 interface SendMessageBody {
   content: string;
-  attachments?: string[]; // Array of upload IDs
+  attachments?: string[]; // Legacy: array of upload IDs
+  richAttachments?: MessageAttachment[]; // Structured attachment objects
   sessionId?: string; // Session ID for looking up attachments
 }
 
@@ -143,9 +154,26 @@ export function registerStreamingRoutes(
         return;
       }
 
-      const attachmentPaths = (body.attachments ?? [])
-        .map((uploadId) => (body.sessionId ? getUploadPath(body.sessionId, uploadId) : null))
-        .filter((path): path is string => Boolean(path));
+      // Resolve attachments: prefer richAttachments (structured), fall back to legacy ID-based resolution
+      // Rich attachments are validated: each must resolve to a real file via getUploadPath
+      let resolvedAttachments: MessageAttachment[] = [];
+      let attachmentPaths: string[] = [];
+
+      if (body.richAttachments && body.richAttachments.length > 0) {
+        for (const att of body.richAttachments) {
+          const verifiedPath = getUploadPath(att.sessionId, att.id);
+          if (verifiedPath) {
+            resolvedAttachments.push({ ...att, path: verifiedPath });
+            attachmentPaths.push(verifiedPath);
+          } else {
+            logger.warn({ id: att.id, sessionId: att.sessionId }, "Ignoring unverified rich attachment");
+          }
+        }
+      } else if (body.attachments && body.attachments.length > 0) {
+        attachmentPaths = body.attachments
+          .map((uploadId) => (body.sessionId ? getUploadPath(body.sessionId, uploadId) : null))
+          .filter((path): path is string => Boolean(path));
+      }
 
       if (thread.externalSessionId) {
         if (!executorState) {
@@ -168,12 +196,17 @@ export function registerStreamingRoutes(
       }
 
       const userMessageId = randomUUID();
+      const messageMetadata = resolvedAttachments.length > 0
+        ? { attachments: resolvedAttachments }
+        : attachmentPaths.length > 0
+          ? { attachments: attachmentPaths }
+          : undefined;
       stateManager.createThreadMessage({
         id: userMessageId,
         threadId,
         role: "user",
         content: body.content,
-        metadata: attachmentPaths.length > 0 ? { attachments: attachmentPaths } : undefined,
+        metadata: messageMetadata,
       });
       existingMessageIds.add(userMessageId);
 
