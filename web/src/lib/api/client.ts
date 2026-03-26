@@ -122,12 +122,22 @@ export interface Thread {
 	messageCount?: number;
 }
 
+export interface MessageAttachment {
+	id: string;
+	sessionId: string;
+	filename: string;
+	mimeType: string;
+	size: number;
+	path: string;
+}
+
 export interface ThreadMessage {
 	id: string;
 	threadId: string;
 	role: 'user' | 'assistant' | 'system';
 	content: string;
 	metadata: Record<string, unknown> | null;
+	attachments?: MessageAttachment[];
 	createdAt: string;
 }
 
@@ -752,6 +762,7 @@ export interface StreamCallbacks {
 
 export interface StreamOptions {
 	attachments?: string[];
+	richAttachments?: MessageAttachment[];
 	sessionId?: string;
 }
 
@@ -829,6 +840,7 @@ export function streamMessage(
 		body: JSON.stringify({
 			content,
 			attachments: options?.attachments,
+			richAttachments: options?.richAttachments,
 			sessionId: options?.sessionId
 		}),
 		signal: controller.signal
@@ -1269,11 +1281,12 @@ export interface CLIRunRecord {
 export async function executeMessage(
 	threadId: string,
 	content: string,
-	attachments?: string[]
+	attachments?: string[],
+	richAttachments?: MessageAttachment[]
 ): Promise<ExecuteResult> {
 	return apiFetch<ExecuteResult>(`/api/threads/${threadId}/execute`, {
 		method: 'POST',
-		body: JSON.stringify({ content, attachments })
+		body: JSON.stringify({ content, attachments, richAttachments })
 	});
 }
 
