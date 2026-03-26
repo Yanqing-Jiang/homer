@@ -269,6 +269,26 @@ export class MemoryIndexer {
       }
     }
 
+    // YouTube transcripts — ~/memory/youtube/*.md
+    const youtubeDir = PATHS.youtubeMemory;
+    if (existsSync(youtubeDir)) {
+      try {
+        const files = readdirSync(youtubeDir).filter(f => f.endsWith(".md"));
+        for (const file of files) {
+          const filePath = `${youtubeDir}/${file}`;
+          try {
+            const indexed = await this.indexFile(filePath, "general");
+            if (indexed) stats.indexed++;
+            else stats.skipped++;
+          } catch {
+            stats.errors++;
+          }
+        }
+      } catch (err) {
+        logger.warn({ error: err }, "Failed to index YouTube transcript files");
+      }
+    }
+
     logger.info(stats, "Completed memory file indexing");
     return stats;
   }

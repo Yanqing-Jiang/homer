@@ -36,6 +36,7 @@ export const PATHS = {
   scrapes: `${mem}/scrapes`,
   backups: `${mem}/backups`,
   skills: `${mem}/skills`,
+  youtubeMemory: `${mem}/youtube`,
 
   // Legacy files (may be removed)
   ideasMd: `${mem}/ideas.md`,

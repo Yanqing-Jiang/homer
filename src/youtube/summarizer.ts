@@ -799,6 +799,160 @@ ${summaryBody}
 }
 
 // ============================================
+// MEMORY FILE (for FTS5 + embedding indexing)
+// ============================================
+
+function writeTranscriptToMemory(
+  videoId: string,
+  videoUrl: string,
+  pass1: Pass1Result,
+  pass2: Pass2Result,
+  transcriptText: string,
+  db?: Database.Database,
+): void {
+  try {
+    const memDir = PATHS.youtubeMemory;
+    if (!existsSync(memDir)) {
+      mkdirSync(memDir, { recursive: true });
+    }
+
+    const filePath = join(memDir, `${videoId}.md`);
+    const content = `---
+videoId: ${videoId}
+videoUrl: ${videoUrl}
+title: "${(pass2.videoTitle ?? "Unknown").replace(/"/g, '\\"')}"
+channel: "${(pass2.channelName ?? "Unknown").replace(/"/g, '\\"')}"
+category: "${pass1.videoCategory}"
+relevance: ${pass2.overallRelevance}
+processedAt: ${new Date().toISOString()}
+---
+
+# ${pass2.videoTitle ?? videoId}
+
+**Channel:** ${pass2.channelName ?? "Unknown"}
+**Category:** ${pass1.videoCategory}
+**Relevance:** ${pass2.overallRelevance}/10
+
+## Transcript
+
+${transcriptText}
+`;
+
+    writeFileSync(filePath, content, "utf-8");
+    logger.info({ filePath, videoId }, "YouTube transcript written to memory directory");
+
+    // Mark reindex + embeddings pipelines dirty so the scheduler picks up the new file
+    if (db) {
+      try {
+        db.prepare(`
+          INSERT INTO pipeline_dirty (pipeline, is_dirty, last_trigger, marked_at)
+          VALUES (?, 1, ?, datetime('now'))
+          ON CONFLICT(pipeline) DO UPDATE SET
+            is_dirty = 1, last_trigger = excluded.last_trigger, marked_at = excluded.marked_at
+        `).run("reindex", "youtube_transcript");
+        db.prepare(`
+          INSERT INTO pipeline_dirty (pipeline, is_dirty, last_trigger, marked_at)
+          VALUES (?, 1, ?, datetime('now'))
+          ON CONFLICT(pipeline) DO UPDATE SET
+            is_dirty = 1, last_trigger = excluded.last_trigger, marked_at = excluded.marked_at
+        `).run("embeddings", "youtube_transcript");
+      } catch { /* pipeline_dirty table may not exist — non-fatal */ }
+    }
+  } catch (error) {
+    logger.warn({ videoId, error }, "Failed to write YouTube transcript to memory (non-fatal)");
+  }
+}
+
+// ============================================
+// BACKFILL: Write memory files for existing youtube_videos rows
+// ============================================
+
+/**
+ * Backfill ~/memory/youtube/ for all youtube_videos rows that don't yet have a memory file.
+ * Call once after deploying this refactor to catch existing corpus.
+ */
+export function backfillYouTubeMemoryFiles(db: Database.Database): { written: number; skipped: number } {
+  const stats = { written: 0, skipped: 0 };
+  const memDir = PATHS.youtubeMemory;
+  if (!existsSync(memDir)) {
+    mkdirSync(memDir, { recursive: true });
+  }
+
+  const rows = db.prepare(`
+    SELECT video_id, url, title, channel_name, transcript, pass1_classification, analysis_json, relevance_score
+    FROM youtube_videos
+    WHERE transcript IS NOT NULL AND length(transcript) > 50
+  `).all() as Array<{
+    video_id: string; url: string; title: string; channel_name: string;
+    transcript: string; pass1_classification: string; analysis_json: string; relevance_score: number;
+  }>;
+
+  for (const row of rows) {
+    const filePath = join(memDir, `${row.video_id}.md`);
+    if (existsSync(filePath)) {
+      stats.skipped++;
+      continue;
+    }
+
+    let category = "Unknown";
+    try {
+      const p1 = JSON.parse(row.pass1_classification ?? "{}");
+      category = p1.videoCategory ?? "Unknown";
+    } catch { /* ignore */ }
+
+    const content = `---
+videoId: ${row.video_id}
+videoUrl: ${row.url}
+title: "${(row.title ?? "Unknown").replace(/"/g, '\\"')}"
+channel: "${(row.channel_name ?? "Unknown").replace(/"/g, '\\"')}"
+category: "${category}"
+relevance: ${row.relevance_score ?? 0}
+processedAt: ${new Date().toISOString()}
+backfilled: true
+---
+
+# ${row.title ?? row.video_id}
+
+**Channel:** ${row.channel_name ?? "Unknown"}
+**Category:** ${category}
+**Relevance:** ${row.relevance_score ?? 0}/10
+
+## Transcript
+
+${row.transcript}
+`;
+
+    try {
+      writeFileSync(filePath, content, "utf-8");
+      stats.written++;
+    } catch {
+      logger.warn({ videoId: row.video_id }, "Failed to backfill YouTube memory file");
+    }
+  }
+
+  if (stats.written > 0) {
+    // Mark pipelines dirty for indexing
+    try {
+      db.prepare(`
+        INSERT INTO pipeline_dirty (pipeline, is_dirty, last_trigger, marked_at)
+        VALUES (?, 1, ?, datetime('now'))
+        ON CONFLICT(pipeline) DO UPDATE SET
+          is_dirty = 1, last_trigger = excluded.last_trigger, marked_at = excluded.marked_at
+      `).run("reindex", "youtube_backfill");
+      db.prepare(`
+        INSERT INTO pipeline_dirty (pipeline, is_dirty, last_trigger, marked_at)
+        VALUES (?, 1, ?, datetime('now'))
+        ON CONFLICT(pipeline) DO UPDATE SET
+          is_dirty = 1, last_trigger = excluded.last_trigger, marked_at = excluded.marked_at
+      `).run("embeddings", "youtube_backfill");
+    } catch { /* non-fatal */ }
+  }
+
+  logger.info(stats, "YouTube memory backfill complete");
+  return stats;
+}
+
+// ============================================
 // MAIN SUMMARIZE FUNCTION
 // ============================================
 
@@ -916,6 +1070,9 @@ export async function summarizeYouTubeVideo(
 
     // Write summary file mirror
     const summaryPath = writeSummaryFile(videoId, videoUrl, pass1, pass2);
+
+    // Write transcript to memory directory for indexing (FTS5 + embeddings)
+    writeTranscriptToMemory(videoId, videoUrl, pass1, pass2, transcriptText, db);
 
     // Resolve transcript file path (written by extractTranscript → saveTranscriptLocally)
     const transcriptPath = getLocalTranscriptPath(videoId);

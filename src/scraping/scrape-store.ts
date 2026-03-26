@@ -10,6 +10,7 @@
 // @ts-ignore
 import type Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
+import { extractVideoId } from "../youtube/utils.js";
 
 export interface ScrapeRecord {
   id: string;
@@ -180,6 +181,7 @@ export function pruneOldScrapes(db: Database.Database, days: number = 30): numbe
   const result = db.prepare(`
     DELETE FROM scrapes
     WHERE scraped_at < datetime('now', '-${Math.floor(days)} days')
+      AND source NOT LIKE '%youtube%'
   `).run();
   if (result.changes > 0) {
     logger.info({ deleted: result.changes, days }, "Pruned old scrapes");
@@ -394,20 +396,46 @@ export interface LinkInboxItem {
 /** Detect link type from URL */
 function detectLinkType(url: string): string {
   const u = url.toLowerCase();
-  if (u.includes("youtube.com/watch") || u.includes("youtu.be/")) return "youtube";
+  if (u.includes("youtube.com/watch") || u.includes("youtube.com/shorts/") || u.includes("youtu.be/")) return "youtube";
   if (u.includes("medium.com/") || u.includes(".medium.com")) return "medium";
   if (u.includes("twitter.com/") || u.includes("x.com/")) return "twitter";
   if (u.includes("github.com/")) return "github";
   return "website";
 }
 
-/** Add a URL to the link inbox. Returns true if inserted, false if duplicate. */
+/** Add a URL to the link inbox. Returns true if inserted, false if duplicate/already processed. */
 export function addToLinkInbox(
   db: Database.Database,
   url: string,
   opts?: { source?: string; title?: string; notes?: string; submittedBy?: string },
 ): boolean {
   const linkType = detectLinkType(url);
+
+  // Dedup: skip YouTube URLs already processed or already queued
+  if (linkType === "youtube") {
+    const videoId = extractVideoId(url);
+    if (videoId) {
+      try {
+        const exists = db.prepare("SELECT 1 FROM youtube_videos WHERE video_id = ?").get(videoId);
+        if (exists) {
+          logger.info({ url, videoId }, "YouTube video already processed, skipping link inbox");
+          return false;
+        }
+      } catch { /* youtube_videos table may not exist — proceed normally */ }
+
+      // Also check if already queued in link_inbox under a different URL form
+      try {
+        const queued = db.prepare(
+          "SELECT 1 FROM link_inbox WHERE link_type = 'youtube' AND url LIKE ? AND status IN ('pending', 'processing')"
+        ).get(`%${videoId}%`);
+        if (queued) {
+          logger.info({ url, videoId }, "YouTube video already queued in link inbox, skipping");
+          return false;
+        }
+      } catch { /* non-fatal */ }
+    }
+  }
+
   const id = `link_${Date.now()}_${linkType}`;
   try {
     const result = db.prepare(`
