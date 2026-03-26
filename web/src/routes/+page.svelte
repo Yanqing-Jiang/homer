@@ -38,6 +38,8 @@
 	let streamingSteps = $state<Array<api.StepEvent & { startedAt: number; completed: boolean }>>([]);
 	let currentAbort = $state<{ abort: () => void } | null>(null);
 	let chatError = $state<string | null>(null);
+	let lastFailedMessage = $state<string | null>(null);
+	let canRetry = $state(false);
 	let sessionExpired = $state(false);
 	let activeStreamGen = 0; // generation counter to guard stale callbacks
 
@@ -54,6 +56,9 @@
 	let currentSessionName = $state('New Session');
 
 	// Unread state is now server-authoritative (no more localStorage)
+	let anySessionUnread = $derived(
+		sessions.some(s => s.id !== sessionId && s.hasUnread)
+	);
 
 	// File upload state
 	let attachedFiles = $state<api.Upload[]>([]);
@@ -377,9 +382,11 @@
 						loadSessions();
 					}
 					// Auto-send pending message after session is restored
+					// Use jitter for bootstrap messages (e.g. "Go" from idea explore) to avoid rate limit pile-up
 					if (msgToSend) {
 						chatInput = msgToSend;
-						setTimeout(() => handleSendMessage(), 50);
+						const delay = msgToSend === 'Go' ? 800 + Math.random() * 400 : 50;
+						setTimeout(() => handleSendMessage(), delay);
 					}
 				} catch (e) {
 					console.error('Failed to restore session:', e);
@@ -733,7 +740,12 @@ Just confirm when done. Keep your response brief.`;
 		const hasPendingUploads = chatInputComponent?.hasPendingUploads() ?? false;
 		if ((!chatInput.trim() && attachedFiles.length === 0) || hasPendingUploads || isStreaming) return;
 
+		// Clear previous error state on new send
+		chatError = null;
+		canRetry = false;
+
 		const typedMessage = chatInput.trim();
+		lastFailedMessage = typedMessage || null;
 		const currentAttachmentPaths = attachedFiles.map((f) => f.path).filter(Boolean);
 		const currentAttachmentIds = attachedFiles.map((f) => f.id).filter(Boolean);
 		const userMessage = typedMessage || `Attached files: ${attachedFiles.map((f) => f.filename).join(', ')}`;
@@ -900,6 +912,9 @@ Just confirm when done. Keep your response brief.`;
 							sessionExpired = true;
 						}
 						chatError = data.message;
+						if (data.recoverable || data.code === 'RATE_LIMIT') {
+							canRetry = true;
+						}
 						resetStreamingState();
 					},
 					onDisconnect: (data) => {
@@ -1231,6 +1246,7 @@ Just confirm when done. Keep your response brief.`;
 								{currentSessionName}
 								bind:isOpen={showSessionDropdown}
 								hasUnread={(sess) => sess.id !== sessionId && sess.hasUnread}
+								hasAnyUnread={anySessionUnread}
 								onSelectSession={(sess) => selectSession(sess)}
 								onNewSession={() => selectSession(null)}
 								onRenameSession={handleRenameSession}
@@ -1247,7 +1263,10 @@ Just confirm when done. Keep your response brief.`;
 					{#if chatError}
 						<div class="chat-error">
 							<span>{chatError}</span>
-							<button onclick={() => chatError = null}>Dismiss</button>
+							{#if canRetry && lastFailedMessage}
+								<button onclick={() => { chatError = null; canRetry = false; chatInput = lastFailedMessage ?? ''; handleSendMessage(); }}>Retry</button>
+							{/if}
+							<button onclick={() => { chatError = null; canRetry = false; }}>Dismiss</button>
 						</div>
 					{/if}
 
