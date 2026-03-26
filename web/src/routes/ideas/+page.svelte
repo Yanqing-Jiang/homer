@@ -234,8 +234,12 @@
 	async function startExploration(idea: api.Idea) {
 		startingExploration = true;
 		try {
-			// Navigate to the dedicated explore route
-			window.location.href = `/ideas/${idea.id}/explore`;
+			const result = await api.startIdeaExploration(idea.id);
+			const params = new URLSearchParams({ session: result.sessionId, thread: result.threadId });
+			if (!result.resumed) {
+				params.set('message', 'Go');
+			}
+			window.location.href = `/?${params.toString()}`;
 		} catch (e) {
 			console.error('Failed to start exploration:', e);
 			toast.error(`Failed to start exploration: ${e instanceof Error ? e.message : 'Unknown error'}`);

@@ -770,8 +770,8 @@ export async function runContentScraper(db: Database.Database): Promise<{
   try {
     // Ensure Chrome CDP is available for browser-based scraping
     try {
-      chromeHandle = await ensureCDP();
-      logger.info({ pid: chromeHandle.pid }, "Chrome CDP ready for content scraper");
+      chromeHandle = await ensureCDP({ headed: true });
+      logger.info({ pid: chromeHandle.pid }, "Chrome CDP ready for content scraper (headed)");
     } catch (err) {
       logger.warn({ error: String(err) }, "Chrome CDP launch failed — browser scrapes may fail");
     }

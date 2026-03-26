@@ -7,6 +7,7 @@
 		currentSessionName,
 		isOpen = $bindable(false),
 		hasUnread,
+		hasAnyUnread = false,
 		onSelectSession,
 		onNewSession,
 		onRenameSession,
@@ -18,6 +19,7 @@
 		currentSessionName: string;
 		isOpen: boolean;
 		hasUnread: (sess: ChatSession) => boolean;
+		hasAnyUnread?: boolean;
 		onSelectSession: (sess: ChatSession) => void;
 		onNewSession: () => void;
 		onRenameSession: (id: string, name: string) => Promise<void>;
@@ -88,7 +90,11 @@
 {/if}
 
 <div class="session-selector">
-	<button class="session-dropdown-btn" onclick={toggle}>
+	<button
+		class="session-dropdown-btn"
+		onclick={toggle}
+		aria-label="{currentSessionName}{hasAnyUnread ? ' (unread messages)' : ''}"
+	>
 		<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
 			<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
 		</svg>
@@ -96,6 +102,9 @@
 		<svg viewBox="0 0 24 24" fill="currentColor" width="10" height="10" class="chevron" class:open={isOpen}>
 			<path d="M7 10l5 5 5-5z"/>
 		</svg>
+		{#if hasAnyUnread}
+			<span class="btn-unread-badge" aria-hidden="true"></span>
+		{/if}
 	</button>
 	{#if isOpen}
 		<div class="session-dropdown">
@@ -180,6 +189,7 @@
 	}
 
 	.session-dropdown-btn {
+		position: relative;
 		display: flex;
 		align-items: center;
 		gap: 6px;
@@ -320,6 +330,24 @@
 	@keyframes pulse {
 		0%, 100% { opacity: 1; }
 		50% { opacity: 0.4; }
+	}
+
+	.btn-unread-badge {
+		position: absolute;
+		top: -2px;
+		right: -2px;
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: #dc2626;
+		border: 2px solid rgba(0, 0, 0, 0.3);
+		pointer-events: none;
+		animation: badge-appear 0.2s ease-out;
+	}
+
+	@keyframes badge-appear {
+		from { transform: scale(0); opacity: 0; }
+		to { transform: scale(1); opacity: 1; }
 	}
 
 	.session-rename-btn {

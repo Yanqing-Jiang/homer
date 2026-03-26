@@ -342,6 +342,20 @@ export function registerStreamingRoutes(
           .find((message) => message.role === "assistant" && !existingMessageIds.has(message.id));
 
         cleanup();
+
+        // Emit error event for failed runs so the frontend can show retry UI
+        if (result.status === "failed") {
+          const errorOutput = (result.output ?? "").trim();
+          const isRateLimit = /rate.?limit|quota|429|capacity|exhausted/i.test(errorOutput);
+          sendEvent("error", {
+            message: isRateLimit ? "Rate limit reached. Try again in a moment." : "Run failed.",
+            recoverable: isRateLimit,
+            code: isRateLimit ? "RATE_LIMIT" : "RUN_FAILED",
+          });
+          endReply();
+          return;
+        }
+
         sendEvent("complete", {
           messageId: newAssistantMessage?.id ?? null,
           runId,

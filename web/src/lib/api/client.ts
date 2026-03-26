@@ -744,7 +744,7 @@ export interface StreamCallbacks {
 	onStart?: (data: { userMessageId: string; runId?: string }) => void;
 	onDelta?: (data: { content: string }) => void;
 	onStep?: (data: StepEvent) => void;
-	onComplete?: (data: { messageId: string; exitCode?: number }) => void;
+	onComplete?: (data: { messageId: string; exitCode?: number; status?: string; executor?: string }) => void;
 	onError?: (data: { message: string; recoverable: boolean; code?: string }) => void;
 	/** Called when SSE disconnects before completion — provides runId for poll fallback */
 	onDisconnect?: (data: { runId: string | null }) => void;
