@@ -30,36 +30,68 @@ export interface CDPHandle {
  * Ensure a CDP endpoint is available on the given port.
  * Returns a handle with a cleanup function.
  */
-export async function ensureCDP(port: number = CDP_PORT): Promise<CDPHandle> {
+async function isHeadless(port: number): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2_000);
+    const resp = await fetch(`http://localhost:${port}/json/version`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!resp.ok) return false;
+    const data = (await resp.json()) as { "User-Agent"?: string };
+    return /HeadlessChrome/i.test(data["User-Agent"] ?? "");
+  } catch {
+    return false;
+  }
+}
+
+export interface EnsureCDPOptions {
+  port?: number;
+  /** Force headed Chrome (avoids HeadlessChrome UA that triggers bot detection). */
+  headed?: boolean;
+}
+
+export async function ensureCDP(opts: EnsureCDPOptions = {}): Promise<CDPHandle> {
+  const port = opts.port ?? CDP_PORT;
+  const forceHeaded = opts.headed ?? false;
+
   // 1. Check if CDP is already available
   if (await isCDPAvailable(port)) {
-    logger.debug({ port }, "CDP already available");
-    return { pid: 0, cleanup: () => {} };
-  }
-
-  // 2. Try headless launch
-  logger.info({ port }, "Launching headless Chrome with CDP");
-  try {
-    const handle = await launchChrome(port, true);
-    if (await waitForCDP(port)) {
-      logger.info({ pid: handle.pid, port }, "Headless Chrome CDP ready");
-      return handle;
+    // If we need headed but current instance is headless, skip reuse
+    if (forceHeaded && (await isHeadless(port))) {
+      logger.info({ port }, "Existing CDP is headless but headed requested — launching new instance");
+    } else {
+      logger.debug({ port }, "CDP already available");
+      return { pid: 0, cleanup: () => {} };
     }
-    // Headless didn't come up — kill it and try headed
-    handle.cleanup();
-  } catch (err) {
-    logger.warn({ error: err instanceof Error ? err.message : String(err) }, "Headless Chrome launch failed");
   }
 
-  // 3. Fallback: headed launch
-  logger.info({ port }, "Falling back to headed Chrome with CDP");
+  if (!forceHeaded) {
+    // 2. Try headless launch
+    logger.info({ port }, "Launching headless Chrome with CDP");
+    try {
+      const handle = await launchChrome(port, true);
+      if (await waitForCDP(port)) {
+        logger.info({ pid: handle.pid, port }, "Headless Chrome CDP ready");
+        return handle;
+      }
+      // Headless didn't come up — kill it and try headed
+      handle.cleanup();
+    } catch (err) {
+      logger.warn({ error: err instanceof Error ? err.message : String(err) }, "Headless Chrome launch failed");
+    }
+  }
+
+  // 3. Headed launch (fallback or forced)
+  logger.info({ port, forced: forceHeaded }, "Launching headed Chrome with CDP");
   const handle = await launchChrome(port, false);
   if (await waitForCDP(port)) {
     logger.info({ pid: handle.pid, port }, "Headed Chrome CDP ready");
     return handle;
   }
 
-  // Both failed — clean up and throw
+  // Failed — clean up and throw
   handle.cleanup();
   throw new Error(`Failed to launch Chrome with CDP on port ${port}`);
 }
