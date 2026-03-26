@@ -9,6 +9,7 @@ import type { Context } from "grammy";
 import { logger } from "../../utils/logger.js";
 import { OvernightTaskStore } from "../../overnight/task-store.js";
 import { summaryExists } from "../../youtube/summarizer.js";
+import { extractVideoId as extractVideoIdFromUrl } from "../../youtube/utils.js";
 import type { StateManager } from "../../state/manager.js";
 import type { YouTubeSummaryMetadata } from "../../overnight/types.js";
 // @ts-ignore
@@ -35,17 +36,14 @@ export function initializeYouTubeHandler(stateManager: StateManager): void {
 // URL DETECTION
 // ============================================
 
-/**
- * Regex to match bare YouTube URLs (no surrounding text).
- * Captures the 11-character video ID.
- */
-const YOUTUBE_URL_REGEX =
+/** Regex to validate that the entire message is a bare YouTube URL (no surrounding text). */
+const BARE_YOUTUBE_URL_REGEX =
   /^(?:https?:\/\/)?(?:(?:www\.|m\.)?youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([\w-]{11})(?:\S*)$/;
 
 function extractVideoId(text: string): string | null {
   const trimmed = text.trim();
-  const match = trimmed.match(YOUTUBE_URL_REGEX);
-  return match?.[1] ?? null;
+  if (!BARE_YOUTUBE_URL_REGEX.test(trimmed)) return null;
+  return extractVideoIdFromUrl(trimmed);
 }
 
 function normalizeUrl(videoId: string): string {
