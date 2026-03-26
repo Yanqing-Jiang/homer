@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomUUID } from "crypto";
-import { existsSync, mkdirSync, writeFileSync, unlinkSync, readdirSync, statSync, readFileSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync, unlinkSync, readdirSync, statSync, readFileSync, createReadStream } from "fs";
 import { join, extname, basename } from "path";
 import { logger } from "../../utils/logger.js";
 import { config } from "../../config/index.js";
@@ -274,6 +274,40 @@ export function registerUploadsRoutes(server: FastifyInstance): void {
       reply.status(500);
       return { error: "Failed to delete upload" };
     }
+  });
+
+  // Serve raw file content (for inline previews / downloads)
+  server.get("/api/uploads/:sessionId/:id/raw", async (request: FastifyRequest, reply: FastifyReply) => {
+    const { sessionId: rawSessionId, id: rawId } = request.params as { sessionId: string; id: string };
+    // Sanitize both params to prevent path traversal
+    const sessionId = sanitizeSessionId(rawSessionId);
+    const id = rawId.replace(/[^a-zA-Z0-9_-]/g, "");
+
+    if (!id) {
+      reply.status(400);
+      return { error: "Invalid upload ID" };
+    }
+
+    const filePath = findUploadFile(sessionId, id);
+
+    if (!filePath) {
+      reply.status(404);
+      return { error: "Upload not found" };
+    }
+
+    const ext = extname(filePath).toLowerCase();
+    const mimeType = EXT_TO_MIME[ext] || "application/octet-stream";
+    const rawFilename = basename(filePath);
+    // RFC 5987 safe encoding for Content-Disposition
+    const safeFilename = rawFilename.replace(/["\\\r\n]/g, "_");
+    const isInline = mimeType.startsWith("image/") || mimeType === "application/pdf";
+
+    reply.header("Content-Type", mimeType);
+    reply.header("Content-Disposition", `${isInline ? "inline" : "attachment"}; filename="${safeFilename}"`);
+    reply.header("Cache-Control", "private, max-age=86400");
+
+    const stream = createReadStream(filePath);
+    return reply.send(stream);
   });
 }
 
