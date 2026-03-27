@@ -58,6 +58,16 @@ interface ImpressionRecord {
 }
 const pendingImpressions = new Map<string, ImpressionRecord>();
 
+// Track active discussion reply targets (telegram messageId -> discussion context)
+interface PendingDiscussion {
+  discussionId: string;
+  packetId?: string;
+  ideaId?: string;
+  title: string;
+  createdAt: number;
+}
+const pendingDiscussions = new Map<number, PendingDiscussion>();
+
 let stateManagerRef: StateManager | null = null;
 
 // Register Maps for cleanup via shared StaleMapCleaner (30min interval, replaces per-module setInterval)
@@ -66,6 +76,9 @@ staleMapCleaner.register(pendingInstructionRequests, "approval:instructions");
 staleMapCleaner.register(pendingImpressions, "approval:impressions", {
   maxAgeMs: 86400000, // 24 hours
   timestampKey: "displayedAt",
+});
+staleMapCleaner.register(pendingDiscussions, "approval:discussions", {
+  maxAgeMs: 4 * 60 * 60 * 1000, // 4 hours — discussions are longer-lived
 });
 
 /**
@@ -489,6 +502,134 @@ async function loadPacketContextForIdea(db: any, idea: ParsedIdea): Promise<stri
 }
 
 /**
+ * Build a concise Telegram HTML breakdown of a source packet from enrichment data.
+ * No LLM call — uses structured enrichment already produced by the pipeline.
+ */
+function buildPacketBreakdown(packet: SourcePacket): string {
+  const parts: string[] = [];
+  const e = packet.enrichment;
+
+  parts.push(`<b>${escapeHtml(packet.title ?? "Source Packet")}</b>\n`);
+
+  // Core idea
+  if (e?.deepDive?.coreClaim) {
+    parts.push(`<b>核心观点:</b> ${escapeHtml(e.deepDive.coreClaim)}`);
+  } else if (e?.candidate?.content) {
+    const preview = e.candidate.content.slice(0, 400);
+    parts.push(`<b>核心观点:</b> ${escapeHtml(preview)}${e.candidate.content.length > 400 ? "..." : ""}`);
+  } else if (packet.summary) {
+    parts.push(`<b>核心观点:</b> ${escapeHtml(packet.summary)}`);
+  }
+
+  // Why it matters
+  const whyParts: string[] = [];
+  if (e?.candidate?.relevance) whyParts.push(e.candidate.relevance);
+  if (e?.critique?.strengths?.length) whyParts.push(e.critique.strengths.slice(0, 2).join(". "));
+  if (whyParts.length) {
+    parts.push(`\n<b>为什么重要:</b> ${escapeHtml(whyParts.join(". "))}`);
+  }
+
+  // Homer/project relevance
+  if (e?.homerImprovement?.relevant && e.homerImprovement.summary) {
+    const area = e.homerImprovement.area ?? "";
+    const priority = e.homerImprovement.priority ?? "";
+    const suffix = area ? ` (${escapeHtml(area)}${priority ? `, ${priority}` : ""})` : "";
+    parts.push(`\n<b>Homer关联:</b> ${escapeHtml(e.homerImprovement.summary)}${suffix}`);
+  }
+
+  // Risks / open questions
+  const questions: string[] = [];
+  if (e?.critique?.risks?.length) {
+    questions.push(...e.critique.risks.slice(0, 2));
+  }
+  if (e?.deepDive?.validationPath) {
+    questions.push(`Validate: ${e.deepDive.validationPath}`);
+  }
+  if (questions.length) {
+    parts.push(`\n<b>风险与疑点:</b>`);
+    for (const q of questions) {
+      parts.push(`- ${escapeHtml(q)}`);
+    }
+  }
+
+  // Deep links
+  if (e?.deepLinks?.length) {
+    const linkStr = e.deepLinks.slice(0, 3)
+      .map((l: any) => `${escapeHtml(l.target)} (${escapeHtml(l.relationship)})`)
+      .join(", ");
+    parts.push(`\n<b>关联:</b> ${linkStr}`);
+  }
+
+  // Source URL
+  if (packet.primaryUrl) {
+    parts.push(`\n<a href="${escapeHtml(packet.primaryUrl)}">Source</a>`);
+  }
+
+  parts.push(`\n<code>${escapeHtml(packet.id)}</code>`);
+  parts.push(`\nReply to discuss.`);
+
+  return parts.join("\n");
+}
+
+/**
+ * Generate a conversational AI reply within a discussion thread.
+ * Loads discussion history and packet context, calls Sonnet.
+ */
+async function generateDiscussionReply(
+  db: any,
+  discussionId: string,
+  latestUserMessage: string,
+): Promise<string> {
+  const messages = discussionDao.getMessages(db, discussionId);
+
+  // System message (first msg) has full packet context
+  const systemContext = (messages.find(m => m.role === "system")?.content ?? "").slice(0, 6000);
+
+  // Recent conversation turns (skip system, last 10)
+  const recentTurns = messages
+    .filter(m => m.role !== "system")
+    .slice(-10)
+    .map(m => `${m.role === "user" ? "User" : "Homer"}: ${m.content}`)
+    .join("\n\n");
+
+  const prompt = `You are Homer, having a focused discussion about a source packet or idea with Yanqing.
+
+## Context
+${systemContext}
+
+## Conversation so far
+${recentTurns}
+
+## Latest message from Yanqing
+${latestUserMessage}
+
+## Instructions
+- Respond directly to what Yanqing said
+- Stay on topic. Be concise (2-4 paragraphs max)
+- Be opinionated and analytical. Challenge weak thinking. Surface non-obvious connections
+- Connect to active projects/goals (career, trading, Homer, analytics, P&G) when relevant
+- Respond in the same language the user uses (Chinese or English)
+- Output valid Telegram HTML only. No Markdown. No code fences
+- End with a follow-up question or observation to keep discussion productive`;
+
+  const { executeClaudeCommand } = await import("../../executors/claude.js");
+  const result = await executeClaudeCommand(prompt, {
+    cwd: config.paths.homerRoot,
+    model: "sonnet",
+    timeout: 60_000,
+  });
+
+  if (result.exitCode !== 0) {
+    throw new Error(result.output?.slice(0, 300) || "Discussion reply generation failed");
+  }
+
+  return (result.output ?? "")
+    .trim()
+    .replace(/^```(?:html)?\s*/i, "")
+    .replace(/\s*```$/, "");
+}
+
+/**
  * Format a source packet for Telegram morning review.
  */
 export function formatPacketForTelegram(packet: SourcePacket, index: number): string {
@@ -795,31 +936,43 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
 
       await ctx.editMessageText(formatScheduledTelegramHtml(headerMsg), { parse_mode: "HTML" });
 
-      // Record system message with full source context
-      const contextParts: string[] = [`Discussion ${msgCount > 0 ? "resumed" : "started"} from Telegram on idea: ${idea.title}`];
-      if (packetContent) {
-        contextParts.push(packetContent);
-      } else {
-        // Fall back to idea content if no packet linked
-        if (idea.content) contextParts.push(`## Idea Content\n${idea.content}`);
-        if (idea.context) contextParts.push(`## Context\n${idea.context}`);
-      }
-      if (idea.notes) contextParts.push(`## Notes\n${idea.notes}`);
-      if (idea.enrichment) {
-        try {
-          const enrichment = JSON.parse(idea.enrichment);
-          if (enrichment.deep_links?.length) {
-            contextParts.push(`## Connections\n${enrichment.deep_links.map((l: any) => `- ${l.target} (${l.relationship})`).join("\n")}`);
-          }
-        } catch { /* ignore parse errors */ }
+      // Track telegram message -> discussion mapping for reply capture
+      const telegramMessageId = ctx.callbackQuery?.message?.message_id;
+      if (telegramMessageId) {
+        pendingDiscussions.set(telegramMessageId, {
+          discussionId: discussion.id,
+          ideaId: idea.id,
+          title: idea.title,
+          createdAt: Date.now(),
+        });
       }
 
-      discussionDao.addMessage(db, {
-        discussionId: discussion.id,
-        role: "system",
-        content: contextParts.join("\n\n"),
-        metadata: { source: "telegram", ideaId: idea.id },
-      });
+      // Record system message with full source context (only for new discussions)
+      if (msgCount === 0) {
+        const contextParts: string[] = [`Discussion started from Telegram on idea: ${idea.title}`];
+        if (packetContent) {
+          contextParts.push(packetContent);
+        } else {
+          if (idea.content) contextParts.push(`## Idea Content\n${idea.content}`);
+          if (idea.context) contextParts.push(`## Context\n${idea.context}`);
+        }
+        if (idea.notes) contextParts.push(`## Notes\n${idea.notes}`);
+        if (idea.enrichment) {
+          try {
+            const enrichment = JSON.parse(idea.enrichment);
+            if (enrichment.deep_links?.length) {
+              contextParts.push(`## Connections\n${enrichment.deep_links.map((l: any) => `- ${l.target} (${l.relationship})`).join("\n")}`);
+            }
+          } catch { /* ignore parse errors */ }
+        }
+
+        discussionDao.addMessage(db, {
+          discussionId: discussion.id,
+          role: "system",
+          content: contextParts.join("\n\n"),
+          metadata: { source: "telegram", ideaId: idea.id },
+        });
+      }
 
       // Feedback tracking
       await logFeedback("talk", idea.title);
@@ -871,40 +1024,56 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       const chatId = ctx.chat?.id;
       if (!chatId) return;
 
-      let headerMsg = `💬 <b>Discussion: ${escapeHtml(packet.title ?? "Source Packet")}</b>\n`;
-      headerMsg += `<code>${escapeHtml(discussion.id)}</code>\n`;
+      // Build display message: breakdown for new discussions, resume header for existing
+      let displayMsg: string;
       if (msgCount > 0) {
-        headerMsg += `\n📝 Resuming thread (${msgCount} prior messages)\n`;
+        displayMsg = `💬 <b>Discussion: ${escapeHtml(packet.title ?? "Source Packet")}</b>\n`;
+        displayMsg += `<code>${escapeHtml(discussion.id)}</code>\n`;
+        displayMsg += `\n📝 Resuming thread (${msgCount} prior messages)\n`;
+        displayMsg += `\nReply to continue.`;
+      } else {
+        displayMsg = buildPacketBreakdown(packet);
       }
-      headerMsg += `\nReply to this message to continue the discussion.`;
-      headerMsg += `\n\n<b>Full source packet loaded</b> — raw content + deep-fetch available`;
 
-      await ctx.editMessageText(formatScheduledTelegramHtml(headerMsg), { parse_mode: "HTML" });
+      await ctx.editMessageText(formatScheduledTelegramHtml(displayMsg), { parse_mode: "HTML" });
 
-      // Record system message with full packet context
-      const packetParts: string[] = [`Discussion ${msgCount > 0 ? "resumed" : "started"} from Telegram on packet: ${packet.title ?? packet.id}`];
-      if (packet.rawContent) packetParts.push(`## Original Source Content\n${packet.rawContent}`);
-      if (packet.deepFetchContent) packetParts.push(`## Deep-Fetched Content\n${packet.deepFetchContent}`);
-      if (packet.metadata?.externalUrls?.length) {
-        packetParts.push(`## External Links\n${packet.metadata.externalUrls.join("\n")}`);
+      // Track telegram message -> discussion mapping for reply capture
+      const telegramMessageId = ctx.callbackQuery?.message?.message_id;
+      if (telegramMessageId) {
+        pendingDiscussions.set(telegramMessageId, {
+          discussionId: discussion.id,
+          packetId: packet.id,
+          title: packet.title ?? "Source Packet",
+          createdAt: Date.now(),
+        });
       }
-      if (packet.metadata?.extractedTopics?.length) {
-        packetParts.push(`## Extracted Topics\n${packet.metadata.extractedTopics.join(", ")}`);
-      }
-      if (packet.enrichment) {
-        const e = packet.enrichment;
-        if (e.deepDive?.coreClaim) packetParts.push(`## Core Claim\n${e.deepDive.coreClaim}`);
-        if (e.deepLinks?.length) {
-          packetParts.push(`## Connections\n${e.deepLinks.map(l => `- ${l.target} (${l.relationship})`).join("\n")}`);
+
+      // Record system message with full packet context (only for new discussions)
+      if (msgCount === 0) {
+        const packetParts: string[] = [`Discussion started from Telegram on packet: ${packet.title ?? packet.id}`];
+        if (packet.rawContent) packetParts.push(`## Original Source Content\n${packet.rawContent}`);
+        if (packet.deepFetchContent) packetParts.push(`## Deep-Fetched Content\n${packet.deepFetchContent}`);
+        if (packet.metadata?.externalUrls?.length) {
+          packetParts.push(`## External Links\n${packet.metadata.externalUrls.join("\n")}`);
         }
-      }
+        if (packet.metadata?.extractedTopics?.length) {
+          packetParts.push(`## Extracted Topics\n${packet.metadata.extractedTopics.join(", ")}`);
+        }
+        if (packet.enrichment) {
+          const e = packet.enrichment;
+          if (e.deepDive?.coreClaim) packetParts.push(`## Core Claim\n${e.deepDive.coreClaim}`);
+          if (e.deepLinks?.length) {
+            packetParts.push(`## Connections\n${e.deepLinks.map((l: any) => `- ${l.target} (${l.relationship})`).join("\n")}`);
+          }
+        }
 
-      discussionDao.addMessage(db, {
-        discussionId: discussion.id,
-        role: "system",
-        content: packetParts.join("\n\n"),
-        metadata: { source: "telegram", packetId: packet.id },
-      });
+        discussionDao.addMessage(db, {
+          discussionId: discussion.id,
+          role: "system",
+          content: packetParts.join("\n\n"),
+          metadata: { source: "telegram", packetId: packet.id },
+        });
+      }
     } catch (error) {
       logger.error({ error, packetId }, "Failed to start packet discussion");
       await ctx.answerCallbackQuery("Error starting discussion");
@@ -1221,6 +1390,90 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
         );
       } finally {
         pendingInstructionRequests.delete(replyTo);
+      }
+      return;
+    }
+
+    // Discussion reply handler — user replies to a discussion header or AI response
+    if (pendingDiscussions.has(replyTo)) {
+      const pending = pendingDiscussions.get(replyTo)!;
+      const userText = ctx.message.text.trim();
+      if (!userText) {
+        await ctx.reply("❌ Message cannot be empty.");
+        return;
+      }
+
+      try {
+        const db = stateManagerRef?.getDb();
+        if (!db) {
+          await ctx.reply("❌ DB unavailable");
+          return;
+        }
+
+        // Verify discussion still exists and is active
+        const discussion = discussionDao.getDiscussion(db, pending.discussionId);
+        if (!discussion || discussion.status !== "active") {
+          await ctx.reply("❌ Discussion ended or not found.");
+          pendingDiscussions.delete(replyTo);
+          return;
+        }
+
+        // Save user message
+        discussionDao.addMessage(db, {
+          discussionId: pending.discussionId,
+          role: "user",
+          content: userText,
+          metadata: { source: "telegram", telegramMessageId: ctx.message.message_id },
+        });
+
+        logger.info(
+          { discussionId: pending.discussionId, length: userText.length },
+          "User reply saved to discussion"
+        );
+
+        // Typing indicator
+        const replyChatId = ctx.chat?.id;
+        if (!replyChatId) return;
+        await ctx.api.sendChatAction(replyChatId, "typing");
+
+        // Generate AI response
+        const aiResponse = await generateDiscussionReply(db, pending.discussionId, userText);
+
+        // Save assistant message
+        discussionDao.addMessage(db, {
+          discussionId: pending.discussionId,
+          role: "assistant",
+          content: aiResponse,
+          metadata: { source: "telegram", model: "sonnet" },
+        });
+
+        // Send response (reply to user's message for visual threading)
+        const sent = await ctx.reply(
+          formatScheduledTelegramHtml(aiResponse),
+          {
+            parse_mode: "HTML",
+            reply_to_message_id: ctx.message.message_id,
+          }
+        );
+
+        // Register AI response message so user can reply to it and continue the chain
+        pendingDiscussions.set(sent.message_id, {
+          ...pending,
+          createdAt: Date.now(),
+        });
+
+        logger.info(
+          { discussionId: pending.discussionId, responseMessageId: sent.message_id },
+          "Discussion AI response sent"
+        );
+      } catch (error) {
+        logger.error({ error, discussionId: pending.discussionId }, "Discussion reply failed");
+        try {
+          await ctx.reply(
+            `⚠️ Reply failed: ${escapeHtml((error instanceof Error ? error.message : String(error)).slice(0, 200))}`,
+            { parse_mode: "HTML" }
+          );
+        } catch { /* best-effort */ }
       }
       return;
     }
