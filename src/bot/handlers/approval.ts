@@ -1051,6 +1051,17 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       return next();
     }
 
+    // Plan review revision replies
+    if (pendingPlanRevisions.has(replyTo)) {
+      const chatId = ctx.chat?.id;
+      if (chatId) {
+        const consumed = await handlePlanRevisionReply(
+          bot, stateManager, replyTo, ctx.message.text.trim(), chatId,
+        );
+        if (consumed) return;
+      }
+    }
+
     if (pendingInstructionRequests.has(replyTo)) {
       const pending = pendingInstructionRequests.get(replyTo);
       if (!pending) return next();
@@ -1304,7 +1315,368 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
 }
 
 // ============================================
-// Implementation Plan Approval
+// Plan Review Cards (Structured Approve/Revise/Deny)
+// ============================================
+
+import type { GeneratedPlan } from "../../plans/review-types.js";
+import { renderPlanCard, renderPlanDetails, renderRevisionPrompt, renderApproved, renderDenied } from "../../plans/review-renderer.js";
+import { parsePlanFromOutput } from "../../plans/review-parser.js";
+
+// Track pending revision replies (telegram messageId -> plan context)
+interface PendingPlanRevision {
+  planId: string;
+  chatId: number;
+  createdAt: number;
+}
+const pendingPlanRevisions = new Map<number, PendingPlanRevision>();
+staleMapCleaner.register(pendingPlanRevisions, "plan-revisions", {
+  maxAgeMs: 2 * 60 * 60 * 1000,  // 2 hours
+  timestampKey: "createdAt",
+});
+
+/**
+ * Create inline keyboard for plan review card.
+ * Uses plan:* namespace to avoid collision with existing a:p:* handlers.
+ */
+export function createPlanReviewKeyboard(planId: string): InlineKeyboard {
+  // Telegram 64-byte limit for callback_data
+  const maxIdLen = 64 - "plan:approve:".length;
+  const id = planId.length > maxIdLen ? planId.slice(0, maxIdLen) : planId;
+  return new InlineKeyboard()
+    .text("✅ Approve", `plan:approve:${id}`)
+    .text("✏️ Revise", `plan:revise:${id}`)
+    .text("❌ Deny", `plan:deny:${id}`);
+}
+
+/**
+ * Send a structured plan review card to Telegram.
+ * Can be called from scheduler, Claude sessions, or any executor.
+ */
+export async function sendPlanForReview(
+  bot: Bot,
+  stateManager: StateManager,
+  chatId: number,
+  plan: GeneratedPlan,
+): Promise<number | null> {
+  // Store structured plan
+  stateManager.savePlanReview(
+    plan.id,
+    JSON.stringify(plan),
+    plan.title,
+    plan.riskLevel,
+    plan.source,
+    chatId,
+  );
+
+  // Also save raw text in old table for backward compat
+  if (plan.rawText) {
+    stateManager.savePendingPlan(plan.id, plan.rawText);
+  }
+
+  try {
+    // Send summary card
+    const card = renderPlanCard(plan);
+    const cardMsg = await bot.api.sendMessage(chatId, card, {
+      parse_mode: "HTML",
+      reply_markup: createPlanReviewKeyboard(plan.id),
+    });
+
+    // Update with message ID
+    stateManager.updatePlanReviewStatus(plan.id, "pending_review", {
+      cardMessageId: cardMsg.message_id,
+    });
+
+    // Send detail messages if plan is large
+    const details = renderPlanDetails(plan);
+    for (const detail of details) {
+      await bot.api.sendMessage(chatId, detail, { parse_mode: "HTML" });
+    }
+
+    logger.info({ planId: plan.id, phases: plan.phases.length }, "Plan review card sent");
+    return cardMsg.message_id;
+  } catch (err) {
+    logger.error({ planId: plan.id, error: err }, "Failed to send plan review card");
+    return null;
+  }
+}
+
+/**
+ * Register plan review card callback handlers (plan:approve, plan:revise, plan:deny).
+ */
+export function registerPlanReviewCallbacks(bot: Bot, stateManager: StateManager): void {
+
+  // ── Approve ──
+  bot.callbackQuery(/^plan:approve:(.+)$/, async (ctx) => {
+    const planId = ctx.match?.[1];
+    if (!planId) { await ctx.answerCallbackQuery("Invalid"); return; }
+
+    const review = stateManager.getPlanReview(planId);
+    if (!review || review.status !== "pending_review") {
+      await ctx.answerCallbackQuery("Plan not found or already processed");
+      return;
+    }
+
+    const plan: GeneratedPlan = JSON.parse(review.planJson);
+
+    // Edit card to approved
+    await ctx.editMessageText(renderApproved(plan), { parse_mode: "HTML" });
+    await ctx.answerCallbackQuery("Plan approved — executing!");
+
+    stateManager.updatePlanReviewStatus(planId, "approved", { decidedAt: true });
+    logger.info({ planId }, "Plan approved via review card");
+
+    try {
+      recordFeedback(stateManager.getDb(), {
+        contentType: "plan",
+        contentId: planId,
+        action: "approve",
+        source: "telegram",
+        delta: 0.15,
+      });
+    } catch { /* best-effort */ }
+
+    // Execute plan
+    const chatId = ctx.chat?.id;
+    if (chatId) {
+      stateManager.updatePlanReviewStatus(planId, "executing");
+      stateManager.clearPendingPlan(planId);
+
+      import("../../executors/claude.js").then(({ executeClaudeCommand }) => {
+        const rawPlan = plan.rawText || review.planJson;
+        const prompt = `You are implementing an approved Homer improvement plan.
+
+## The Plan
+
+${rawPlan}
+
+## Instructions
+
+1. Read the relevant source files mentioned in the plan.
+2. Implement the changes described. Use your judgment on the best approach.
+3. After making changes, run \`npm run build\` in ~/homer/ to verify.
+4. If the build fails, fix the issues until it passes.
+5. Commit your changes with a descriptive message.
+6. Do NOT push to remote, restart the daemon, or modify .env/credentials/CLAUDE.md.
+7. Do NOT create git branches — work directly on the current branch.
+
+Output a brief summary of what you changed and whether the build passes.`;
+
+        executeClaudeCommand(prompt, {
+          cwd: "/Users/yj/homer",
+          model: "opus",
+          timeout: 20 * 60 * 1000,
+        }).then(async (result) => {
+          stateManager.updatePlanReviewStatus(planId, "completed");
+          const summary = (result.output || "completed").slice(0, 1500);
+          try {
+            await bot.api.sendMessage(chatId,
+              `✅ <b>Plan implemented</b>\n<b>${escapeHtml(plan.title)}</b>\n\n${escapeHtml(summary)}`,
+              { parse_mode: "HTML" }
+            );
+          } catch { /* best effort */ }
+        }).catch(async (err) => {
+          stateManager.updatePlanReviewStatus(planId, "completed", { feedback: String(err).slice(0, 500) });
+          logger.error({ planId, error: err }, "Plan execution failed");
+          try {
+            await bot.api.sendMessage(chatId,
+              `❌ <b>Plan failed</b>\n<b>${escapeHtml(plan.title)}</b>\n<code>${escapeHtml(String(err).slice(0, 500))}</code>`,
+              { parse_mode: "HTML" }
+            );
+          } catch { /* best effort */ }
+        });
+      }).catch(err => logger.error({ planId, error: err }, "Failed to import claude executor"));
+    }
+  });
+
+  // ── Revise ──
+  bot.callbackQuery(/^plan:revise:(.+)$/, async (ctx) => {
+    const planId = ctx.match?.[1];
+    if (!planId) { await ctx.answerCallbackQuery("Invalid"); return; }
+
+    const review = stateManager.getPlanReview(planId);
+    if (!review || review.status !== "pending_review") {
+      await ctx.answerCallbackQuery("Plan not found or already processed");
+      return;
+    }
+
+    const plan: GeneratedPlan = JSON.parse(review.planJson);
+
+    // Edit card to show revision requested
+    await ctx.editMessageText(renderRevisionPrompt(plan), { parse_mode: "HTML" });
+    await ctx.answerCallbackQuery("Reply with what to change");
+
+    stateManager.updatePlanReviewStatus(planId, "awaiting_revision");
+
+    // Send force_reply prompt
+    const chatId = ctx.chat?.id;
+    if (chatId) {
+      try {
+        const promptMsg = await bot.api.sendMessage(chatId, renderRevisionPrompt(plan), {
+          parse_mode: "HTML",
+          reply_markup: { force_reply: true, selective: true },
+        });
+
+        pendingPlanRevisions.set(promptMsg.message_id, {
+          planId,
+          chatId,
+          createdAt: Date.now(),
+        });
+      } catch (err) {
+        logger.error({ planId, error: err }, "Failed to send revision prompt");
+      }
+    }
+  });
+
+  // ── Deny ──
+  bot.callbackQuery(/^plan:deny:(.+)$/, async (ctx) => {
+    const planId = ctx.match?.[1];
+    if (!planId) { await ctx.answerCallbackQuery("Invalid"); return; }
+
+    const review = stateManager.getPlanReview(planId);
+    if (!review || review.status !== "pending_review") {
+      await ctx.answerCallbackQuery("Plan not found or already processed");
+      return;
+    }
+
+    const plan: GeneratedPlan = JSON.parse(review.planJson);
+
+    await ctx.editMessageText(renderDenied(plan), { parse_mode: "HTML" });
+    await ctx.answerCallbackQuery("Plan denied");
+
+    stateManager.updatePlanReviewStatus(planId, "denied", { decidedAt: true });
+    stateManager.clearPendingPlan(planId);
+
+    logger.info({ planId }, "Plan denied via review card");
+
+    try {
+      recordFeedback(stateManager.getDb(), {
+        contentType: "plan",
+        contentId: planId,
+        action: "reject",
+        source: "telegram",
+        delta: -0.1,
+      });
+    } catch { /* best-effort */ }
+  });
+
+  logger.info("Plan review card callbacks registered");
+}
+
+/**
+ * Handle revision reply — called from the main message:text handler.
+ * Returns true if the message was consumed as a revision reply.
+ */
+export async function handlePlanRevisionReply(
+  bot: Bot,
+  stateManager: StateManager,
+  replyToMessageId: number,
+  feedbackText: string,
+  chatId: number,
+): Promise<boolean> {
+  const pending = pendingPlanRevisions.get(replyToMessageId);
+  if (!pending) return false;
+
+  pendingPlanRevisions.delete(replyToMessageId);
+
+  const review = stateManager.getPlanReview(pending.planId);
+  if (!review) {
+    await bot.api.sendMessage(chatId, `❌ Plan not found: <code>${escapeHtml(pending.planId)}</code>`, { parse_mode: "HTML" });
+    return true;
+  }
+
+  const oldPlan: GeneratedPlan = JSON.parse(review.planJson);
+
+  // Store feedback
+  stateManager.addPlanRevisionFeedback(pending.planId, oldPlan.revisionNumber, feedbackText);
+  stateManager.updatePlanReviewStatus(pending.planId, "revising");
+
+  // Get full revision history
+  const history = stateManager.getPlanRevisionHistory(pending.planId);
+  const historyContext = history.map(h => `Revision ${h.revisionNumber}: ${h.feedbackText}`).join("\n");
+
+  await bot.api.sendMessage(chatId, `🔄 <b>Revising plan...</b>\n<i>${escapeHtml(feedbackText.slice(0, 200))}</i>`, { parse_mode: "HTML" });
+
+  try {
+    const { executeClaudeCommand } = await import("../../executors/claude.js");
+    const prompt = `You are revising a Homer implementation plan based on user feedback.
+
+## Original Plan
+${oldPlan.rawText || JSON.stringify(oldPlan, null, 2)}
+
+## Revision History
+${historyContext}
+
+## Latest Feedback
+${feedbackText}
+
+## Instructions
+1. Read the original plan carefully.
+2. Apply the user's feedback to produce a REVISED plan.
+3. Keep the same structure: ## Implementation Plan, ### Step N:, **Files:**, **Risk:**
+4. Only change what the feedback asks for. Keep everything else.
+5. Output ONLY the revised plan text, nothing else.`;
+
+    const result = await executeClaudeCommand(prompt, {
+      cwd: "/Users/yj/homer",
+      model: "sonnet",
+      timeout: 90_000,
+    });
+
+    if (result.exitCode !== 0) throw new Error(result.output?.slice(0, 300) || "Revision failed");
+
+    // Parse new plan
+    const newPlan = parsePlanFromOutput(result.output || "", oldPlan.source);
+    newPlan.revisionNumber = oldPlan.revisionNumber + 1;
+    newPlan.id = oldPlan.id;  // Keep same ID, bump version
+
+    // Mark old as superseded
+    stateManager.updatePlanReviewStatus(pending.planId, "superseded");
+
+    // Save and send new card
+    stateManager.savePlanReview(
+      newPlan.id,
+      JSON.stringify(newPlan),
+      newPlan.title,
+      newPlan.riskLevel,
+      newPlan.source,
+      chatId,
+    );
+    if (newPlan.rawText) stateManager.savePendingPlan(newPlan.id, newPlan.rawText);
+
+    // Send new card
+    const card = renderPlanCard(newPlan);
+    const cardMsg = await bot.api.sendMessage(chatId, card, {
+      parse_mode: "HTML",
+      reply_markup: createPlanReviewKeyboard(newPlan.id),
+    });
+
+    stateManager.updatePlanReviewStatus(newPlan.id, "pending_review", {
+      cardMessageId: cardMsg.message_id,
+      revisionNumber: newPlan.revisionNumber,
+    });
+
+    // Send details if needed
+    const details = renderPlanDetails(newPlan);
+    for (const detail of details) {
+      await bot.api.sendMessage(chatId, detail, { parse_mode: "HTML" });
+    }
+
+    logger.info({ planId: newPlan.id, revision: newPlan.revisionNumber }, "Plan revised and resent");
+  } catch (err) {
+    logger.error({ planId: pending.planId, error: err }, "Plan revision failed");
+    // Restore to pending_review so user can try again
+    stateManager.updatePlanReviewStatus(pending.planId, "pending_review");
+    await bot.api.sendMessage(chatId,
+      `❌ <b>Revision failed</b>\n<code>${escapeHtml(String(err).slice(0, 300))}</code>\n\nOriginal plan restored. Try again.`,
+      { parse_mode: "HTML" }
+    );
+  }
+
+  return true;
+}
+
+// ============================================
+// Implementation Plan Approval (Legacy)
 // ============================================
 
 /**
