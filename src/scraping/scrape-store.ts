@@ -56,23 +56,28 @@ export function insertScrape(db: Database.Database, scrape: ScrapeRecord): boole
 }
 
 /**
- * Get unprocessed scrapes, optionally filtered by recency.
+ * Get unprocessed scrapes, optionally filtered by recency and excluded sources.
  */
 export function getUnprocessedScrapes(
   db: Database.Database,
   hoursAgo?: number,
+  excludeSources?: string[],
 ): StoredScrape[] {
   const since = hoursAgo
     ? `AND scraped_at > datetime('now', '-${Math.floor(hoursAgo)} hours')`
+    : "";
+
+  const exclude = excludeSources?.length
+    ? `AND source NOT IN (${excludeSources.map(() => "?").join(", ")})`
     : "";
 
   return db.prepare(`
     SELECT id, source, url, title, author, raw_content, metadata,
            scraped_at, processed_at, idea_id, quality_score
     FROM scrapes
-    WHERE processed_at IS NULL ${since}
+    WHERE processed_at IS NULL ${since} ${exclude}
     ORDER BY scraped_at DESC
-  `).all() as StoredScrape[];
+  `).all(...(excludeSources ?? [])) as StoredScrape[];
 }
 
 /**

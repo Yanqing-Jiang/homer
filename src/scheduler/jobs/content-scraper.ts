@@ -35,7 +35,7 @@ import {
 import { cleanAgentOutput } from "../../scraping/clean-output.js";
 import { htmlToMarkdown, extractDeepLinks, extractImages, type DeepLink, type ImageRef } from "../../scraping/html-to-markdown.js";
 import { ensureCDP } from "../../scraping/chrome-launcher.js";
-import { insertScrape } from "../../scraping/scrape-store.js";
+import { extractAndStoreHooks } from "../../ideas/content-hooks.js";
 import { LINKEDIN_CODEX_SKILLS, MEDIUM_CODEX_SKILLS } from "../../scraping/skill-paths.js";
 import { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
@@ -510,7 +510,8 @@ async function sendScraperAlert(message: string): Promise<void> {
  * Biases toward Yanqing's interests: AI agents, quant, TypeScript, building tools.
  * Penalizes generic clickbait.
  */
-function scoreTrendingPost(post: ScrapedPost): number {
+/** Score a trending post by topic relevance. Available for future content-hook scoring. */
+export function scoreTrendingPost(post: ScrapedPost): number {
   const text = `${post.title} ${post.content ?? ""}`.toLowerCase();
   let score = 5; // base
 
@@ -901,29 +902,13 @@ export async function runContentScraper(db: Database.Database): Promise<{
           if (trendingPosts.length > 0) {
             mediumTrendingPosts = trendingPosts;
 
-            let trendingScrapes = 0;
+            // Route to content_hooks (NOT scrapes) — these are copywriting patterns, not ideas
+            let hooksStored = 0;
             for (const post of trendingPosts) {
-              const key = `med_${slugify(post.title).slice(0, 30)}_${contentHash(post.content).slice(0, 8)}`;
-              const inserted = insertScrape(db, {
-                id: key,
-                source: "medium-trending",
-                url: post.link,
-                title: post.title,
-                author: post.author,
-                raw_content: post.content,
-                metadata: JSON.stringify({
-                  topic: post.topic,
-                  first_paragraph: post.first_paragraph,
-                  hook_analysis: post.hook_analysis,
-                  access: post.access,
-                  claps: post.claps,
-                  score: scoreTrendingPost(post),
-                }),
-              });
-              if (inserted) trendingScrapes++;
+              hooksStored += extractAndStoreHooks(db, post, "medium");
             }
-            if (trendingScrapes > 0) {
-              logger.info({ count: trendingScrapes }, "Wrote Medium For You posts to scrapes table");
+            if (hooksStored > 0) {
+              logger.info({ count: hooksStored }, "Stored Medium For You posts as content hooks");
             }
 
             writeFileSync(
@@ -994,6 +979,12 @@ export async function runContentScraper(db: Database.Database): Promise<{
         const metrics = recordMetrics(db, linkedinPosts, "linkedin", scrapeTime);
         results.push(`LinkedIn: ${linkedinPosts.length} top post scraped via Codex, ${newPosts.length} new, ${written} files updated, ${metrics} metrics recorded`);
         scrapeSucceeded = true;
+        // Also extract content hooks from LinkedIn posts
+        let liHooks = 0;
+        for (const post of linkedinPosts) {
+          liHooks += extractAndStoreHooks(db, post, "linkedin");
+        }
+        if (liHooks > 0) logger.info({ count: liHooks }, "Stored LinkedIn posts as content hooks");
         logger.info({ total: linkedinPosts.length, new: newPosts.length }, "LinkedIn scrape complete");
       } else if (!results.some((r) => r.startsWith("LinkedIn:"))) {
         results.push("LinkedIn: no posts parsed from scrape output");
@@ -1004,8 +995,8 @@ export async function runContentScraper(db: Database.Database): Promise<{
       logger.error({ error: msg }, "LinkedIn processing error");
     }
 
-    // PHASE 3a: Trending idea creation now handled by idea-synthesizer (reads from scrapes table)
-    results.push("Trending ideas: deferred to idea-synthesizer");
+    // PHASE 3a: Medium/LinkedIn content now routes to content_hooks (not idea pipeline)
+    results.push("Trending content: stored as content hooks (not ideas)");
 
     // =========================================================
     // PHASE 3b: Post-scrape pattern analysis → patterns.md
