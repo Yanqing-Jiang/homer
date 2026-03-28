@@ -5,7 +5,7 @@
  * Strategy: check existing CDP → headless launch → headed fallback.
  */
 
-import { spawn, type ChildProcess } from "child_process";
+import { execSync, spawn, type ChildProcess } from "child_process";
 import { cpSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { logger } from "../utils/logger.js";
@@ -58,9 +58,10 @@ export async function ensureCDP(opts: EnsureCDPOptions = {}): Promise<CDPHandle>
 
   // 1. Check if CDP is already available
   if (await isCDPAvailable(port)) {
-    // If we need headed but current instance is headless, skip reuse
+    // If we need headed but current instance is headless, kill it first
     if (forceHeaded && (await isHeadless(port))) {
-      logger.info({ port }, "Existing CDP is headless but headed requested — launching new instance");
+      logger.info({ port }, "Existing CDP is headless but headed requested — killing headless instance");
+      await killCDPOnPort(port);
     } else {
       logger.debug({ port }, "CDP already available");
       return { pid: 0, cleanup: () => {} };
@@ -94,6 +95,30 @@ export async function ensureCDP(opts: EnsureCDPOptions = {}): Promise<CDPHandle>
   // Failed — clean up and throw
   handle.cleanup();
   throw new Error(`Failed to launch Chrome with CDP on port ${port}`);
+}
+
+async function killCDPOnPort(port: number): Promise<void> {
+  try {
+    // Find the main Chrome process listening on this port (not helper/renderer children)
+    const output = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
+    const pids = output.split("\n").filter(Boolean);
+    for (const pid of pids) {
+      try {
+        process.kill(Number(pid), "SIGTERM");
+      } catch {
+        // Already dead
+      }
+    }
+    // Wait for port to free up
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      if (!(await isCDPAvailable(port))) return;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    logger.warn({ port }, "Port still occupied after killing headless Chrome — proceeding anyway");
+  } catch (err) {
+    logger.warn({ error: err instanceof Error ? err.message : String(err) }, "Failed to kill headless Chrome");
+  }
 }
 
 async function isCDPAvailable(port: number): Promise<boolean> {

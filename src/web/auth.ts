@@ -95,32 +95,25 @@ export async function authMiddleware(
     return;
   }
 
-  // When not exposed externally, only allow genuine localhost requests
-  if (!config.web.exposeExternally) {
-    // Reject any request that appears to be proxied (SSRF protection)
-    const forwarded = request.headers['x-forwarded-for'];
-    if (forwarded) {
-      logger.warn({ forwarded }, "Rejected proxied request when exposeExternally=false");
-      reply.status(403).send({
-        error: "Forbidden",
-        message: "External access not allowed"
-      });
-      return;
-    }
+  // Allow genuine localhost requests to bypass auth regardless of exposeExternally
+  const forwarded = request.headers['x-forwarded-for'];
+  const ip = request.ip;
+  const isLocalhost = !forwarded && (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1');
 
-    // Only allow actual localhost connections
-    const ip = request.ip;
-    const isLocalhost = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+  if (!config.web.exposeExternally) {
     if (!isLocalhost) {
-      logger.warn({ ip }, "Rejected non-localhost request when exposeExternally=false");
+      logger.warn({ ip, forwarded }, "Rejected non-localhost request when exposeExternally=false");
       reply.status(403).send({
         error: "Forbidden",
         message: "Only localhost access allowed"
       });
       return;
     }
+    return;
+  }
 
-    // Valid localhost request - skip auth
+  // Localhost bypasses JWT auth even when exposed externally (Cloudflare tunnel handles external auth)
+  if (isLocalhost) {
     return;
   }
 
