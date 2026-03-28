@@ -9,7 +9,7 @@ import {
   getExecutorModel,
   type ParsedCommand,
 } from "../commands/index.js";
-import { registerApprovalHandlers, registerPlanApprovalHandlers, registerPlanApprovalCallbacks } from "./handlers/approval.js";
+import { registerApprovalHandlers, registerPlanApprovalHandlers, registerPlanApprovalCallbacks, registerPlanReviewCallbacks } from "./handlers/approval.js";
 import { registerIdeaCommands, registerIdeaCallbacks } from "./handlers/idea.js";
 import { registerQuickCommands, registerProposalCallbacks } from "./handlers/proposal-approval.js";
 import { registerOvernightCommands, handleOvernightMessage } from "./handlers/overnight.js";
@@ -127,9 +127,10 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
   // Register approval callback handlers for idea review buttons
   registerApprovalHandlers(bot, stateManager);
 
-  // Register plan approval handlers (/approve, /reject, /plans)
+  // Register plan approval handlers (/approve, /reject, /plans) + structured review cards
   registerPlanApprovalHandlers(bot, stateManager);
   registerPlanApprovalCallbacks(bot, stateManager);
+  registerPlanReviewCallbacks(bot, stateManager);
 
   // Register proposal quick commands (/a, /r, /s, /aa, /proposals) and inline button callbacks
   registerQuickCommands(bot, stateManager);

@@ -6,7 +6,8 @@ import { executeScheduledJob } from "./executor.js";
 import { notifyJobResult } from "./notifier.js";
 import type { StateManager } from "../state/manager.js";
 import type { RegisteredJob, ProgressEvent, JobExecutionResult } from "./types.js";
-import { isPlanRequiringApproval, createPlanApprovalKeyboard } from "../bot/handlers/approval.js";
+import { isPlanRequiringApproval, sendPlanForReview } from "../bot/handlers/approval.js";
+import { parsePlanFromOutput } from "../plans/review-parser.js";
 import { executeInternalJob } from "./internal-handlers.js";
 import { runCompletionCheckup } from "../executors/completion-checkup.js";
 import { routeTelegramNotification } from "../notifications/telegram-router.js";
@@ -657,32 +658,17 @@ export class Scheduler {
 
       // Check if output contains an implementation plan requiring approval
       if (result.success && isPlanRequiringApproval(result.output)) {
-        logger.info({ jobId: job.config.id }, "Plan detected, requesting approval");
+        logger.info({ jobId: job.config.id }, "Plan detected, requesting structured approval");
 
-        // Save plan for later execution
+        // Parse into structured plan and send review card
+        const plan = parsePlanFromOutput(result.output, "scheduler-job");
+        plan.id = `plan_${job.config.id}_${Date.now()}`;
+        plan.rawText = result.output;
+
+        // Also save in legacy table for backward compat
         this.stateManager.savePendingPlan(job.config.id, result.output);
 
-        // Send plan for approval with inline buttons
-        const preview = escapeHtml(result.output.slice(0, 1500));
-        const truncated = result.output.length > 1500 ? "\n...(truncated)" : "";
-        const jobName = escapeHtml(job.config.name);
-        const jobId = escapeHtml(job.config.id);
-        try {
-          await this.bot.api.sendMessage(
-            this.chatId,
-            `📋 <b>Plan Generated</b>\n` +
-            `<b>Job:</b> ${jobName}\n` +
-            `<b>ID:</b> <code>${jobId}</code>\n\n` +
-            `<pre>${preview}${truncated}</pre>\n\n` +
-            `Choose an action below. Use "Add Instructions" to provide executor context.`,
-            {
-              parse_mode: "HTML",
-              reply_markup: createPlanApprovalKeyboard(job.config.id),
-            }
-          );
-        } catch (err) {
-          logger.warn({ error: err, jobId: job.config.id }, "Failed to send plan approval message");
-        }
+        await sendPlanForReview(this.bot, this.stateManager, this.chatId, plan);
 
         // Don't send normal notification - plan approval takes over
         return;

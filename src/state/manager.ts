@@ -1444,6 +1444,80 @@ export class StateManager {
   }
 
   // ============================================
+  // Plan Reviews (Structured Cards)
+  // ============================================
+
+  /**
+   * Save a structured plan review for Telegram card rendering.
+   */
+  savePlanReview(planId: string, planJson: string, title: string, riskLevel: string, source?: string, chatId?: number): void {
+    this._db.prepare(`
+      INSERT OR REPLACE INTO plan_reviews (id, status, revision_number, title, plan_json, risk_level, source, chat_id, created_at, updated_at)
+      VALUES (?, 'pending_review', 1, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    `).run(planId, title, planJson, riskLevel, source ?? null, chatId ?? null);
+  }
+
+  /**
+   * Get a plan review by ID.
+   */
+  getPlanReview(planId: string): { id: string; parentPlanId: string | null; status: string; revisionNumber: number; title: string; planJson: string; riskLevel: string; source: string | null; chatId: number | null; cardMessageId: number | null; createdAt: string; updatedAt: string; decidedAt: string | null; decisionFeedback: string | null } | null {
+    try {
+      const row = this._db.prepare(`
+        SELECT id, parent_plan_id as parentPlanId, status, revision_number as revisionNumber,
+               title, plan_json as planJson, risk_level as riskLevel, source,
+               chat_id as chatId, card_message_id as cardMessageId,
+               created_at as createdAt, updated_at as updatedAt,
+               decided_at as decidedAt, decision_feedback as decisionFeedback
+        FROM plan_reviews WHERE id = ?
+      `).get(planId) as any;
+      return row ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Update plan review status and optional fields.
+   */
+  updatePlanReviewStatus(planId: string, status: string, opts?: { cardMessageId?: number; decidedAt?: boolean; feedback?: string; planJson?: string; revisionNumber?: number }): void {
+    const sets = ["status = ?", "updated_at = datetime('now')"];
+    const params: unknown[] = [status];
+
+    if (opts?.cardMessageId != null) { sets.push("card_message_id = ?"); params.push(opts.cardMessageId); }
+    if (opts?.decidedAt) { sets.push("decided_at = datetime('now')"); }
+    if (opts?.feedback != null) { sets.push("decision_feedback = ?"); params.push(opts.feedback); }
+    if (opts?.planJson != null) { sets.push("plan_json = ?"); params.push(opts.planJson); }
+    if (opts?.revisionNumber != null) { sets.push("revision_number = ?"); params.push(opts.revisionNumber); }
+
+    params.push(planId);
+    this._db.prepare(`UPDATE plan_reviews SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+  }
+
+  /**
+   * Add revision feedback for a plan.
+   */
+  addPlanRevisionFeedback(planId: string, revisionNumber: number, feedbackText: string): void {
+    this._db.prepare(`
+      INSERT INTO plan_revision_feedback (plan_id, revision_number, feedback_text, created_at)
+      VALUES (?, ?, ?, datetime('now'))
+    `).run(planId, revisionNumber, feedbackText);
+  }
+
+  /**
+   * Get all revision feedback for a plan.
+   */
+  getPlanRevisionHistory(planId: string): Array<{ revisionNumber: number; feedbackText: string; createdAt: string }> {
+    try {
+      return this._db.prepare(`
+        SELECT revision_number as revisionNumber, feedback_text as feedbackText, created_at as createdAt
+        FROM plan_revision_feedback WHERE plan_id = ? ORDER BY id ASC
+      `).all(planId) as any[];
+    } catch {
+      return [];
+    }
+  }
+
+  // ============================================
   // Executor State (Persistent Switching)
   // ============================================
 
