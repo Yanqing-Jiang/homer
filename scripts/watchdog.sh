@@ -25,6 +25,7 @@ MIN_DAEMON_AGE_SECS="${MIN_DAEMON_AGE_SECS:-7200}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-15}"
 FAILURES_BEFORE_ACTION="${FAILURES_BEFORE_ACTION:-2}"
 TRIAGE_COOLDOWN="${TRIAGE_COOLDOWN:-300}"
+HEALTH_RETRY_DELAY="${HEALTH_RETRY_DELAY:-10}"
 POST_ACTION_WAIT="${POST_ACTION_WAIT:-10}"
 
 DISK_SPACE_MIN="${DISK_SPACE_MIN:-10}"
@@ -1350,7 +1351,6 @@ acquire_watchdog_lock() {
 run_once() {
   acquire_watchdog_lock || exit 0
 
-  CONSECUTIVE_FAILURES=1
   EXECUTED="true"
   VALIDATION_OUTCOME="validation_failed"
   VALIDATION_SIGNATURE=""
@@ -1375,22 +1375,40 @@ run_once() {
     fi
   fi
 
-  check_health
-  local health_rc=$?
-  if (( health_rc == 0 )); then
-    # Healthy -- do periodic maintenance checks
-    check_disk_space || true
-    check_memory || true
-    check_docker_health || true
-    exit 0
-  fi
+  # Retry health checks before escalating — avoids false positives from transient blips
+  local attempt=1 health_rc=0 health_timed_out=0
+  CONSECUTIVE_FAILURES=0
 
-  local health_timed_out=0
-  if (( health_rc == 28 )); then
-    health_timed_out=1
-  fi
+  while (( attempt <= FAILURES_BEFORE_ACTION )); do
+    if (( attempt > 1 )); then
+      log "watchdog: health retry ${attempt}/${FAILURES_BEFORE_ACTION} after ${HEALTH_RETRY_DELAY}s delay"
+      sleep "$HEALTH_RETRY_DELAY"
+    fi
 
-  log "watchdog: health failed (agent=${RECOVERY_AGENT})"
+    check_health
+    health_rc=$?
+
+    if (( health_rc == 0 )); then
+      if (( attempt > 1 )); then
+        log "watchdog: health recovered after $((attempt - 1)) retries"
+      fi
+      # Healthy -- do periodic maintenance checks
+      check_disk_space || true
+      check_memory || true
+      check_docker_health || true
+      exit 0
+    fi
+
+    CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
+    if (( health_rc == 28 )); then
+      health_timed_out=1
+    fi
+
+    log "watchdog: health check failed (attempt ${attempt}/${FAILURES_BEFORE_ACTION}, rc=${health_rc})"
+    attempt=$((attempt + 1))
+  done
+
+  log "watchdog: health failed ${CONSECUTIVE_FAILURES} consecutive checks (agent=${RECOVERY_AGENT})"
   handle_failure "$health_timed_out"
   check_docker_health || true
 }
