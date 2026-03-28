@@ -860,7 +860,8 @@ export async function runIdeaSynthesizer(db: Database.Database, jobRunId?: numbe
   error?: string;
 }> {
   try {
-    const unprocessed = getUnprocessedScrapes(db, 48);
+    // Exclude medium-trending — those route to content_hooks, not the idea pipeline
+    const unprocessed = getUnprocessedScrapes(db, 48, ["medium-trending"]);
 
     if (unprocessed.length === 0) {
       return { success: true, output: "No unprocessed scrapes to synthesize" };

@@ -4,7 +4,7 @@ import { readFile, writeFile, appendFile } from "fs/promises";
 import { existsSync } from "fs";
 import type { StateManager } from "../../state/manager.js";
 import { updatePreferences, type PreferenceSignal } from "../../preferences/engine.js";
-import { trackIdeaProgress, trackIdeaArchived } from "../../outcomes/hooks.js";
+import { trackIdeaArchived } from "../../outcomes/hooks.js";
 import {
   recordFeedback,
   createReviewSession,
@@ -23,7 +23,6 @@ import { staleMapCleaner } from "../../utils/stale-map-cleaner.js";
 import { config } from "../../config/index.js";
 import {
   formatScheduledTelegramHtml,
-  sendChunkedTelegramMessage,
 } from "../../notifications/telegram-router.js";
 import { escapeHtml } from "../../utils/telegram-format.js";
 import type { SourcePacket } from "../../ideas/source-packets.js";
@@ -360,41 +359,21 @@ function truncateCallbackId(ideaId: string, maxSuffix = ":deep_dive"): string {
 /**
  * Keyboard for existing ideas (legacy flow, still used for promoted ideas).
  */
-export function createIdeaKeyboard(ideaId: string, hasEnrichment = false): InlineKeyboard {
+export function createIdeaKeyboard(ideaId: string): InlineKeyboard {
   const id = truncateCallbackId(ideaId);
-
-  const kb = new InlineKeyboard()
-    .text("🔬 审视", `a:i:${id}:review`)   // was "talk" — now honestly labeled as one-shot review
-    .text("💬 聊聊", `a:i:${id}:talk`);     // new: real discussion thread
-
-  if (hasEnrichment) {
-    kb.text("🔍 深挖", `a:i:${id}:deep_dive`);
-  }
-
-  kb.text("💤 暂缓", `a:i:${id}:snooze`)
-    .text("🗂 归档", `a:i:${id}:archive`);
-
-  return kb;
+  return new InlineKeyboard()
+    .text("💬 Talk", `a:i:${id}:talk`)
+    .text("🗂 Skip", `a:i:${id}:archive`);
 }
 
 /**
  * Keyboard for source packets (morning review of un-promoted packets).
  */
-export function createPacketKeyboard(packetId: string, hasEnrichment = false): InlineKeyboard {
-  const id = truncateCallbackId(packetId, ":promote");
-
-  const kb = new InlineKeyboard()
-    .text("💬 聊聊", `a:p:${id}:talk`)       // discuss the packet
-    .text("⬆️ 提升", `a:p:${id}:promote`);   // promote to idea
-
-  if (hasEnrichment) {
-    kb.text("🔍 深挖", `a:p:${id}:deep_dive`);
-  }
-
-  kb.text("💤 暂缓", `a:p:${id}:snooze`)
-    .text("🗂 归档", `a:p:${id}:archive`);
-
-  return kb;
+export function createPacketKeyboard(packetId: string): InlineKeyboard {
+  const id = truncateCallbackId(packetId, ":talk");
+  return new InlineKeyboard()
+    .text("💬 Talk", `a:p:${id}:talk`)
+    .text("🗂 Skip", `a:p:${id}:archive`);
 }
 
 /**
@@ -735,160 +714,14 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
   });
 
   // Handle snooze button — weak positive signal, re-draft for tomorrow
+  // Legacy: idea snooze — no longer rendered, kept for old messages
   bot.callbackQuery(/^a:i:([^:]+):snooze$/, async (ctx) => {
-    const ideaId = ctx.match?.[1];
-    if (!ideaId) {
-      await ctx.answerCallbackQuery("Invalid request");
-      return;
-    }
-    logger.info({ ideaId }, "Snooze button clicked");
-
-    try {
-      // Move back to draft — it'll show up again in a future review
-      const db = stateManagerRef?.getDb();
-      const idea = db ? dao.getIdea(db, ideaId) : null;
-
-      if (idea && db) {
-        dao.updateIdea(db, idea.id, { status: "draft" });
-        dao.appendNote(db, idea.id, "Snoozed — will resurface later");
-        await logFeedback("snooze", idea.title);
-        sendPreferenceSignals(idea, 0.05); // weak positive signal
-        try {
-          recordFeedback(db, {
-            contentType: "idea",
-            contentId: ideaId,
-            action: "snooze",
-            source: "telegram",
-            impressionId: pendingImpressions.get(ideaId)?.impressionId,
-            delta: 0.05,
-            responseTimeMs: pendingImpressions.has(ideaId)
-              ? Date.now() - pendingImpressions.get(ideaId)!.displayedAt
-              : undefined,
-          });
-        } catch { /* best-effort */ }
-        await ctx.editMessageText(`💤 <b>Snoozed: ${escapeHtml(idea.title)}</b>`, { parse_mode: "HTML" });
-      } else {
-        await ctx.editMessageText(`❌ Idea not found: ${escapeHtml(ideaId)}`, { parse_mode: "HTML" });
-      }
-    } catch (error) {
-      logger.error({ error, ideaId }, "Failed to snooze idea");
-      await ctx.answerCallbackQuery("Error processing snooze");
-    }
+    await ctx.answerCallbackQuery("This button is no longer active. Use Talk or Skip.");
   });
 
-  // Handle review button (was "talk") — one-shot Sonnet review, honestly labeled
+  // Legacy: idea review — no longer rendered, kept for old messages
   bot.callbackQuery(/^a:i:([^:]+):review$/, async (ctx) => {
-    const ideaId = ctx.match?.[1];
-    if (!ideaId) {
-      await ctx.answerCallbackQuery("Invalid request");
-      return;
-    }
-    logger.info({ ideaId }, "Review button clicked — starting Sonnet review");
-
-    try {
-      await ctx.answerCallbackQuery("Starting review...");
-
-      const db = stateManagerRef?.getDb();
-      const idea = db ? dao.getIdea(db, ideaId) : null;
-
-      if (!idea || !db) {
-        await ctx.editMessageText(`❌ Idea not found: ${escapeHtml(ideaId)}`, { parse_mode: "HTML" });
-        return;
-      }
-
-      await ctx.editMessageText(
-        formatScheduledTelegramHtml(
-          `🔬 <b>Idea review</b>\n\n<b>${escapeHtml(idea.title)}</b>\n` +
-          `Running Sonnet review with the full idea payload.\n` +
-          `Results should land in about 1-2 minutes.`,
-        ),
-        { parse_mode: "HTML" }
-      );
-
-      // Update status + append note — NO auto-task creation
-      dao.updateIdea(db, idea.id, { status: "review" });
-      dao.appendNote(db, idea.id, "Sonnet review started");
-      await logFeedback("review", idea.title);
-
-      // Track outcome
-      try {
-        if (stateManagerRef) {
-          trackIdeaProgress(stateManagerRef.getDb(), ideaId, idea.title);
-        }
-        sendPreferenceSignals(idea, 0.15);
-      } catch { /* outcome tracking best-effort */ }
-
-      // Record feedback event
-      try {
-        recordFeedback(db, {
-          contentType: "idea",
-          contentId: ideaId,
-          action: "review",
-          source: "telegram",
-          impressionId: pendingImpressions.get(ideaId)?.impressionId,
-          delta: 0.15,
-          responseTimeMs: pendingImpressions.has(ideaId)
-            ? Date.now() - pendingImpressions.get(ideaId)!.displayedAt
-            : undefined,
-        });
-      } catch { /* best-effort */ }
-
-      // Build notify callback
-      const chatId = ctx.chat?.id;
-      if (!chatId) return;
-
-      const notify = async (text: string, parseMode?: string) => {
-        await sendChunkedTelegramMessage({
-          bot,
-          chatId,
-          message: parseMode === "HTML" ? text : formatScheduledTelegramHtml(text),
-          parseMode: parseMode === "HTML" ? "HTML" : undefined,
-          enableLinkPreview: true,
-        });
-      };
-
-      // Fire-and-forget analysis — load full packet context if available
-      const packetContext = await loadPacketContextForIdea(db, idea);
-
-      import("../../ideas/analyze.js").then(({ analyzeIdea }) => {
-        analyzeIdea(
-          {
-            id: idea.id,
-            title: idea.title,
-            content: packetContext || idea.content,
-            context: idea.context,
-            link: idea.link,
-            source: idea.source,
-            tags: idea.tags,
-            notes: idea.notes,
-            filePath: idea.filePath,
-            linkedExplorationThreadId: idea.linkedExplorationThreadId,
-            linkedPlanId: idea.linkedPlanId,
-            apiUrl: `${config.web.baseUrl}/api/ideas/${encodeURIComponent(idea.id)}`,
-          },
-          notify
-        ).then(() => {
-          try { if (db) dao.appendNote(db, idea.id, "Sonnet review complete"); } catch { /* best-effort */ }
-        }).catch(async (err) => {
-          const msg = err instanceof Error ? err.message : String(err);
-          logger.error({ ideaId, error: msg }, "Idea analysis failed");
-          await sendChunkedTelegramMessage({
-            bot,
-            chatId,
-            message: formatScheduledTelegramHtml(
-              `❌ <b>Idea review failed</b>\n\n<b>${escapeHtml(idea.title)}</b>\n${escapeHtml(msg)}`,
-            ),
-            parseMode: "HTML",
-            enableLinkPreview: false,
-          });
-        });
-      }).catch(err => {
-        logger.error({ ideaId, error: err }, "Failed to import analyze module");
-      });
-    } catch (error) {
-      logger.error({ error, ideaId }, "Failed to initiate review");
-      await ctx.answerCallbackQuery("Error starting review");
-    }
+    await ctx.answerCallbackQuery("This button is no longer active. Use Talk or Skip.");
   });
 
   // Handle talk button on IDEAS — creates/resumes a real discussion thread
@@ -904,7 +737,7 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
         return;
       }
 
-      await ctx.answerCallbackQuery("Opening discussion...");
+      await ctx.answerCallbackQuery("Discussion opened below");
 
       // Get or create discussion for this idea
       const discussion = discussionDao.getOrCreateDiscussion(db, {
@@ -920,7 +753,7 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       // Load full packet context if available
       const packetContent = await loadPacketContextForIdea(db, idea);
 
-      // Send discussion header
+      // Send discussion opener as a NEW message (edits are invisible on Telegram)
       const chatId = ctx.chat?.id;
       if (!chatId) return;
 
@@ -934,18 +767,30 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
         headerMsg += `\n\n<b>Source material loaded</b> (full packet context available)`;
       }
 
-      await ctx.editMessageText(formatScheduledTelegramHtml(headerMsg), { parse_mode: "HTML" });
+      const sent = await ctx.reply(formatScheduledTelegramHtml(headerMsg), {
+        parse_mode: "HTML",
+        reply_parameters: { message_id: ctx.callbackQuery.message!.message_id },
+      });
 
-      // Track telegram message -> discussion mapping for reply capture
-      const telegramMessageId = ctx.callbackQuery?.message?.message_id;
-      if (telegramMessageId) {
-        pendingDiscussions.set(telegramMessageId, {
+      // Track the NEW message for reply capture
+      pendingDiscussions.set(sent.message_id, {
+        discussionId: discussion.id,
+        ideaId: idea.id,
+        title: idea.title,
+        createdAt: Date.now(),
+      });
+      // Also track the original message in case user replies to that
+      const origMessageId = ctx.callbackQuery?.message?.message_id;
+      if (origMessageId) {
+        pendingDiscussions.set(origMessageId, {
           discussionId: discussion.id,
           ideaId: idea.id,
           title: idea.title,
           createdAt: Date.now(),
         });
       }
+
+      logger.info({ ideaId: idea.id, discussionId: discussion.id, resumed: msgCount > 0 }, "Idea discussion opened in Telegram");
 
       // Record system message with full source context (only for new discussions)
       if (msgCount === 0) {
@@ -1008,7 +853,7 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
         return;
       }
 
-      await ctx.answerCallbackQuery("Opening discussion...");
+      await ctx.answerCallbackQuery("Discussion opened below");
 
       // Get or create discussion for this packet
       const discussion = discussionDao.getOrCreateDiscussion(db, {
@@ -1024,23 +869,35 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       const chatId = ctx.chat?.id;
       if (!chatId) return;
 
-      // Build display message: breakdown for new discussions, resume header for existing
-      let displayMsg: string;
+      // Build discussion opener as a NEW message (edits are invisible on Telegram)
+      let displayMsg = `💬 <b>Discussion: ${escapeHtml(packet.title ?? "Source Packet")}</b>\n`;
+      displayMsg += `<code>${escapeHtml(discussion.id)}</code>\n`;
       if (msgCount > 0) {
-        displayMsg = `💬 <b>Discussion: ${escapeHtml(packet.title ?? "Source Packet")}</b>\n`;
-        displayMsg += `<code>${escapeHtml(discussion.id)}</code>\n`;
         displayMsg += `\n📝 Resuming thread (${msgCount} prior messages)\n`;
-        displayMsg += `\nReply to continue.`;
       } else {
-        displayMsg = buildPacketBreakdown(packet);
+        // Include packet breakdown for new discussions
+        const breakdown = buildPacketBreakdown(packet);
+        // Strip the trailing "Reply to discuss." since we add our own
+        displayMsg += `\n${breakdown.replace(/\nReply to discuss\.\s*$/, "")}\n`;
       }
+      displayMsg += `\nReply to this message to continue the discussion.`;
 
-      await ctx.editMessageText(formatScheduledTelegramHtml(displayMsg), { parse_mode: "HTML" });
+      const sent = await ctx.reply(formatScheduledTelegramHtml(displayMsg), {
+        parse_mode: "HTML",
+        reply_parameters: { message_id: ctx.callbackQuery.message!.message_id },
+      });
 
-      // Track telegram message -> discussion mapping for reply capture
-      const telegramMessageId = ctx.callbackQuery?.message?.message_id;
-      if (telegramMessageId) {
-        pendingDiscussions.set(telegramMessageId, {
+      // Track the NEW message for reply capture
+      pendingDiscussions.set(sent.message_id, {
+        discussionId: discussion.id,
+        packetId: packet.id,
+        title: packet.title ?? "Source Packet",
+        createdAt: Date.now(),
+      });
+      // Also track the original message in case user replies to that
+      const origMessageId = ctx.callbackQuery?.message?.message_id;
+      if (origMessageId) {
+        pendingDiscussions.set(origMessageId, {
           discussionId: discussion.id,
           packetId: packet.id,
           title: packet.title ?? "Source Packet",
@@ -1074,6 +931,21 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
           metadata: { source: "telegram", packetId: packet.id },
         });
       }
+
+      // Feedback tracking (was missing for packets)
+      await logFeedback("talk", packet.title ?? packet.id);
+      try {
+        recordFeedback(db, {
+          contentType: "packet",
+          contentId: packetId,
+          action: "talk",
+          source: "telegram",
+          impressionId: pendingImpressions.get(packetId)?.impressionId,
+          delta: 0.2,
+        });
+      } catch { /* best-effort */ }
+
+      logger.info({ packetId: packet.id, discussionId: discussion.id, resumed: msgCount > 0 }, "Packet discussion opened in Telegram");
     } catch (error) {
       logger.error({ error, packetId }, "Failed to start packet discussion");
       await ctx.answerCallbackQuery("Error starting discussion");
@@ -1081,67 +953,14 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
   });
 
   // Handle promote button on PACKETS — promotes to idea
+  // Legacy: packet promote — no longer rendered, kept for old messages
   bot.callbackQuery(/^a:p:([^:]+):promote$/, async (ctx) => {
-    const packetId = ctx.match?.[1];
-    if (!packetId) { await ctx.answerCallbackQuery("Invalid request"); return; }
-
-    try {
-      const db = stateManagerRef?.getDb();
-      if (!db) { await ctx.answerCallbackQuery("DB unavailable"); return; }
-
-      const packet = packetDao.getPacket(db, packetId);
-      if (!packet) {
-        await ctx.editMessageText(`❌ Packet not found: ${escapeHtml(packetId)}`, { parse_mode: "HTML" });
-        return;
-      }
-
-      if (packet.status === "promoted") {
-        await ctx.answerCallbackQuery("Already promoted");
-        return;
-      }
-
-      await ctx.answerCallbackQuery("Promoting to idea...");
-
-      const result = packetDao.promotePacket(db, packetId);
-      if (!result) {
-        await ctx.editMessageText(`❌ Failed to promote packet`, { parse_mode: "HTML" });
-        return;
-      }
-
-      await ctx.editMessageText(
-        formatScheduledTelegramHtml(
-          `⬆️ <b>Promoted to idea</b>\n\n` +
-          `<b>${escapeHtml(packet.title ?? "Untitled")}</b>\n` +
-          `Idea ID: <code>${escapeHtml(result.ideaId)}</code>`,
-        ),
-        { parse_mode: "HTML" }
-      );
-
-      logger.info({ packetId, ideaId: result.ideaId }, "Packet promoted via Telegram");
-    } catch (error) {
-      logger.error({ error, packetId }, "Failed to promote packet");
-      await ctx.answerCallbackQuery("Error promoting packet");
-    }
+    await ctx.answerCallbackQuery("This button is no longer active. Use Talk or Skip.");
   });
 
-  // Handle snooze on PACKETS
+  // Legacy: packet snooze — no longer rendered, kept for old messages
   bot.callbackQuery(/^a:p:([^:]+):snooze$/, async (ctx) => {
-    const packetId = ctx.match?.[1];
-    if (!packetId) { await ctx.answerCallbackQuery("Invalid request"); return; }
-    try {
-      const db = stateManagerRef?.getDb();
-      if (!db) { await ctx.answerCallbackQuery("DB unavailable"); return; }
-      const packet = packetDao.getPacket(db, packetId);
-      if (packet) {
-        packetDao.updatePacket(db, packet.id, { status: "raw" }); // back to queue
-        await ctx.editMessageText(`💤 <b>Snoozed: ${escapeHtml(packet.title ?? packetId)}</b>`, { parse_mode: "HTML" });
-      } else {
-        await ctx.editMessageText(`❌ Packet not found`, { parse_mode: "HTML" });
-      }
-    } catch (error) {
-      logger.error({ error, packetId }, "Failed to snooze packet");
-      await ctx.answerCallbackQuery("Error");
-    }
+    await ctx.answerCallbackQuery("This button is no longer active. Use Talk or Skip.");
   });
 
   // Handle archive on PACKETS
@@ -1164,120 +983,14 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
     }
   });
 
-  // Handle deep dive on PACKETS
+  // Legacy: packet deep dive — no longer rendered, kept for old messages
   bot.callbackQuery(/^a:p:([^:]+):deep_dive$/, async (ctx) => {
-    const packetId = ctx.match?.[1];
-    if (!packetId) { await ctx.answerCallbackQuery("Invalid request"); return; }
-    try {
-      const db = stateManagerRef?.getDb();
-      if (!db) { await ctx.answerCallbackQuery("DB unavailable"); return; }
-      const packet = packetDao.getPacket(db, packetId);
-      if (!packet) { await ctx.answerCallbackQuery("Packet not found"); return; }
-      if (!packet.enrichment) { await ctx.answerCallbackQuery("No enrichment data yet"); return; }
-
-      await ctx.answerCallbackQuery("Loading deep dive...");
-      const enrichment = packet.enrichment;
-      const dive = enrichment.deepDive;
-      const links = enrichment.deepLinks ?? [];
-      const imp = enrichment.homerImprovement;
-
-      let msg = `🔍 <b>深挖: ${escapeHtml(packet.title ?? "Source Packet")}</b>\n\n`;
-      msg += `<b>核心论点</b>\n${escapeHtml(dive?.coreClaim ?? "N/A")}\n\n`;
-      msg += `<b>证据</b>\n${escapeHtml(dive?.evidence ?? "N/A")}\n\n`;
-      if (dive?.risks?.length) {
-        msg += `<b>风险</b>\n${dive.risks.map((r: string) => `• ${escapeHtml(r)}`).join("\n")}\n\n`;
-      }
-      msg += `<b>最快验证</b>\n${escapeHtml(dive?.validationPath ?? "N/A")}\n\n`;
-      if (links.length) {
-        msg += `<b>关联</b>\n`;
-        for (const l of links) {
-          msg += `• <i>${escapeHtml(l.relationship)}</i>: ${escapeHtml(l.target)} (${Math.round(l.strength * 100)}%)\n`;
-        }
-        msg += "\n";
-      }
-      if (imp?.relevant && imp.summary) {
-        const priorityIcon = imp.priority === "high" ? "🔴" : imp.priority === "medium" ? "🟡" : "🟢";
-        msg += `⚡ ${priorityIcon} <b>${escapeHtml(imp.summary)}</b>\n`;
-      }
-
-      const chatId = ctx.chat?.id;
-      if (!chatId) return;
-      await sendChunkedTelegramMessage({ bot, chatId, message: formatScheduledTelegramHtml(msg), parseMode: "HTML" });
-    } catch (error) {
-      logger.error({ error, packetId }, "Failed to show packet deep dive");
-      await ctx.answerCallbackQuery("Error loading deep dive");
-    }
+    await ctx.answerCallbackQuery("This button is no longer active. Use Talk or Skip.");
   });
 
-  // Handle deep dive button — expand enrichment JSON inline
+  // Legacy: idea deep dive — no longer rendered, kept for old messages
   bot.callbackQuery(/^a:i:([^:]+):deep_dive$/, async (ctx) => {
-    const ideaId = ctx.match?.[1];
-    if (!ideaId) { await ctx.answerCallbackQuery("Invalid request"); return; }
-
-    const db = stateManagerRef?.getDb();
-    const idea = db ? dao.getIdea(db, ideaId) : null;
-    if (!idea || !db) { await ctx.answerCallbackQuery("Idea not found"); return; }
-
-    if (!idea.enrichment) {
-      await ctx.answerCallbackQuery("No enrichment data yet");
-      return;
-    }
-
-    await ctx.answerCallbackQuery("Loading deep dive...");
-
-    try {
-      const enrichment = JSON.parse(idea.enrichment);
-      const dive = enrichment?.deep_dive ?? {};
-      const links = enrichment?.deep_links ?? [];
-      const imp = enrichment?.homer_improvement ?? {};
-
-      let msg = `🔍 <b>深挖: ${escapeHtml(idea.title)}</b>\n\n`;
-
-      msg += `<b>核心论点</b>\n${escapeHtml(dive.core_claim ?? "N/A")}\n\n`;
-      msg += `<b>证据</b>\n${escapeHtml(dive.evidence ?? "N/A")}\n\n`;
-
-      if (dive.risks?.length) {
-        msg += `<b>风险</b>\n${(dive.risks as string[]).map((r: string) => `• ${escapeHtml(r)}`).join("\n")}\n\n`;
-      }
-
-      msg += `<b>最快验证</b>\n${escapeHtml(dive.validation_path ?? "N/A")}\n\n`;
-
-      if (links.length) {
-        msg += `<b>关联</b>\n`;
-        for (const l of links as Array<{ target: string; relationship: string; strength: number }>) {
-          msg += `• <i>${escapeHtml(l.relationship)}</i>: ${escapeHtml(l.target)} (${Math.round((l.strength ?? 0) * 100)}%)\n`;
-        }
-        msg += "\n";
-      }
-
-      if (imp.relevant) {
-        const priorityIcon = imp.priority === "high" ? "🔴" : imp.priority === "medium" ? "🟡" : "🟢";
-        msg += `<b>Homer 改进 ${priorityIcon} [${escapeHtml(imp.priority?.toUpperCase() ?? "")}]</b>\n`;
-        msg += `${escapeHtml(imp.summary ?? "")}\n\n`;
-        msg += `<i>${escapeHtml(imp.user_context ?? "")}</i>\n\n`;
-        if (imp.plan?.length) {
-          for (const step of imp.plan as Array<{ step: number; action: string; file: string; effort: string }>) {
-            msg += `${step.step}. [${escapeHtml(step.effort)}] ${escapeHtml(step.action)}\n   <code>${escapeHtml(step.file)}</code>\n`;
-          }
-          msg += "\n";
-        }
-        msg += `⚙️ <i>${escapeHtml(imp.automation_potential ?? "")}</i>\n`;
-      }
-
-      const chatId = ctx.chat?.id;
-      if (chatId) {
-        await sendChunkedTelegramMessage({
-          bot,
-          chatId,
-          message: formatScheduledTelegramHtml(msg),
-          parseMode: "HTML",
-          enableLinkPreview: false,
-        });
-      }
-    } catch (err) {
-      logger.error({ error: err, ideaId }, "Deep dive render failed");
-      await ctx.answerCallbackQuery("Failed to render deep dive");
-    }
+    await ctx.answerCallbackQuery("This button is no longer active. Use Talk or Skip.");
   });
 
   // Handle add instructions button
@@ -1534,7 +1247,7 @@ export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLim
       for (let i = 0; i < packets.length; i++) {
         const packet = packets[i]!;
         const message = formatPacketForTelegram(packet, i);
-        const keyboard = createPacketKeyboard(packet.id, !!packet.enrichment);
+        const keyboard = createPacketKeyboard(packet.id);
 
         try {
           await bot.api.sendMessage(chatId, message, {
