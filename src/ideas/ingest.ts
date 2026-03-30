@@ -5,18 +5,17 @@ import { z } from "zod";
 import { parseIdeasMd, type ParsedIdea } from "./parser.js";
 import * as dao from "./dao.js";
 import { logger } from "../utils/logger.js";
-import { executeClaudeCommand } from "../executors/claude.js";
+import { executeBrowserScrape } from "../executors/browser-scrape.js";
 import {
   buildBookmarkScrapePrompt,
+  buildTweetReadPrompt,
   BOOKMARK_JSON_START, BOOKMARK_JSON_END,
-  SCRAPE_OPTIONS,
 } from "../scraping/browser-prompts.js";
 import { ensureCDP } from "../scraping/chrome-launcher.js";
 import { cleanAgentOutput } from "../scraping/clean-output.js";
 import { parseSwarmJSON } from "../executors/model-swarm.js";
 import { insertScrape } from "../scraping/scrape-store.js";
 import { PATHS } from "../config/paths.js";
-import { TWITTER_SCRAPE_SKILL_PATH } from "../scraping/skill-paths.js";
 
 const IDEAS_FILE = PATHS.ideasMd;
 const DENY_HISTORY_FILE = PATHS.denyHistory;
@@ -161,23 +160,16 @@ function ensureIdeaId(idea: ParsedIdea): void {
 
 /**
  * Run bookmark extraction with a given target count.
+ * Uses executeBrowserScrape (Claude Sonnet → Gemini Flash fallback).
  * Returns validated TwitterBookmark[] or throws.
  */
 async function runBookmarkExtraction(maxItems: number): Promise<TwitterBookmark[]> {
-  const skillContent = existsSync(TWITTER_SCRAPE_SKILL_PATH)
-    ? readFileSync(TWITTER_SCRAPE_SKILL_PATH, "utf-8")
-    : "";
-
-  const prompt = `${skillContent ? `SKILL REFERENCE:\n${skillContent}\n\n` : ""}${buildBookmarkScrapePrompt(maxItems)}`;
-
-  const result = await executeClaudeCommand(prompt, {
-    ...SCRAPE_OPTIONS,
-    model: "sonnet",
-    timeout: 300_000, // 5 min — extraction only, no deep-fetch
-  });
+  const result = await executeBrowserScrape(
+    buildBookmarkScrapePrompt(maxItems), "", { timeout: 600_000 },
+  );
 
   if (result.exitCode !== 0) {
-    throw new Error(`Claude bookmark scrape failed (exit ${result.exitCode}): ${result.output?.slice(0, 200)}`);
+    throw new Error(`Bookmark scrape failed (${result.executor}, exit ${result.exitCode}): ${result.output?.slice(0, 200)}`);
   }
 
   const bookmarks = parseBookmarkOutput(result.output ?? "");
@@ -186,6 +178,25 @@ async function runBookmarkExtraction(maxItems: number): Promise<TwitterBookmark[
   }
 
   return bookmarks;
+}
+
+/**
+ * Read a single tweet/thread to get full text content.
+ * Uses executeBrowserScrape (Claude Sonnet → Gemini Flash fallback).
+ * Returns full thread text or null on failure.
+ */
+async function readTweetThread(tweetUrl: string): Promise<string | null> {
+  try {
+    const result = await executeBrowserScrape(
+      buildTweetReadPrompt(tweetUrl), "", { timeout: 300_000 },
+    );
+    if (result.exitCode === 0 && result.output && result.output !== "FAILED") {
+      return result.output.trim();
+    }
+  } catch (err) {
+    logger.debug({ err, tweetUrl }, "Tweet thread read failed");
+  }
+  return null;
 }
 
 async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
@@ -216,21 +227,47 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
     const now = new Date();
     const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
 
-    return bookmarks.map((bookmark) => {
-      const externalUrl = bookmark.urls[0];
-      const idea: ParsedIdea = {
+    // Step 2: Read full thread content for each bookmark (sequential to avoid contention)
+    // Cap at 5 thread reads to keep ingest under ~30 minutes total
+    const MAX_THREAD_READS = 5;
+    const ideas: ParsedIdea[] = [];
+    let threadReadsUsed = 0;
+    for (const bookmark of bookmarks) {
+      const tweetUrl = `https://x.com/${bookmark.author}/status/${bookmark.id}`;
+      const fullText = threadReadsUsed < MAX_THREAD_READS
+        ? await readTweetThread(tweetUrl)
+        : null;
+      if (fullText) threadReadsUsed++;
+      const content = fullText && fullText.length > bookmark.text.length
+        ? fullText
+        : bookmark.text;
+
+      // Extract external URLs from full text
+      const urlRegex = /https?:\/\/[^\s"'<>\])}，。]+/g;
+      const textUrls = (content.match(urlRegex) || [])
+        .filter((u: string) => !u.includes("x.com") && !u.includes("twitter.com"));
+      const allUrls = [...new Set([...bookmark.urls, ...textUrls])];
+      const externalUrl = allUrls[0];
+
+      logger.debug(
+        { id: bookmark.id, author: bookmark.author, cardLen: bookmark.text.length, fullLen: content.length, urls: allUrls.length },
+        "Bookmark thread read complete"
+      );
+
+      ideas.push({
         id: `tweet_${bookmark.id}`,
         title: bookmark.title,
         status: "draft",
         source: "x-bookmarks",
-        content: `**@${bookmark.author}**: ${bookmark.text}`,
-        link: `https://x.com/${bookmark.author}/status/${bookmark.id}`,
+        content: `**@${bookmark.author}**: ${content}`,
+        link: tweetUrl,
         tags: ["x-bookmark"],
         timestamp,
         ...(externalUrl ? { context: `External link: ${externalUrl}` } : {}),
-      };
-      return idea;
-    });
+      });
+    }
+
+    return ideas;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.warn({ error: msg }, "Browser bookmark scrape error");

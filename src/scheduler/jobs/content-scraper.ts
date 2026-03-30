@@ -22,12 +22,11 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { createHash } from "crypto";
 // @ts-ignore
 import type Database from "better-sqlite3";
-import { executeCodexBrowserScrape } from "../../executors/codex-browser.js";
+import { executeBrowserScrape } from "../../executors/browser-scrape.js";
 import { executeClaudeCommand } from "../../executors/claude.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { z } from "zod";
 import {
-  SCRAPE_OPTIONS,
   buildMediumScrapePrompt,
   buildMediumForYouScrapePrompt,
   buildLinkedInTopPostPrompt,
@@ -36,7 +35,6 @@ import { cleanAgentOutput } from "../../scraping/clean-output.js";
 import { htmlToMarkdown, extractDeepLinks, extractImages, type DeepLink, type ImageRef } from "../../scraping/html-to-markdown.js";
 import { ensureCDP } from "../../scraping/chrome-launcher.js";
 import { extractAndStoreHooks } from "../../ideas/content-hooks.js";
-import { LINKEDIN_CODEX_SKILLS, MEDIUM_CODEX_SKILLS } from "../../scraping/skill-paths.js";
 import { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
 import { PATHS } from "../../config/paths.js";
@@ -759,7 +757,6 @@ export async function runContentScraper(db: Database.Database): Promise<{
   const results: string[] = [];
   const runStartedAt = new Date();
   const scrapeTime = runStartedAt.toISOString();
-  const scrapeOpts = { ...SCRAPE_OPTIONS };
 
   // Track scraped content for post-scrape analysis
   let ownMediumPosts: ScrapedPost[] = [];
@@ -811,35 +808,42 @@ export async function runContentScraper(db: Database.Database): Promise<{
     const rssPostsRaw = await fetchMediumRSS();
     logger.info({ count: rssPostsRaw.length }, "Medium RSS complete");
 
-    // Phase 2: parallel — Medium For You + LinkedIn + optional Medium browser fallback
-    const [mediumFallbackResult, mediumTrendingResult, linkedinResult] = await Promise.allSettled([
-      // Medium browser fallback (only if RSS was empty)
-      rssPostsRaw.length > 0
-        ? Promise.resolve(null)
-        : (async () => {
-            logger.info("Medium RSS empty — launching browser fallback in parallel");
-            return executeCodexBrowserScrape(
-              buildMediumScrapePrompt(),
-              { ...scrapeOpts, timeout: 120_000, skillPaths: MEDIUM_CODEX_SKILLS },
-            );
-          })(),
-      // Medium For You: signed-in browser feed via Codex
-      (async () => {
-        logger.info("Starting Medium For You scrape");
-        return executeCodexBrowserScrape(
-          buildMediumForYouScrapePrompt(5),
-          { ...scrapeOpts, timeout: 300_000, skillPaths: MEDIUM_CODEX_SKILLS },
-        );
-      })(),
-      // LinkedIn: signed-in browser activity via Codex
-      (async () => {
-        logger.info("Starting LinkedIn scrape");
-        return executeCodexBrowserScrape(
-          buildLinkedInTopPostPrompt(),
-          { ...scrapeOpts, timeout: 300_000, skillPaths: LINKEDIN_CODEX_SKILLS },
-        );
-      })(),
-    ]);
+    // Phase 2: sequential — Medium For You + LinkedIn + optional Medium browser fallback
+    // Sequential avoids Gemini account contention when Claude Sonnet times out and both fall back.
+
+    // Medium browser fallback (only if RSS was empty)
+    let mediumFallbackResult: PromiseSettledResult<Awaited<ReturnType<typeof executeBrowserScrape>> | null>;
+    if (rssPostsRaw.length > 0) {
+      mediumFallbackResult = { status: "fulfilled", value: null };
+    } else {
+      logger.info("Medium RSS empty — launching browser fallback");
+      try {
+        const val = await executeBrowserScrape(buildMediumScrapePrompt(), "", { timeout: 120_000 });
+        mediumFallbackResult = { status: "fulfilled", value: val };
+      } catch (err) {
+        mediumFallbackResult = { status: "rejected", reason: err };
+      }
+    }
+
+    // Medium For You: signed-in browser feed via executeBrowserScrape (Claude Sonnet → Gemini Flash)
+    let mediumTrendingResult: PromiseSettledResult<Awaited<ReturnType<typeof executeBrowserScrape>>>;
+    try {
+      logger.info("Starting Medium For You scrape");
+      const val = await executeBrowserScrape(buildMediumForYouScrapePrompt(5), "", { timeout: 600_000 });
+      mediumTrendingResult = { status: "fulfilled", value: val };
+    } catch (err) {
+      mediumTrendingResult = { status: "rejected", reason: err };
+    }
+
+    // LinkedIn: signed-in browser activity via executeBrowserScrape (Claude Sonnet → Gemini Flash)
+    let linkedinResult: PromiseSettledResult<Awaited<ReturnType<typeof executeBrowserScrape>>>;
+    try {
+      logger.info("Starting LinkedIn scrape");
+      const val = await executeBrowserScrape(buildLinkedInTopPostPrompt(), "", { timeout: 600_000 });
+      linkedinResult = { status: "fulfilled", value: val };
+    } catch (err) {
+      linkedinResult = { status: "rejected", reason: err };
+    }
 
     // =========================================================
     // Process Medium own posts (RSS + optional browser fallback)
