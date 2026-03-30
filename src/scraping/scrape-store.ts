@@ -303,7 +303,10 @@ export function getScrapesForStep(
   // Filter by pipeline state
   return all.filter((s) => {
     const meta = s.metadata ? JSON.parse(s.metadata) : {};
-    const pipeline = meta.pipeline as PipelineState | undefined;
+    const pipeline =
+      typeof meta.pipeline === "object" && meta.pipeline !== null
+        ? (meta.pipeline as PipelineState)
+        : undefined;
 
     switch (targetStep) {
       case "pending": // Needs scoring
@@ -357,7 +360,10 @@ export function getClusterMembers(db: Database.Database, clusterId: string): Sto
   const all = getUnprocessedScrapes(db, 48);
   return all.filter((s) => {
     const meta = s.metadata ? JSON.parse(s.metadata) : {};
-    const pipeline = meta.pipeline as PipelineState | undefined;
+    const pipeline =
+      typeof meta.pipeline === "object" && meta.pipeline !== null
+        ? (meta.pipeline as PipelineState)
+        : undefined;
     return pipeline?.cluster?.clusterId === clusterId;
   });
 }
@@ -372,7 +378,10 @@ export function markClusterSecondariesTerminal(
   const members = getClusterMembers(db, clusterId);
   for (const m of members) {
     const meta = m.metadata ? JSON.parse(m.metadata) : {};
-    const pipeline = meta.pipeline as PipelineState | undefined;
+    const pipeline =
+      typeof meta.pipeline === "object" && meta.pipeline !== null
+        ? (meta.pipeline as PipelineState)
+        : undefined;
     if (pipeline?.cluster?.role === "secondary") {
       markScrapeTerminal(db, m.id, reason, ideaId, pipeline.score?.value);
     }

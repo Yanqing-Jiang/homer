@@ -1,6 +1,6 @@
 import { logger } from "../utils/logger.js";
 import { executeClaudeCommand } from "../executors/claude.js";
-import { executeGeminiWithFallback } from "../executors/opencode-cli.js";
+import { executeOpenCodeWithFallback } from "../executors/opencode-cli.js";
 import { executeWithRouting } from "../executors/router.js";
 import { OvernightTaskStore } from "./task-store.js";
 import { WorkspaceManager } from "./workspace.js";
@@ -199,7 +199,7 @@ export class PipelineOrchestrator {
     }
 
     this.fallbackMode = "gemini";
-    const gemini = await executeGeminiWithFallback(prompt, "", { sandbox: false });
+    const gemini = await executeOpenCodeWithFallback(prompt, "", { sandbox: false });
     return { output: gemini.output, exitCode: gemini.exitCode, executor: "gemini" };
   }
 

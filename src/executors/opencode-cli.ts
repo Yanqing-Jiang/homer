@@ -462,7 +462,7 @@ export async function executeOpenCodeCLI(
 }
 
 // ============================================
-// WITH RETRY (replaces executeGeminiWithFallback)
+// WITH RETRY + FALLBACK CHAIN
 // ============================================
 
 export async function executeOpenCodeWithFallback(
@@ -605,10 +605,3 @@ export function resetAccountCooldowns(): void {
   logger.info("OpenCode CLI manages account rotation internally - no cooldowns to reset");
 }
 
-// ============================================
-// BACKWARD-COMPATIBLE ALIASES
-// ============================================
-
-export const executeGeminiCLI = executeOpenCodeCLI;
-export const executeGeminiWithFallback = executeOpenCodeWithFallback;
-export const streamGeminiCLI = streamOpenCodeCLI;

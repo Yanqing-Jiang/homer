@@ -1,5 +1,5 @@
 import { executeClaudeCommand } from "./claude.js";
-import { executeGeminiCLI } from "./opencode-cli.js";
+import { executeOpenCodeCLI } from "./opencode-cli.js";
 import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
@@ -61,7 +61,7 @@ async function runCheckupWithExecutor(
 ): Promise<string | null> {
   try {
     if (executor === "gemini") {
-      const res = await executeGeminiCLI(prompt, "", {
+      const res = await executeOpenCodeCLI(prompt, "", {
         timeout: 300000,
         sandbox: true,
         model: GEMINI_CLI_FLASH_MODEL,
