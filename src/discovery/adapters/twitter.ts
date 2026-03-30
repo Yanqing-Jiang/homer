@@ -7,13 +7,11 @@
 
 import type { SourceConfig, RawDiscoveryItem } from "../types.js";
 import { BaseAdapter } from "./base.js";
-import { executeCodexBrowserScrape } from "../../executors/codex-browser.js";
+import { executeBrowserScrape } from "../../executors/browser-scrape.js";
 import {
   buildBookmarkScrapePrompt,
   BOOKMARK_JSON_START, BOOKMARK_JSON_END,
-  SCRAPE_OPTIONS,
 } from "../../scraping/browser-prompts.js";
-import { X_BOOKMARK_CODEX_SKILLS } from "../../scraping/skill-paths.js";
 import { cleanAgentOutput } from "../../scraping/clean-output.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { z } from "zod";
@@ -43,9 +41,9 @@ export class TwitterAdapter extends BaseAdapter {
 
   async isAvailable(): Promise<boolean> {
     try {
-      const result = await executeCodexBrowserScrape(
+      const result = await executeBrowserScrape(
         'Run this command and report if it succeeds: agent-browser connect 9222',
-        { timeout: 15_000, skillPaths: X_BOOKMARK_CODEX_SKILLS },
+        "", { timeout: 15_000 },
       );
       return result.exitCode === 0;
     } catch {
@@ -56,9 +54,9 @@ export class TwitterAdapter extends BaseAdapter {
   async fetch(config: SourceConfig): Promise<RawDiscoveryItem[]> {
     const maxItems = Math.min(config.maxItems || 10, 10);
 
-    const result = await executeCodexBrowserScrape(
+    const result = await executeBrowserScrape(
       buildBookmarkScrapePrompt(maxItems),
-      { ...SCRAPE_OPTIONS, skillPaths: X_BOOKMARK_CODEX_SKILLS },
+      "", { timeout: 600_000 },
     );
 
     if (result.exitCode !== 0) {
