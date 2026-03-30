@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "fs/promises";
 import { join } from "path";
 import { logger } from "../utils/logger.js";
 import { executeClaudeCommand } from "./claude.js";
-import { executeGeminiCLI } from "./opencode-cli.js";
+import { executeOpenCodeCLI } from "./opencode-cli.js";
 import { GEMINI_CLI_FLASH_MODEL, GEMINI_CLI_PRO_MODEL } from "./gemini-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
@@ -267,7 +267,7 @@ async function runDiagnosis(
       return res.exitCode === 0 ? res.output : null;
     }
     if (executor === "gemini" || executor === "opencode") {
-      const res = await executeGeminiCLI(prompt, "", {
+      const res = await executeOpenCodeCLI(prompt, "", {
         timeout: 300000,
         sandbox: true,
         model: GEMINI_CLI_FLASH_MODEL,

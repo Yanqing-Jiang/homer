@@ -19,9 +19,6 @@ export {
   type CodexCLIResult,
 } from "./codex-cli.js";
 export {
-  executeGeminiCLI,
-  executeGeminiWithFallback,
-  streamGeminiCLI,
   getAccountStatus,
   resetAccountCooldowns,
   executeOpenCodeCLI,
@@ -91,8 +88,6 @@ export {
   executeWithRouting,
 
   // Cost tracking
-  trackCost,
-  getDailyCost,
   estimateCost,
 
   // Deferral management

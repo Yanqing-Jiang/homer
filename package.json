@@ -14,6 +14,8 @@
     "migrate": "tsx scripts/run-migrations.ts",
     "migrate:ideas": "tsx scripts/migrate-ideas.ts",
     "migrate:plans": "tsx scripts/migrate-plans.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "test:router": "tsx scripts/test-router.ts",
     "test:swarm": "npx tsx --test src/executors/__tests__/parse-swarm-json.test.ts",
     "app:build": "bash scripts/build-homer-app.sh /Users/yj/Applications/Homer.app",
@@ -61,6 +63,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.5.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.2"
   }
 }

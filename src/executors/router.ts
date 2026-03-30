@@ -12,16 +12,14 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import { logger } from "../utils/logger.js";
-import { executeGeminiCLI, getAccountStatus, type GeminiCLIOptions } from "./opencode-cli.js";
-import { GEMINI_CLI_FLASH_MODEL, executeGeminiCLIDirect } from "./gemini-cli.js";
-import { type GeminiAPIResult } from "./gemini.js";
+import { executeOpenCodeCLI, getAccountStatus, type OpenCodeCLIOptions } from "./opencode-cli.js";
+import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI, type KimiCLIOptions } from "./kimi-cli.js";
 import { executeClaudeCommand, type ClaudeExecutorOptions } from "./claude.js";
 import type { ExecutorResult } from "./types.js";
 import { runWithFallbackChain, DEFAULT_CHAIN, type ExecutorKind } from "./fallback-orchestrator.js";
 import { AccountManager, CostTracker, DeferralQueue, createRouterState, type RouterState } from "./router-db.js";
-import { getModelPreferences } from "../preferences/engine.js";
 
 // ============================================
 // TYPES
@@ -122,26 +120,6 @@ const COST_PER_1K_TOKENS: Record<ExecutorType, { input: number; output: number }
   "claude": { input: 0.003, output: 0.015 },       // Sonnet pricing
   "codex": { input: 0.003, output: 0.015 },        // Uses Claude internally
 };
-
-export function trackCost(
-  executor: ExecutorType,
-  inputTokens: number,
-  outputTokens: number,
-  options?: { jobId?: string; query?: string; intentId?: string }
-): number {
-  // Cost telemetry intentionally disabled.
-  void executor;
-  void inputTokens;
-  void outputTokens;
-  void options;
-  return 0;
-}
-
-export function getDailyCost(date?: string): number {
-  // Cost telemetry intentionally disabled.
-  void date;
-  return 0;
-}
 
 export function estimateCost(
   executor: ExecutorType,
@@ -343,52 +321,8 @@ function buildRoutingCacheKey(taskType: string, promptLength: number, urgency: s
   return `${taskType}:${bucket}:${urgency}`;
 }
 
-function buildRoutingPrompt(features: {
-  taskType: string;
-  promptLength: number;
-  urgency: string;
-  timeOfDay: number;
-  preferences: string;
-}): string {
-  return `Pick the best executor for this task. Available executors and their strengths:
-- claude: Best for complex reasoning, code generation, nuanced analysis. Expensive.
-- opencode (Gemini Flash): Best for research, file reading, browser tasks. Free. Fast.
-- codex (GPT-5.3): Best for deep reasoning, architecture, debugging. Expensive. Slow.
-- kimi (K2.5): Best for web search, long-context analysis, multilingual tasks. Free.
-
-Task type: ${features.taskType}
-Prompt length: ${features.promptLength} chars
-Urgency: ${features.urgency}
-Time: ${features.timeOfDay}h
-${features.preferences ? `User model preferences:\n${features.preferences}` : ""}
-
-Rules:
-- For "batch" or overnight tasks, prefer free executors (opencode, kimi)
-- For "code-change", prefer claude or codex
-- For "discovery", prefer opencode or kimi
-- For "long-context" (>10000 chars), prefer kimi
-- For "verification", prefer codex
-
-Return JSON: { "executor": "claude|opencode|codex|kimi", "fallbackChain": ["...", "..."], "reason": "one sentence" }`;
-}
-
-function parseRoutingResponse(output: string): { executor: ExecutorType; fallbackChain: ExecutorType[]; reason: string } | null {
-  try {
-    const parsed = JSON.parse(output);
-    const validExecutors: ExecutorType[] = ["claude", "opencode", "codex", "kimi"];
-    if (!validExecutors.includes(parsed.executor)) return null;
-    return {
-      executor: parsed.executor,
-      fallbackChain: (parsed.fallbackChain || []).filter((e: string) => validExecutors.includes(e as ExecutorType)),
-      reason: parsed.reason || "LLM-selected",
-    };
-  } catch {
-    return null;
-  }
-}
-
 /**
- * Primary routing decision — LLM-driven with hardcoded fallback.
+ * Primary routing decision — deterministic heuristic-based.
  *
  * Uses Gemini Flash API (cheapest, fastest) to pick the best executor.
  * Falls back to deterministic defaults if the LLM call fails.
@@ -482,84 +416,6 @@ export function makeRoutingDecision(request: RoutingRequest): RoutingDecision {
   return decision;
 }
 
-/**
- * Async LLM-driven routing — for use when the caller can await.
- * Falls back to makeRoutingDecision() on failure.
- */
-export async function makeSmartRoutingDecision(request: RoutingRequest): Promise<RoutingDecision> {
-  const {
-    taskType = "general",
-    urgency = "immediate",
-    estimatedTokens = 2000,
-  } = request;
-
-  // Force executor short-circuits
-  if (request.forceExecutor) {
-    return makeRoutingDecision(request);
-  }
-
-  const promptLength = (request.query?.length || 0) + (request.context?.length || 0);
-  const cacheKey = buildRoutingCacheKey(taskType, promptLength, urgency);
-  const cached = routingCache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < ROUTING_CACHE_TTL) {
-    return { ...cached.decision, reason: `[cached] ${cached.decision.reason}` };
-  }
-
-  // Gather model preferences from DB
-  let prefContext = "";
-  try {
-    if (_db) {
-      const prefs = getModelPreferences(_db);
-      if (prefs.length > 0) {
-        prefContext = prefs.map(p => `${p.dimension}: ${p.score.toFixed(2)}`).join(", ");
-      }
-    }
-  } catch { /* preferences may not exist yet */ }
-
-  try {
-    const result = await executeGeminiCLIDirect(
-      buildRoutingPrompt({
-        taskType,
-        promptLength,
-        urgency,
-        timeOfDay: new Date().getHours(),
-        preferences: prefContext,
-      }),
-      { timeout: 30_000 }
-    );
-
-    if (result.exitCode === 0 && result.output) {
-      const parsed = parseRoutingResponse(result.output);
-      if (parsed) {
-        const decision: RoutingDecision = {
-          executor: parsed.executor,
-          fallbackChain: parsed.fallbackChain,
-          reason: `[smart] ${parsed.reason}`,
-          estimatedCost: estimateCost(parsed.executor, estimatedTokens),
-          canDefer: urgency !== "immediate",
-          deferred: false,
-        };
-
-        // Cache
-        routingCache.set(cacheKey, { decision, timestamp: Date.now() });
-
-        logger.info({
-          executor: parsed.executor,
-          reason: parsed.reason,
-          taskType,
-        }, "Smart routing decision made");
-
-        return decision;
-      }
-    }
-  } catch (err) {
-    logger.debug({ error: err }, "Smart routing LLM call failed, using defaults");
-  }
-
-  // Fallback to deterministic routing
-  return makeRoutingDecision(request);
-}
-
 function mapExecutorTypeToKind(executor: ExecutorType): ExecutorKind | null {
   switch (executor) {
     case "claude":
@@ -570,8 +426,6 @@ function mapExecutorTypeToKind(executor: ExecutorType): ExecutorKind | null {
       return "codex";
     case "kimi":
       return "kimi";
-    case "gemini-api":
-      return null;
     default:
       return null;
   }
@@ -636,28 +490,6 @@ export async function executeWithRouting(
     "Routing decision made"
   );
 
-  if (decision.executor === "gemini-api") {
-    const apiResult = await executeOnExecutor(decision.executor, request);
-    if (apiResult.exitCode === 0 && "inputTokens" in apiResult) {
-      const inputTokens = (apiResult as GeminiAPIResult).inputTokens || request.estimatedTokens || 2000;
-      const outputTokens = (apiResult as GeminiAPIResult).outputTokens || Math.floor(inputTokens * 0.5);
-      trackCost(decision.executor, inputTokens, outputTokens, {
-        jobId: request.jobId,
-        query: request.query,
-        intentId: request.intentId,
-      });
-    }
-
-    return {
-      ...apiResult,
-      decision,
-      executorUsed: "gemini-api",
-      fallbacksAttempted: 0,
-      fallbackUsed: false,
-      failed: apiResult.exitCode !== 0,
-    };
-  }
-
   const baseQuery = request.context
     ? `${request.context}\n\n---\n\n${request.query}`
     : request.query;
@@ -689,11 +521,11 @@ export async function executeWithRouting(
     }
 
     if (executor === "gemini") {
-      const res = await executeGeminiCLI(query, "", {
+      const res = await executeOpenCodeCLI(query, "", {
         model: request.model || GEMINI_CLI_FLASH_MODEL,
         sandbox: true,
         yolo: true,
-      } as GeminiCLIOptions);
+      } as OpenCodeCLIOptions);
       return {
         ...res,
         error: res.exitCode === 0 ? undefined : res.output,
@@ -792,53 +624,6 @@ export async function executeWithRouting(
 }
 
 // ============================================
-// INDIVIDUAL EXECUTOR DISPATCH
-// ============================================
-
-async function executeOnExecutor(
-  executor: ExecutorType,
-  request: RoutingRequest
-): Promise<ExecutorResult> {
-  const { query, context = "", cwd = process.cwd(), model } = request;
-
-  switch (executor) {
-    case "opencode":
-      return executeGeminiCLI(query, context, {
-        model: model || GEMINI_CLI_FLASH_MODEL,
-        yolo: true,
-        sandbox: true,
-      } as GeminiCLIOptions);
-
-    case "gemini-api":
-      return executeGeminiCLIDirect(context ? `${context}\n\n---\n\n${query}` : query, {
-        timeout: 120_000,
-      });
-
-    case "kimi":
-      return executeKimiCLI(context ? `${context}\n\n---\n\n${query}` : query, "", {
-        model: model || undefined, // Use Kimi CLI config default (moonshot-ai/kimi-k2.5)
-        timeout: 1200000,
-        yolo: true,
-        workDir: cwd,
-      } as KimiCLIOptions);
-
-    case "claude":
-      return executeClaudeCommand(query, {
-        cwd,
-      } as ClaudeExecutorOptions);
-
-    case "codex":
-      return executeCodexCLI(query, {
-        cwd,
-        timeout: 1200000,
-      });
-
-    default:
-      throw new Error(`Unknown executor: ${executor}`);
-  }
-}
-
-// ============================================
 // BATCH PROCESSOR (for deferred tasks)
 // ============================================
 
@@ -911,7 +696,7 @@ export function getRouterStatus(): RouterStatus {
 
   return {
     geminiCLI: getGeminiCLIPoolStatus(),
-    dailyCost: getDailyCost(),
+    dailyCost: 0,
     deferredTasks: deferralStats.pending + deferralStats.processing,
     pendingDeferrals: deferralStats.pending,
     dbConnected: _db !== null,

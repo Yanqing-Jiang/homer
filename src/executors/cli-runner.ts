@@ -4,7 +4,7 @@ import { logger } from "../utils/logger.js";
 import { acquireSlot } from "./concurrency.js";
 import { StateManager, type CLIRunStatus, type ExecutorStateType } from "../state/manager.js";
 import { executeClaudeCommand } from "./claude.js";
-import { executeGeminiCLI, executeOpenCodeCLI } from "./opencode-cli.js";
+import { executeOpenCodeCLI } from "./opencode-cli.js";
 import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
@@ -297,7 +297,7 @@ ${pendingContext.context}
                 resumeAccountId = stored.accountId;
               }
             }
-            const result = await executeGeminiCLI(prompt, "", {
+            const result = await executeOpenCodeCLI(prompt, "", {
               model: executorKind === executor ? model ?? undefined : undefined,
               resume: executorKind === executor ? sessionId ?? undefined : undefined,
               accountId: resumeAccountId,
