@@ -11,7 +11,7 @@
 
 import { logger } from "../utils/logger.js";
 import { executeWithRouting, type RoutingRequest } from "../executors/router.js";
-import { executeGeminiWithFallback } from "../executors/opencode-cli.js";
+import { executeOpenCodeWithFallback } from "../executors/opencode-cli.js";
 import { OvernightTaskStore } from "./task-store.js";
 import { WorkspaceManager } from "./workspace.js";
 import type {
@@ -149,7 +149,7 @@ export class PrototypeOrchestrator {
 
     logger.debug({ taskId: this.task.id }, "Generating approach strategies");
 
-    const result = await executeGeminiWithFallback(prompt, "", {
+    const result = await executeOpenCodeWithFallback(prompt, "", {
       sandbox: true,
       yolo: false,
     });
