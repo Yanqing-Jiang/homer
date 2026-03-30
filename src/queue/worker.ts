@@ -2,7 +2,7 @@ import type { Bot } from "grammy";
 import { QueueManager } from "./manager.js";
 import { StateManager, type Job } from "../state/manager.js";
 import { executeClaudeCommand } from "../executors/claude.js";
-import { executeGeminiCLI } from "../executors/opencode-cli.js";
+import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
 import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 import { executeCodexCLI } from "../executors/codex-cli.js";
 import { executeKimiCLI } from "../executors/kimi-cli.js";
@@ -136,7 +136,7 @@ export class QueueWorker {
         }
 
         if (executor === "gemini") {
-          const result = await executeGeminiCLI(query, "", {
+          const result = await executeOpenCodeCLI(query, "", {
             timeout: 1200000,
             sandbox: true,
             model: GEMINI_CLI_FLASH_MODEL,
