@@ -5,6 +5,8 @@ import { z } from "zod";
 import { parseIdeasMd, type ParsedIdea } from "./parser.js";
 import * as dao from "./dao.js";
 import { logger } from "../utils/logger.js";
+import { fetchTwitterBookmarks, fetchTwitterArticle, isRetryableOpenCLIError } from "../executors/opencli.js";
+import { mapOpenCLIBookmarks, mapOpenCLIArticleToText } from "../executors/opencli-mappers.js";
 import { executeBrowserScrape } from "../executors/browser-scrape.js";
 import {
   buildBookmarkScrapePrompt,
@@ -15,6 +17,7 @@ import { ensureCDP } from "../scraping/chrome-launcher.js";
 import { cleanAgentOutput } from "../scraping/clean-output.js";
 import { parseSwarmJSON } from "../executors/model-swarm.js";
 import { insertScrape } from "../scraping/scrape-store.js";
+import { fetchAndExtract } from "../scraping/deep-fetch.js";
 import { PATHS } from "../config/paths.js";
 
 const IDEAS_FILE = PATHS.ideasMd;
@@ -76,6 +79,80 @@ function deriveBookmarkTitle(text: string, author: string): string {
   return firstSentence.length > 80
     ? `${firstSentence.slice(0, 77)}...`
     : firstSentence;
+}
+
+// ============================================
+// T.CO RESOLUTION + DEEP CONTENT ENRICHMENT
+// ============================================
+
+const TCO_RESOLVE_TIMEOUT = 8_000;
+const DEEP_FETCH_MAX_CHARS = 6_000;
+
+/**
+ * Resolve a t.co short URL to its final destination via HTTP redirect.
+ * Returns the original URL if resolution fails.
+ */
+async function resolveTco(url: string): Promise<string> {
+  if (!url.includes("t.co")) return url;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TCO_RESOLVE_TIMEOUT);
+    const resp = await fetch(url, {
+      method: "HEAD",
+      redirect: "follow",
+      signal: controller.signal,
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; Homer/1.0)" },
+    });
+    clearTimeout(timer);
+    return resp.url !== url ? resp.url : url;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Enrich a bookmark with resolved URLs and deep-fetched article content.
+ * Mirrors what Chrome CDP did implicitly: follow t.co → fetch article body.
+ *
+ * Returns augmented content and final resolved external URLs.
+ */
+async function enrichBookmark(bookmark: TwitterBookmark): Promise<{
+  content: string;
+  resolvedUrls: string[];
+  deepContent: string | null;
+}> {
+  // Resolve all t.co URLs to their final destinations
+  const resolvedUrls = await Promise.all(
+    bookmark.urls.map(u => resolveTco(u))
+  );
+
+  // Filter to non-social external URLs
+  const externalUrls = resolvedUrls.filter(u => {
+    try {
+      const h = new URL(u).hostname;
+      return !["x.com", "twitter.com", "t.co", "linkedin.com", "instagram.com"].some(d => h === d || h.endsWith(`.${d}`));
+    } catch { return false; }
+  });
+
+  // Deep-fetch article content when:
+  // 1. Bookmark text is minimal (mostly just a URL) — the link IS the content
+  // 2. OR we have external article URLs worth enriching
+  const isLinkOnly = bookmark.text.trim().match(/^https?:\/\/\S+$/) != null
+    || (bookmark.text.trim().length < 60 && externalUrls.length > 0);
+
+  let deepContent: string | null = null;
+  if (externalUrls.length > 0 && isLinkOnly) {
+    const target = externalUrls[0]!;
+    logger.debug({ url: target, author: bookmark.author }, "Deep-fetching bookmark article");
+    const result = await fetchAndExtract(target);
+    if (result.method !== "failed" && result.content.length > 100) {
+      const cap = result.content.slice(0, DEEP_FETCH_MAX_CHARS);
+      deepContent = result.title ? `# ${result.title}\n\n${cap}` : cap;
+      logger.debug({ url: target, chars: result.content.length, method: result.method }, "Deep-fetch OK");
+    }
+  }
+
+  return { content: bookmark.text, resolvedUrls: externalUrls, deepContent };
 }
 
 /** Parse bookmark scrape output: try markers first, fall back to parseSwarmJSON. */
@@ -160,21 +237,35 @@ function ensureIdeaId(idea: ParsedIdea): void {
 
 /**
  * Run bookmark extraction with a given target count.
- * Uses executeBrowserScrape (Claude Sonnet → Gemini Flash fallback).
- * Returns validated TwitterBookmark[] or throws.
+ * Primary: opencli (zero cost, ~2s). Fallback: executeBrowserScrape on infra errors.
  */
 async function runBookmarkExtraction(maxItems: number): Promise<TwitterBookmark[]> {
+  // Try opencli first
+  const cliResult = await fetchTwitterBookmarks(maxItems);
+  if (cliResult.exitCode === 0 && cliResult.data && cliResult.data.length > 0) {
+    const mapped = mapOpenCLIBookmarks(cliResult.data);
+    logger.info({ count: mapped.length, source: "opencli", duration: cliResult.duration }, "Bookmark extraction via opencli");
+    if (mapped.length > 0) return mapped;
+  }
+
+  // Fallback to browser scrape only on infra errors (extension down, timeout)
+  if (cliResult.exitCode !== 0 && !isRetryableOpenCLIError(cliResult.exitCode)) {
+    throw new Error(`opencli bookmarks failed (exit ${cliResult.exitCode}): ${cliResult.error}`);
+  }
+
+  logger.info({ opencliExit: cliResult.exitCode, error: cliResult.error }, "opencli unavailable, falling back to browser scrape");
+  await ensureCDP({ headed: true }).catch(() => {});
   const result = await executeBrowserScrape(
     buildBookmarkScrapePrompt(maxItems), "", { timeout: 600_000 },
   );
 
   if (result.exitCode !== 0) {
-    throw new Error(`Bookmark scrape failed (${result.executor}, exit ${result.exitCode}): ${result.output?.slice(0, 200)}`);
+    throw new Error(`Browser scrape fallback failed (${result.executor}, exit ${result.exitCode}): ${result.output?.slice(0, 200)}`);
   }
 
   const bookmarks = parseBookmarkOutput(result.output ?? "");
   if (bookmarks.length === 0) {
-    throw new Error(`No valid bookmarks parsed from output (${(result.output ?? "").length} chars)`);
+    throw new Error(`No valid bookmarks parsed from fallback output (${(result.output ?? "").length} chars)`);
   }
 
   return bookmarks;
@@ -182,16 +273,32 @@ async function runBookmarkExtraction(maxItems: number): Promise<TwitterBookmark[
 
 /**
  * Read a single tweet/thread to get full text content.
- * Uses executeBrowserScrape (Claude Sonnet → Gemini Flash fallback).
- * Returns full thread text or null on failure.
+ * Primary: opencli twitter article (zero cost, ~3s). Fallback: executeBrowserScrape.
  */
 async function readTweetThread(tweetUrl: string): Promise<string | null> {
+  // Extract tweet ID from URL
+  const idMatch = tweetUrl.match(/status\/(\d+)/);
+  if (!idMatch) return null;
+
+  // Try opencli first
   try {
-    const result = await executeBrowserScrape(
-      buildTweetReadPrompt(tweetUrl), "", { timeout: 300_000 },
-    );
-    if (result.exitCode === 0 && result.output && result.output !== "FAILED") {
-      return result.output.trim();
+    const cliResult = await fetchTwitterArticle(idMatch[1]!);
+    if (cliResult.exitCode === 0 && cliResult.data) {
+      const text = mapOpenCLIArticleToText(cliResult.data);
+      if (text.length > 0) {
+        logger.debug({ tweetId: idMatch[1], chars: text.length, source: "opencli" }, "Thread read via opencli");
+        return text;
+      }
+    }
+
+    // Fallback on infra errors only
+    if (cliResult.exitCode !== 0 && isRetryableOpenCLIError(cliResult.exitCode)) {
+      const browserResult = await executeBrowserScrape(
+        buildTweetReadPrompt(tweetUrl), "", { timeout: 300_000 },
+      );
+      if (browserResult.exitCode === 0 && browserResult.output && browserResult.output !== "FAILED") {
+        return browserResult.output.trim();
+      }
     }
   } catch (err) {
     logger.debug({ err, tweetUrl }, "Tweet thread read failed");
@@ -200,7 +307,7 @@ async function readTweetThread(tweetUrl: string): Promise<string | null> {
 }
 
 async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
-  logger.info("Scraping Twitter/X bookmarks via Claude Sonnet + agent-browser (extraction-only)");
+  logger.info("Scraping Twitter/X bookmarks via opencli (browser fallback on infra errors)");
 
   try {
     let bookmarks: TwitterBookmark[] = [];
@@ -227,31 +334,44 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
     const now = new Date();
     const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
 
-    // Step 2: Read full thread content for each bookmark (sequential to avoid contention)
-    // Cap at 5 thread reads to keep ingest under ~30 minutes total
+    // Step 2: Enrich each bookmark — resolve t.co, deep-fetch linked articles,
+    // then read full thread text. Sequential to avoid Chrome/network contention.
+    // Thread reads capped at 5 to keep wall-clock under ~5 minutes.
     const MAX_THREAD_READS = 5;
     const ideas: ParsedIdea[] = [];
     let threadReadsUsed = 0;
     for (const bookmark of bookmarks) {
       const tweetUrl = `https://x.com/${bookmark.author}/status/${bookmark.id}`;
+
+      // Enrich: resolve t.co → deep-fetch article if link-only tweet
+      const enriched = await enrichBookmark(bookmark);
+
+      // Read full thread (show more, multi-tweet threads)
       const fullText = threadReadsUsed < MAX_THREAD_READS
         ? await readTweetThread(tweetUrl)
         : null;
       if (fullText) threadReadsUsed++;
-      const content = fullText && fullText.length > bookmark.text.length
-        ? fullText
-        : bookmark.text;
 
-      // Extract external URLs from full text
+      // Best content: thread text > deep-fetched article > original bookmark text
+      let content: string;
+      if (fullText && fullText.length > bookmark.text.length) {
+        content = fullText;
+      } else if (enriched.deepContent) {
+        content = enriched.deepContent;
+      } else {
+        content = bookmark.text;
+      }
+
+      // Merge resolved external URLs with any URLs found in thread text
       const urlRegex = /https?:\/\/[^\s"'<>\])}，。]+/g;
       const textUrls = (content.match(urlRegex) || [])
-        .filter((u: string) => !u.includes("x.com") && !u.includes("twitter.com"));
-      const allUrls = [...new Set([...bookmark.urls, ...textUrls])];
+        .filter((u: string) => !u.includes("x.com") && !u.includes("twitter.com") && !u.includes("t.co"));
+      const allUrls = [...new Set([...enriched.resolvedUrls, ...textUrls])];
       const externalUrl = allUrls[0];
 
       logger.debug(
-        { id: bookmark.id, author: bookmark.author, cardLen: bookmark.text.length, fullLen: content.length, urls: allUrls.length },
-        "Bookmark thread read complete"
+        { id: bookmark.id, author: bookmark.author, cardLen: bookmark.text.length, fullLen: content.length, urls: allUrls.length, deepFetched: enriched.deepContent != null },
+        "Bookmark enrichment complete"
       );
 
       ideas.push({
