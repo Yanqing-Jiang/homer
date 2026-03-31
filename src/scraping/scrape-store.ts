@@ -352,7 +352,7 @@ export function isStepExhausted(
   stepName: "score" | "candidate" | "critique" | "enrich" | "synthesize",
 ): boolean {
   const pipeline = getPipelineState(db, scrapeId);
-  return (pipeline?.attempts[stepName] ?? 0) >= MAX_STEP_RETRIES;
+  return (pipeline?.attempts?.[stepName] ?? 0) >= MAX_STEP_RETRIES;
 }
 
 /** Get all scrapes belonging to a cluster (by clusterId in metadata). */
