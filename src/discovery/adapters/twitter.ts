@@ -1,12 +1,13 @@
 /**
  * Twitter Bookmarks Adapter
  *
- * Fetches bookmarks from Twitter/X using Codex + agent-browser via Chrome CDP.
- * Uses marker-wrapped extraction-only prompt (no deep-fetch, no enrichment).
+ * Primary: opencli (zero cost, ~2s). Fallback: executeBrowserScrape on infra errors.
  */
 
 import type { SourceConfig, RawDiscoveryItem } from "../types.js";
 import { BaseAdapter } from "./base.js";
+import { fetchTwitterBookmarks, isOpenCLIHealthy, isRetryableOpenCLIError } from "../../executors/opencli.js";
+import { mapBookmarkToDiscoveryItem } from "../../executors/opencli-mappers.js";
 import { executeBrowserScrape } from "../../executors/browser-scrape.js";
 import {
   buildBookmarkScrapePrompt,
@@ -41,11 +42,7 @@ export class TwitterAdapter extends BaseAdapter {
 
   async isAvailable(): Promise<boolean> {
     try {
-      const result = await executeBrowserScrape(
-        'Run this command and report if it succeeds: agent-browser connect 9222',
-        "", { timeout: 15_000 },
-      );
-      return result.exitCode === 0;
+      return await isOpenCLIHealthy();
     } catch {
       return false;
     }
@@ -54,18 +51,38 @@ export class TwitterAdapter extends BaseAdapter {
   async fetch(config: SourceConfig): Promise<RawDiscoveryItem[]> {
     const maxItems = Math.min(config.maxItems || 10, 10);
 
+    // Try opencli first
+    const cliResult = await fetchTwitterBookmarks(maxItems);
+    if (cliResult.exitCode === 0 && cliResult.data && cliResult.data.length > 0) {
+      return cliResult.data.map(b => {
+        const item = mapBookmarkToDiscoveryItem(b);
+        // Use adapter's generateId for consistency with other adapters
+        return {
+          ...item,
+          id: this.generateId(item.url, this.type),
+          source: this.type,
+          description: this.cleanText(b.text),
+          author: `@${b.author}`,
+          rawContent: JSON.stringify(b),
+        };
+      });
+    }
+
+    // Fallback to browser scrape on infra errors
+    if (cliResult.exitCode !== 0 && !isRetryableOpenCLIError(cliResult.exitCode)) {
+      throw new Error(`opencli bookmarks failed (exit ${cliResult.exitCode}): ${cliResult.error}`);
+    }
+
     const result = await executeBrowserScrape(
       buildBookmarkScrapePrompt(maxItems),
       "", { timeout: 600_000 },
     );
 
     if (result.exitCode !== 0) {
-      throw new Error(`Twitter adapter failed: ${result.output?.slice(0, 200)}`);
+      throw new Error(`Twitter adapter browser fallback failed: ${result.output?.slice(0, 200)}`);
     }
 
     const output = result.output ?? "";
-
-    // Try markers first, fall back to cleaning raw output
     const marked = extractMarkedBlock(output, BOOKMARK_JSON_START, BOOKMARK_JSON_END);
     const candidate = marked ?? cleanAgentOutput(output);
 
@@ -94,7 +111,6 @@ export class TwitterAdapter extends BaseAdapter {
       u => !u.includes("x.com") && !u.includes("twitter.com"),
     );
 
-    // Generate title from text (deterministic)
     const clean = bookmark.text.replace(/\s+/g, " ").trim();
     const firstSentence = clean.split(/[.!?\n]/)[0]?.trim() || clean;
     const title = firstSentence.length > 80

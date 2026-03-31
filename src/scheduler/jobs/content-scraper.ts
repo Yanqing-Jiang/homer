@@ -22,6 +22,8 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { createHash } from "crypto";
 // @ts-ignore
 import type Database from "better-sqlite3";
+import { fetchLinkedInTimeline, fetchMediumFeed, isRetryableOpenCLIError } from "../../executors/opencli.js";
+import { mapLinkedInTimeline, mapMediumFeed } from "../../executors/opencli-mappers.js";
 import { executeBrowserScrape } from "../../executors/browser-scrape.js";
 import { executeClaudeCommand } from "../../executors/claude.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
@@ -809,38 +811,70 @@ export async function runContentScraper(db: Database.Database): Promise<{
     logger.info({ count: rssPostsRaw.length }, "Medium RSS complete");
 
     // Phase 2: sequential — Medium For You + LinkedIn + optional Medium browser fallback
-    // Sequential avoids Gemini account contention when Claude Sonnet times out and both fall back.
+    // Primary: opencli (~2s, free). Fallback: executeBrowserScrape on infra errors.
 
     // Medium browser fallback (only if RSS was empty)
     let mediumFallbackResult: PromiseSettledResult<Awaited<ReturnType<typeof executeBrowserScrape>> | null>;
     if (rssPostsRaw.length > 0) {
       mediumFallbackResult = { status: "fulfilled", value: null };
     } else {
-      logger.info("Medium RSS empty — launching browser fallback");
+      logger.info("Medium RSS empty — trying opencli medium feed, then browser fallback");
       try {
-        const val = await executeBrowserScrape(buildMediumScrapePrompt(), "", { timeout: 120_000 });
-        mediumFallbackResult = { status: "fulfilled", value: val };
+        const cliResult = await fetchMediumFeed(10);
+        if (cliResult.exitCode === 0 && cliResult.data && cliResult.data.length > 0) {
+          // opencli succeeded but returns discovery-only data (no content). Treat as "no full posts".
+          logger.info({ count: cliResult.data.length }, "Medium RSS fallback: opencli found articles (discovery only)");
+          mediumFallbackResult = { status: "fulfilled", value: null };
+        } else if (isRetryableOpenCLIError(cliResult.exitCode)) {
+          const val = await executeBrowserScrape(buildMediumScrapePrompt(), "", { timeout: 120_000 });
+          mediumFallbackResult = { status: "fulfilled", value: val };
+        } else {
+          mediumFallbackResult = { status: "fulfilled", value: null };
+        }
       } catch (err) {
         mediumFallbackResult = { status: "rejected", reason: err };
       }
     }
 
-    // Medium For You: signed-in browser feed via executeBrowserScrape (Claude Sonnet → Gemini Flash)
-    let mediumTrendingResult: PromiseSettledResult<Awaited<ReturnType<typeof executeBrowserScrape>>>;
+    // Medium For You: opencli primary → browser fallback
+    let mediumTrendingResult: PromiseSettledResult<{ exitCode: number; output: string; duration: number }>;
     try {
-      logger.info("Starting Medium For You scrape");
-      const val = await executeBrowserScrape(buildMediumForYouScrapePrompt(5), "", { timeout: 600_000 });
-      mediumTrendingResult = { status: "fulfilled", value: val };
+      logger.info("Starting Medium For You scrape via opencli");
+      const cliResult = await fetchMediumFeed(5);
+      if (cliResult.exitCode === 0 && cliResult.data && cliResult.data.length > 0) {
+        const mapped = mapMediumFeed(cliResult.data);
+        // Serialize as JSON so downstream parseScrapedJSON can consume it
+        mediumTrendingResult = { status: "fulfilled", value: { exitCode: 0, output: JSON.stringify(mapped), duration: cliResult.duration } };
+        logger.info({ count: mapped.length, source: "opencli", duration: cliResult.duration }, "Medium For You via opencli");
+      } else if (isRetryableOpenCLIError(cliResult.exitCode)) {
+        logger.info({ opencliExit: cliResult.exitCode }, "opencli unavailable, falling back to browser for Medium For You");
+        await ensureCDP({ headed: true }).catch(() => {});
+        const val = await executeBrowserScrape(buildMediumForYouScrapePrompt(5), "", { timeout: 600_000 });
+        mediumTrendingResult = { status: "fulfilled", value: { exitCode: val.exitCode, output: val.output ?? "", duration: val.duration } };
+      } else {
+        mediumTrendingResult = { status: "fulfilled", value: { exitCode: cliResult.exitCode, output: cliResult.error || "", duration: cliResult.duration } };
+      }
     } catch (err) {
       mediumTrendingResult = { status: "rejected", reason: err };
     }
 
-    // LinkedIn: signed-in browser activity via executeBrowserScrape (Claude Sonnet → Gemini Flash)
-    let linkedinResult: PromiseSettledResult<Awaited<ReturnType<typeof executeBrowserScrape>>>;
+    // LinkedIn: opencli primary → browser fallback
+    let linkedinResult: PromiseSettledResult<{ exitCode: number; output: string; duration: number }>;
     try {
-      logger.info("Starting LinkedIn scrape");
-      const val = await executeBrowserScrape(buildLinkedInTopPostPrompt(), "", { timeout: 600_000 });
-      linkedinResult = { status: "fulfilled", value: val };
+      logger.info("Starting LinkedIn scrape via opencli");
+      const cliResult = await fetchLinkedInTimeline(10);
+      if (cliResult.exitCode === 0 && cliResult.data && cliResult.data.length > 0) {
+        const mapped = mapLinkedInTimeline(cliResult.data);
+        linkedinResult = { status: "fulfilled", value: { exitCode: 0, output: JSON.stringify(mapped), duration: cliResult.duration } };
+        logger.info({ count: mapped.length, source: "opencli", duration: cliResult.duration }, "LinkedIn via opencli");
+      } else if (isRetryableOpenCLIError(cliResult.exitCode)) {
+        logger.info({ opencliExit: cliResult.exitCode }, "opencli unavailable, falling back to browser for LinkedIn");
+        await ensureCDP({ headed: true }).catch(() => {});
+        const val = await executeBrowserScrape(buildLinkedInTopPostPrompt(), "", { timeout: 600_000 });
+        linkedinResult = { status: "fulfilled", value: { exitCode: val.exitCode, output: val.output ?? "", duration: val.duration } };
+      } else {
+        linkedinResult = { status: "fulfilled", value: { exitCode: cliResult.exitCode, output: cliResult.error || "", duration: cliResult.duration } };
+      }
     } catch (err) {
       linkedinResult = { status: "rejected", reason: err };
     }

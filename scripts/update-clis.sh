@@ -29,4 +29,9 @@ echo "[kimi] Updating..."
 brew upgrade kimi-cli 2>&1 | tail -3
 echo "[kimi] $(kimi --version 2>/dev/null)"
 
+# Gemini CLI — npm global
+echo "[gemini] Updating..."
+npm install -g @google/gemini-cli@latest 2>&1 | tail -3
+echo "[gemini] $(gemini --version 2>/dev/null)"
+
 echo "=== Done ==="
