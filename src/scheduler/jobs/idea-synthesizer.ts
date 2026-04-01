@@ -854,7 +854,7 @@ function stepSave(
 // MAIN
 // ============================================
 
-export async function runIdeaSynthesizer(db: Database.Database, jobRunId?: number): Promise<{
+export async function runIdeaSynthesizer(db: Database.Database, jobRunId?: number, signal?: AbortSignal): Promise<{
   success: boolean;
   output: string;
   error?: string;
@@ -941,19 +941,26 @@ ${existingTitles.slice(0, 1500)}`;
     logger.info({ count: needsScoring.length }, "Step 1: Scoring scrapes");
 
     for (const scrape of needsScoring) {
-      if (isStepExhausted(db, scrape.id, "score")) {
-        markScrapeTerminal(db, scrape.id, "exhausted");
-        stats.failed++;
-        continue;
-      }
-      const ok = await stepScore(db, scrape, sharedContext);
-      if (ok) {
-        stats.scored++;
-        const pipeline = getPipelineState(db, scrape.id);
-        if (pipeline?.score && pipeline.score.value >= 6) {
-          stats.aboveThreshold++;
+      if (signal?.aborted) break;
+      try {
+        if (isStepExhausted(db, scrape.id, "score")) {
+          markScrapeTerminal(db, scrape.id, "exhausted");
+          stats.failed++;
+          continue;
         }
-      } else {
+        const ok = await stepScore(db, scrape, sharedContext);
+        if (ok) {
+          stats.scored++;
+          const pipeline = getPipelineState(db, scrape.id);
+          if (pipeline?.score && pipeline.score.value >= 6) {
+            stats.aboveThreshold++;
+          }
+        } else {
+          stats.failed++;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn({ scrapeId: scrape.id, step: "score", error: msg }, "Scrape failed, continuing");
         stats.failed++;
       }
     }
@@ -983,23 +990,30 @@ ${existingTitles.slice(0, 1500)}`;
     logger.info({ count: needsSynthesis.length }, "Step 3: Synthesizing candidates");
 
     for (const scrape of needsSynthesis) {
-      if (isStepExhausted(db, scrape.id, "synthesize")) {
-        markScrapeTerminal(db, scrape.id, "exhausted");
-        stats.failed++;
-        continue;
-      }
-      const ok = await stepSynthesize(db, scrape, sharedContext);
-      if (ok) {
-        const pipeline = getPipelineState(db, scrape.id);
-        if (pipeline?.step === "rejected") {
-          stats.confidenceGateRejected++;
-        } else {
-          stats.synthesized++;
-          if ((pipeline?.cluster?.memberIds?.length ?? 1) > 1) {
-            stats.multiSourceIdeas++;
-          }
+      if (signal?.aborted) break;
+      try {
+        if (isStepExhausted(db, scrape.id, "synthesize")) {
+          markScrapeTerminal(db, scrape.id, "exhausted");
+          stats.failed++;
+          continue;
         }
-      } else {
+        const ok = await stepSynthesize(db, scrape, sharedContext);
+        if (ok) {
+          const pipeline = getPipelineState(db, scrape.id);
+          if (pipeline?.step === "rejected") {
+            stats.confidenceGateRejected++;
+          } else {
+            stats.synthesized++;
+            if ((pipeline?.cluster?.memberIds?.length ?? 1) > 1) {
+              stats.multiSourceIdeas++;
+            }
+          }
+        } else {
+          stats.failed++;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn({ scrapeId: scrape.id, step: "synthesize", error: msg }, "Scrape failed, continuing");
         stats.failed++;
       }
     }
@@ -1011,20 +1025,27 @@ ${existingTitles.slice(0, 1500)}`;
     logger.info({ count: needsCritique.length }, "Step 4: Critiquing candidates");
 
     for (const scrape of needsCritique) {
-      if (isStepExhausted(db, scrape.id, "critique")) {
-        markScrapeTerminal(db, scrape.id, "exhausted");
-        stats.failed++;
-        continue;
-      }
-      const ok = await stepCritique(db, scrape, sharedContext);
-      if (ok) {
-        const pipeline = getPipelineState(db, scrape.id);
-        if (pipeline?.critique?.passed) {
-          stats.critiquePassed++;
-        } else {
-          stats.critiqueScoreRejected++;
+      if (signal?.aborted) break;
+      try {
+        if (isStepExhausted(db, scrape.id, "critique")) {
+          markScrapeTerminal(db, scrape.id, "exhausted");
+          stats.failed++;
+          continue;
         }
-      } else {
+        const ok = await stepCritique(db, scrape, sharedContext);
+        if (ok) {
+          const pipeline = getPipelineState(db, scrape.id);
+          if (pipeline?.critique?.passed) {
+            stats.critiquePassed++;
+          } else {
+            stats.critiqueScoreRejected++;
+          }
+        } else {
+          stats.failed++;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn({ scrapeId: scrape.id, step: "critique", error: msg }, "Scrape failed, continuing");
         stats.failed++;
       }
     }
@@ -1036,14 +1057,21 @@ ${existingTitles.slice(0, 1500)}`;
     logger.info({ count: needsEnrichment.length }, "Step 5: Enriching passed candidates");
 
     for (const scrape of needsEnrichment) {
-      if (isStepExhausted(db, scrape.id, "enrich")) {
-        markScrapeTerminal(db, scrape.id, "exhausted");
+      if (signal?.aborted) break;
+      try {
+        if (isStepExhausted(db, scrape.id, "enrich")) {
+          markScrapeTerminal(db, scrape.id, "exhausted");
+          stats.failed++;
+          continue;
+        }
+        const ok = await stepEnrich(db, scrape, sharedContext);
+        if (ok) stats.enriched++;
+        else stats.failed++;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn({ scrapeId: scrape.id, step: "enrich", error: msg }, "Scrape failed, continuing");
         stats.failed++;
-        continue;
       }
-      const ok = await stepEnrich(db, scrape, sharedContext);
-      if (ok) stats.enriched++;
-      else stats.failed++;
     }
 
     // ========================================
@@ -1053,13 +1081,20 @@ ${existingTitles.slice(0, 1500)}`;
     logger.info({ count: needsSaving.length }, "Step 6: Saving enriched ideas");
 
     for (const scrape of needsSaving) {
-      const result = stepSave(db, scrape);
-      if (result) {
-        saveResults.push(result);
-        if (result.action === "created") stats.saved++;
-        else if (result.action === "enhanced") stats.enhanced++;
-        else stats.skipped++;
-      } else {
+      if (signal?.aborted) break;
+      try {
+        const result = stepSave(db, scrape);
+        if (result) {
+          saveResults.push(result);
+          if (result.action === "created") stats.saved++;
+          else if (result.action === "enhanced") stats.enhanced++;
+          else stats.skipped++;
+        } else {
+          stats.failed++;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn({ scrapeId: scrape.id, step: "save", error: msg }, "Scrape failed, continuing");
         stats.failed++;
       }
     }
