@@ -26,7 +26,7 @@ DB_PATH="${HOME}/homer/data/homer.db"
 LOG_DIR="${HOME}/Library/Logs/homer"
 LOG_FILE="${LOG_DIR}/kickstart.log"
 
-DRAIN_MAX_AGE_SECS=360  # 6 minutes
+DRAIN_MAX_AGE_SECS=60  # matches plist ExitTimeOut
 
 mkdir -p "$APP_SUPPORT_DIR" "$LOG_DIR"
 
