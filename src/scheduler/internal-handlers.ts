@@ -1085,7 +1085,7 @@ async function runHandler(
       }
       case "idea_synthesizer": {
         const { runIdeaSynthesizer } = await import("./jobs/idea-synthesizer.js");
-        const result = await runIdeaSynthesizer(ctx.stateManager.getDb(), ctx.jobRunId);
+        const result = await runIdeaSynthesizer(ctx.stateManager.getDb(), ctx.jobRunId, ctx.signal);
         return buildResult(
           job,
           startedAt,

@@ -20,6 +20,7 @@ import { executeClaudeCommand, type ClaudeExecutorOptions } from "./claude.js";
 import type { ExecutorResult } from "./types.js";
 import { runWithFallbackChain, DEFAULT_CHAIN, type ExecutorKind } from "./fallback-orchestrator.js";
 import { AccountManager, CostTracker, DeferralQueue, createRouterState, type RouterState } from "./router-db.js";
+import { writeChainTrace } from "./trace-writer.js";
 
 // ============================================
 // TYPES
@@ -572,6 +573,8 @@ export async function executeWithRouting(
     runExecutor,
     notify: options?.notify,
   });
+
+  writeChainTrace(fallbackResult, { jobId, source: "router" });
 
   const lastResult = fallbackResult.result;
   const executorUsed = mapExecutorKindToType(fallbackResult.executorUsed);

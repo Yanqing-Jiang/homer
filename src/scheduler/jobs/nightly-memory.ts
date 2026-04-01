@@ -362,6 +362,16 @@ If nothing to promote, use an empty array.`;
     } catch (err) {
       logger.debug({ error: err }, "Executor feedback purge skipped");
     }
+    try {
+      const { purgeOldTraces } = await import("../../executors/trace-writer.js");
+      const purgedTraces = purgeOldTraces(stateManager.getDb());
+      if (purgedTraces > 0) {
+        logger.info({ purged: purgedTraces }, "Purged old execution traces (>90 days)");
+        parts.push(`purged ${purgedTraces} old traces`);
+      }
+    } catch (err) {
+      logger.debug({ error: err }, "Execution trace purge skipped");
+    }
 
     try {
       // Archive skills inactive for >30 days

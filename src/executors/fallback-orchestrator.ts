@@ -16,8 +16,8 @@ export type ErrorType = "timeout" | "rate_limit" | "session_timeout" | "auth" | 
 export const DEFAULT_CHAIN: ExecutorKind[] = ["claude", "codex", "gemini"];
 export const MEMORY_CHAIN: ExecutorKind[] = ["gemini", "claude", "codex"];
 
-const FAILURE_DISABLE_THRESHOLD = 2;
-const DISABLE_MS = 30 * 60 * 1000;
+export const FAILURE_DISABLE_THRESHOLD = 2;
+export const DISABLE_MS = 30 * 60 * 1000;
 const MAX_RETRIES_PER_EXECUTOR = 2; // Retry same CLI twice before switching to next
 
 interface HealthState {
@@ -103,6 +103,11 @@ export function recordSuccess(executor: ExecutorKind): void {
   state.consecutiveFailures = 0;
   state.disabledUntil = 0;
   state.lastError = undefined;
+}
+
+/** Set health state directly (used for rehydration from traces on startup). */
+export function setHealthState(executor: ExecutorKind, state: { consecutiveFailures: number; disabledUntil: number }): void {
+  HEALTH.set(executor, { ...state });
 }
 
 export function recordFailure(executor: ExecutorKind, errorSummary: string): { disabledNow: boolean } {

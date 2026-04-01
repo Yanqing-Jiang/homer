@@ -9,6 +9,7 @@ import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { runWithFallbackChain, DEFAULT_CHAIN, type ExecutorKind } from "./fallback-orchestrator.js";
+import { writeChainTrace } from "./trace-writer.js";
 import { processMemoryUpdates } from "../memory/writer.js";
 import { getExecutorModel, getClaudeDefaultModel } from "../commands/index.js";
 import { buildConversationContext, CONTEXT_DEFAULTS, type ContextSource } from "./context-builder.js";
@@ -386,6 +387,8 @@ ${pendingContext.context}
             runExecutor,
             stateManager: this.stateManager,
           });
+
+          writeChainTrace(fallbackResult, { jobId: runId, source: "runtime" });
 
           const result = fallbackResult.result;
           output = result.output;
