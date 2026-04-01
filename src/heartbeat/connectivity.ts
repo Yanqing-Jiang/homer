@@ -5,7 +5,7 @@ import type { Bot } from "grammy";
 const CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const INVESTIGATE_AFTER_FAILURES = 3;
 const HEALTH_ENDPOINTS = [
-  { name: "Telegram", url: "https://api.telegram.org", timeout: 10000 },
+  // Telegram checked via bot.api.getMe() — see checkTelegram()
   { name: "Anthropic", url: "https://api.anthropic.com", timeout: 10000 },
   { name: "OpenAI", url: "https://api.openai.com", timeout: 10000 },
 ];
@@ -79,7 +79,31 @@ export class ConnectivityMonitor {
   }
 
   /**
-   * Check a single endpoint's health
+   * Check Telegram via bot.api.getMe() — reliable authenticated check
+   */
+  private async checkTelegram(): Promise<HealthStatus> {
+    const startTime = Date.now();
+    const checkedAt = new Date();
+
+    if (!this.bot) {
+      return { name: "Telegram", healthy: false, error: "Bot not configured", checkedAt };
+    }
+
+    try {
+      await this.bot.api.getMe();
+      return { name: "Telegram", healthy: true, latencyMs: Date.now() - startTime, checkedAt };
+    } catch (error) {
+      return {
+        name: "Telegram",
+        healthy: false,
+        error: error instanceof Error ? error.message : "Unknown error",
+        checkedAt,
+      };
+    }
+  }
+
+  /**
+   * Check a single endpoint's health via HTTP
    */
   private async checkEndpoint(endpoint: { name: string; url: string; timeout: number }): Promise<HealthStatus> {
     const startTime = Date.now();
@@ -89,22 +113,19 @@ export class ConnectivityMonitor {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), endpoint.timeout);
 
-      const response = await fetch(endpoint.url, {
-        method: "HEAD",
-        signal: controller.signal,
-      });
+      try {
+        const response = await fetch(endpoint.url, {
+          method: "HEAD",
+          signal: controller.signal,
+        });
 
-      clearTimeout(timeoutId);
+        const latencyMs = Date.now() - startTime;
+        const healthy = response.status < 500;
 
-      const latencyMs = Date.now() - startTime;
-      const healthy = response.status < 500;
-
-      return {
-        name: endpoint.name,
-        healthy,
-        latencyMs,
-        checkedAt,
-      };
+        return { name: endpoint.name, healthy, latencyMs, checkedAt };
+      } finally {
+        clearTimeout(timeoutId);
+      }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
       return {
@@ -117,55 +138,54 @@ export class ConnectivityMonitor {
   }
 
   /**
+   * Track consecutive failures, send alerts, trigger investigation
+   */
+  private async trackFailures(name: string, status: HealthStatus): Promise<void> {
+    if (!status.healthy) {
+      const failures = (this.consecutiveFailures.get(name) || 0) + 1;
+      this.consecutiveFailures.set(name, failures);
+
+      logger.warn({ endpoint: name, error: status.error, consecutiveFailures: failures }, "Connectivity check failed");
+
+      if (failures === 2 && this.alertOnFailure) {
+        await this.sendAlert(name, status);
+        try {
+          const { sendEmergencySms } = await import("../telephony/emergency-sms.js");
+          await sendEmergencySms(`Connectivity: ${name} unreachable (2 failures). Error: ${status.error || "Unknown"}`);
+        } catch { /* best-effort */ }
+      }
+
+      if (failures === INVESTIGATE_AFTER_FAILURES) {
+        await this.triggerInvestigation(name, status, failures);
+      }
+    } else {
+      const previousFailures = this.consecutiveFailures.get(name) || 0;
+      this.consecutiveFailures.set(name, 0);
+      this.investigationTriggered.set(name, false);
+
+      if (previousFailures >= 2 && this.alertOnFailure) {
+        await this.sendRecoveryAlert(name, status);
+      }
+    }
+  }
+
+  /**
    * Check all endpoints
    */
   async checkAll(): Promise<HealthStatus[]> {
     const results: HealthStatus[] = [];
 
+    // Telegram: use authenticated bot API instead of raw HTTP
+    const telegramStatus = await this.checkTelegram();
+    results.push(telegramStatus);
+    this.lastStatus.set("Telegram", telegramStatus);
+    await this.trackFailures("Telegram", telegramStatus);
+
     for (const endpoint of HEALTH_ENDPOINTS) {
       const status = await this.checkEndpoint(endpoint);
       results.push(status);
       this.lastStatus.set(endpoint.name, status);
-
-      // Track consecutive failures
-      if (!status.healthy) {
-        const failures = (this.consecutiveFailures.get(endpoint.name) || 0) + 1;
-        this.consecutiveFailures.set(endpoint.name, failures);
-
-        logger.warn(
-          {
-            endpoint: endpoint.name,
-            error: status.error,
-            consecutiveFailures: failures,
-          },
-          "Connectivity check failed"
-        );
-
-        // Alert after 2 consecutive failures
-        if (failures === 2 && this.alertOnFailure) {
-          await this.sendAlert(endpoint.name, status);
-          // Emergency SMS backup
-          try {
-            const { sendEmergencySms } = await import("../telephony/emergency-sms.js");
-            await sendEmergencySms(`Connectivity: ${endpoint.name} unreachable (2 failures). Error: ${status.error || "Unknown"}`);
-          } catch { /* best-effort */ }
-        }
-
-        // Trigger Claude Code investigation after 3 consecutive failures
-        if (failures === INVESTIGATE_AFTER_FAILURES) {
-          await this.triggerInvestigation(endpoint.name, status, failures);
-        }
-      } else {
-        const previousFailures = this.consecutiveFailures.get(endpoint.name) || 0;
-        this.consecutiveFailures.set(endpoint.name, 0);
-        // Reset investigation flag on recovery
-        this.investigationTriggered.set(endpoint.name, false);
-
-        // Alert recovery if was previously failing
-        if (previousFailures >= 2 && this.alertOnFailure) {
-          await this.sendRecoveryAlert(endpoint.name, status);
-        }
-      }
+      await this.trackFailures(endpoint.name, status);
     }
 
     return results;
