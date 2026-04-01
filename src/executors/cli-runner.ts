@@ -138,6 +138,14 @@ export class CLIRunManager {
     return true;
   }
 
+  cancelAll(reason = "daemon shutdown"): number {
+    let cancelled = 0;
+    for (const [lane] of this.activeRuns) {
+      if (this.cancelRun(lane, reason)) cancelled++;
+    }
+    return cancelled;
+  }
+
   async startRun(params: CLIRunStartParams): Promise<{ runId: string; result: Promise<CLIRunResult> }> {
     if (this.activeRuns.has(params.lane)) {
       throw new Error("A run is already in progress for this session.");

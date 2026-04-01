@@ -3,11 +3,14 @@
  *
  * Validates the memory backup system:
  * 1. Orphan summaries without transcripts
- * 2. Daily log archive gaps
- * 3. Memory snapshot freshness per file
- * 4. DB backup recency (within 48h)
- * 5. Backup file exists on disk + checksum matches
- * 6. Job artifacts exist for recent synthesizer/improvements runs
+ * 2. Memory snapshot freshness per file
+ * 3. DB backup recency (within 48h)
+ * 4. Backup file exists on disk + checksum matches
+ * 5. Job artifacts exist for recent synthesizer/improvements runs
+ *
+ * Note: Daily log archive gap check removed 2026-03-31 — session-summaries
+ * (the only writer to daily_log_archive) was disabled in the 2026-02-24
+ * pipeline refactor. Table retained for historical reads by weekly-consolidation.
  *
  * Sends Telegram notification only on failures.
  * Schedule: 30 4 * * 0 (Sunday 4:30am, after weekly-cleanup)
@@ -62,37 +65,7 @@ export async function runArchiveVerify(db: Database.Database): Promise<{
       results.push({ check: "Transcript coverage", status: "warn", detail: `Check failed: ${err}` });
     }
 
-    // 2. Daily log archive gaps (last 7 days)
-    try {
-      const today = new Date();
-      let gaps = 0;
-      const gapDates: string[] = [];
-
-      for (let i = 1; i <= 7; i++) {
-        const d = new Date(today);
-        d.setDate(d.getDate() - i);
-        const dateStr = d.toISOString().slice(0, 10);
-        const archived = db.prepare(
-          "SELECT 1 FROM daily_log_archive WHERE date = ?"
-        ).get(dateStr);
-        if (!archived) {
-          gaps++;
-          gapDates.push(dateStr);
-        }
-      }
-
-      results.push({
-        check: "Daily log archives",
-        status: gaps > 2 ? "fail" : gaps > 0 ? "warn" : "ok",
-        detail: gaps > 0
-          ? `${gaps} missing archive days: ${gapDates.join(", ")}`
-          : "All 7 recent days archived",
-      });
-    } catch (err) {
-      results.push({ check: "Daily log archives", status: "warn", detail: `Check failed: ${err}` });
-    }
-
-    // 3. Memory snapshot freshness
+    // 2. Memory snapshot freshness
     try {
       const hasSnapshotsTable = db.prepare(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_file_snapshots'"
