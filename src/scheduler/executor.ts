@@ -18,6 +18,7 @@ import {
   MEMORY_CHAIN,
   type ExecutorKind,
 } from "../executors/fallback-orchestrator.js";
+import { writeChainTrace } from "../executors/trace-writer.js";
 
 /**
  * Load context files and combine into a single string
@@ -879,6 +880,8 @@ export async function executeScheduledJob(
     skipDiagnosis: options?.skipDiagnosis,
     jobMeta: { deep: config.deep },
   });
+
+  writeChainTrace(fallbackResult, { jobId: config.id, source: "scheduler" });
 
   const result = fallbackResult.result ?? {
     jobId: config.id,

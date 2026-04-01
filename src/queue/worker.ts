@@ -14,6 +14,7 @@ import {
   MEMORY_CHAIN,
   type ExecutorKind,
 } from "../executors/fallback-orchestrator.js";
+import { writeChainTrace } from "../executors/trace-writer.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { logger } from "../utils/logger.js";
 
@@ -197,6 +198,8 @@ export class QueueWorker {
           await this.bot.api.sendMessage(job.chatId, message);
         },
       });
+
+      writeChainTrace(fallbackResult, { jobId: job.id, source: "runtime" });
 
       const result = fallbackResult.result;
       const success = result.exitCode === 0;
