@@ -26,9 +26,9 @@ const FATAL_LOG = path.join(LOG_DIR, "fatal.log");
 
 const EXIT_TIMEOUT_MS = 2000;
 // Global shutdown timeout: total budget for all shutdown phases.
-// Must be larger than DRAIN_TIMEOUT_MS (used in index.ts) to allow for Phase 1 + Phase 3.
-// Default 330s (5.5 min). LaunchD ExitTimeOut (360s) > this > DRAIN_TIMEOUT_MS (270s).
-const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS ?? "330000", 10);
+// Must be larger than DRAIN_TIMEOUT_MS (15s in index.ts) to allow for Phase 1 + Phase 3.
+// Default 30s. LaunchD ExitTimeOut (60s) > this > DRAIN_TIMEOUT_MS (15s).
+const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS ?? "30000", 10);
 
 // SMS constants — read from env directly (no config import, this runs before init)
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID ?? "";

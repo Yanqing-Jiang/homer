@@ -336,7 +336,8 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
 
     // Step 2: Enrich each bookmark — resolve t.co, deep-fetch linked articles,
     // then read full thread text. Sequential to avoid Chrome/network contention.
-    // Thread reads capped at 5 to keep wall-clock under ~5 minutes.
+    // Thread reads for regular tweets capped at 5. Link-only tweets always get
+    // a thread read because their entire content depends on it.
     const MAX_THREAD_READS = 5;
     const ideas: ParsedIdea[] = [];
     let threadReadsUsed = 0;
@@ -346,11 +347,13 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
       // Enrich: resolve t.co → deep-fetch article if link-only tweet
       const enriched = await enrichBookmark(bookmark);
 
-      // Read full thread (show more, multi-tweet threads)
-      const fullText = threadReadsUsed < MAX_THREAD_READS
+      // Link-only tweets (entire text is a URL) have no content without a thread read —
+      // always read those. Cap regular tweet thread reads at MAX_THREAD_READS.
+      const isLinkOnly = /^https?:\/\/\S+$/.test(bookmark.text.trim());
+      const fullText = (isLinkOnly || threadReadsUsed < MAX_THREAD_READS)
         ? await readTweetThread(tweetUrl)
         : null;
-      if (fullText) threadReadsUsed++;
+      if (fullText && !isLinkOnly) threadReadsUsed++;
 
       // Best content: thread text > deep-fetched article > original bookmark text
       let content: string;

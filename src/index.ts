@@ -232,11 +232,9 @@ async function main(): Promise<void> {
 
   // Graceful shutdown — two-phase approach:
   // Phase 1: Stop accepting new work (immediate)
-  // Phase 2: Drain active processes (configurable timeout, default 5min)
-  // Drain timeout for active executor processes. Must be < SHUTDOWN_TIMEOUT_MS (330s)
-  // to leave room for Phase 1 (stop accepting) and Phase 3 (cleanup).
-  // Budget: Phase 1 (~5s) + Phase 2 drain (270s) + force-kill (10s) + Phase 3 (~5s) = ~290s < 330s
-  const DRAIN_TIMEOUT_MS = parseInt(process.env.DRAIN_TIMEOUT_MS ?? "270000", 10);
+  // Phase 2: Cancel + drain active processes (15s default)
+  // Budget: Phase 1 (~5s) + Phase 2 cancel+drain (15s) + force-kill (5s) + Phase 3 (~5s) = ~30s
+  const DRAIN_TIMEOUT_MS = parseInt(process.env.DRAIN_TIMEOUT_MS ?? "15000", 10);
 
   // Drain sentinel: tells heartbeat we're shutting down gracefully (don't emergency-restart)
   const DRAIN_SENTINEL = path.join(
@@ -271,8 +269,13 @@ async function main(): Promise<void> {
     }
   });
 
-  // Phase 2: Drain active executor processes
+  // Phase 2: Cancel + drain active executor processes
   registerShutdownTask(async () => {
+    const cancelledCount = cliRunManager.cancelAll("daemon restart");
+    if (cancelledCount > 0) {
+      logger.info({ cancelledCount }, "Phase 2: Cancelled active CLI runs");
+    }
+
     const activeExecutors = processRegistry.getByType("executor").length;
     const activeCliRuns = cliRunManager.activeCount;
     const totalActive = activeExecutors + activeCliRuns;

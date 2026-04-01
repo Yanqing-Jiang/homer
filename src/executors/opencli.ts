@@ -171,7 +171,15 @@ export async function fetchTwitterBookmarks(limit = 20, options?: OpenCLIOptions
 }
 
 export async function fetchTwitterArticle(tweetId: string, options?: OpenCLIOptions): Promise<OpenCLIResult<OpenCLIArticle>> {
-  return executeOpenCLI<OpenCLIArticle>(["twitter", "article", tweetId], { timeout: TWITTER_ARTICLE_TIMEOUT, ...options });
+  // opencli returns [{...}] (array of one) — unwrap to single article
+  const result = await executeOpenCLI<OpenCLIArticle | OpenCLIArticle[]>(
+    ["twitter", "article", tweetId],
+    { timeout: TWITTER_ARTICLE_TIMEOUT, ...options },
+  );
+  if (result.data && Array.isArray(result.data)) {
+    return { ...result, data: result.data[0] ?? null };
+  }
+  return result as OpenCLIResult<OpenCLIArticle>;
 }
 
 // ---- LinkedIn ----
