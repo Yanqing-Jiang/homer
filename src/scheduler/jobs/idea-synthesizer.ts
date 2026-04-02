@@ -992,21 +992,31 @@ ${existingTitles.slice(0, 1500)}`;
     stepStart = Date.now();
 
     if (needsClustering.length > 0) {
-      const clusterResult = stepCluster(db, needsClustering);
-      stats.clustersFormed = clusterResult.clustersFormed;
-      stats.nearDuplicatesSkipped = clusterResult.nearDuplicatesSkipped;
-      stats.singletonClusters = clusterResult.singletons;
-      logger.info({
-        clusters: clusterResult.clustersFormed,
-        singletons: clusterResult.singletons,
-        nearDups: clusterResult.nearDuplicatesSkipped,
-      }, "Clustering complete");
+      try {
+        const clusterResult = stepCluster(db, needsClustering);
+        stats.clustersFormed = clusterResult.clustersFormed;
+        stats.nearDuplicatesSkipped = clusterResult.nearDuplicatesSkipped;
+        stats.singletonClusters = clusterResult.singletons;
+        logger.info({
+          clusters: clusterResult.clustersFormed,
+          singletons: clusterResult.singletons,
+          nearDups: clusterResult.nearDuplicatesSkipped,
+        }, "Clustering complete");
 
-      writeStepTrace({
-        jobId: "idea-synthesizer", chainId: pipelineChainId, stepName: "cluster",
-        executor: "deterministic", success: true,
-        durationMs: Date.now() - stepStart, scheduledRunId: jobRunId,
-      });
+        writeStepTrace({
+          jobId: "idea-synthesizer", chainId: pipelineChainId, stepName: "cluster",
+          executor: "deterministic", success: true,
+          durationMs: Date.now() - stepStart, scheduledRunId: jobRunId,
+        });
+      } catch (clusterErr) {
+        const msg = clusterErr instanceof Error ? clusterErr.message : String(clusterErr);
+        logger.error({ error: msg, scrapeCount: needsClustering.length }, "Step 2 clustering failed — continuing to steps 3-6");
+        writeStepTrace({
+          jobId: "idea-synthesizer", chainId: pipelineChainId, stepName: "cluster",
+          executor: "deterministic", success: false,
+          durationMs: Date.now() - stepStart, scheduledRunId: jobRunId,
+        });
+      }
     }
 
     // ========================================
@@ -1225,7 +1235,7 @@ ${existingTitles.slice(0, 1500)}`;
       logger.warn({ error: err }, "Failed to write harness scores (non-fatal)");
     }
 
-    const success = stats.scored > 0 || stats.synthesized > 0 || stats.saved > 0 || stats.enhanced > 0 || unprocessed.length === 0;
+    const success = stats.scored > 0 || stats.clustersFormed > 0 || stats.synthesized > 0 || stats.critiquePassed > 0 || stats.enriched > 0 || stats.saved > 0 || stats.enhanced > 0 || unprocessed.length === 0;
     return { success, output, error: success ? undefined : "All pipeline steps failed" };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
