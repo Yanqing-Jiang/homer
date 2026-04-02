@@ -45,6 +45,9 @@ import { logger } from "../../utils/logger.js";
 import { storeJobArtifact } from "./artifact-store.js";
 import { PATHS } from "../../config/paths.js";
 import { deepFetchScrapes } from "../../scraping/deep-fetch.js";
+import { writeStepTrace } from "../../executors/trace-writer.js";
+import { getPromptManifest, getManifestHash, getSourceHash } from "./prompts/idea-synthesizer.js";
+import { registerVersion, writeEvalScore } from "../../harness/manager.js";
 
 const DENY_HISTORY = PATHS.denyHistory;
 const CLUSTER_SIMILARITY_THRESHOLD = 0.3; // Related (lower than dedup's 0.8)
@@ -869,6 +872,12 @@ export async function runIdeaSynthesizer(db: Database.Database, jobRunId?: numbe
 
     logger.info({ count: unprocessed.length }, "Starting idea synthesis pipeline v3");
 
+    // Trace context for per-step instrumentation
+    const pipelineChainId = `synth_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const promptManifest = getPromptManifest();
+    void promptManifest; // used for future harness versioning
+    const manifestHash = getManifestHash();
+
     // Load shared context once
     const [condensedContext, preferences] = await Promise.all([
       buildCondensedContext(),
@@ -939,6 +948,7 @@ ${existingTitles.slice(0, 1500)}`;
     // ========================================
     const needsScoring = getScrapesForStep(db, "pending", 48);
     logger.info({ count: needsScoring.length }, "Step 1: Scoring scrapes");
+    let stepStart = Date.now();
 
     for (const scrape of needsScoring) {
       if (signal?.aborted) break;
@@ -965,11 +975,21 @@ ${existingTitles.slice(0, 1500)}`;
       }
     }
 
+    if (needsScoring.length > 0) {
+      writeStepTrace({
+        jobId: "idea-synthesizer", chainId: pipelineChainId, stepName: "score",
+        executor: "claude", model: "sonnet", success: stats.scored > 0 || stats.failed === 0,
+        durationMs: Date.now() - stepStart, promptHash: manifestHash,
+        scheduledRunId: jobRunId,
+      });
+    }
+
     // ========================================
     // STEP 2: Cluster scored scrapes
     // ========================================
     const needsClustering = getScrapesForStep(db, "scored", 48);
     logger.info({ count: needsClustering.length }, "Step 2: Clustering scored scrapes");
+    stepStart = Date.now();
 
     if (needsClustering.length > 0) {
       const clusterResult = stepCluster(db, needsClustering);
@@ -981,6 +1001,12 @@ ${existingTitles.slice(0, 1500)}`;
         singletons: clusterResult.singletons,
         nearDups: clusterResult.nearDuplicatesSkipped,
       }, "Clustering complete");
+
+      writeStepTrace({
+        jobId: "idea-synthesizer", chainId: pipelineChainId, stepName: "cluster",
+        executor: "deterministic", success: true,
+        durationMs: Date.now() - stepStart, scheduledRunId: jobRunId,
+      });
     }
 
     // ========================================
@@ -988,6 +1014,7 @@ ${existingTitles.slice(0, 1500)}`;
     // ========================================
     const needsSynthesis = getScrapesForStep(db, "clustered", 48);
     logger.info({ count: needsSynthesis.length }, "Step 3: Synthesizing candidates");
+    stepStart = Date.now();
 
     for (const scrape of needsSynthesis) {
       if (signal?.aborted) break;
@@ -1018,11 +1045,21 @@ ${existingTitles.slice(0, 1500)}`;
       }
     }
 
+    if (needsSynthesis.length > 0) {
+      writeStepTrace({
+        jobId: "idea-synthesizer", chainId: pipelineChainId, stepName: "synthesize",
+        executor: "claude", model: "sonnet", success: stats.synthesized > 0 || stats.failed === 0,
+        durationMs: Date.now() - stepStart, promptHash: manifestHash,
+        scheduledRunId: jobRunId,
+      });
+    }
+
     // ========================================
     // STEP 4: Critique synthesized candidates
     // ========================================
     const needsCritique = getScrapesForStep(db, "extracted", 48);
     logger.info({ count: needsCritique.length }, "Step 4: Critiquing candidates");
+    stepStart = Date.now();
 
     for (const scrape of needsCritique) {
       if (signal?.aborted) break;
@@ -1050,11 +1087,21 @@ ${existingTitles.slice(0, 1500)}`;
       }
     }
 
+    if (needsCritique.length > 0) {
+      writeStepTrace({
+        jobId: "idea-synthesizer", chainId: pipelineChainId, stepName: "critique",
+        executor: "claude", model: "sonnet", success: true,
+        durationMs: Date.now() - stepStart, promptHash: manifestHash,
+        scheduledRunId: jobRunId,
+      });
+    }
+
     // ========================================
     // STEP 5: Enrich critique-passed candidates
     // ========================================
     const needsEnrichment = getScrapesForStep(db, "critiqued", 48);
     logger.info({ count: needsEnrichment.length }, "Step 5: Enriching passed candidates");
+    stepStart = Date.now();
 
     for (const scrape of needsEnrichment) {
       if (signal?.aborted) break;
@@ -1072,6 +1119,15 @@ ${existingTitles.slice(0, 1500)}`;
         logger.warn({ scrapeId: scrape.id, step: "enrich", error: msg }, "Scrape failed, continuing");
         stats.failed++;
       }
+    }
+
+    if (needsEnrichment.length > 0) {
+      writeStepTrace({
+        jobId: "idea-synthesizer", chainId: pipelineChainId, stepName: "enrich",
+        executor: "claude", model: "sonnet", success: stats.enriched > 0 || stats.failed === 0,
+        durationMs: Date.now() - stepStart, promptHash: manifestHash,
+        scheduledRunId: jobRunId,
+      });
     }
 
     // ========================================
@@ -1129,6 +1185,45 @@ ${existingTitles.slice(0, 1500)}`;
 
     const output = `Synthesizer: ${parts.join(", ")}`;
     logger.info({ stats }, "Idea synthesis pipeline v3 complete");
+
+    // ── Harness versioning & scoring ──
+    try {
+      const version = registerVersion(db, "idea-synthesizer", getPromptManifest(), getSourceHash(), "migration");
+      const runId = jobRunId ? String(jobRunId) : pipelineChainId;
+
+      // critique_pass_rate: fraction of critiqued items that passed
+      const totalCritiqued = stats.critiquePassed + stats.critiqueScoreRejected;
+      if (totalCritiqued > 0) {
+        writeEvalScore(db, {
+          runId, jobId: "idea-synthesizer", harnessVersionId: version.id,
+          scoreName: "critique_pass_rate",
+          scoreValue: stats.critiquePassed / totalCritiqued,
+          scoreComponents: { passed: stats.critiquePassed, rejected: stats.critiqueScoreRejected },
+        });
+      }
+
+      // packet_yield: saved + enhanced per run
+      if (unprocessed.length > 0) {
+        writeEvalScore(db, {
+          runId, jobId: "idea-synthesizer", harnessVersionId: version.id,
+          scoreName: "packet_yield",
+          scoreValue: stats.saved + stats.enhanced,
+          scoreComponents: { saved: stats.saved, enhanced: stats.enhanced, input: unprocessed.length },
+        });
+      }
+
+      // pipeline_throughput: fraction of input scrapes that reached save step
+      if (unprocessed.length > 0) {
+        writeEvalScore(db, {
+          runId, jobId: "idea-synthesizer", harnessVersionId: version.id,
+          scoreName: "pipeline_throughput",
+          scoreValue: (stats.saved + stats.enhanced + stats.skipped) / unprocessed.length,
+          scoreComponents: stats,
+        });
+      }
+    } catch (err) {
+      logger.warn({ error: err }, "Failed to write harness scores (non-fatal)");
+    }
 
     const success = stats.scored > 0 || stats.synthesized > 0 || stats.saved > 0 || stats.enhanced > 0 || unprocessed.length === 0;
     return { success, output, error: success ? undefined : "All pipeline steps failed" };

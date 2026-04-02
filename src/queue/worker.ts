@@ -199,7 +199,7 @@ export class QueueWorker {
         },
       });
 
-      writeChainTrace(fallbackResult, { jobId: job.id, source: "runtime" });
+      writeChainTrace(fallbackResult, { jobId: job.id, source: "queue" });
 
       const result = fallbackResult.result;
       const success = result.exitCode === 0;

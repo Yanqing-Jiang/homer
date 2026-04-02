@@ -759,7 +759,7 @@ ${stderr.trim()}`
 export async function executeScheduledJob(
   job: RegisteredJob,
   onProgress?: ProgressCallback,
-  options?: { singleExecutor?: ExecutorKind; skipDiagnosis?: boolean }
+  options?: { singleExecutor?: ExecutorKind; skipDiagnosis?: boolean; scheduledRunId?: number }
 ): Promise<JobExecutionResult> {
   const startedAt = new Date();
   const { config } = job;
@@ -881,7 +881,7 @@ export async function executeScheduledJob(
     jobMeta: { deep: config.deep },
   });
 
-  writeChainTrace(fallbackResult, { jobId: config.id, source: "scheduler" });
+  writeChainTrace(fallbackResult, { jobId: config.id, source: "scheduler", scheduledRunId: options?.scheduledRunId });
 
   const result = fallbackResult.result ?? {
     jobId: config.id,
