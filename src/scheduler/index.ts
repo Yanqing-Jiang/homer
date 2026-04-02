@@ -532,7 +532,10 @@ export class Scheduler {
               jobRunId: runId,
               signal: controller.signal,
             })
-          : executeScheduledJob(job, onProgress, takeoverEnabled ? { skipDiagnosis: true } : undefined);
+          : executeScheduledJob(job, onProgress, {
+              ...(takeoverEnabled ? { skipDiagnosis: true } : {}),
+              scheduledRunId: runId,
+            });
         result = await Promise.race([execPromise, hangPromise]);
       } catch (hangError) {
         const msg = hangError instanceof Error ? hangError.message : String(hangError);

@@ -227,6 +227,14 @@ export async function executeOpenCodeCLI(
     let timedOut = false;
     let aborted = false;
 
+    /** Build metrics from accumulated token counts (available on all exit paths) */
+    const buildMetrics = () => ({
+      inputTokens: totalInputTokens,
+      outputTokens: totalOutputTokens,
+      cachedTokens: totalCached,
+      toolCalls: toolCallCount,
+    });
+
     // Kill the entire process group (including opencode's child processes)
     const killGroup = (signal: NodeJS.Signals) => {
       try {
@@ -364,6 +372,7 @@ export async function executeOpenCodeCLI(
           sessionId,
           model,
           accountId: 1,
+          metrics: buildMetrics(),
         });
         return;
       }
@@ -377,6 +386,7 @@ export async function executeOpenCodeCLI(
           sessionId,
           model,
           accountId: 1,
+          metrics: buildMetrics(),
         });
         return;
       }
@@ -390,6 +400,7 @@ export async function executeOpenCodeCLI(
           sessionId,
           model,
           accountId: 1,
+          metrics: buildMetrics(),
         });
         return;
       }
@@ -403,6 +414,7 @@ export async function executeOpenCodeCLI(
           sessionId,
           model,
           accountId: 1,
+          metrics: buildMetrics(),
         });
         return;
       }
@@ -423,6 +435,7 @@ export async function executeOpenCodeCLI(
           sessionId,
           model,
           accountId: 1,
+          metrics: buildMetrics(),
         });
         return;
       }
@@ -435,6 +448,7 @@ export async function executeOpenCodeCLI(
         sessionId,
         model,
         accountId: 1,
+        metrics: buildMetrics(),
         stats: {
           total_tokens: totalInputTokens + totalOutputTokens,
           input_tokens: totalInputTokens,
@@ -456,6 +470,7 @@ export async function executeOpenCodeCLI(
         sessionId: "",
         model,
         accountId: 1,
+        metrics: buildMetrics(),
       });
     });
   });

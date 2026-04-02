@@ -215,8 +215,12 @@ const COST_PER_1K_TOKENS: Record<string, { input: number; output: number }> = {
 };
 
 export class CostTracker {
+  /** In-memory daily cost accumulator. Resets on daemon restart or day change. */
+  private _dailyCost = 0;
+  private _dailyDate = new Date().toISOString().slice(0, 10);
+
   constructor(_db: Database.Database) {
-    // Cost telemetry has been intentionally removed.
+    // DB-backed cost tracking was removed. Using in-memory accumulator instead.
   }
 
   calculateCost(
@@ -247,23 +251,29 @@ export class CostTracker {
     executor: string,
     inputTokens: number,
     outputTokens: number,
-    options?: { jobId?: string; query?: string; intentId?: string; runId?: string; executorAccount?: string }
+    _options?: { jobId?: string; query?: string; intentId?: string; runId?: string; executorAccount?: string }
   ): number {
-    // Cost telemetry has been intentionally removed.
-    void executor;
-    void inputTokens;
-    void outputTokens;
-    void options;
-    return 0;
+    const cost = this.calculateCost(executor, inputTokens, outputTokens);
+    const today = new Date().toISOString().slice(0, 10);
+    if (today !== this._dailyDate) {
+      this._dailyCost = 0;
+      this._dailyDate = today;
+    }
+    this._dailyCost += cost;
+    return cost;
   }
 
-  getDailyCost(date?: string): number {
-    void date;
-    return 0;
+  getDailyCost(_date?: string): number {
+    const today = new Date().toISOString().slice(0, 10);
+    if (today !== this._dailyDate) {
+      this._dailyCost = 0;
+      this._dailyDate = today;
+    }
+    return this._dailyCost;
   }
 
   getDailySummary(
-    date?: string
+    _date?: string
   ): {
     dateKey: string;
     totalCost: number;
@@ -273,8 +283,7 @@ export class CostTracker {
     claudeCost: number;
     codexCost: number;
   } | null {
-    void date;
-    return null;
+    return null; // Not tracking per-executor breakdown in-memory yet
   }
 
   getWeeklyCosts(): Array<{
@@ -286,7 +295,7 @@ export class CostTracker {
     claudeCost: number;
     codexCost: number;
   }> {
-    return [];
+    return []; // Not tracking weekly costs in-memory yet
   }
 }
 

@@ -30,6 +30,27 @@ async function readFileIfExists(path: string): Promise<string | null> {
 }
 
 /**
+ * Build a compact execution bootstrap preamble.
+ * Gives sub-agents runtime awareness: where they are, what's running, budget limits.
+ */
+export function buildBootstrapPreamble(options?: {
+  executor?: string;
+  lane?: string;
+  jobId?: string;
+  timeoutMs?: number;
+}): string {
+  const now = new Date().toISOString().slice(0, 19) + "Z";
+  return `<execution_bootstrap>
+  <cwd>${PATHS.homerRoot}</cwd>
+  <date>${now}</date>
+  <executor>${options?.executor ?? "unknown"}</executor>
+  <lane>${options?.lane ?? "default"}</lane>
+  <job_id>${options?.jobId ?? "ad-hoc"}</job_id>
+  <budget timeout_ms="${options?.timeoutMs ?? 600000}" />
+</execution_bootstrap>`;
+}
+
+/**
  * Format session_summaries rows into markdown blocks by date.
  */
 function formatSessionsAsMarkdown(sessions: SessionSummaryRow[]): Map<string, string> {
@@ -109,6 +130,9 @@ export async function buildSchedulerContext(
 
   // Build sections array
   const sections: string[] = [];
+
+  // Environment bootstrap — gives sub-agents runtime awareness
+  sections.push(buildBootstrapPreamble());
 
   sections.push(`You are HOMER — Yanqing's personal AI operating system.
 
