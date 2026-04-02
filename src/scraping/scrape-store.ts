@@ -302,27 +302,32 @@ export function getScrapesForStep(
 
   // Filter by pipeline state
   return all.filter((s) => {
-    const meta = s.metadata ? JSON.parse(s.metadata) : {};
-    const pipeline =
-      typeof meta.pipeline === "object" && meta.pipeline !== null
-        ? (meta.pipeline as PipelineState)
-        : undefined;
+    try {
+      const meta = s.metadata ? JSON.parse(s.metadata) : {};
+      const pipeline =
+        typeof meta.pipeline === "object" && meta.pipeline !== null
+          ? (meta.pipeline as PipelineState)
+          : undefined;
 
-    switch (targetStep) {
-      case "pending": // Needs scoring
-        return !pipeline || pipeline.step === "pending";
-      case "scored": // Already scored, needs clustering
-        return pipeline?.step === "scored" && (pipeline.score?.value ?? 0) >= 6;
-      case "clustered": // Clustered primary, needs synthesis/extraction
-        return pipeline?.step === "clustered" && pipeline.cluster?.role === "primary";
-      case "extracted": // Has candidate, needs critique
-        return pipeline?.step === "extracted";
-      case "critiqued": // Critiqued + passed, needs enrichment
-        return pipeline?.step === "critiqued" && pipeline.critique?.passed === true;
-      case "enriched": // Enriched, needs saving
-        return pipeline?.step === "enriched";
-      default:
-        return false;
+      switch (targetStep) {
+        case "pending": // Needs scoring
+          return !pipeline || pipeline.step === "pending";
+        case "scored": // Already scored, needs clustering
+          return pipeline?.step === "scored" && (pipeline.score?.value ?? 0) >= 6;
+        case "clustered": // Clustered primary, needs synthesis/extraction
+          return pipeline?.step === "clustered" && pipeline.cluster?.role === "primary";
+        case "extracted": // Has candidate, needs critique
+          return pipeline?.step === "extracted";
+        case "critiqued": // Critiqued + passed, needs enrichment
+          return pipeline?.step === "critiqued" && pipeline.critique?.passed === true;
+        case "enriched": // Enriched, needs saving
+          return pipeline?.step === "enriched";
+        default:
+          return false;
+      }
+    } catch {
+      logger.warn({ scrapeId: s.id }, "Corrupt metadata in scrape — skipping");
+      return false;
     }
   });
 }
@@ -359,12 +364,17 @@ export function isStepExhausted(
 export function getClusterMembers(db: Database.Database, clusterId: string): StoredScrape[] {
   const all = getUnprocessedScrapes(db, 48);
   return all.filter((s) => {
-    const meta = s.metadata ? JSON.parse(s.metadata) : {};
-    const pipeline =
-      typeof meta.pipeline === "object" && meta.pipeline !== null
-        ? (meta.pipeline as PipelineState)
-        : undefined;
-    return pipeline?.cluster?.clusterId === clusterId;
+    try {
+      const meta = s.metadata ? JSON.parse(s.metadata) : {};
+      const pipeline =
+        typeof meta.pipeline === "object" && meta.pipeline !== null
+          ? (meta.pipeline as PipelineState)
+          : undefined;
+      return pipeline?.cluster?.clusterId === clusterId;
+    } catch {
+      logger.warn({ scrapeId: s.id }, "Corrupt metadata in scrape — skipping");
+      return false;
+    }
   });
 }
 
