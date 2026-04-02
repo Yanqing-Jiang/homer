@@ -592,6 +592,16 @@ export async function executeWithRouting(
     request.estimatedTokens,
   );
 
+  // Track cost from executor metrics if available
+  if (lastResult?.metrics?.inputTokens || lastResult?.metrics?.outputTokens) {
+    getRouterState().costs.track(
+      executorUsed,
+      lastResult.metrics.inputTokens ?? 0,
+      lastResult.metrics.outputTokens ?? 0,
+      { jobId, runId: jobId },
+    );
+  }
+
   if (!lastResult || lastResult.exitCode !== 0 || fallbackResult.failed) {
     const lastOutput = lastResult?.output ?? "No output";
     logger.error(
@@ -699,7 +709,7 @@ export function getRouterStatus(): RouterStatus {
 
   return {
     geminiCLI: getGeminiCLIPoolStatus(),
-    dailyCost: 0,
+    dailyCost: state.costs.getDailyCost(),
     deferredTasks: deferralStats.pending + deferralStats.processing,
     pendingDeferrals: deferralStats.pending,
     dbConnected: _db !== null,

@@ -25,16 +25,29 @@ export function initTraceWriter(db: Database.Database): void {
   _insertStmt = db.prepare(`
     INSERT INTO execution_traces
       (id, chain_id, attempt_number, job_id, source, executor, model,
-       success, duration_ms, exit_code, error_type, error_summary, fallback_used)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       success, duration_ms, exit_code, error_type, error_summary, fallback_used,
+       scheduled_run_id, trace_kind, step_name, prompt_hash, git_commit, harness_version_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
+}
+
+let _gitCommit: string | null = null;
+
+/** Cache the current git commit hash at startup */
+export function setGitCommit(commit: string): void {
+  _gitCommit = commit;
+}
+
+function traceId(): string {
+  return `trace_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 // ── Write ──
 
 export interface TraceJobContext {
   jobId: string;
-  source: "scheduler" | "router" | "runtime";
+  source: "scheduler" | "router" | "runtime" | "queue";
+  scheduledRunId?: number;
 }
 
 export function writeChainTrace<T extends ExecutorAttemptResult>(
@@ -51,43 +64,89 @@ export function writeChainTrace<T extends ExecutorAttemptResult>(
     for (let i = 0; i < attempts.length; i++) {
       const a = attempts[i]!;
       _insertStmt.run(
-        `trace_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        chainId,
-        i + 1,
-        ctx.jobId,
-        ctx.source,
-        a.executor,
-        null, // model not available in AttemptInfo
-        0, // failed
-        a.durationMs,
-        a.exitCode,
-        a.errorType,
-        (a.errorSummary ?? "").slice(0, 500) || null,
-        i > 0 ? 1 : 0,
+        traceId(), chainId, i + 1, ctx.jobId, ctx.source,
+        a.executor, null, 0, a.durationMs, a.exitCode,
+        a.errorType, (a.errorSummary ?? "").slice(0, 500) || null,
+        i > 0 ? 1 : 0, ctx.scheduledRunId ?? null,
+        "chain", null, null, _gitCommit, null,
       );
     }
 
     // Write the final successful attempt (failed attempts already in the loop above)
     if (result && !failed) {
-      const attemptNum = attempts.length + 1;
       _insertStmt.run(
-        `trace_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        chainId,
-        attemptNum,
-        ctx.jobId,
-        ctx.source,
-        executorUsed,
-        null,
-        failed ? 0 : 1,
-        result.duration,
-        result.exitCode,
-        failed ? "unknown" : null,
-        failed ? (result.error ?? result.output ?? "").slice(0, 500) || null : null,
-        fallbackUsed ? 1 : 0,
+        traceId(), chainId, attempts.length + 1, ctx.jobId, ctx.source,
+        executorUsed, null, 1, result.duration, result.exitCode,
+        null, null, fallbackUsed ? 1 : 0, ctx.scheduledRunId ?? null,
+        "chain", null, null, _gitCommit, null,
       );
     }
   } catch (err) {
     logger.warn({ error: err, jobId: ctx.jobId }, "Failed to write execution trace");
+  }
+}
+
+// ── Internal job traces ──
+
+export interface InternalTraceData {
+  jobId: string;
+  jobName: string;
+  executor: string;
+  model?: string;
+  success: boolean;
+  durationMs: number;
+  exitCode: number;
+  error?: string;
+  scheduledRunId?: number;
+  harnessVersionId?: string;
+}
+
+export function writeInternalTrace(data: InternalTraceData): void {
+  if (!_db || !_insertStmt) return;
+
+  try {
+    const chainId = `int_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    _insertStmt.run(
+      traceId(), chainId, 1, data.jobId, "scheduler",
+      data.executor, data.model ?? null, data.success ? 1 : 0, data.durationMs, data.exitCode,
+      data.success ? null : "internal", data.error ? data.error.slice(0, 500) : null,
+      0, data.scheduledRunId ?? null,
+      "job", null, null, _gitCommit, data.harnessVersionId ?? null,
+    );
+  } catch (err) {
+    logger.warn({ error: err, jobId: data.jobId }, "Failed to write internal execution trace");
+  }
+}
+
+// ── Per-step traces (for instrumented pipelines like idea-synthesizer) ──
+
+export interface StepTraceData {
+  jobId: string;
+  chainId: string;         // parent chain_id to group steps under one run
+  stepName: string;        // e.g. "triage", "synthesize", "critique", "enrich"
+  executor: string;        // e.g. "claude", "gemini-api"
+  model?: string;          // e.g. "sonnet", "opus", "flash"
+  success: boolean;
+  durationMs: number;
+  promptHash?: string;
+  scheduledRunId?: number;
+  harnessVersionId?: string;
+  error?: string;
+}
+
+export function writeStepTrace(data: StepTraceData): void {
+  if (!_db || !_insertStmt) return;
+
+  try {
+    _insertStmt.run(
+      traceId(), data.chainId, 1, data.jobId, "scheduler",
+      data.executor, data.model ?? null, data.success ? 1 : 0, data.durationMs, 0,
+      data.success ? null : "step_failure", data.error ? data.error.slice(0, 500) : null,
+      0, data.scheduledRunId ?? null,
+      "step", data.stepName, data.promptHash ?? null, _gitCommit, data.harnessVersionId ?? null,
+    );
+  } catch (err) {
+    logger.warn({ error: err, jobId: data.jobId, step: data.stepName }, "Failed to write step trace");
   }
 }
 

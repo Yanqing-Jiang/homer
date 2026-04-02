@@ -2,6 +2,7 @@ import type { Bot } from "grammy";
 import type { RegisteredJob, JobExecutionResult } from "./types.js";
 import { DEFAULT_JOB_TIMEOUT } from "./types.js";
 import type { StateManager } from "../state/manager.js";
+import { writeInternalTrace } from "../executors/trace-writer.js";
 import { sendBatchIdeasForReview } from "../bot/handlers/approval.js";
 import { presentOvernightSummaries } from "../bot/handlers/overnight.js";
 import { ingestIdeasFromLegacy } from "../ideas/ingest.js";
@@ -205,6 +206,7 @@ const RETRYABLE_HANDLERS = new Set([
   "memory_cleanup", "planning_reminder", "content_scraper", "outcome_tracker",
   "preference_updater", "idea_dedup", "memory_git_commit", "nightly_code_push", "db_backup",
   "idea_synthesizer", "idea_deep_linker", "link_processor", "archive_verify", "health_check", "context_bridge",
+  "harness_auto_improve", "decision_journal",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
 ]);
 
@@ -781,6 +783,30 @@ async function runHandler(
           result.success ? { notificationIntent: "operational_status" } : {}
         );
       }
+      case "harness_auto_improve": {
+        const { runHarnessAutoImprove } = await import("./jobs/harness-auto-improve.js");
+        const result = await runHarnessAutoImprove(ctx.stateManager.getDb(), ctx.jobRunId, ctx.signal);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "user_info" } : {}
+        );
+      }
+      case "decision_journal": {
+        const { runDecisionJournal } = await import("./jobs/decision-journal.js");
+        const result = await runDecisionJournal(ctx.stateManager.getDb(), ctx.jobRunId, ctx.signal);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
+      }
       case "session_harvester": {
         const { runSessionHarvester } = await import("./jobs/session-harvester.js");
         const result = await runSessionHarvester(ctx.stateManager, ctx.signal);
@@ -1274,7 +1300,7 @@ export async function executeInternalJob(
     );
   }
 
-  const result = await runHandler(job, ctx, startedAt);
+  let result = await runHandler(job, ctx, startedAt);
 
   // Retry once for retryable handlers on transient errors
   const handler = job.config.handler ?? "";
@@ -1282,6 +1308,16 @@ export async function executeInternalJob(
     // Skip retry if the job was aborted by the hang watchdog
     if (ctx.signal?.aborted) {
       logger.warn({ jobId: job.config.id }, "Job aborted by timeout, skipping retry");
+      writeInternalTrace({
+        jobId: job.config.id,
+        jobName: job.config.name,
+        executor: "internal",
+        success: false,
+        durationMs: result.duration,
+        exitCode: result.exitCode,
+        error: result.error,
+        scheduledRunId: ctx.jobRunId,
+      });
       return result;
     }
 
@@ -1295,19 +1331,40 @@ export async function executeInternalJob(
 
     if (ctx.signal?.aborted) {
       logger.warn({ jobId: job.config.id }, "Job aborted during retry wait, skipping retry");
+      writeInternalTrace({
+        jobId: job.config.id,
+        jobName: job.config.name,
+        executor: "internal",
+        success: false,
+        durationMs: result.duration,
+        exitCode: result.exitCode,
+        error: result.error,
+        scheduledRunId: ctx.jobRunId,
+      });
       return result;
     }
 
     const retryStartedAt = new Date();
-    const retryResult = await runHandler(job, ctx, retryStartedAt);
+    result = await runHandler(job, ctx, retryStartedAt);
 
-    if (retryResult.success) {
+    if (result.success) {
       logger.info({ jobId: job.config.id }, "Retry succeeded");
     } else {
-      logger.error({ jobId: job.config.id, error: retryResult.error }, "Retry also failed");
+      logger.error({ jobId: job.config.id, error: result.error }, "Retry also failed");
     }
-    return retryResult;
   }
+
+  // Write execution trace for every internal job completion
+  writeInternalTrace({
+    jobId: job.config.id,
+    jobName: job.config.name,
+    executor: job.config.handler ?? "internal",
+    success: result.success,
+    durationMs: result.duration,
+    exitCode: result.exitCode,
+    error: result.error,
+    scheduledRunId: ctx.jobRunId,
+  });
 
   return result;
 }

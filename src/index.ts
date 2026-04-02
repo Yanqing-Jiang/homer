@@ -27,7 +27,7 @@ import { processRegistry } from "./process/registry.js";
 import { SessionTimeoutManager } from "./process/timeout-manager.js";
 import { cleanupScheduler } from "./process/cleanup-scheduler.js";
 import { initFallbackChain } from "./process/fallback-chain.js";
-import { initTraceWriter, rehydrateHealth } from "./executors/trace-writer.js";
+import { initTraceWriter, rehydrateHealth, setGitCommit } from "./executors/trace-writer.js";
 import { setRuntimeBuildInfo } from "./utils/build-info.js";
 import type { FastifyInstance } from "fastify";
 import type { VoiceConfig } from "./voice/types.js";
@@ -108,6 +108,12 @@ async function main(): Promise<void> {
   initFallbackChain(stateManager.getDb());
   initTraceWriter(stateManager.getDb());
   rehydrateHealth(stateManager.getDb());
+  // Cache git commit for execution traces
+  try {
+    const { execSync } = await import("child_process");
+    const commit = execSync("git rev-parse --short HEAD", { cwd: runtimePaths.homerRoot, timeout: 3000 }).toString().trim();
+    if (commit) setGitCommit(commit);
+  } catch { /* not in a git repo or git not available */ }
   logger.info("Process lifecycle management initialized");
 
   // Cleanup scheduler init (the cron is now in scheduler as "daemon-cleanup")
