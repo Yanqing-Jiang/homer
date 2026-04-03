@@ -18,9 +18,16 @@ interface ConversationAnalysis {
   call_summary_title?: string;
 }
 
+interface PhoneCallInfo {
+  direction?: string;
+  external_number?: string;
+  agent_number?: string;
+}
+
 interface ConversationMetadata {
   call_duration_secs?: number;
   termination_reason?: string;
+  phone_call?: PhoneCallInfo;
 }
 
 export interface ConversationData {
@@ -119,11 +126,18 @@ function formatCallSummaryForTelegram(
   const turns = conversation.transcript.length;
   const title = conversation.analysis?.call_summary_title || "Call Summary";
   const outcome = conversation.analysis?.call_successful
-    ? ` (${conversation.analysis.call_successful})`
+    ? ` (${escapeHtml(conversation.analysis.call_successful)})`
+    : "";
+
+  const callerPhone = conversation.metadata?.phone_call?.external_number;
+  const direction = conversation.metadata?.phone_call?.direction || "unknown";
+  const phoneLine = callerPhone
+    ? `Phone: <code>${escapeHtml(callerPhone)}</code> (${escapeHtml(direction)})\n`
     : "";
 
   return (
     `<b>${escapeHtml(title)}</b>${outcome}\n` +
+    phoneLine +
     `Duration: ${duration} | ${turns} turns\n` +
     `ID: <code>${conversation.conversation_id}</code>\n\n` +
     escapeHtml(summary)
@@ -145,10 +159,11 @@ export async function processCallComplete(
     return;
   }
 
-  // Use webhook data if provided, otherwise fetch from API
-  let conversation = webhookData;
-  if (!conversation || !conversation.transcript?.length) {
-    conversation = await fetchConversationTranscript(conversationId) ?? undefined;
+  // Always fetch full conversation from API for complete metadata (phone_call, etc.)
+  // Fall back to webhook data if API fetch fails
+  let conversation = await fetchConversationTranscript(conversationId) ?? undefined;
+  if (!conversation && webhookData) {
+    conversation = webhookData;
   }
 
   if (!conversation) {
@@ -157,7 +172,23 @@ export async function processCallComplete(
   }
 
   if (!conversation.transcript || conversation.transcript.length === 0) {
-    logger.info({ conversationId }, "Empty transcript, skipping summary");
+    logger.info({ conversationId }, "Empty transcript — sending abandoned call notification");
+    const duration = conversation.metadata?.call_duration_secs
+      ? `${Math.floor(conversation.metadata.call_duration_secs / 60)}m ${conversation.metadata.call_duration_secs % 60}s`
+      : "0s";
+    const reason = conversation.metadata?.termination_reason || "unknown";
+    const callerPhone = conversation.metadata?.phone_call?.external_number;
+    const phoneLine = callerPhone ? `Phone: <code>${escapeHtml(callerPhone)}</code>\n` : "";
+    const abandonedMsg =
+      `<b>Missed/Abandoned Call</b>\n` +
+      phoneLine +
+      `Duration: ${duration} | Ended: ${escapeHtml(reason)}\n` +
+      `ID: <code>${conversation.conversation_id}</code>`;
+    try {
+      await bot.api.sendMessage(chatId, abandonedMsg, { parse_mode: "HTML" });
+    } catch (sendErr) {
+      logger.error({ error: sendErr, conversationId }, "Failed to send abandoned call notification");
+    }
     return;
   }
 
