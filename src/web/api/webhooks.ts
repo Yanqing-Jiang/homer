@@ -1,8 +1,11 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { createHmac, timingSafeEqual } from "crypto";
+import { writeFileSync, mkdirSync, existsSync, unlinkSync } from "fs";
+import { join } from "path";
 import { logger } from "../../utils/logger.js";
 import { config } from "../../config/index.js";
-import { WEBHOOK_BASE } from "../../telephony/constants.js";
+import { WEBHOOK_BASE, HOMER_AGENT_ID } from "../../telephony/constants.js";
+import { PATHS } from "../../config/paths.js";
 import type { StateManager } from "../../state/manager.js";
 import type { Bot } from "grammy";
 
@@ -33,14 +36,36 @@ function validateTwilioSignature(
   }
 }
 
+const ELEVENLABS_SIGNATURE_TOLERANCE_SECS = 300;
+
 function validateElevenLabsSignature(
   rawBody: Buffer,
-  signature: string,
+  signatureHeader: string,
   secret: string
 ): boolean {
-  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
+  // Header format: "t=<unix_timestamp>,v0=<hex_digest>"
+  const parts = Object.fromEntries(
+    signatureHeader.split(",").map((p) => {
+      const [k, ...v] = p.split("=");
+      return [k, v.join("=")];
+    })
+  );
+
+  const timestamp = parts.t;
+  const v0 = parts.v0;
+  if (!timestamp || !v0) return false;
+
+  // Replay protection
+  const age = Math.abs(Math.floor(Date.now() / 1000) - parseInt(timestamp, 10));
+  if (isNaN(age) || age > ELEVENLABS_SIGNATURE_TOLERANCE_SECS) return false;
+
+  // HMAC input: "{timestamp}.{rawBody}"
+  const expected = createHmac("sha256", secret)
+    .update(`${timestamp}.${rawBody.toString()}`)
+    .digest("hex");
+
   try {
-    return timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(signature, "hex"));
+    return timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(v0, "hex"));
   } catch {
     return false;
   }
@@ -83,6 +108,9 @@ export function registerWebhookRoutes(
   );
 
   // ---- ElevenLabs: Post-call summary ----
+  const callEventsDir = join(PATHS.homerData, "call-events");
+  if (!existsSync(callEventsDir)) mkdirSync(callEventsDir, { recursive: true });
+
   server.post("/webhooks/elevenlabs/call-complete", async (request: FastifyRequest, reply: FastifyReply) => {
     const secret = config.voice.elevenLabsWebhookSecret;
 
@@ -98,11 +126,19 @@ export function registerWebhookRoutes(
       }
     }
 
-    // Parse the payload — structure: { type, event_timestamp, data: { conversation_id, transcript, analysis, ... } }
-    const payload = request.body as Record<string, unknown>;
-    const eventType = payload?.type as string || "unknown";
-    const data = payload?.data as Record<string, unknown> | undefined;
-    const conversationId = data?.conversation_id as string | undefined;
+    // Parse and validate payload shape
+    const payload = request.body as Record<string, unknown> | undefined;
+    if (!payload || typeof payload !== "object") {
+      logger.warn("ElevenLabs webhook: invalid payload");
+      reply.status(400).send({ error: "Invalid payload" });
+      return;
+    }
+
+    const eventType = typeof payload.type === "string" ? payload.type : "unknown";
+    const data = (typeof payload.data === "object" && payload.data !== null)
+      ? payload.data as Record<string, unknown>
+      : undefined;
+    const conversationId = typeof data?.conversation_id === "string" ? data.conversation_id : undefined;
 
     // Only process transcription events (skip audio, failure)
     if (eventType !== "post_call_transcription") {
@@ -117,27 +153,53 @@ export function registerWebhookRoutes(
       return;
     }
 
-    logger.info({ conversationId, eventType }, "ElevenLabs call-complete webhook received");
+    // Validate agent_id — only process calls from Homer's agent
+    const agentId = typeof data?.agent_id === "string" ? data.agent_id : undefined;
+    if (agentId && agentId !== HOMER_AGENT_ID) {
+      logger.info({ agentId, conversationId }, "ElevenLabs webhook: ignoring call from non-Homer agent");
+      reply.status(200).send({ ok: true });
+      return;
+    }
 
-    // Return 200 immediately, process async
+    // Durable storage: persist raw payload to disk BEFORE returning 200
+    const eventFile = join(callEventsDir, `${conversationId}.json`);
+    try {
+      writeFileSync(eventFile, JSON.stringify(payload), "utf-8");
+    } catch (err) {
+      logger.error({ error: err, conversationId }, "Failed to persist call event to disk");
+      reply.status(500).send({ error: "Storage failure" });
+      return;
+    }
+
+    logger.info({ conversationId, eventType, agentId }, "ElevenLabs call-complete webhook received and persisted");
     reply.status(200).send({ ok: true });
 
-    // Process in background — pass webhook data directly to avoid re-fetching
-    const webhookData = data ? {
+    // Build typed webhook data from validated fields
+    const transcript = Array.isArray(data?.transcript)
+      ? (data.transcript as Array<{ role: string; message: string; time_in_call_secs?: number }>)
+      : [];
+    const webhookData = {
       conversation_id: conversationId,
-      agent_id: data.agent_id as string,
-      status: data.status as string,
-      transcript: (data.transcript || []) as Array<{ role: string; message: string; time_in_call_secs?: number }>,
-      analysis: data.analysis as Record<string, unknown> | undefined,
-      metadata: data.metadata as Record<string, unknown> | undefined,
-    } : undefined;
+      agent_id: agentId,
+      status: typeof data?.status === "string" ? data.status : undefined,
+      transcript,
+      analysis: (typeof data?.analysis === "object" && data.analysis !== null)
+        ? data.analysis as { call_successful?: string; transcript_summary?: string; call_summary_title?: string }
+        : undefined,
+      metadata: (typeof data?.metadata === "object" && data.metadata !== null)
+        ? data.metadata as { call_duration_secs?: number; termination_reason?: string }
+        : undefined,
+    };
 
+    // Process in background — event file on disk ensures recoverability
     setImmediate(async () => {
       try {
         const { processCallComplete } = await import("../../telephony/call-summary.js");
-        await processCallComplete(conversationId, bot, chatId, webhookData as any);
+        await processCallComplete(conversationId, bot, chatId, webhookData);
+        // Clean up persisted event after successful processing
+        try { unlinkSync(eventFile); } catch { /* best-effort cleanup */ }
       } catch (error) {
-        logger.error({ error, conversationId }, "Failed to process call-complete webhook");
+        logger.error({ error, conversationId }, "Failed to process call-complete webhook (event persisted for retry)");
       }
     });
   });

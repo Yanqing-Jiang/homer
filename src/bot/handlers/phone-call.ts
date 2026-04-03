@@ -8,9 +8,9 @@
 import type { Context } from "grammy";
 import { logger } from "../../utils/logger.js";
 import { config } from "../../config/index.js";
+import { HOMER_AGENT_ID } from "../../telephony/constants.js";
 
 // ElevenLabs agent config
-const HOMER_AGENT_ID = "agent_1601kj0gst8eevwrexvm0yc2qwn3";
 const HOMER_PHONE_NUMBER_ID = "phnum_2201kj0h93swfpyafb3jdssn9pw5";
 const ELEVENLABS_API_BASE = "https://api.elevenlabs.io/v1";
 
@@ -80,6 +80,7 @@ async function makeOutboundCall(toNumber: string): Promise<OutboundCallResult> {
           agent_id: HOMER_AGENT_ID,
           agent_phone_number_id: HOMER_PHONE_NUMBER_ID,
           to_number: toNumber,
+          first_message: "Hey! This is Homer, Yanqing's AI assistant. He asked me to give you a call. How's it going?",
         }),
       }
     );
