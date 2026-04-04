@@ -44,8 +44,6 @@ const GEMINI_GLOBAL_ACCOUNTS_FILE = path.join(
 const GEMINI_SYSTEM_PROMPT_FILE = path.join(GEMINI_GLOBAL_DIR, "GEMINI.md");
 const AGENT_FILES: Record<string, string> = {
   research: path.join(GEMINI_GLOBAL_DIR, "agents", "homer-researcher.md"),
-  scraper: path.join(GEMINI_GLOBAL_DIR, "agents", "homer-scraper.md"),
-  general: path.join(GEMINI_GLOBAL_DIR, "agents", "homer-general.md"),
 };
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -107,7 +105,7 @@ export interface GeminiCLIDirectOptions {
   signal?: AbortSignal;
   cwd?: string;
   outputFormat?: "text" | "json" | "stream-json";
-  role?: "research" | "scraper" | "general";
+  role?: "research";
 }
 
 export interface GeminiCLIDirectResult extends ExecutorResult {

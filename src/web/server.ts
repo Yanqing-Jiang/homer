@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import websocket from "@fastify/websocket";
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
+import replyFrom from "@fastify/reply-from";
 import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
 import { StateManager } from "../state/manager.js";
@@ -60,6 +61,24 @@ export async function createWebServer(
     });
     logger.info("CORS enabled for external access");
   }
+
+  // Proxy Supabase auth calls through Homer's domain so supabase.co
+  // never appears in browser network traffic on corporate laptops.
+  await server.register(async (instance) => {
+    await instance.register(replyFrom, {
+      base: "https://muyfrblqagucgijljiir.supabase.co",
+      http2: false,
+      undici: {
+        connections: 10,
+        pipelining: 1,
+      },
+    });
+    instance.all("/supabase/*", async (request, reply) => {
+      const upstream = request.url.replace(/^\/supabase/, "");
+      return reply.from(upstream || "/");
+    });
+  });
+  logger.info("Supabase proxy registered at /supabase/*");
 
   // Add auth hook for API routes when externally exposed
   if (config.web.exposeExternally) {
