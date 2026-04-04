@@ -157,7 +157,7 @@ export async function executeOpenCodeCLI(
   // Route Google/Flash/Pro models to Gemini CLI (OpenCode Google account ToS-blocked)
   if (model.includes("flash") || model.includes("pro") || model.startsWith("google/") || model.startsWith("google-aistudio/")) {
     const geminiModel = model.replace(/^google(-aistudio)?\//, "");
-    const geminiRole = browserOnly ? "scraper" as const : researchOnly ? "research" as const : "general" as const;
+    const geminiRole = "research" as const;
     const effectivePrompt = context ? `${context}\n\n---\n\n${prompt}` : prompt;
     const result = await executeGeminiCLIDirect(effectivePrompt, {
       model: geminiModel,

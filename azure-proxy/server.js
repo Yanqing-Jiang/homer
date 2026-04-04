@@ -5,8 +5,8 @@
  * Cloudflare tunnel endpoints, hiding personal domains from corporate networks.
  *
  * Routes:
- *   /api/*  -> homer.jiangyanqing.com/api/*  (Homer API)
- *   /guac/* -> guac.jiangyanqing.com/*       (Guacamole remote desktop)
+ *   /api/*      -> homer.jiangyanqing.com/api/*           (Homer API)
+ *   /supabase/* -> muyfrblqagucgijljiir.supabase.co/*     (Supabase auth)
  *
  * Why this exists:
  *   - Corporate firewall only sees Azure domains (*.azurecontainerapps.io)
@@ -23,7 +23,7 @@ const PORT = process.env.PORT || 8080;
 
 // Target URLs - configure via environment variables for flexibility
 const HOMER_API_URL = process.env.HOMER_API_URL || 'https://homer.jiangyanqing.com';
-const GUACAMOLE_URL = process.env.GUACAMOLE_URL || 'https://guac.jiangyanqing.com';
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://muyfrblqagucgijljiir.supabase.co';
 
 // Enable CORS for Azure Static Web Apps and Blob Storage
 app.use(cors({
@@ -60,45 +60,41 @@ const apiProxy = createProxyMiddleware({
   }
 });
 
-// Proxy configuration for Guacamole
-// This needs WebSocket support for the remote desktop connection
-const guacProxy = createProxyMiddleware({
-  target: GUACAMOLE_URL,
+// Proxy configuration for Supabase Auth
+// Hides supabase.co domain from corporate network DPI
+const supabaseProxy = createProxyMiddleware({
+  target: SUPABASE_URL,
   changeOrigin: true,
-  ws: true,  // Enable WebSocket proxying
   pathRewrite: {
-    '^/guac': ''  // Remove /guac prefix when forwarding
+    '^/supabase': ''  // Remove /supabase prefix: /supabase/auth/v1/... -> /auth/v1/...
   },
   onProxyReq: (proxyReq, req, res) => {
-    // Forward cookies for Guacamole session
-    if (req.headers.cookie) {
-      proxyReq.setHeader('Cookie', req.headers.cookie);
+    // Forward auth and apikey headers (required by Supabase)
+    if (req.headers.authorization) {
+      proxyReq.setHeader('Authorization', req.headers.authorization);
     }
-  },
-  onProxyReqWs: (proxyReq, req, socket, options, head) => {
-    // WebSocket upgrade handling for Guacamole tunnel
-    console.log('WebSocket upgrade request:', req.url);
+    if (req.headers.apikey) {
+      proxyReq.setHeader('apikey', req.headers.apikey);
+    }
   },
   onError: (err, req, res) => {
-    console.error('Guacamole Proxy error:', err.message);
-    if (res.writeHead) {
-      res.status(502).json({ error: 'Proxy error', message: err.message });
-    }
+    console.error('Supabase Proxy error:', err.message);
+    res.status(502).json({ error: 'Proxy error', message: err.message });
   }
 });
 
 // Mount proxies
 app.use('/api', apiProxy);
-app.use('/guac', guacProxy);
+app.use('/supabase', supabaseProxy);
 
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
     service: 'Homer Azure Proxy',
-    version: '1.0.0',
+    version: '1.1.0',
     routes: {
       '/api/*': 'Homer API proxy',
-      '/guac/*': 'Guacamole remote desktop proxy',
+      '/supabase/*': 'Supabase auth proxy',
       '/health': 'Health check'
     }
   });
@@ -107,15 +103,8 @@ app.get('/', (req, res) => {
 // Start server
 const server = app.listen(PORT, () => {
   console.log(`Homer Azure Proxy listening on port ${PORT}`);
-  console.log(`  API proxy:  /api/* -> ${HOMER_API_URL}`);
-  console.log(`  Guac proxy: /guac/* -> ${GUACAMOLE_URL}`);
-});
-
-// Handle WebSocket upgrades
-server.on('upgrade', (req, socket, head) => {
-  if (req.url.startsWith('/guac')) {
-    guacProxy.upgrade(req, socket, head);
-  }
+  console.log(`  API proxy:      /api/*      -> ${HOMER_API_URL}`);
+  console.log(`  Supabase proxy: /supabase/* -> ${SUPABASE_URL}`);
 });
 
 // Graceful shutdown
