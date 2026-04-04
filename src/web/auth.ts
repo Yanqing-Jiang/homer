@@ -84,9 +84,10 @@ export async function authMiddleware(
   request: AuthenticatedRequest,
   reply: FastifyReply
 ): Promise<void> {
-  // Skip auth for health checks and webhooks (webhooks validate their own signatures)
+  // Skip auth for health checks, webhooks, and Supabase proxy (auth is between browser and Supabase)
   if (request.url === "/health" || request.url === "/health/auth" || request.url === "/health/live"
-      || request.url.startsWith("/webhooks/")) {
+      || request.url.startsWith("/webhooks/")
+      || request.url.startsWith("/supabase/")) {
     return;
   }
 
