@@ -1493,31 +1493,7 @@ export class StateManager {
     this._db.prepare(`UPDATE plan_reviews SET ${sets.join(", ")} WHERE id = ?`).run(...params);
   }
 
-  /**
-   * Add revision feedback for a plan.
-   */
-  addPlanRevisionFeedback(planId: string, revisionNumber: number, feedbackText: string): void {
-    try {
-      this._db.prepare(`
-        INSERT INTO plan_revision_feedback (plan_id, revision_number, feedback_text, created_at)
-        VALUES (?, ?, ?, datetime('now'))
-      `).run(planId, revisionNumber, feedbackText);
-    } catch { /* table dropped in migration 072 — non-fatal */ }
-  }
-
-  /**
-   * Get all revision feedback for a plan.
-   */
-  getPlanRevisionHistory(planId: string): Array<{ revisionNumber: number; feedbackText: string; createdAt: string }> {
-    try {
-      return this._db.prepare(`
-        SELECT revision_number as revisionNumber, feedback_text as feedbackText, created_at as createdAt
-        FROM plan_revision_feedback WHERE plan_id = ? ORDER BY id ASC
-      `).all(planId) as any[];
-    } catch {
-      return [];
-    }
-  }
+  // plan_revision_feedback — table dropped in migration 072 (0 rows ever existed)
 
   // ============================================
   // Executor State (Persistent Switching)
