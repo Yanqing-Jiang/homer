@@ -208,6 +208,7 @@ const RETRYABLE_HANDLERS = new Set([
   "idea_synthesizer", "idea_deep_linker", "link_processor", "archive_verify", "health_check", "context_bridge",
   "harness_auto_improve", "decision_journal",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
+  "candidate_expiry",
 ]);
 
 const TRANSIENT_PATTERNS = [
@@ -750,6 +751,23 @@ async function runHandler(
       case "nightly_memory": {
         const { runNightlyMemory } = await import("./jobs/nightly-memory.js");
         const result = await runNightlyMemory(ctx.stateManager);
+
+        // Post-nightly: send Memory Moments to Telegram if candidates were created
+        if (result.success && result.output.includes("candidates queued")) {
+          try {
+            const { getPendingCandidates } = await import("../memory/claims.js");
+            const { sendMemoryMoments } = await import("../bot/handlers/memory-review.js");
+            const { config: appConfig } = await import("../config/index.js");
+            const candidates = getPendingCandidates(ctx.stateManager.getDb(), 5);
+            if (candidates.length > 0 && ctx.bot) {
+              await sendMemoryMoments(ctx.bot, appConfig.telegram.allowedChatId, candidates);
+              logger.info({ count: candidates.length }, "Sent Memory Moments to Telegram");
+            }
+          } catch (err) {
+            logger.debug({ error: err }, "Memory Moments delivery skipped");
+          }
+        }
+
         return buildResult(
           job,
           startedAt,
@@ -758,6 +776,19 @@ async function runHandler(
           result.error,
           result.success ? { notificationIntent: "operational_status" } : {}
         );
+      }
+      case "candidate_expiry": {
+        try {
+          const { expireStaleCandidates, getClaimMetrics } = await import("../memory/claims.js");
+          const db = ctx.stateManager.getDb();
+          const expired = expireStaleCandidates(db, 7);
+          const metrics = getClaimMetrics(db);
+          const output = `Expired ${expired} stale candidates. Queue: ${metrics.candidate} pending, ${metrics.approved} approved, ${metrics.rejected} rejected.`;
+          return buildResult(job, startedAt, true, output, undefined, { notificationIntent: "operational_status" });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return buildResult(job, startedAt, false, "", msg);
+        }
       }
       case "homer_improvements": {
         const { runHomerImprovements } = await import("./jobs/homer-improvements.js");
