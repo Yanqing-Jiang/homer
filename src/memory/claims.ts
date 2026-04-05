@@ -14,7 +14,7 @@ import type { CanonicalMemoryService } from "./canonical-service.js";
 // ── Types ────────────────────────────────────────────────────
 
 export type ClaimType = "fact" | "decision" | "preference" | "question" | "lesson";
-export type ClaimStatus = "candidate" | "applying" | "approved" | "rejected" | "expired" | "archived";
+export type ClaimStatus = "candidate" | "applying" | "approved" | "rejected" | "expired" | "stale" | "archived";
 export type TargetFile = "me" | "work" | "life" | "preferences" | "tools";
 
 export interface ClaimCandidate {
@@ -408,4 +408,80 @@ export function archiveClaim(db: Database.Database, claimId: string): boolean {
   `).run(claimId);
 
   return result.changes > 0;
+}
+
+/**
+ * Flag approved claims as stale based on lint findings from weekly consolidation.
+ * Matches findings to claims by content substring + target file.
+ * Returns matched claim IDs (for Telegram delivery).
+ */
+export function flagClaimsStale(
+  db: Database.Database,
+  findings: Array<{ file: string; stale_text: string; reason: string; suggestion: string }>,
+): KnowledgeClaim[] {
+  const staleClaims: KnowledgeClaim[] = [];
+
+  for (const finding of findings) {
+    const targetFile = finding.file.replace(/\.md$/, "");
+    // Try to match by first 50 chars of the stale text
+    const searchText = finding.stale_text.slice(0, 50).replace(/'/g, "''");
+
+    const matched = db.prepare(`
+      SELECT * FROM knowledge_claims
+      WHERE status = 'approved' AND target_file = ? AND content LIKE ?
+      LIMIT 1
+    `).get(targetFile, `%${searchText}%`) as any | undefined;
+
+    if (matched) {
+      db.prepare(`
+        UPDATE knowledge_claims SET status = 'stale', updated_at = datetime('now') WHERE id = ?
+      `).run(matched.id);
+
+      staleClaims.push({
+        id: matched.id,
+        content: matched.content,
+        contentHash: matched.content_hash,
+        targetFile: matched.target_file,
+        section: matched.section,
+        claimType: matched.claim_type,
+        confidence: matched.confidence,
+        status: "stale" as ClaimStatus,
+        reviewAt: matched.review_at ?? null,
+        telegramMessageId: matched.telegram_message_id ?? null,
+        createdAt: matched.created_at,
+        decidedAt: matched.decided_at ?? null,
+        decidedBy: matched.decided_by ?? null,
+      });
+    } else {
+      // No matching claim — create a synthetic one for the lint finding
+      const id = claimId();
+      const hash = contentHash(finding.stale_text, targetFile);
+      db.prepare(`
+        INSERT OR IGNORE INTO knowledge_claims (id, content, content_hash, target_file, section, claim_type, confidence, status, created_at)
+        VALUES (?, ?, ?, ?, null, 'fact', 0.5, 'stale', datetime('now'))
+      `).run(id, finding.stale_text, hash, targetFile);
+
+      staleClaims.push({
+        id,
+        content: `${finding.stale_text} — ${finding.reason}`,
+        contentHash: hash,
+        targetFile: targetFile as TargetFile,
+        section: null,
+        claimType: "fact",
+        confidence: 0.5,
+        status: "stale" as ClaimStatus,
+        reviewAt: null,
+        telegramMessageId: null,
+        createdAt: new Date().toISOString(),
+        decidedAt: null,
+        decidedBy: null,
+      });
+    }
+  }
+
+  if (staleClaims.length > 0) {
+    logger.info({ count: staleClaims.length }, "Flagged claims as stale from lint findings");
+  }
+
+  return staleClaims;
 }

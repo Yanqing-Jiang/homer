@@ -120,6 +120,22 @@ export const definitions: ToolDefinition[] = [
       },
     },
   },
+  {
+    name: "memory_suggest",
+    description: "Suggest a fact for permanent memory, queued for human review via Telegram. Use instead of memory_promote when the fact should be reviewed before persisting. Good for preserving valuable synthesis from conversations.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "The fact or synthesis to remember" },
+        file: { type: "string", enum: ["me", "work", "life", "preferences", "tools"], description: "Target memory file" },
+        section: { type: "string", description: "Optional section header" },
+        claim_type: { type: "string", enum: ["fact", "decision", "preference", "question", "lesson"], description: "Type of claim (default: fact)" },
+        confidence: { type: "number", description: "0.0-1.0 confidence (default: 0.7)" },
+        session_id: { type: "string", description: "Optional source session ID for attribution" },
+      },
+      required: ["content", "file"],
+    },
+  },
 ];
 
 export async function handle(
@@ -669,6 +685,32 @@ export async function handle(
         return { content: [{ type: "text", text: JSON.stringify(rows, null, 2) }] };
       } catch {
         return { content: [{ type: "text", text: "knowledge_claims table not yet available (migration 069 pending)" }] };
+      }
+    }
+
+    case "memory_suggest": {
+      const { content, file, section, claim_type, confidence, session_id } = args as {
+        content: string; file: string; section?: string; claim_type?: string;
+        confidence?: number; session_id?: string;
+      };
+      const sm = deps.getSharedStateManager();
+      try {
+        const { insertCandidate } = await import("../../memory/claims.js");
+        const claimId = insertCandidate(sm.getDb(), {
+          content,
+          targetFile: file as "me" | "work" | "life" | "preferences" | "tools",
+          section: section ?? "",
+          claimType: (claim_type ?? "fact") as "fact" | "decision" | "preference" | "question" | "lesson",
+          confidence: confidence ?? 0.7,
+          sessionIds: session_id ? [session_id] : undefined,
+        });
+        if (!claimId) {
+          return { content: [{ type: "text", text: `Skipped — duplicate (already pending or approved in ${file}.md)` }] };
+        }
+        return { content: [{ type: "text", text: `Queued for review (${claimId}). Will appear in next Memory Moments batch.` }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Failed to suggest: ${msg}` }] };
       }
     }
 
