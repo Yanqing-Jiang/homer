@@ -18,6 +18,7 @@ import { StateManager, type SessionSummaryRow } from "../../state/manager.js";
 import { buildSchedulerContext, buildGoalScoreboard } from "../shared-context.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
 import { getCanonicalMemoryService } from "../../memory/canonical-service.js";
+import { flagClaimsStale, type KnowledgeClaim } from "../../memory/claims.js";
 import { PATHS } from "../../config/paths.js";
 
 const DAILY_LOG_DIR = PATHS.daily;
@@ -110,6 +111,16 @@ Do NOT promote:
 - Session-level debugging or ephemeral fixes
 - Generic observations without specific facts
 
+## PART 3: Memory Lint (Staleness Check)
+
+Scan the permanent memory files for claims that are:
+1. **Date-expired** — references to dates that have passed ("until Apr 11", "next Thursday", specific deadlines)
+2. **Contradicted** — this week's sessions show something different from what memory says
+3. **Stale status** — "in progress" / "pending" / "waiting on" with no recent activity supporting them
+4. **Orphaned** — people, projects, or initiatives not mentioned in any session for 3+ weeks
+
+Be HIGH-CONFIDENCE only. Better to catch 3 genuinely stale facts than flag 15 maybes. Only flag things you're confident are outdated based on the sessions you just read.
+
 Output format — you MUST use this exact structure:
 
 <weekly_summary>
@@ -124,7 +135,16 @@ Example:
   {"file": "work.md", "content": "### [2026-02-05] Segmentation Ownership\\nFormally pitched to JT for ownership of segmentation workstream.", "reason": "Career milestone — taking ownership of highest-leverage P&G project"}
 ]
 If no promotions needed, output: []
-</promotions>`;
+</promotions>
+
+<lint_findings>
+(JSON array, each with: "file", "stale_text", "reason", "suggestion")
+Example:
+[
+  {"file": "work.md", "stale_text": "JT on vacation until ~Apr 11", "reason": "date passed", "suggestion": "remove or update with current status"}
+]
+If no findings: []
+</lint_findings>`;
 }
 
 function getDateRange(days: number): string[] {
@@ -152,6 +172,7 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
   success: boolean;
   output: string;
   error?: string;
+  lintFindings?: KnowledgeClaim[];
 }> {
   const dates = getDateRange(daysBack);
   const startDate = dates[0];
@@ -291,6 +312,24 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
       }
     }
 
+    // Parse lint findings
+    const lintMatch = response.match(/<lint_findings>([\s\S]*?)<\/lint_findings>/);
+    let lintFindings: Array<{ file: string; stale_text: string; reason: string; suggestion: string }> = [];
+
+    if (lintMatch) {
+      try {
+        const jsonStr = lintMatch[1]!.trim();
+        if (jsonStr !== "[]") {
+          const arrayMatch = jsonStr.match(/\[[\s\S]*\]/);
+          if (arrayMatch) {
+            lintFindings = JSON.parse(arrayMatch[0]);
+          }
+        }
+      } catch (parseErr) {
+        logger.warn({ error: parseErr }, "Failed to parse lint findings JSON, continuing");
+      }
+    }
+
     // Append weekly summary to today's daily log
     const todayDate = getTodayDateString();
     const todayLogPath = `${DAILY_LOG_DIR}/${todayDate}.md`;
@@ -304,6 +343,7 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
 
     // Apply promotions via CanonicalMemoryService (CAS dedup built in)
     let promotionsApplied = 0;
+    let staleClaims: KnowledgeClaim[] = [];
     const promotionLog: string[] = [];
     const validFiles = new Set(PERMANENT_FILES.map(f => f.path.split("/").pop()));
     const dedupSm = stateManager ?? new StateManager(DB_PATH);
@@ -334,6 +374,11 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
           logger.info({ file: fileName, reason: promo.reason }, "Promoted fact to permanent memory");
         }
       }
+
+      // Process lint findings — flag matching claims as stale (must run before dedupSm.close())
+      if (lintFindings.length > 0) {
+        staleClaims = flagClaimsStale(dedupSm.getDb(), lintFindings);
+      }
     } finally {
       if (ownedDedupSm) dedupSm.close();
     }
@@ -350,13 +395,18 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
       parts.push("No new promotions needed");
     }
 
+    if (staleClaims.length > 0) {
+      parts.push(`${staleClaims.length} lint findings flagged as stale`);
+    }
+
     logger.info({
       startDate, endDate, logsFound,
       duration: result.duration,
       promotionsApplied,
+      lintFindings: staleClaims.length,
     }, "Weekly consolidation complete");
 
-    return { success: true, output: parts.join("\n") };
+    return { success: true, output: parts.join("\n"), lintFindings: staleClaims };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error({ error: message }, "Weekly consolidation failed");
