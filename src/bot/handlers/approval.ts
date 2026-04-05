@@ -1586,13 +1586,9 @@ export async function handlePlanRevisionReply(
 
   const oldPlan: GeneratedPlan = JSON.parse(review.planJson);
 
-  // Store feedback
-  stateManager.addPlanRevisionFeedback(pending.planId, oldPlan.revisionNumber, feedbackText);
   stateManager.updatePlanReviewStatus(pending.planId, "revising");
 
-  // Get full revision history
-  const history = stateManager.getPlanRevisionHistory(pending.planId);
-  const historyContext = history.map(h => `Revision ${h.revisionNumber}: ${h.feedbackText}`).join("\n");
+  const historyContext = `Revision ${oldPlan.revisionNumber}: ${feedbackText}`;
 
   await bot.api.sendMessage(chatId, `🔄 <b>Revising plan...</b>\n<i>${escapeHtml(feedbackText.slice(0, 200))}</i>`, { parse_mode: "HTML" });
 

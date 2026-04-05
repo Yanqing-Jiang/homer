@@ -171,7 +171,6 @@ export async function approveCandidate(
 export function rejectCandidate(
   db: Database.Database,
   claimId: string,
-  _reason?: string,
 ): boolean {
   const result = db.prepare(`
     UPDATE knowledge_claims
