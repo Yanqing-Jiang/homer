@@ -1497,10 +1497,12 @@ export class StateManager {
    * Add revision feedback for a plan.
    */
   addPlanRevisionFeedback(planId: string, revisionNumber: number, feedbackText: string): void {
-    this._db.prepare(`
-      INSERT INTO plan_revision_feedback (plan_id, revision_number, feedback_text, created_at)
-      VALUES (?, ?, ?, datetime('now'))
-    `).run(planId, revisionNumber, feedbackText);
+    try {
+      this._db.prepare(`
+        INSERT INTO plan_revision_feedback (plan_id, revision_number, feedback_text, created_at)
+        VALUES (?, ?, ?, datetime('now'))
+      `).run(planId, revisionNumber, feedbackText);
+    } catch { /* table dropped in migration 072 — non-fatal */ }
   }
 
   /**
@@ -2033,65 +2035,7 @@ export class StateManager {
     ).all(date, nextDayStr) as SessionTranscript[];
   }
 
-  // ============================================
-  // Memory File Snapshots
-  // ============================================
-
-  snapshotMemoryFile(fileName: string, content: string, reason: string, jobRunId?: number): void {
-    const date = new Date().toISOString().slice(0, 10);
-    const contentHash = createHash("sha256").update(content).digest("hex");
-    const sizeBytes = Buffer.byteLength(content, "utf-8");
-
-    this._db.prepare(
-      `INSERT INTO memory_file_snapshots (file_name, snapshot_date, content, content_hash, size_bytes, reason, job_run_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(file_name, snapshot_date, reason) DO UPDATE SET
-         content = excluded.content,
-         content_hash = excluded.content_hash,
-         size_bytes = excluded.size_bytes,
-         job_run_id = excluded.job_run_id`
-    ).run(fileName, date, content, contentHash, sizeBytes, reason, jobRunId ?? null);
-  }
-
-  getMemorySnapshot(fileName: string, date: string, reason?: string): MemoryFileSnapshot | null {
-    if (reason) {
-      return this._db.prepare(
-        `SELECT id, file_name as fileName, snapshot_date as snapshotDate, content,
-                content_hash as contentHash, size_bytes as sizeBytes, reason,
-                job_run_id as jobRunId, created_at as createdAt
-         FROM memory_file_snapshots
-         WHERE file_name = ? AND snapshot_date = ? AND reason = ?`
-      ).get(fileName, date, reason) as MemoryFileSnapshot | null ?? null;
-    }
-    return this._db.prepare(
-      `SELECT id, file_name as fileName, snapshot_date as snapshotDate, content,
-              content_hash as contentHash, size_bytes as sizeBytes, reason,
-              job_run_id as jobRunId, created_at as createdAt
-       FROM memory_file_snapshots
-       WHERE file_name = ? AND snapshot_date = ?
-       ORDER BY created_at DESC LIMIT 1`
-    ).get(fileName, date) as MemoryFileSnapshot | null ?? null;
-  }
-
-  listMemorySnapshots(fileName?: string, limit: number = 50): MemoryFileSnapshot[] {
-    if (fileName) {
-      return this._db.prepare(
-        `SELECT id, file_name as fileName, snapshot_date as snapshotDate,
-                content_hash as contentHash, size_bytes as sizeBytes, reason,
-                job_run_id as jobRunId, created_at as createdAt
-         FROM memory_file_snapshots
-         WHERE file_name = ?
-         ORDER BY created_at DESC LIMIT ?`
-      ).all(fileName, limit) as MemoryFileSnapshot[];
-    }
-    return this._db.prepare(
-      `SELECT id, file_name as fileName, snapshot_date as snapshotDate,
-              content_hash as contentHash, size_bytes as sizeBytes, reason,
-              job_run_id as jobRunId, created_at as createdAt
-       FROM memory_file_snapshots
-       ORDER BY created_at DESC LIMIT ?`
-    ).all(limit) as MemoryFileSnapshot[];
-  }
+  // Memory File Snapshots — removed in migration 072 (git handles version control)
 
   // ============================================
   // Backup Runs (Audit Trail)
@@ -2349,17 +2293,19 @@ export class StateManager {
 
   /**
    * Check if a fact has already been promoted (by content hash).
+   * Now backed by knowledge_claims instead of promoted_facts.
    */
   checkFactExists(content: string, targetFile: string): boolean {
     const hash = this.factHash(content, targetFile);
     const row = this._db.prepare(
-      "SELECT 1 FROM promoted_facts WHERE fact_hash = ?"
-    ).get(hash);
+      "SELECT 1 FROM knowledge_claims WHERE content_hash = ? AND target_file = ? AND status IN ('approved', 'candidate') LIMIT 1"
+    ).get(hash, targetFile.replace(".md", ""));
     return row !== undefined;
   }
 
   /**
-   * Record a promoted fact for dedup tracking. INSERT OR IGNORE — idempotent.
+   * Record a promoted fact for dedup tracking.
+   * Now inserts into knowledge_claims with status='approved'.
    */
   recordPromotedFact(
     content: string,
@@ -2368,21 +2314,31 @@ export class StateManager {
     source: "nightly" | "weekly" | "mcp" | "unknown"
   ): void {
     const hash = this.factHash(content, targetFile);
+    const normalizedFile = targetFile.replace(".md", "");
+    const existing = this._db.prepare(
+      "SELECT 1 FROM knowledge_claims WHERE content_hash = ? AND target_file = ? AND status NOT IN ('rejected', 'archived', 'expired') LIMIT 1"
+    ).get(hash, normalizedFile);
+    if (existing) return; // already exists
+
+    const ts = Date.now().toString(36);
+    const rand = Math.random().toString(36).slice(2, 10);
+    const id = `kc_${ts}_${rand}`;
     this._db.prepare(
-      `INSERT OR IGNORE INTO promoted_facts (fact_hash, content, target_file, section, source)
-       VALUES (?, ?, ?, ?, ?)`
-    ).run(hash, content, targetFile, section, source);
+      `INSERT INTO knowledge_claims (id, content, content_hash, target_file, section, claim_type, confidence, status, decided_at, decided_by, created_at)
+       VALUES (?, ?, ?, ?, ?, 'fact', 1.0, 'approved', datetime('now'), ?, datetime('now'))`
+    ).run(id, content, hash, normalizedFile, section, source);
   }
 
   /**
    * Get recently promoted facts (for context-bridge).
+   * Now reads from knowledge_claims instead of promoted_facts.
    */
   getRecentPromotedFacts(days: number = 7): Array<{ content: string; targetFile: string; section: string | null; promotedAt: string; source: string }> {
     return this._db.prepare(
-      `SELECT content, target_file as targetFile, section, promoted_at as promotedAt, source
-       FROM promoted_facts
-       WHERE promoted_at >= datetime('now', ?)
-       ORDER BY promoted_at DESC`
+      `SELECT content, target_file as targetFile, section, created_at as promotedAt, COALESCE(decided_by, 'unknown') as source
+       FROM knowledge_claims
+       WHERE status = 'approved' AND created_at >= datetime('now', ?)
+       ORDER BY created_at DESC`
     ).all(`-${days} days`) as Array<{ content: string; targetFile: string; section: string | null; promotedAt: string; source: string }>;
   }
 
@@ -2589,18 +2545,6 @@ export interface SessionTranscript {
   endedAt: string | null;
   messageCount: number;
   uncompressedSize: number;
-  createdAt: string;
-}
-
-export interface MemoryFileSnapshot {
-  id: number;
-  fileName: string;
-  snapshotDate: string;
-  content?: string;
-  contentHash: string;
-  sizeBytes: number;
-  reason: string;
-  jobRunId: number | null;
   createdAt: string;
 }
 
