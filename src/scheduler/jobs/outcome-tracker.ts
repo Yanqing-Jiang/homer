@@ -175,6 +175,16 @@ export async function runOutcomeTracker(
   errors: number;
 }> {
   try {
+    // Auto-expire stale pending checks (>14 days past due)
+    const expired = db.prepare(`
+      UPDATE outcome_checks
+      SET status = 'skipped', outcome_notes = 'auto-expired: pending >14 days past due', checked_at = datetime('now')
+      WHERE status = 'pending' AND check_at < datetime('now', '-14 days')
+    `).run();
+    if (expired.changes > 0) {
+      logger.info({ count: expired.changes }, "Auto-expired stale outcome checks (>14 days past due)");
+    }
+
     // Get due outcome checks (up to 5)
     const dueChecks = db.prepare(`
       SELECT id, source_type, source_id, source_title, created_at, check_at

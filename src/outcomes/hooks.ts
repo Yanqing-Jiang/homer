@@ -67,23 +67,25 @@ export function trackApplicationSubmitted(
 }
 
 /**
- * When a memory fact is promoted → 30-day check ("was it referenced?")
+ * When a memory fact is promoted → no longer creates outcome checks.
+ * Promotions are tracked via knowledge_claims; outcome checks only for plans/applications.
  */
 export function trackPromotion(
-  db: Database.Database,
-  factTitle: string,
-  targetFile: string,
+  _db: Database.Database,
+  _factTitle: string,
+  _targetFile: string,
 ): void {
-  insertOutcomeCheck(db, "promotion", targetFile, factTitle, 30);
+  // No-op: promotion outcome checks removed (89% abandonment rate).
+  // Knowledge claims system handles curation feedback instead.
 }
 
 /**
- * When a homer-improvement is proposed → 7-day check
+ * When a homer-improvement is proposed → no longer creates outcome checks.
  */
 export function trackImprovement(
-  db: Database.Database,
-  improvementId: string,
-  improvementTitle: string,
+  _db: Database.Database,
+  _improvementId: string,
+  _improvementTitle: string,
 ): void {
-  insertOutcomeCheck(db, "improvement", improvementId, improvementTitle, 7);
+  // No-op: improvement outcome checks removed (89% abandonment rate).
 }

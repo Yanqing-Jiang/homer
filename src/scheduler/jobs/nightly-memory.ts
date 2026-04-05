@@ -37,7 +37,7 @@ const PERMANENT_FILES: Record<MemoryFileKey, string> = {
 // SCHEMAS
 // ============================================
 
-const CLAIM_TYPES = ["fact", "decision", "preference", "hypothesis", "insight", "commitment", "question", "lesson"] as const;
+const CLAIM_TYPES = ["fact", "decision", "preference", "question", "lesson"] as const;
 
 const PromotionSchema = z.object({
   content: z.string().min(10),
@@ -247,13 +247,10 @@ Return ONLY a valid JSON object (no markdown, no preamble):
 
 Each promotion MUST include:
 - "confidence": 0.0-1.0 (how certain this is worth remembering: 0.9+ = obvious, 0.5 = maybe, <0.3 = skip)
-- "claim_type": one of "fact"|"decision"|"preference"|"hypothesis"|"insight"|"commitment"|"question"|"lesson"
+- "claim_type": one of "fact"|"decision"|"preference"|"question"|"lesson"
   - fact: objective information worth persisting
   - decision: a choice made (outcome can be checked later)
   - preference: expressed preference or style choice
-  - hypothesis: belief that needs validation
-  - insight: non-obvious observation or pattern
-  - commitment: deadline or deliverable promise
   - question: open question worth tracking until answered
   - lesson: learned the hard way — surface proactively next time
 
@@ -305,19 +302,6 @@ If nothing to promote, use an empty array.`;
         logger.error({ error: msg, rawOutput: consolidated.slice(0, 500) }, "Failed to parse nightly memory output");
         // Leave sessions unprocessed for retry
         return { success: false, output: "", error: `Nightly output parse failed: ${msg}` };
-      }
-    }
-
-    // Snapshot target files before promotion writes
-    const snapshotTargets = new Set(promotions.map(p => p.file));
-    for (const target of snapshotTargets) {
-      const filePath = PERMANENT_FILES[target];
-      if (!filePath || !existsSync(filePath)) continue;
-      try {
-        const content = readFileSync(filePath, "utf-8");
-        stateManager.snapshotMemoryFile(`${target}.md`, content, "pre-promotion");
-      } catch (snapErr) {
-        logger.warn({ error: snapErr, file: target }, "Failed to snapshot before promotion");
       }
     }
 

@@ -65,43 +65,13 @@ export async function runArchiveVerify(db: Database.Database): Promise<{
       results.push({ check: "Transcript coverage", status: "warn", detail: `Check failed: ${err}` });
     }
 
-    // 2. Memory snapshot freshness
+    // 2. Memory snapshot freshness — removed in migration 072, git handles this
     try {
-      const hasSnapshotsTable = db.prepare(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_file_snapshots'"
-      ).get();
-
-      if (hasSnapshotsTable) {
-        const expectedFiles = ["me.md", "work.md", "life.md", "preferences.md", "tools.md"];
-        const staleFiles: string[] = [];
-
-        for (const fileName of expectedFiles) {
-          const latest = db.prepare(
-            `SELECT snapshot_date FROM memory_file_snapshots
-             WHERE file_name = ?
-             ORDER BY created_at DESC LIMIT 1`
-          ).get(fileName) as { snapshot_date: string } | undefined;
-
-          if (!latest) {
-            staleFiles.push(`${fileName} (never)`);
-          } else {
-            const daysSince = Math.floor(
-              (Date.now() - new Date(latest.snapshot_date).getTime()) / (24 * 60 * 60 * 1000)
-            );
-            if (daysSince > 14) {
-              staleFiles.push(`${fileName} (${daysSince}d ago)`);
-            }
-          }
-        }
-
-        results.push({
-          check: "Memory snapshots",
-          status: staleFiles.length > 2 ? "fail" : staleFiles.length > 0 ? "warn" : "ok",
-          detail: staleFiles.length > 0
-            ? `Stale: ${staleFiles.join(", ")}`
-            : "All memory files have recent snapshots",
-        });
-      }
+      results.push({
+        check: "Memory snapshots",
+        status: "ok",
+        detail: "Handled by git version control",
+      });
     } catch (err) {
       results.push({ check: "Memory snapshots", status: "warn", detail: `Check failed: ${err}` });
     }

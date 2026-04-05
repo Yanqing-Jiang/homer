@@ -17,7 +17,6 @@ import { getRecentScrapes } from "../../scraping/scrape-store.js";
 import { storeJobArtifact } from "./artifact-store.js";
 import type { ParsedIdea } from "../../ideas/parser.js";
 import { smartSaveIdea, type SmartSaveResult } from "../../ideas/smart-save.js";
-import { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
 import { PATHS } from "../../config/paths.js";
 
@@ -184,20 +183,7 @@ If no patterns or ideas found, use empty arrays.`;
     // Post-consolidation: overwrite patterns.md
     let patternsWritten = 0;
     if (output.patterns.length > 0) {
-      // Snapshot patterns.md before overwriting
-      if (existsSync(PATTERNS_PATH)) {
-        try {
-          const snapSm = new StateManager(PATHS.db);
-          try {
-            const existing = readFileSync(PATTERNS_PATH, "utf-8");
-            snapSm.snapshotMemoryFile("patterns.md", existing, "pre-learning-engine");
-          } finally {
-            snapSm.close();
-          }
-        } catch (snapErr) {
-          logger.warn({ error: snapErr }, "Failed to snapshot patterns.md before overwrite");
-        }
-      }
+      // memory_file_snapshots removed — git handles version control
 
       const today = new Date().toISOString().slice(0, 10);
       const header = `# Content Patterns\n\nAuto-maintained by learning engine. Last updated: ${today}\n\n`;
