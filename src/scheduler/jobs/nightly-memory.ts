@@ -18,6 +18,10 @@ import { getCanonicalMemoryService } from "../../memory/canonical-service.js";
 import type { StateManager } from "../../state/manager.js";
 import { trackPromotion } from "../../outcomes/hooks.js";
 import { PATHS } from "../../config/paths.js";
+import { config } from "../../config/index.js";
+import { hasMigration } from "../../state/migrations/index.js";
+import { insertCandidate, expireStaleCandidates, autoApproveHighConfidence, getPendingCandidates } from "../../memory/claims.js";
+import type { ClaimType, TargetFile } from "../../memory/claims.js";
 
 type MemoryFileKey = "me" | "work" | "life" | "preferences" | "tools";
 
@@ -33,10 +37,14 @@ const PERMANENT_FILES: Record<MemoryFileKey, string> = {
 // SCHEMAS
 // ============================================
 
+const CLAIM_TYPES = ["fact", "decision", "preference", "hypothesis", "insight", "commitment", "question", "lesson"] as const;
+
 const PromotionSchema = z.object({
   content: z.string().min(10),
   file: z.enum(["me", "work", "life", "preferences", "tools"]),
   section: z.string().min(1),
+  confidence: z.number().min(0).max(1).default(0.5),
+  claim_type: z.enum(CLAIM_TYPES).default("fact"),
 });
 
 const PromotionsArraySchema = z.array(PromotionSchema);
@@ -235,7 +243,19 @@ ${sessionInput.length > 80000 ? sessionInput.slice(0, 80000) + "\n\n... (truncat
 ## Output Format
 
 Return ONLY a valid JSON object (no markdown, no preamble):
-{"promotions": [{"content": "fact to promote", "file": "me"|"work"|"life"|"preferences"|"tools", "section": "Section Name"}]}
+{"promotions": [{"content": "fact to promote", "file": "me"|"work"|"life"|"preferences"|"tools", "section": "Section Name", "confidence": 0.8, "claim_type": "fact"}]}
+
+Each promotion MUST include:
+- "confidence": 0.0-1.0 (how certain this is worth remembering: 0.9+ = obvious, 0.5 = maybe, <0.3 = skip)
+- "claim_type": one of "fact"|"decision"|"preference"|"hypothesis"|"insight"|"commitment"|"question"|"lesson"
+  - fact: objective information worth persisting
+  - decision: a choice made (outcome can be checked later)
+  - preference: expressed preference or style choice
+  - hypothesis: belief that needs validation
+  - insight: non-obvious observation or pattern
+  - commitment: deadline or deliverable promise
+  - question: open question worth tracking until answered
+  - lesson: learned the hard way — surface proactively next time
 
 If nothing to promote, use an empty array.`;
 
@@ -301,37 +321,93 @@ If nothing to promote, use an empty array.`;
       }
     }
 
-    // Write promotions via CanonicalMemoryService
+    // Determine whether to use human-gated mode
+    const db = stateManager.getDb();
+    const useHumanGated = config.features.humanGatedMemory && hasMigration(db, "069_knowledge_claims.sql");
+
     const canonicalMemory = getCanonicalMemoryService(stateManager, getMemoryIndexer());
     let writtenPromos = 0;
+    let candidatesCreated = 0;
     const writeErrors: string[] = [];
+    const sessionIds = sessions.map(s => s.id);
 
-    for (const promo of promotions) {
-      const filePath = PERMANENT_FILES[promo.file];
-      if (!filePath) {
-        writeErrors.push(`Unknown target file: ${promo.file}`);
-        continue;
+    if (useHumanGated) {
+      // ── Human-gated mode: insert candidates for review ──
+      for (const promo of promotions) {
+        try {
+          const claimId = insertCandidate(db, {
+            content: promo.content,
+            targetFile: promo.file as TargetFile,
+            section: promo.section,
+            claimType: (promo.claim_type ?? "fact") as ClaimType,
+            confidence: promo.confidence ?? 0.5,
+            sessionIds,
+          });
+          if (claimId) candidatesCreated++;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          writeErrors.push(`Candidate insert error for ${promo.file}: ${msg}`);
+          logger.error({ error: msg, file: promo.file }, "Failed to insert candidate");
+        }
       }
 
+      // Queue health fallback: auto-approve if backlog is too large
       try {
-        const ok = await canonicalMemory.promoteToFile(promo.content, promo.file, promo.section, "nightly");
-        if (ok) {
-          writtenPromos++;
-          logger.info({ file: promo.file, section: promo.section, content: promo.content.slice(0, 80) }, "Promoted fact to permanent memory");
-          try {
-            trackPromotion(stateManager.getDb(), promo.content.slice(0, 80), promo.file);
-          } catch { /* outcome tracking best-effort */ }
+        const pending = getPendingCandidates(db, 1);
+        if (pending.length > 0) {
+          const oldest = pending[0]!;
+          const oldestAge = (Date.now() - new Date(oldest.createdAt).getTime()) / 86400000;
+          const totalPending = db.prepare(
+            "SELECT COUNT(*) as c FROM knowledge_claims WHERE status = 'candidate'"
+          ).get() as { c: number };
+
+          if (totalPending.c > 50 || oldestAge > 14) {
+            const autoApproved = await autoApproveHighConfidence(db, canonicalMemory, 0.8);
+            if (autoApproved > 0) {
+              writtenPromos = autoApproved;
+              logger.warn({ autoApproved, queueSize: totalPending.c, oldestAgeDays: Math.round(oldestAge) },
+                "Queue health fallback: auto-approved high-confidence candidates");
+            }
+          }
         }
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        writeErrors.push(`Write error for ${promo.file}: ${msg}`);
-        logger.error({ error: msg, file: promo.file }, "Failed to promote fact");
+        logger.debug({ error: err }, "Queue health check skipped");
+      }
+
+      // Expire stale candidates (>7 days)
+      try {
+        expireStaleCandidates(db, 7);
+      } catch { /* best-effort */ }
+
+      logger.info({ candidatesCreated, promotions: promotions.length }, "Human-gated mode: inserted candidates for review");
+    } else {
+      // ── Legacy mode: direct auto-promotion ──
+      for (const promo of promotions) {
+        const filePath = PERMANENT_FILES[promo.file];
+        if (!filePath) {
+          writeErrors.push(`Unknown target file: ${promo.file}`);
+          continue;
+        }
+
+        try {
+          const ok = await canonicalMemory.promoteToFile(promo.content, promo.file, promo.section, "nightly");
+          if (ok) {
+            writtenPromos++;
+            logger.info({ file: promo.file, section: promo.section, content: promo.content.slice(0, 80) }, "Promoted fact to permanent memory");
+            try {
+              trackPromotion(db, promo.content.slice(0, 80), promo.file);
+            } catch { /* outcome tracking best-effort */ }
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          writeErrors.push(`Write error for ${promo.file}: ${msg}`);
+          logger.error({ error: msg, file: promo.file }, "Failed to promote fact");
+        }
       }
     }
 
     // Mark sessions as processed only if no write errors (allows retry on failure)
     if (writeErrors.length === 0) {
-      const sessionIds = sessions.map(s => s.id);
       if (sessionIds.length > 0) {
         const marked = stateManager.markSessionsProcessed(sessionIds);
         logger.info({ marked, total: sessionIds.length }, "Marked sessions as processed for promotion");
@@ -344,7 +420,10 @@ If nothing to promote, use an empty array.`;
     // canonicalMemory.promoteToFile() — no inline reindex or markContextBridgeDirty needed.
 
     const parts: string[] = [];
-    if (writtenPromos > 0 || promotions.length > 0) {
+    if (candidatesCreated > 0) {
+      parts.push(`${candidatesCreated} candidates queued for review`);
+    }
+    if (writtenPromos > 0 || (!useHumanGated && promotions.length > 0)) {
       parts.push(`Promoted ${writtenPromos}/${promotions.length} facts`);
     }
     parts.push(`${sessions.length} sessions processed`);
