@@ -716,6 +716,19 @@ async function runHandler(
       }
       case "weekly_consolidation": {
         const result = await runWeeklyConsolidation();
+
+        // Send lint findings to Telegram if any stale claims were flagged
+        if (result.success && result.lintFindings && result.lintFindings.length > 0 && ctx.bot) {
+          try {
+            const { sendLintFindings } = await import("../bot/handlers/memory-review.js");
+            const { config: appConfig } = await import("../config/index.js");
+            await sendLintFindings(ctx.bot, appConfig.telegram.allowedChatId, result.lintFindings);
+            logger.info({ count: result.lintFindings.length }, "Sent lint findings to Telegram");
+          } catch (err) {
+            logger.debug({ error: err }, "Lint findings delivery skipped");
+          }
+        }
+
         return buildResult(
           job,
           startedAt,
