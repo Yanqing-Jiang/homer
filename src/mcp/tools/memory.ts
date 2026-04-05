@@ -109,6 +109,17 @@ export const definitions: ToolDefinition[] = [
       },
     },
   },
+  {
+    name: "memory_candidates",
+    description: "Returns pending memory promotion candidates awaiting human review. Use in morning brief to show 'Memory Moments'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "Max candidates to return (default: 5)" },
+        status: { type: "string", enum: ["candidate", "approved", "rejected", "expired"], description: "Filter by status (default: candidate)" },
+      },
+    },
+  },
 ];
 
 export async function handle(
@@ -631,6 +642,34 @@ export async function handle(
 
       const output = sections.length > 0 ? sections.join("\n") : "No recent activity found.";
       return { content: [{ type: "text", text: output }] };
+    }
+
+    case "memory_candidates": {
+      const { limit: candidateLimit, status: candidateStatus } = args as { limit?: number; status?: string };
+      const sm = deps.getSharedStateManager();
+      try {
+        const statusFilter = candidateStatus ?? "candidate";
+        const maxResults = candidateLimit ?? 5;
+        const rows = sm.getDb().prepare(`
+          SELECT id, content, target_file as targetFile, section, claim_type as claimType,
+                 confidence, status, created_at as createdAt
+          FROM knowledge_claims
+          WHERE status = ?
+          ORDER BY confidence DESC, created_at ASC
+          LIMIT ?
+        `).all(statusFilter, maxResults) as Array<{
+          id: string; content: string; targetFile: string; section: string | null;
+          claimType: string; confidence: number; status: string; createdAt: string;
+        }>;
+
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: `No ${statusFilter} candidates found.` }] };
+        }
+
+        return { content: [{ type: "text", text: JSON.stringify(rows, null, 2) }] };
+      } catch {
+        return { content: [{ type: "text", text: "knowledge_claims table not yet available (migration 069 pending)" }] };
+      }
     }
 
     default:
