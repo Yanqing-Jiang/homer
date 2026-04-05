@@ -339,7 +339,7 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
     const intent = detectReplyIntent(replyText, replyCtx.originalContent);
 
     if (intent === "reject") {
-      rejectCandidate(db, replyCtx.claimId, replyText);
+      rejectCandidate(db, replyCtx.claimId);
       await ctx.reply(
         formatScheduledTelegramHtml(`❌ <b>Rejected</b>\n<s>"${escapeHtml(replyCtx.originalContent.slice(0, 120))}"</s>`),
         { parse_mode: "HTML", reply_parameters: { message_id: ctx.message.message_id } },
