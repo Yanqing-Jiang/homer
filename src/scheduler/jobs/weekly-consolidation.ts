@@ -302,27 +302,6 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
       await appendFile(todayLogPath, `# ${todayDate}\n${summaryBlock}`);
     }
 
-    // Snapshot target files before promotion writes
-    if (promotions.length > 0) {
-      const sm = stateManager ?? new StateManager(DB_PATH);
-      const ownedSm = !stateManager;
-      try {
-        const targetFiles = new Set(promotions.map((p: { file: string }) => p.file));
-        for (const fileName of targetFiles) {
-          const filePath = FILE_PATH_MAP[fileName] ?? `${PATHS.memory}/${fileName}`;
-          if (!existsSync(filePath)) continue;
-          try {
-            const content = await readFile(filePath, "utf-8");
-            sm.snapshotMemoryFile(fileName, content, "pre-weekly-consolidation");
-          } catch (snapErr) {
-            logger.warn({ error: snapErr, file: fileName }, "Failed to snapshot before promotion");
-          }
-        }
-      } finally {
-        if (ownedSm) sm.close();
-      }
-    }
-
     // Apply promotions via CanonicalMemoryService (CAS dedup built in)
     let promotionsApplied = 0;
     const promotionLog: string[] = [];

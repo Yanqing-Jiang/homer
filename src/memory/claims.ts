@@ -13,8 +13,8 @@ import type { CanonicalMemoryService } from "./canonical-service.js";
 
 // ── Types ────────────────────────────────────────────────────
 
-export type ClaimType = "fact" | "decision" | "preference" | "hypothesis" | "insight" | "commitment" | "question" | "lesson";
-export type ClaimStatus = "candidate" | "applying" | "approved" | "rejected" | "expired" | "superseded" | "stale" | "archived";
+export type ClaimType = "fact" | "decision" | "preference" | "question" | "lesson";
+export type ClaimStatus = "candidate" | "applying" | "approved" | "rejected" | "expired" | "archived";
 export type TargetFile = "me" | "work" | "life" | "preferences" | "tools";
 
 export interface ClaimCandidate {
@@ -92,39 +92,20 @@ export function insertCandidate(
     return null;
   }
 
-  const reviewAt = ["decision", "hypothesis", "commitment"].includes(candidate.claimType)
+  const reviewAt = candidate.claimType === "decision"
     ? new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 19).replace("T", " ")
     : null;
+
+  // Write session_id + source_url directly (inlined from former claim_sources table)
+  const sessionId = candidate.sessionIds?.[0] ?? null;
 
   db.prepare(`
     INSERT INTO knowledge_claims (
       id, content, content_hash, target_file, section,
-      claim_type, confidence, status, review_at, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'candidate', ?, datetime('now'))
+      claim_type, confidence, status, review_at, session_id, source_url, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'candidate', ?, ?, ?, datetime('now'))
   `).run(id, candidate.content, hash, candidate.targetFile, candidate.section,
-    candidate.claimType, candidate.confidence, reviewAt);
-
-  // Insert provenance sources
-  if (candidate.sessionIds?.length) {
-    const stmt = db.prepare(`
-      INSERT INTO claim_sources (claim_id, session_id, source_url, created_at)
-      VALUES (?, ?, ?, datetime('now'))
-    `);
-    for (const sessionId of candidate.sessionIds) {
-      stmt.run(id, sessionId, candidate.sourceUrl ?? null);
-    }
-  } else if (candidate.sourceUrl) {
-    db.prepare(`
-      INSERT INTO claim_sources (claim_id, source_url, created_at)
-      VALUES (?, ?, datetime('now'))
-    `).run(id, candidate.sourceUrl);
-  }
-
-  // Log creation event
-  db.prepare(`
-    INSERT INTO claim_events (claim_id, event_type, actor, content, created_at)
-    VALUES (?, 'created', 'nightly', ?, datetime('now'))
-  `).run(id, `confidence=${candidate.confidence.toFixed(2)}, type=${candidate.claimType}`);
+    candidate.claimType, candidate.confidence, reviewAt, sessionId, candidate.sourceUrl ?? null);
 
   logger.info({ claimId: id, type: candidate.claimType, confidence: candidate.confidence, target: candidate.targetFile },
     "Inserted candidate claim");
@@ -149,35 +130,26 @@ export async function approveCandidate(
   if (claim.status === "approved") return true; // idempotent
   if (claim.status !== "candidate") return false; // only candidates can be approved
 
-  // Transition: candidate → applying
+  // Transition: candidate → applying (crash-safe intermediate state)
   db.prepare(`
     UPDATE knowledge_claims SET status = 'applying', updated_at = datetime('now') WHERE id = ?
   `).run(claimId);
 
   try {
     // Write to canonical memory file
-    const promoted = await canonicalMemory.promoteToFile(
+    await canonicalMemory.promoteToFile(
       claim.content,
       claim.target_file,
       claim.section,
-      "mcp", // source: goes through the standard write path
+      "mcp",
     );
 
     // Transition: applying → approved
     db.prepare(`
       UPDATE knowledge_claims
-      SET status = 'approved', decided_at = datetime('now'), decided_by = 'user', updated_at = datetime('now'),
-          promoted_fact_hash = ?
+      SET status = 'approved', decided_at = datetime('now'), decided_by = 'user', updated_at = datetime('now')
       WHERE id = ?
-    `).run(
-      contentHash(claim.content, claim.target_file),
-      claimId,
-    );
-
-    db.prepare(`
-      INSERT INTO claim_events (claim_id, event_type, actor, content, created_at)
-      VALUES (?, 'approved', 'user', ?, datetime('now'))
-    `).run(claimId, promoted ? "promoted to file" : "already existed in file (CAS dedup)");
+    `).run(claimId);
 
     logger.info({ claimId, target: claim.target_file }, "Candidate approved and promoted");
     return true;
@@ -188,11 +160,6 @@ export async function approveCandidate(
     `).run(claimId);
 
     const msg = err instanceof Error ? err.message : String(err);
-    db.prepare(`
-      INSERT INTO claim_events (claim_id, event_type, actor, content, created_at)
-      VALUES (?, 'disputed', 'system', ?, datetime('now'))
-    `).run(claimId, `approval failed: ${msg}`);
-
     logger.error({ claimId, error: msg }, "Candidate approval failed — rolled back to candidate");
     return false;
   }
@@ -204,7 +171,7 @@ export async function approveCandidate(
 export function rejectCandidate(
   db: Database.Database,
   claimId: string,
-  reason?: string,
+  _reason?: string,
 ): boolean {
   const result = db.prepare(`
     UPDATE knowledge_claims
@@ -212,15 +179,11 @@ export function rejectCandidate(
     WHERE id = ? AND status = 'candidate'
   `).run(claimId);
 
-  if (result.changes === 0) return false;
+  if (result.changes > 0) {
+    logger.info({ claimId }, "Candidate rejected");
+  }
 
-  db.prepare(`
-    INSERT INTO claim_events (claim_id, event_type, actor, content, created_at)
-    VALUES (?, 'rejected', 'user', ?, datetime('now'))
-  `).run(claimId, reason ?? null);
-
-  logger.info({ claimId, reason }, "Candidate rejected");
-  return true;
+  return result.changes > 0;
 }
 
 /**
@@ -247,12 +210,6 @@ export async function editAndApprove(
     WHERE id = ?
   `).run(newContent, newHash, claimId);
 
-  // Log the edit
-  db.prepare(`
-    INSERT INTO claim_events (claim_id, event_type, actor, content, metadata_json, created_at)
-    VALUES (?, 'edited', 'user', ?, ?, datetime('now'))
-  `).run(claimId, newContent, JSON.stringify({ original: claim.content }));
-
   // Now approve the edited claim
   return approveCandidate(db, claimId, canonicalMemory);
 }
@@ -269,14 +226,6 @@ export function expireStaleCandidates(db: Database.Database, maxAgeDays: number 
   `).run(`-${maxAgeDays} days`);
 
   if (result.changes > 0) {
-    // Bulk log expiry events
-    db.prepare(`
-      INSERT INTO claim_events (claim_id, event_type, actor, content, created_at)
-      SELECT id, 'expired', 'system', 'auto-expired after ${maxAgeDays} days', datetime('now')
-      FROM knowledge_claims
-      WHERE status = 'expired' AND decided_by = 'auto-expire' AND decided_at > datetime('now', '-1 minute')
-    `).run();
-
     logger.info({ expired: result.changes, maxAgeDays }, "Expired stale candidates");
   }
 
@@ -297,7 +246,6 @@ export function expireStaleCandidates(db: Database.Database, maxAgeDays: number 
 
 /**
  * Auto-approve high-confidence candidates when queue is backing up.
- * Called as a safety valve to prevent memory starvation.
  */
 export async function autoApproveHighConfidence(
   db: Database.Database,
@@ -315,7 +263,6 @@ export async function autoApproveHighConfidence(
   for (const c of candidates) {
     const ok = await approveCandidate(db, c.id, canonicalMemory);
     if (ok) {
-      // Override decided_by to indicate auto-approval
       db.prepare(`UPDATE knowledge_claims SET decided_by = 'auto-approve' WHERE id = ?`).run(c.id);
       approved++;
     }
@@ -412,15 +359,14 @@ export function getClaimMetrics(db: Database.Database): ClaimMetrics {
   const medianEntry = ages.length > 0 ? ages[Math.floor(ages.length / 2)] : undefined;
   const medianAge = medianEntry?.ageDays ?? null;
 
-  // Last 7 days activity
+  // Last 7 days activity — derived from knowledge_claims directly
   const last7 = db.prepare(`
     SELECT
-      SUM(CASE WHEN event_type = 'created' THEN 1 ELSE 0 END) as created,
-      SUM(CASE WHEN event_type = 'approved' THEN 1 ELSE 0 END) as approved,
-      SUM(CASE WHEN event_type = 'rejected' THEN 1 ELSE 0 END) as rejected,
-      SUM(CASE WHEN event_type = 'expired' THEN 1 ELSE 0 END) as expired
-    FROM claim_events
-    WHERE created_at > datetime('now', '-7 days')
+      SUM(CASE WHEN created_at > datetime('now', '-7 days') THEN 1 ELSE 0 END) as created,
+      SUM(CASE WHEN decided_at > datetime('now', '-7 days') AND status = 'approved' THEN 1 ELSE 0 END) as approved,
+      SUM(CASE WHEN decided_at > datetime('now', '-7 days') AND status = 'rejected' THEN 1 ELSE 0 END) as rejected,
+      SUM(CASE WHEN decided_at > datetime('now', '-7 days') AND status = 'expired' THEN 1 ELSE 0 END) as expired
+    FROM knowledge_claims
   `).get() as { created: number | null; approved: number | null; rejected: number | null; expired: number | null };
 
   return {
@@ -440,21 +386,14 @@ export function getClaimMetrics(db: Database.Database): ClaimMetrics {
 }
 
 /**
- * Mark a stale claim as validated (lint: keep).
+ * Mark a claim as validated (lint: keep). Works on any non-archived claim.
  */
 export function markClaimValidated(db: Database.Database, claimId: string): boolean {
   const result = db.prepare(`
     UPDATE knowledge_claims
     SET status = 'approved', updated_at = datetime('now')
-    WHERE id = ? AND status = 'stale'
+    WHERE id = ? AND status NOT IN ('archived', 'expired')
   `).run(claimId);
-
-  if (result.changes > 0) {
-    db.prepare(`
-      INSERT INTO claim_events (claim_id, event_type, actor, content, created_at)
-      VALUES (?, 'lint_resolved', 'user', 'marked as still valid', datetime('now'))
-    `).run(claimId);
-  }
 
   return result.changes > 0;
 }
@@ -466,15 +405,8 @@ export function archiveClaim(db: Database.Database, claimId: string): boolean {
   const result = db.prepare(`
     UPDATE knowledge_claims
     SET status = 'archived', updated_at = datetime('now'), decided_at = datetime('now'), decided_by = 'user'
-    WHERE id = ? AND status IN ('approved', 'stale')
+    WHERE id = ? AND status IN ('approved', 'candidate')
   `).run(claimId);
-
-  if (result.changes > 0) {
-    db.prepare(`
-      INSERT INTO claim_events (claim_id, event_type, actor, content, created_at)
-      VALUES (?, 'lint_resolved', 'user', 'archived via lint review', datetime('now'))
-    `).run(claimId);
-  }
 
   return result.changes > 0;
 }

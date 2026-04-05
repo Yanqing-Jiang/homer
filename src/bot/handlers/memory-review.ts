@@ -2,11 +2,9 @@
  * Memory Review Handlers — Telegram callbacks for human-gated memory curation.
  *
  * Callback namespace: m:* (all under 20 bytes)
- *   m:a:<id>  — approve candidate
+ *   m:a:<id>  — approve candidate as-is
  *   m:r:<id>  — reject candidate
- *   m:e:<id>  — start edit (captures next reply)
- *   m:t:<id>  — start talk/discussion
- *   m:x:<id>  — expand (show full content + sources)
+ *   m:p:<id>  — reply (edit, discuss, or correct — intent inferred from text)
  *   m:lr:<id> — lint: remove (archive)
  *   m:lu:<id> — lint: update (start thread)
  *   m:lk:<id> — lint: keep (validate)
@@ -35,22 +33,15 @@ import { staleMapCleaner } from "../../utils/stale-map-cleaner.js";
 
 // ── State tracking ──────────────────────────────────────────
 
-interface PendingEdit {
+interface PendingReply {
   claimId: string;
+  originalContent: string;
   createdAt: number;
 }
 
-interface PendingTalk {
-  claimId: string;
-  title: string;
-  createdAt: number;
-}
+const pendingReplies = new Map<number, PendingReply>();
 
-const pendingEdits = new Map<number, PendingEdit>();
-const pendingTalks = new Map<number, PendingTalk>();
-
-staleMapCleaner.register(pendingEdits, "memory:edits", { maxAgeMs: 60 * 60 * 1000 }); // 1hr
-staleMapCleaner.register(pendingTalks, "memory:talks", { maxAgeMs: 4 * 60 * 60 * 1000 }); // 4hr
+staleMapCleaner.register(pendingReplies, "memory:replies", { maxAgeMs: 4 * 60 * 60 * 1000 }); // 4hr
 
 let stateManagerRef: StateManager | null = null;
 
@@ -60,12 +51,23 @@ const CLAIM_BADGES: Record<string, string> = {
   fact: "📝",
   decision: "⚖️",
   preference: "🎯",
-  hypothesis: "🔬",
-  insight: "💡",
-  commitment: "📅",
   question: "❓",
   lesson: "⚠️",
 };
+
+// ── Intent Detection ────────────────────────────────────────
+
+const REJECT_PATTERNS = /^(delete|reject|no|wrong|nope|nah|remove|skip|trash|not true|incorrect|drop it)$/i;
+
+function detectReplyIntent(replyText: string, _originalContent: string): "reject" | "edit" {
+  const trimmed = replyText.trim();
+
+  // Explicit rejection keywords
+  if (REJECT_PATTERNS.test(trimmed)) return "reject";
+
+  // Everything else is treated as a corrected version (edit + approve)
+  return "edit";
+}
 
 // ── Keyboard Builders ───────────────────────────────────────
 
@@ -73,10 +75,8 @@ function createCandidateKeyboard(claimId: string): InlineKeyboard {
   const id = claimId.slice(-10);
   return new InlineKeyboard()
     .text("✅ Approve", `m:a:${id}`)
-    .text("✏️ Edit", `m:e:${id}`)
-    .row()
-    .text("❌ Reject", `m:r:${id}`)
-    .text("💬 Talk", `m:t:${id}`);
+    .text("💬 Reply", `m:p:${id}`)
+    .text("❌ Reject", `m:r:${id}`);
 }
 
 function createLintKeyboard(claimId: string): InlineKeyboard {
@@ -227,22 +227,26 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
     await ctx.answerCallbackQuery("Rejected ❌");
   });
 
-  // ── Edit (start) ──
-  bot.callbackQuery(/^m:e:(.+)$/, async (ctx) => {
+  // ── Reply (unified edit + talk) ──
+  bot.callbackQuery(/^m:p:(.+)$/, async (ctx) => {
     const idSuffix = ctx.match?.[1];
     if (!idSuffix) { await ctx.answerCallbackQuery("Invalid"); return; }
 
     const claim = findClaim(idSuffix);
     if (!claim) { await ctx.answerCallbackQuery("Claim not found"); return; }
 
-    await ctx.answerCallbackQuery("Reply with your edited version");
+    await ctx.answerCallbackQuery("Reply to edit or correct");
 
     const chatId = ctx.chat?.id;
     if (!chatId) return;
 
     const sent = await ctx.reply(
       formatScheduledTelegramHtml(
-        `✏️ <b>Edit mode</b>\n\nOriginal: <i>"${escapeHtml(claim.content)}"</i>\n\nReply to this message with your corrected version.`
+        `💬 <b>Reply</b>\n\n` +
+        `<i>"${escapeHtml(claim.content)}"</i>\n` +
+        `→ ${escapeHtml(claim.targetFile)}.md\n\n` +
+        `Reply with your corrected version to edit & approve.\n` +
+        `Or reply "reject" / "delete" to discard.`
       ),
       {
         parse_mode: "HTML",
@@ -250,40 +254,11 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
       },
     );
 
-    pendingEdits.set(sent.message_id, { claimId: claim.id, createdAt: Date.now() });
-    // Also track the original message
+    const replyCtx: PendingReply = { claimId: claim.id, originalContent: claim.content, createdAt: Date.now() };
+    pendingReplies.set(sent.message_id, replyCtx);
+    // Also track the original card message
     const origId = ctx.callbackQuery?.message?.message_id;
-    if (origId) pendingEdits.set(origId, { claimId: claim.id, createdAt: Date.now() });
-  });
-
-  // ── Talk (start discussion) ──
-  bot.callbackQuery(/^m:t:(.+)$/, async (ctx) => {
-    const idSuffix = ctx.match?.[1];
-    if (!idSuffix) { await ctx.answerCallbackQuery("Invalid"); return; }
-
-    const claim = findClaim(idSuffix);
-    if (!claim) { await ctx.answerCallbackQuery("Claim not found"); return; }
-
-    await ctx.answerCallbackQuery("Discussion opened");
-
-    const chatId = ctx.chat?.id;
-    if (!chatId) return;
-
-    const sent = await ctx.reply(
-      formatScheduledTelegramHtml(
-        `💬 <b>Discussion: ${escapeHtml(claim.claimType)}</b>\n\n` +
-        `"${escapeHtml(claim.content)}"\n→ ${escapeHtml(claim.targetFile)}.md\n\n` +
-        `Reply to discuss. When done, I'll update or reject based on your input.`
-      ),
-      {
-        parse_mode: "HTML",
-        reply_parameters: { message_id: ctx.callbackQuery.message!.message_id },
-      },
-    );
-
-    pendingTalks.set(sent.message_id, { claimId: claim.id, title: claim.content.slice(0, 50), createdAt: Date.now() });
-    const origId = ctx.callbackQuery?.message?.message_id;
-    if (origId) pendingTalks.set(origId, { claimId: claim.id, title: claim.content.slice(0, 50), createdAt: Date.now() });
+    if (origId) pendingReplies.set(origId, replyCtx);
   });
 
   // ── Lint: Remove (archive) ──
@@ -327,7 +302,7 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
       },
     );
 
-    pendingEdits.set(sent.message_id, { claimId: claim.id, createdAt: Date.now() });
+    pendingReplies.set(sent.message_id, { claimId: claim.id, originalContent: claim.content, createdAt: Date.now() });
   });
 
   // ── Lint: Keep (validate) ──
@@ -348,62 +323,43 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
     await ctx.answerCallbackQuery("Marked as valid ✅");
   });
 
-  // ── Reply capture for edits ──
+  // ── Reply capture (unified edit/reject handler) ──
   bot.on("message:text", async (ctx, next) => {
     const replyTo = ctx.message.reply_to_message?.message_id;
     if (!replyTo) return next();
 
-    // Check for pending edit
-    const editCtx = pendingEdits.get(replyTo);
-    if (editCtx) {
-      pendingEdits.delete(replyTo);
-      const db = stateManagerRef?.getDb();
-      if (!db) return next();
+    const replyCtx = pendingReplies.get(replyTo);
+    if (!replyCtx) return next();
 
-      const newContent = ctx.message.text.trim();
-      if (newContent.toLowerCase() === "delete") {
-        archiveClaim(db, editCtx.claimId);
-        await ctx.reply("🗑 Claim deleted.", { reply_parameters: { message_id: ctx.message.message_id } });
-        return;
-      }
+    pendingReplies.delete(replyTo);
+    const db = stateManagerRef?.getDb();
+    if (!db) return next();
 
-      const cms = getCanonicalMemoryService(stateManagerRef!, getMemoryIndexer());
-      const ok = await editAndApprove(db, editCtx.claimId, newContent, cms);
+    const replyText = ctx.message.text.trim();
+    const intent = detectReplyIntent(replyText, replyCtx.originalContent);
 
-      if (ok) {
-        await ctx.reply(
-          formatScheduledTelegramHtml(`✅ <b>Edited & approved</b>\n<i>"${escapeHtml(newContent.slice(0, 120))}"</i>`),
-          { parse_mode: "HTML", reply_parameters: { message_id: ctx.message.message_id } },
-        );
-      } else {
-        await ctx.reply("❌ Edit failed — claim may have already been processed.", {
-          reply_parameters: { message_id: ctx.message.message_id },
-        });
-      }
+    if (intent === "reject") {
+      rejectCandidate(db, replyCtx.claimId, replyText);
+      await ctx.reply(
+        formatScheduledTelegramHtml(`❌ <b>Rejected</b>\n<s>"${escapeHtml(replyCtx.originalContent.slice(0, 120))}"</s>`),
+        { parse_mode: "HTML", reply_parameters: { message_id: ctx.message.message_id } },
+      );
       return;
     }
 
-    // Check for pending talk
-    const talkCtx = pendingTalks.get(replyTo);
-    if (talkCtx) {
-      // Log the discussion message as a claim event
-      const db = stateManagerRef?.getDb();
-      if (db) {
-        db.prepare(`
-          INSERT INTO claim_events (claim_id, event_type, actor, content, created_at)
-          VALUES (?, 'reviewed', 'user', ?, datetime('now'))
-        `).run(talkCtx.claimId, ctx.message.text);
-      }
+    // Intent is "edit" — use the reply text as the corrected content, edit + approve
+    const cms = getCanonicalMemoryService(stateManagerRef!, getMemoryIndexer());
+    const ok = await editAndApprove(db, replyCtx.claimId, replyText, cms);
 
-      // Keep the talk context active for further replies
-      pendingTalks.set(ctx.message.message_id, talkCtx);
-
-      await ctx.reply("💬 Noted. Reply again to continue, or use the buttons above to decide.", {
+    if (ok) {
+      await ctx.reply(
+        formatScheduledTelegramHtml(`✅ <b>Edited & approved</b>\n<i>"${escapeHtml(replyText.slice(0, 120))}"</i>`),
+        { parse_mode: "HTML", reply_parameters: { message_id: ctx.message.message_id } },
+      );
+    } else {
+      await ctx.reply("❌ Edit failed — claim may have already been processed.", {
         reply_parameters: { message_id: ctx.message.message_id },
       });
-      return;
     }
-
-    return next();
   });
 }

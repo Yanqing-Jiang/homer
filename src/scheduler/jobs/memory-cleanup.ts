@@ -160,18 +160,7 @@ If NO → let it go, or compress to one line capturing WHAT happened and WHY it 
 ${fileContent}`;
 }
 
-/**
- * Snapshot a file to memory_file_snapshots before cleaning.
- */
-function snapshotFileToDb(sm: StateManager, fileName: string, content: string): void {
-  try {
-    sm.snapshotMemoryFile(fileName, content, "pre-cleanup");
-    logger.debug({ fileName }, "Snapshotted memory file to DB before cleanup");
-  } catch (error) {
-    logger.warn({ error, fileName }, "Failed to snapshot memory file to DB");
-    throw error;
-  }
-}
+// memory_file_snapshots removed in migration 072 — git handles version control
 
 interface FileResult {
   fileName: string;
@@ -233,23 +222,7 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
 
     const originalLines = fileContent.split("\n").length;
 
-    // 1. Snapshot to DB (replaces .bak.md files)
-    try {
-      snapshotFileToDb(sm, file.name, fileContent);
-    } catch (backupErr) {
-      const msg = backupErr instanceof Error ? backupErr.message : String(backupErr);
-      results.push({
-        fileName: file.name,
-        success: false,
-        originalLines,
-        cleanedLines: 0,
-        changelog: "",
-        error: `Snapshot failed: ${msg}`,
-      });
-      continue;
-    }
-
-    // 2. Build prompt and call Gemini
+    // Build prompt and call Gemini
     const prompt = buildCleanupPrompt(file.name, fileContent, date);
 
     logger.info({ file: file.name, originalLines, sizeKB: Math.round(fileContent.length / 1024) }, "Cleaning memory file");

@@ -37,11 +37,8 @@ import { cleanAgentOutput } from "../../scraping/clean-output.js";
 import { htmlToMarkdown, extractDeepLinks, extractImages, type DeepLink, type ImageRef } from "../../scraping/html-to-markdown.js";
 import { ensureCDP } from "../../scraping/chrome-launcher.js";
 import { extractAndStoreHooks } from "../../ideas/content-hooks.js";
-import { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
 import { PATHS } from "../../config/paths.js";
-
-const DB_PATH = PATHS.db;
 
 // ============================================
 // CONSTANTS
@@ -780,20 +777,8 @@ export async function runContentScraper(db: Database.Database): Promise<{
     // PHASE 0: Pre-write snapshots of files we're about to overwrite
     // =========================================================
     try {
-      const sm = new StateManager(DB_PATH);
-      try {
-        const filesToSnapshot = [MEDIUM_FILE, LINKEDIN_FILE, MEDIUM_TRENDING_FILE, PATTERNS_FILE];
-        for (const filePath of filesToSnapshot) {
-          if (existsSync(filePath)) {
-            const content = readFileSync(filePath, "utf-8");
-            const fileName = filePath.split("/").pop()!;
-            sm.snapshotMemoryFile(fileName, content, "pre-content-scraper");
-          }
-        }
-        logger.info("Pre-scrape snapshots saved");
-      } finally {
-        sm.close();
-      }
+      // memory_file_snapshots removed — git handles version control
+      logger.debug("Pre-scrape snapshots skipped (removed in migration 072)");
     } catch (err) {
       logger.warn({ error: String(err) }, "Pre-scrape snapshot failed (non-fatal)");
     }

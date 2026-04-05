@@ -740,19 +740,7 @@ async function maybeCreateIdeasFromVideo(
     createdIds.push(saved.id);
     logger.info({ videoId, ideaId: saved.id, title: saved.title }, "Idea created from YouTube video");
 
-    // Create knowledge link: youtube → idea (inspired)
-    try {
-      db.prepare(`
-        INSERT OR IGNORE INTO knowledge_links (id, src_type, src_id, dst_type, dst_id, link_type, strength, evidence, created_by)
-        VALUES (?, 'youtube', ?, 'idea', ?, 'inspired', ?, ?, 'youtube_pipeline_v2')
-      `).run(
-        randomUUID(),
-        videoId,
-        saved.id,
-        candidate.novelty,
-        candidate.evidence?.slice(0, 500),
-      );
-    } catch { /* knowledge_links may not exist yet — non-fatal */ }
+    // knowledge_links table removed in migration 070
   } catch (error) {
     logger.warn({ videoId, error }, "Failed to create idea from video (non-fatal)");
   }

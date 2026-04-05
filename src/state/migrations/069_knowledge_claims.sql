@@ -76,5 +76,6 @@ SELECT
   promoted_at,
   fact_hash,
   promoted_at,
+  promoted_at,
   'backfill'
 FROM promoted_facts;

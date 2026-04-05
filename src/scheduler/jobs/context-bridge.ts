@@ -267,9 +267,7 @@ async function collectRawData(sm: StateManager): Promise<RawContextData> {
       const date = fact.promotedAt.slice(0, 10);
       recentFacts.push(`[${date}] ${fact.targetFile}: ${truncateLine(fact.content, 180)}`);
     }
-  } catch {
-    // promoted_facts may not exist during partial upgrades
-  }
+  } catch { /* knowledge_claims query failed — non-fatal */ }
 
   const activePlans: string[] = [];
   if (existsSync(PATHS.plans)) {
