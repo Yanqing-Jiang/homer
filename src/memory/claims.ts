@@ -128,7 +128,7 @@ export async function approveCandidate(
 
   if (!claim) return false;
   if (claim.status === "approved") return true; // idempotent
-  if (claim.status !== "candidate") return false; // only candidates can be approved
+  if (!["candidate", "stale"].includes(claim.status)) return false;
 
   // Transition: candidate → applying (crash-safe intermediate state)
   db.prepare(`
@@ -154,7 +154,7 @@ export async function approveCandidate(
     logger.info({ claimId, target: claim.target_file }, "Candidate approved and promoted");
     return true;
   } catch (err) {
-    // Rollback: applying → candidate (so user can retry)
+    // Rollback: applying → candidate/stale (so user can retry)
     db.prepare(`
       UPDATE knowledge_claims SET status = 'candidate', updated_at = datetime('now') WHERE id = ? AND status = 'applying'
     `).run(claimId);
@@ -186,7 +186,7 @@ export function rejectCandidate(
 }
 
 /**
- * Edit a candidate's content and approve it.
+ * Edit a claim's content and approve it. Works for candidate and stale claims (lint: update).
  */
 export async function editAndApprove(
   db: Database.Database,
@@ -198,7 +198,7 @@ export async function editAndApprove(
     SELECT id, content, target_file, status FROM knowledge_claims WHERE id = ?
   `).get(claimId) as { id: string; content: string; target_file: string; status: string } | undefined;
 
-  if (!claim || claim.status !== "candidate") return false;
+  if (!claim || !["candidate", "stale"].includes(claim.status)) return false;
 
   const newHash = contentHash(newContent, claim.target_file);
 

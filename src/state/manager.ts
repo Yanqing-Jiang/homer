@@ -2274,7 +2274,7 @@ export class StateManager {
   checkFactExists(content: string, targetFile: string): boolean {
     const hash = this.factHash(content, targetFile);
     const row = this._db.prepare(
-      "SELECT 1 FROM knowledge_claims WHERE content_hash = ? AND target_file = ? AND status IN ('approved', 'candidate') LIMIT 1"
+      "SELECT 1 FROM knowledge_claims WHERE content_hash = ? AND target_file = ? AND status = 'approved' LIMIT 1"
     ).get(hash, targetFile.replace(".md", ""));
     return row !== undefined;
   }
