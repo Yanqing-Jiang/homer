@@ -404,8 +404,7 @@ async function stepScore(
   scrape: StoredScrape,
   sharedContext: string,
 ): Promise<boolean> {
-  const attempts = incrementPipelineAttempt(db, scrape.id, "score");
-  if (attempts > 3) {
+  if (isStepExhausted(db, scrape.id, "score")) {
     markScrapeTerminal(db, scrape.id, "exhausted");
     return false;
   }
@@ -427,17 +426,25 @@ ${formatScrapeForPrompt(scrape)}
 Decide whether this scrape is strong enough to continue in the idea pipeline.
 Return ONLY a JSON object: { "passed": true|false, "reason": "why", "summary": "one-line summary", "dimensions": ["topic tags"] }`;
 
+  let result;
   try {
-    const result = await executeClaudeCommand(prompt, {
+    result = await executeClaudeCommand(prompt, {
       cwd: "/tmp",
       model: "sonnet",
       timeout: STEP_TIMEOUT,
     });
-    if (result.exitCode !== 0 || !result.output) {
-      logger.warn({ scrapeId: scrape.id, exitCode: result.exitCode }, "Triage step: Sonnet call failed");
-      return false;
-    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ scrapeId: scrape.id, error: msg }, "Triage step: executor error (not counted)");
+    return false;
+  }
 
+  if (result.exitCode !== 0 || !result.output) {
+    logger.warn({ scrapeId: scrape.id, exitCode: result.exitCode }, "Triage step: Sonnet call failed (not counted)");
+    return false;
+  }
+
+  try {
     const parsed = parseSwarmJSON(result.output, TriageSchema);
     updatePipelineStep(db, scrape.id, "scored", {
       value: parsed.passed ? 8 : 3,
@@ -456,8 +463,9 @@ Return ONLY a JSON object: { "passed": true|false, "reason": "why", "summary": "
     }
     return true;
   } catch (err) {
+    incrementPipelineAttempt(db, scrape.id, "score");
     const msg = err instanceof Error ? err.message : String(err);
-    logger.warn({ scrapeId: scrape.id, error: msg, attempt: attempts }, "Triage step failed");
+    logger.warn({ scrapeId: scrape.id, error: msg }, "Triage step: parse failed (attempt counted)");
     return false;
   }
 }
@@ -471,8 +479,7 @@ async function stepSynthesize(
   primaryScrape: StoredScrape,
   sharedContext: string,
 ): Promise<boolean> {
-  const attempts = incrementPipelineAttempt(db, primaryScrape.id, "synthesize");
-  if (attempts > 3) {
+  if (isStepExhausted(db, primaryScrape.id, "synthesize")) {
     markScrapeTerminal(db, primaryScrape.id, "exhausted");
     return false;
   }
@@ -519,18 +526,25 @@ ${clusterScrapes.length > 1
     : "Extract a focused candidate idea from this scrape."}
 Return ONLY the JSON object.`;
 
+  let result;
   try {
-    const result = await executeClaudeCommand(prompt, {
+    result = await executeClaudeCommand(prompt, {
       cwd: "/tmp",
       model: "sonnet",
       timeout: STEP_TIMEOUT,
     });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ scrapeId: primaryScrape.id, error: msg }, "Synthesize step: executor error (not counted)");
+    return false;
+  }
 
-    if (result.exitCode !== 0 || !result.output) {
-      logger.warn({ scrapeId: primaryScrape.id, exitCode: result.exitCode }, "Synthesize step: Sonnet call failed");
-      return false;
-    }
+  if (result.exitCode !== 0 || !result.output) {
+    logger.warn({ scrapeId: primaryScrape.id, exitCode: result.exitCode }, "Synthesize step: Sonnet call failed (not counted)");
+    return false;
+  }
 
+  try {
     const parsed = parseSwarmJSON(result.output, CandidateSchema);
 
     // Tag multi-source ideas
@@ -558,8 +572,9 @@ Return ONLY the JSON object.`;
     }, "Candidate synthesized");
     return true;
   } catch (err) {
+    incrementPipelineAttempt(db, primaryScrape.id, "synthesize");
     const msg = err instanceof Error ? err.message : String(err);
-    logger.warn({ scrapeId: primaryScrape.id, error: msg, attempt: attempts }, "Synthesize step failed");
+    logger.warn({ scrapeId: primaryScrape.id, error: msg }, "Synthesize step: parse failed (attempt counted)");
     return false;
   }
 }
@@ -569,8 +584,7 @@ async function stepCritique(
   scrape: StoredScrape,
   sharedContext: string,
 ): Promise<boolean> {
-  const attempts = incrementPipelineAttempt(db, scrape.id, "critique");
-  if (attempts > 3) {
+  if (isStepExhausted(db, scrape.id, "critique")) {
     markScrapeTerminal(db, scrape.id, "exhausted");
     return false;
   }
@@ -602,17 +616,25 @@ ${sharedContext.slice(0, 2000)}
 Decide whether this candidate should advance to enrichment.
 Return ONLY a JSON object: { "passed": true|false, "reason": "main reason", "strengths": ["..."], "risks": ["..."] }`;
 
+  let result;
   try {
-    const result = await executeClaudeCommand(prompt, {
+    result = await executeClaudeCommand(prompt, {
       cwd: "/tmp",
       model: "sonnet",
       timeout: STEP_TIMEOUT,
     });
-    if (result.exitCode !== 0 || !result.output) {
-      logger.warn({ scrapeId: scrape.id, exitCode: result.exitCode }, "Critique step: Sonnet call failed");
-      return false;
-    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ scrapeId: scrape.id, error: msg }, "Critique step: executor error (not counted)");
+    return false;
+  }
 
+  if (result.exitCode !== 0 || !result.output) {
+    logger.warn({ scrapeId: scrape.id, exitCode: result.exitCode }, "Critique step: Sonnet call failed (not counted)");
+    return false;
+  }
+
+  try {
     const parsed = parseSwarmJSON(result.output, CritiqueSchema);
 
     updatePipelineStep(db, scrape.id, "critiqued", {
@@ -638,8 +660,9 @@ Return ONLY a JSON object: { "passed": true|false, "reason": "main reason", "str
     }
     return true;
   } catch (err) {
+    incrementPipelineAttempt(db, scrape.id, "critique");
     const msg = err instanceof Error ? err.message : String(err);
-    logger.warn({ scrapeId: scrape.id, error: msg, attempt: attempts }, "Critique step failed");
+    logger.warn({ scrapeId: scrape.id, error: msg }, "Critique step: parse failed (attempt counted)");
     return false;
   }
 }
@@ -649,8 +672,7 @@ async function stepEnrich(
   scrape: StoredScrape,
   sharedContext: string,
 ): Promise<boolean> {
-  const attempts = incrementPipelineAttempt(db, scrape.id, "enrich");
-  if (attempts > 3) {
+  if (isStepExhausted(db, scrape.id, "enrich")) {
     markScrapeTerminal(db, scrape.id, "exhausted");
     return false;
   }
@@ -701,26 +723,34 @@ ${sourceContext.slice(0, 2000)}
 
 Enrich this idea. Return ONLY the JSON object. Omit optional fields if not applicable.`;
 
+  let result;
   try {
-    const result = await executeClaudeCommand(prompt, {
+    result = await executeClaudeCommand(prompt, {
       cwd: "/tmp",
       model: "sonnet",
       timeout: STEP_TIMEOUT,
     });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ scrapeId: scrape.id, error: msg }, "Enrich step: executor error (not counted)");
+    return false;
+  }
 
-    if (result.exitCode !== 0 || !result.output) {
-      logger.warn({ scrapeId: scrape.id, exitCode: result.exitCode }, "Enrich step: Sonnet call failed");
-      return false;
-    }
+  if (result.exitCode !== 0 || !result.output) {
+    logger.warn({ scrapeId: scrape.id, exitCode: result.exitCode }, "Enrich step: Sonnet call failed (not counted)");
+    return false;
+  }
 
+  try {
     const parsed = parseSwarmJSON(result.output, EnrichmentSchema);
     updatePipelineStep(db, scrape.id, "enriched", parsed);
 
     logger.info({ scrapeId: scrape.id, title: candidate.title, hasImprovement: parsed.homer_improvement?.relevant }, "Enriched");
     return true;
   } catch (err) {
+    incrementPipelineAttempt(db, scrape.id, "enrich");
     const msg = err instanceof Error ? err.message : String(err);
-    logger.warn({ scrapeId: scrape.id, error: msg, attempt: attempts }, "Enrich step failed");
+    logger.warn({ scrapeId: scrape.id, error: msg }, "Enrich step: parse failed (attempt counted)");
     return false;
   }
 }
@@ -950,8 +980,13 @@ ${existingTitles.slice(0, 1500)}`;
     logger.info({ count: needsScoring.length }, "Step 1: Scoring scrapes");
     let stepStart = Date.now();
 
+    let consecutiveExecutorFailures = 0;
     for (const scrape of needsScoring) {
       if (signal?.aborted) break;
+      if (consecutiveExecutorFailures >= 3) {
+        logger.warn({ remaining: needsScoring.length - stats.scored - stats.failed }, "3 consecutive executor failures — aborting scoring step");
+        break;
+      }
       try {
         if (isStepExhausted(db, scrape.id, "score")) {
           markScrapeTerminal(db, scrape.id, "exhausted");
@@ -960,15 +995,18 @@ ${existingTitles.slice(0, 1500)}`;
         }
         const ok = await stepScore(db, scrape, sharedContext);
         if (ok) {
+          consecutiveExecutorFailures = 0;
           stats.scored++;
           const pipeline = getPipelineState(db, scrape.id);
           if (pipeline?.score && pipeline.score.value >= 6) {
             stats.aboveThreshold++;
           }
         } else {
+          consecutiveExecutorFailures++;
           stats.failed++;
         }
       } catch (err) {
+        consecutiveExecutorFailures++;
         const msg = err instanceof Error ? err.message : String(err);
         logger.warn({ scrapeId: scrape.id, step: "score", error: msg }, "Scrape failed, continuing");
         stats.failed++;
@@ -1026,8 +1064,13 @@ ${existingTitles.slice(0, 1500)}`;
     logger.info({ count: needsSynthesis.length }, "Step 3: Synthesizing candidates");
     stepStart = Date.now();
 
+    consecutiveExecutorFailures = 0;
     for (const scrape of needsSynthesis) {
       if (signal?.aborted) break;
+      if (consecutiveExecutorFailures >= 3) {
+        logger.warn({ step: "synthesize" }, "3 consecutive executor failures — aborting synthesize step");
+        break;
+      }
       try {
         if (isStepExhausted(db, scrape.id, "synthesize")) {
           markScrapeTerminal(db, scrape.id, "exhausted");
@@ -1036,6 +1079,7 @@ ${existingTitles.slice(0, 1500)}`;
         }
         const ok = await stepSynthesize(db, scrape, sharedContext);
         if (ok) {
+          consecutiveExecutorFailures = 0;
           const pipeline = getPipelineState(db, scrape.id);
           if (pipeline?.step === "rejected") {
             stats.confidenceGateRejected++;
@@ -1046,9 +1090,11 @@ ${existingTitles.slice(0, 1500)}`;
             }
           }
         } else {
+          consecutiveExecutorFailures++;
           stats.failed++;
         }
       } catch (err) {
+        consecutiveExecutorFailures++;
         const msg = err instanceof Error ? err.message : String(err);
         logger.warn({ scrapeId: scrape.id, step: "synthesize", error: msg }, "Scrape failed, continuing");
         stats.failed++;
@@ -1071,8 +1117,13 @@ ${existingTitles.slice(0, 1500)}`;
     logger.info({ count: needsCritique.length }, "Step 4: Critiquing candidates");
     stepStart = Date.now();
 
+    consecutiveExecutorFailures = 0;
     for (const scrape of needsCritique) {
       if (signal?.aborted) break;
+      if (consecutiveExecutorFailures >= 3) {
+        logger.warn({ step: "critique" }, "3 consecutive executor failures — aborting critique step");
+        break;
+      }
       try {
         if (isStepExhausted(db, scrape.id, "critique")) {
           markScrapeTerminal(db, scrape.id, "exhausted");
@@ -1081,6 +1132,7 @@ ${existingTitles.slice(0, 1500)}`;
         }
         const ok = await stepCritique(db, scrape, sharedContext);
         if (ok) {
+          consecutiveExecutorFailures = 0;
           const pipeline = getPipelineState(db, scrape.id);
           if (pipeline?.critique?.passed) {
             stats.critiquePassed++;
@@ -1088,9 +1140,11 @@ ${existingTitles.slice(0, 1500)}`;
             stats.critiqueScoreRejected++;
           }
         } else {
+          consecutiveExecutorFailures++;
           stats.failed++;
         }
       } catch (err) {
+        consecutiveExecutorFailures++;
         const msg = err instanceof Error ? err.message : String(err);
         logger.warn({ scrapeId: scrape.id, step: "critique", error: msg }, "Scrape failed, continuing");
         stats.failed++;
@@ -1113,8 +1167,13 @@ ${existingTitles.slice(0, 1500)}`;
     logger.info({ count: needsEnrichment.length }, "Step 5: Enriching passed candidates");
     stepStart = Date.now();
 
+    consecutiveExecutorFailures = 0;
     for (const scrape of needsEnrichment) {
       if (signal?.aborted) break;
+      if (consecutiveExecutorFailures >= 3) {
+        logger.warn({ step: "enrich" }, "3 consecutive executor failures — aborting enrich step");
+        break;
+      }
       try {
         if (isStepExhausted(db, scrape.id, "enrich")) {
           markScrapeTerminal(db, scrape.id, "exhausted");
@@ -1122,9 +1181,15 @@ ${existingTitles.slice(0, 1500)}`;
           continue;
         }
         const ok = await stepEnrich(db, scrape, sharedContext);
-        if (ok) stats.enriched++;
-        else stats.failed++;
+        if (ok) {
+          consecutiveExecutorFailures = 0;
+          stats.enriched++;
+        } else {
+          consecutiveExecutorFailures++;
+          stats.failed++;
+        }
       } catch (err) {
+        consecutiveExecutorFailures++;
         const msg = err instanceof Error ? err.message : String(err);
         logger.warn({ scrapeId: scrape.id, step: "enrich", error: msg }, "Scrape failed, continuing");
         stats.failed++;
