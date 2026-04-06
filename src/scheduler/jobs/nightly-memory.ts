@@ -204,13 +204,17 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
 
 ## Extract Promotable Facts (3-8 max)
 
-A "promotable fact" is information worth persisting in permanent memory. Focus on:
-- Outcomes and decisions (NOT process steps)
-- New preferences expressed (PAY SPECIAL ATTENTION to the Explicit User Feedback section. If Yanqing archived something with specific notes or instructions, extract that as a new rule or preference to remember).
-- Career milestones or changes
-- Tool configurations or subscriptions changed
-- Life events or context changes
-- Architecture decisions or patterns discovered
+A "promotable fact" is information worth persisting in permanent memory.
+
+COVERAGE PRIORITY (extract in this order):
+1. **Work decisions & project status** — outcomes, milestones, blockers, pivots → work.md
+2. **People & org dynamics** — who said what, relationships, power dynamics, roles → work.md
+3. **Strategic insights** — career positioning, competitive moves, narrative framing → me.md or work.md
+4. **Life context** — events, routines, personal milestones → life.md
+5. **Preferences expressed** — PAY SPECIAL ATTENTION to Explicit User Feedback. If Yanqing archived something with specific notes, extract as a new rule → preferences.md
+6. **Tool configurations** — only if genuinely new configs/subscriptions changed → tools.md
+
+BIAS CORRECTION: The system currently over-indexes on tools (36%) and preferences (37%). Actively prioritize work, people, and project facts. Only extract tool/preference facts if nothing else is promotable.
 
 For each fact, classify which file it belongs to:
 - me: identity, goals, ambitions, personal milestones

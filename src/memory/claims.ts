@@ -136,12 +136,13 @@ export async function approveCandidate(
   `).run(claimId);
 
   try {
-    // Write to canonical memory file
+    // Write to canonical memory file (preserve original source if known)
+    const source = claim.status === "stale" ? "weekly" : "nightly";
     await canonicalMemory.promoteToFile(
       claim.content,
       claim.target_file,
       claim.section,
-      "mcp",
+      source,
     );
 
     // Transition: applying → approved
