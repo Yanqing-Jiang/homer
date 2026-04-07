@@ -298,6 +298,26 @@ export function getPendingCandidates(
 }
 
 /**
+ * Get stale claims flagged by weekly lint, ordered by most recent.
+ */
+export function getStaleClaims(
+  db: Database.Database,
+  limit: number = 5,
+): KnowledgeClaim[] {
+  return db.prepare(`
+    SELECT
+      id, content, content_hash as contentHash, target_file as targetFile, section,
+      claim_type as claimType, confidence, status, review_at as reviewAt,
+      telegram_message_id as telegramMessageId, created_at as createdAt,
+      decided_at as decidedAt, decided_by as decidedBy
+    FROM knowledge_claims
+    WHERE status = 'stale'
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT ?
+  `).all(limit) as KnowledgeClaim[];
+}
+
+/**
  * Get a single claim by ID.
  */
 export function getClaim(db: Database.Database, claimId: string): KnowledgeClaim | null {
