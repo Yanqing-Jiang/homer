@@ -20,7 +20,7 @@ import { trackPromotion } from "../../outcomes/hooks.js";
 import { PATHS } from "../../config/paths.js";
 import { config } from "../../config/index.js";
 import { hasMigration } from "../../state/migrations/index.js";
-import { insertCandidate, expireStaleCandidates, autoApproveHighConfidence, getPendingCandidates } from "../../memory/claims.js";
+import { insertCandidate, approveCandidate, expireStaleCandidates, autoApproveHighConfidence, getPendingCandidates } from "../../memory/claims.js";
 import type { ClaimType, TargetFile } from "../../memory/claims.js";
 
 type MemoryFileKey = "me" | "work" | "life" | "preferences" | "tools";
@@ -202,9 +202,9 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
 
     const unifiedPrompt = `You are a memory processing engine for Yanqing's personal AI assistant. Analyze yesterday's session summaries, cross-reference against permanent memory files, and extract promotable facts.
 
-## Extract Promotable Facts (3-8 max)
+## Extract Promotable Facts (2-5 max)
 
-A "promotable fact" is information worth persisting in permanent memory.
+A "promotable fact" is genuinely novel information worth persisting in permanent memory. Quality over quantity — only extract facts that would be missed if not captured now.
 
 COVERAGE PRIORITY (extract in this order):
 1. **Work decisions & project status** — outcomes, milestones, blockers, pivots → work.md
@@ -319,19 +319,43 @@ If nothing to promote, use an empty array.`;
     const writeErrors: string[] = [];
     const sessionIds = sessions.map(s => s.id);
 
+    let autoApprovedCount = 0;
+    let autoRejectedCount = 0;
+
     if (useHumanGated) {
-      // ── Human-gated mode: insert candidates for review ──
+      // ── Human-gated mode with confidence-based auto-approve ──
       for (const promo of promotions) {
+        const confidence = promo.confidence ?? 0.5;
+
+        // Auto-reject low-confidence extractions
+        if (confidence < 0.5) {
+          autoRejectedCount++;
+          logger.debug({ file: promo.file, confidence, content: promo.content.slice(0, 60) }, "Auto-rejected low-confidence extraction");
+          continue;
+        }
+
         try {
           const claimId = insertCandidate(db, {
             content: promo.content,
             targetFile: promo.file as TargetFile,
             section: promo.section,
             claimType: (promo.claim_type ?? "fact") as ClaimType,
-            confidence: promo.confidence ?? 0.5,
+            confidence,
             sessionIds,
           });
-          if (claimId) candidatesCreated++;
+
+          if (claimId && confidence >= 0.75) {
+            // Auto-approve high-confidence claims — no Telegram card needed
+            const ok = await approveCandidate(db, claimId, canonicalMemory);
+            if (ok) {
+              db.prepare(`UPDATE knowledge_claims SET decided_by = 'auto-approve' WHERE id = ?`).run(claimId);
+              autoApprovedCount++;
+              writtenPromos++;
+              logger.info({ file: promo.file, confidence, content: promo.content.slice(0, 60) }, "Auto-approved high-confidence claim");
+            }
+          } else if (claimId) {
+            candidatesCreated++;
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           writeErrors.push(`Candidate insert error for ${promo.file}: ${msg}`);
@@ -367,7 +391,7 @@ If nothing to promote, use an empty array.`;
         expireStaleCandidates(db, 7);
       } catch { /* best-effort */ }
 
-      logger.info({ candidatesCreated, promotions: promotions.length }, "Human-gated mode: inserted candidates for review");
+      logger.info({ candidatesCreated, autoApprovedCount, autoRejectedCount, promotions: promotions.length }, "Human-gated mode: processed promotions");
     } else {
       // ── Legacy mode: direct auto-promotion ──
       for (const promo of promotions) {
@@ -410,6 +434,12 @@ If nothing to promote, use an empty array.`;
     const parts: string[] = [];
     if (candidatesCreated > 0) {
       parts.push(`${candidatesCreated} candidates queued for review`);
+    }
+    if (autoApprovedCount > 0) {
+      parts.push(`${autoApprovedCount} auto-approved (confidence >= 0.75)`);
+    }
+    if (autoRejectedCount > 0) {
+      parts.push(`${autoRejectedCount} auto-rejected (confidence < 0.5)`);
     }
     if (writtenPromos > 0 || (!useHumanGated && promotions.length > 0)) {
       parts.push(`Promoted ${writtenPromos}/${promotions.length} facts`);
@@ -471,6 +501,44 @@ If nothing to promote, use an empty array.`;
       }
     } catch (err) {
       logger.warn({ error: err }, "Run event cleanup failed");
+    }
+
+    // ── Consolidated post-processing (absorbed from standalone jobs) ──
+
+    // 1. Preference updater (was preference-updater job at 3:45 AM)
+    try {
+      const { runPreferenceUpdater } = await import("./preference-updater.js");
+      const prefResult = await runPreferenceUpdater(db);
+      if (prefResult.success) {
+        logger.info("Preference model updated (post-nightly)");
+        parts.push("preferences updated");
+      }
+    } catch (err) {
+      logger.debug({ error: err }, "Preference update skipped (post-nightly)");
+    }
+
+    // 2. Memory reindex (was memory-reindex job at 4:00 AM)
+    try {
+      const { runMemoryReindex } = await import("./memory-reindex.js");
+      const reindexResult = await runMemoryReindex(stateManager);
+      if (reindexResult.success) {
+        logger.info("Memory reindex completed (post-nightly)");
+        parts.push("reindexed");
+      }
+    } catch (err) {
+      logger.debug({ error: err }, "Memory reindex skipped (post-nightly)");
+    }
+
+    // 3. Memory embeddings (was memory-embeddings job at 4:05 AM)
+    try {
+      const { runMemoryEmbeddings } = await import("./memory-embeddings.js");
+      const embedResult = await runMemoryEmbeddings(stateManager);
+      if (embedResult.success) {
+        logger.info("Memory embeddings generated (post-nightly)");
+        parts.push("embeddings updated");
+      }
+    } catch (err) {
+      logger.debug({ error: err }, "Memory embeddings skipped (post-nightly)");
     }
 
     const output = parts.length > 0

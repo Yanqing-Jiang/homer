@@ -90,16 +90,6 @@ export const definitions: ToolDefinition[] = [
     inputSchema: { type: "object", properties: {} },
   },
   {
-    name: "memory_suggestions",
-    description: "Get suggestions for facts from daily log that should be promoted to permanent files.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        date: { type: "string", description: "Date to analyze YYYY-MM-DD (default: today)" },
-      },
-    },
-  },
-  {
     name: "memory_context",
     description: "Returns recent session context, active plans, pending decisions, and project momentum for session warmup. No LLM call, pure SQL + file reads, fast.",
     inputSchema: {
@@ -527,37 +517,6 @@ export async function handle(
     case "memory_reindex": {
       const stats = await deps.indexer.indexAllMemoryFiles();
       return { content: [{ type: "text", text: `Reindexed: ${stats.indexed} files, ${stats.skipped} skipped, ${stats.errors} errors` }] };
-    }
-
-    case "memory_suggestions": {
-      const { date } = args as { date?: string };
-      const dateStr = date ?? new Date().toISOString().slice(0, 10);
-      const sm = deps.getSharedStateManager();
-      const sessions = sm.getDb().prepare(`
-        SELECT title, summary
-        FROM session_summaries
-        WHERE date(COALESCE(started_at, created_at)) = ?
-          AND status = 'active'
-        ORDER BY COALESCE(started_at, created_at) ASC
-      `).all(dateStr) as Array<{ title: string; summary: string }>;
-
-      const suggestions: Array<{ content: string; suggestedFile: string; reason: string }> = [];
-      for (const session of sessions) {
-        const text = `${session.title} ${session.summary}`.toLowerCase();
-        if (text.includes("config") || text.includes("cli") || text.includes("setup")) {
-          suggestions.push({ content: `${session.title}: ${session.summary}`, suggestedFile: "tools", reason: "Contains tool/config information" });
-        }
-        if (text.includes("meeting") || text.includes("project") || text.includes("decision")) {
-          suggestions.push({ content: `${session.title}: ${session.summary}`, suggestedFile: "work", reason: "Contains work-related decision or update" });
-        }
-        if (text.includes("prefer") || text.includes("style") || text.includes("always")) {
-          suggestions.push({ content: `${session.title}: ${session.summary}`, suggestedFile: "preferences", reason: "Contains preference or style information" });
-        }
-      }
-
-      return {
-        content: [{ type: "text", text: suggestions.length > 0 ? JSON.stringify(suggestions, null, 2) : "No promotion suggestions for this day" }],
-      };
     }
 
     case "memory_context": {

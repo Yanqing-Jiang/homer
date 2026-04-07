@@ -18,8 +18,10 @@ import { StateManager, type SessionSummaryRow } from "../../state/manager.js";
 import { buildSchedulerContext, buildGoalScoreboard } from "../shared-context.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
 import { getCanonicalMemoryService } from "../../memory/canonical-service.js";
-import { flagClaimsStale, type KnowledgeClaim } from "../../memory/claims.js";
+import { flagClaimsStale, insertCandidate, type KnowledgeClaim, type TargetFile, type ClaimType } from "../../memory/claims.js";
 import { PATHS } from "../../config/paths.js";
+import { config } from "../../config/index.js";
+import { hasMigration } from "../../state/migrations/index.js";
 
 const DAILY_LOG_DIR = PATHS.daily;
 
@@ -350,6 +352,8 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
     const ownedDedupSm = !stateManager;
     const canonicalMemory = getCanonicalMemoryService(dedupSm, getMemoryIndexer());
 
+    const useHumanGated = config.features.humanGatedMemory && hasMigration(dedupSm.getDb(), "069_knowledge_claims.sql");
+
     try {
       for (const promo of promotions) {
         const fileName = promo.file;
@@ -367,11 +371,32 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
           continue;
         }
 
-        const promoted = await canonicalMemory.promoteToFile(promo.content, fileKey, null, "weekly");
-        if (promoted) {
-          promotionsApplied++;
-          promotionLog.push(`→ ${fileName}: ${promo.reason}`);
-          logger.info({ file: fileName, reason: promo.reason }, "Promoted fact to permanent memory");
+        if (useHumanGated) {
+          // Route through knowledge_claims for human review
+          try {
+            const claimId = insertCandidate(dedupSm.getDb(), {
+              content: promo.content,
+              targetFile: fileKey as TargetFile,
+              section: "",
+              claimType: "fact" as ClaimType,
+              confidence: 0.7,
+            });
+            if (claimId) {
+              promotionsApplied++;
+              promotionLog.push(`→ ${fileName}: ${promo.reason} (queued for review)`);
+              logger.info({ file: fileName, reason: promo.reason }, "Weekly promotion queued as candidate for review");
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.error({ error: msg, file: fileName }, "Failed to insert weekly candidate");
+          }
+        } else {
+          const promoted = await canonicalMemory.promoteToFile(promo.content, fileKey, null, "weekly");
+          if (promoted) {
+            promotionsApplied++;
+            promotionLog.push(`→ ${fileName}: ${promo.reason}`);
+            logger.info({ file: fileName, reason: promo.reason }, "Promoted fact to permanent memory");
+          }
         }
       }
 
