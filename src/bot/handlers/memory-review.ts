@@ -71,14 +71,6 @@ function detectReplyIntent(replyText: string, _originalContent: string): "reject
 
 // ── Keyboard Builders ───────────────────────────────────────
 
-function createCandidateKeyboard(claimId: string): InlineKeyboard {
-  const id = claimId.slice(-10);
-  return new InlineKeyboard()
-    .text("✅ Approve", `m:a:${id}`)
-    .text("💬 Reply", `m:p:${id}`)
-    .text("❌ Reject", `m:r:${id}`);
-}
-
 function createLintKeyboard(claimId: string): InlineKeyboard {
   const id = claimId.slice(-10);
   return new InlineKeyboard()
@@ -87,22 +79,11 @@ function createLintKeyboard(claimId: string): InlineKeyboard {
     .text("✅ Keep", `m:lk:${id}`);
 }
 
-// ── Formatting ──────────────────────────────────────────────
-
-function formatCandidateCard(claim: KnowledgeClaim): string {
-  const badge = CLAIM_BADGES[claim.claimType] ?? "📝";
-  const conf = Math.round(claim.confidence * 100);
-  let msg = `${badge} <b>${escapeHtml(claim.claimType.toUpperCase())}</b> (${conf}%)\n\n`;
-  msg += `<i>"${escapeHtml(claim.content)}"</i>\n\n`;
-  msg += `→ <code>${escapeHtml(claim.targetFile)}.md</code>`;
-  if (claim.section) msg += ` / ${escapeHtml(claim.section)}`;
-  return formatScheduledTelegramHtml(msg);
-}
-
 // ── Public API ──────────────────────────────────────────────
 
 /**
- * Send Memory Moments batch to Telegram. Called after nightly job.
+ * Send Memory Moments as a single batched Telegram message. Called after nightly job.
+ * One message with numbered items + per-item and bulk action buttons.
  */
 export async function sendMemoryMoments(
   bot: Bot,
@@ -114,25 +95,45 @@ export async function sendMemoryMoments(
   const db = stateManagerRef?.getDb();
   if (!db) return;
 
-  // Header message
-  const header = formatScheduledTelegramHtml(
-    `📋 <b>Memory Moments</b> (${candidates.length} new)\n━━━━━━━━━━━━`
-  );
-  await bot.api.sendMessage(chatId, header, { parse_mode: "HTML" });
+  // Build single batched message
+  const lines: string[] = [`📋 <b>Memory Review</b> (${candidates.length} items)\n━━━━━━━━━━━━`];
 
-  // Individual candidate cards with inline keyboards
-  for (const claim of candidates) {
-    try {
-      const text = formatCandidateCard(claim);
-      const sent = await bot.api.sendMessage(chatId, text, {
-        parse_mode: "HTML",
-        reply_markup: createCandidateKeyboard(claim.id),
-      });
-      // Track telegram_message_id for callback lookup
+  for (let i = 0; i < candidates.length; i++) {
+    const claim = candidates[i]!;
+    const badge = CLAIM_BADGES[claim.claimType] ?? "📝";
+    const conf = Math.round(claim.confidence * 100);
+    const statusTag = claim.status === "stale" ? "STALE" : claim.claimType.toUpperCase();
+    lines.push(`\n<b>${i + 1}.</b> ${badge} [${statusTag}] (${conf}%)`);
+    lines.push(`<i>"${escapeHtml(claim.content.slice(0, 150))}"</i>`);
+    lines.push(`→ <code>${escapeHtml(claim.targetFile)}.md</code>${claim.section ? ` / ${escapeHtml(claim.section)}` : ""}`);
+  }
+
+  const text = formatScheduledTelegramHtml(lines.join("\n"));
+
+  // Build keyboard: one row per item [Approve] [Reply] [Reject], then bulk actions
+  const keyboard = new InlineKeyboard();
+  for (let i = 0; i < candidates.length; i++) {
+    const id = candidates[i]!.id.slice(-10);
+    const label = `${i + 1}`;
+    keyboard
+      .text(`✅ ${label}`, `m:a:${id}`)
+      .text(`💬 ${label}`, `m:p:${id}`)
+      .text(`❌ ${label}`, `m:r:${id}`)
+      .row();
+  }
+  keyboard.text("✅ Approve All", "m:aa").text("❌ Dismiss All", "m:da");
+
+  try {
+    const sent = await bot.api.sendMessage(chatId, text, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+    // Track telegram_message_id for all candidates in this batch
+    for (const claim of candidates) {
       setClaimTelegramMessage(db, claim.id, sent.message_id);
-    } catch (err) {
-      logger.error({ error: err, claimId: claim.id }, "Failed to send candidate card");
     }
+  } catch (err) {
+    logger.error({ error: err, count: candidates.length }, "Failed to send batched Memory Moments");
   }
 }
 
@@ -182,34 +183,28 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
     return getClaim(db, row.id);
   }
 
-  // ── Approve ──
+  // ── Approve (single item — toast only, no message edit for batch compatibility) ──
   bot.callbackQuery(/^m:a:(.+)$/, async (ctx) => {
     const idSuffix = ctx.match?.[1];
     if (!idSuffix) { await ctx.answerCallbackQuery("Invalid"); return; }
 
     const claim = findClaim(idSuffix);
     if (!claim) { await ctx.answerCallbackQuery("Claim not found"); return; }
-    if (claim.status !== "candidate") {
+    if (claim.status !== "candidate" && claim.status !== "stale") {
       await ctx.answerCallbackQuery(`Already ${claim.status}`);
       return;
     }
 
     const db = stateManagerRef!.getDb();
     const cms = getCanonicalMemoryService(stateManagerRef!, getMemoryIndexer());
-    const ok = await approveCandidate(db, claim.id, cms);
+    const ok = claim.status === "stale"
+      ? (markClaimValidated(db, claim.id), true)
+      : await approveCandidate(db, claim.id, cms);
 
-    if (ok) {
-      await ctx.editMessageText(
-        `✅ <b>Approved</b> → ${escapeHtml(claim.targetFile)}.md\n<i>"${escapeHtml(claim.content.slice(0, 120))}"</i>`,
-        { parse_mode: "HTML" },
-      );
-      await ctx.answerCallbackQuery("Approved ✅");
-    } else {
-      await ctx.answerCallbackQuery("Approval failed — check logs");
-    }
+    await ctx.answerCallbackQuery(ok ? `Approved: "${claim.content.slice(0, 40)}..." ✅` : "Approval failed");
   });
 
-  // ── Reject ──
+  // ── Reject (single item — toast only) ──
   bot.callbackQuery(/^m:r:(.+)$/, async (ctx) => {
     const idSuffix = ctx.match?.[1];
     if (!idSuffix) { await ctx.answerCallbackQuery("Invalid"); return; }
@@ -218,13 +213,13 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
     if (!claim) { await ctx.answerCallbackQuery("Claim not found"); return; }
 
     const db = stateManagerRef!.getDb();
-    rejectCandidate(db, claim.id);
+    if (claim.status === "stale") {
+      archiveClaim(db, claim.id);
+    } else {
+      rejectCandidate(db, claim.id);
+    }
 
-    await ctx.editMessageText(
-      `❌ <b>Rejected</b>\n<s>"${escapeHtml(claim.content.slice(0, 120))}"</s>`,
-      { parse_mode: "HTML" },
-    );
-    await ctx.answerCallbackQuery("Rejected ❌");
+    await ctx.answerCallbackQuery(`Rejected: "${claim.content.slice(0, 40)}..." ❌`);
   });
 
   // ── Reply (unified edit + talk) ──
@@ -321,6 +316,59 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
       { parse_mode: "HTML" },
     );
     await ctx.answerCallbackQuery("Marked as valid ✅");
+  });
+
+  // ── Bulk: Approve All ──
+  bot.callbackQuery(/^m:aa$/, async (ctx) => {
+    const db = stateManagerRef?.getDb();
+    if (!db) { await ctx.answerCallbackQuery("DB unavailable"); return; }
+
+    const candidates = db.prepare(
+      `SELECT id FROM knowledge_claims WHERE status = 'candidate' ORDER BY created_at DESC LIMIT 10`
+    ).all() as Array<{ id: string }>;
+
+    if (candidates.length === 0) {
+      await ctx.answerCallbackQuery("No pending candidates");
+      return;
+    }
+
+    const cms = getCanonicalMemoryService(stateManagerRef!, getMemoryIndexer());
+    let approved = 0;
+    for (const c of candidates) {
+      const ok = await approveCandidate(db, c.id, cms);
+      if (ok) approved++;
+    }
+
+    await ctx.editMessageText(
+      `✅ <b>Bulk approved ${approved} items</b>`,
+      { parse_mode: "HTML" },
+    );
+    await ctx.answerCallbackQuery(`Approved ${approved} items ✅`);
+  });
+
+  // ── Bulk: Dismiss All ──
+  bot.callbackQuery(/^m:da$/, async (ctx) => {
+    const db = stateManagerRef?.getDb();
+    if (!db) { await ctx.answerCallbackQuery("DB unavailable"); return; }
+
+    const candidates = db.prepare(
+      `SELECT id FROM knowledge_claims WHERE status = 'candidate' ORDER BY created_at DESC LIMIT 10`
+    ).all() as Array<{ id: string }>;
+
+    if (candidates.length === 0) {
+      await ctx.answerCallbackQuery("No pending candidates");
+      return;
+    }
+
+    for (const c of candidates) {
+      rejectCandidate(db, c.id);
+    }
+
+    await ctx.editMessageText(
+      `❌ <b>Dismissed ${candidates.length} items</b>`,
+      { parse_mode: "HTML" },
+    );
+    await ctx.answerCallbackQuery(`Dismissed ${candidates.length} items`);
   });
 
   // ── Reply capture (unified edit/reject handler) ──

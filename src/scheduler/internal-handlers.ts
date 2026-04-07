@@ -717,16 +717,10 @@ async function runHandler(
       case "weekly_consolidation": {
         const result = await runWeeklyConsolidation();
 
-        // Send lint findings to Telegram if any stale claims were flagged
-        if (result.success && result.lintFindings && result.lintFindings.length > 0 && ctx.bot) {
-          try {
-            const { sendLintFindings } = await import("../bot/handlers/memory-review.js");
-            const { config: appConfig } = await import("../config/index.js");
-            await sendLintFindings(ctx.bot, appConfig.telegram.allowedChatId, result.lintFindings);
-            logger.info({ count: result.lintFindings.length }, "Sent lint findings to Telegram");
-          } catch (err) {
-            logger.debug({ error: err }, "Lint findings delivery skipped");
-          }
+        // Lint findings are now surfaced in the nightly Memory Review batch (stale claims
+        // flagged by flagClaimsStale() will be picked up by getStaleClaims() in the nightly handler)
+        if (result.success && result.lintFindings && result.lintFindings.length > 0) {
+          logger.info({ count: result.lintFindings.length }, "Lint findings flagged as stale — will appear in next nightly Memory Review");
         }
 
         return buildResult(
@@ -765,19 +759,22 @@ async function runHandler(
         const { runNightlyMemory } = await import("./jobs/nightly-memory.js");
         const result = await runNightlyMemory(ctx.stateManager);
 
-        // Post-nightly: send Memory Moments to Telegram if candidates were created
-        if (result.success && result.output.includes("candidates queued")) {
+        // Post-nightly: send unified Memory Review batch (candidates + stale items)
+        if (result.success && ctx.bot) {
           try {
-            const { getPendingCandidates } = await import("../memory/claims.js");
+            const { getPendingCandidates, getStaleClaims } = await import("../memory/claims.js");
             const { sendMemoryMoments } = await import("../bot/handlers/memory-review.js");
             const { config: appConfig } = await import("../config/index.js");
-            const candidates = getPendingCandidates(ctx.stateManager.getDb(), 5);
-            if (candidates.length > 0 && ctx.bot) {
-              await sendMemoryMoments(ctx.bot, appConfig.telegram.allowedChatId, candidates);
-              logger.info({ count: candidates.length }, "Sent Memory Moments to Telegram");
+            const db = ctx.stateManager.getDb();
+            const candidates = getPendingCandidates(db, 5);
+            const stale = getStaleClaims(db, 3);
+            const allItems = [...candidates, ...stale];
+            if (allItems.length > 0) {
+              await sendMemoryMoments(ctx.bot, appConfig.telegram.allowedChatId, allItems);
+              logger.info({ candidates: candidates.length, stale: stale.length }, "Sent unified Memory Review to Telegram");
             }
           } catch (err) {
-            logger.debug({ error: err }, "Memory Moments delivery skipped");
+            logger.debug({ error: err }, "Memory Review delivery skipped");
           }
         }
 
@@ -1172,6 +1169,18 @@ async function runHandler(
       case "link_processor": {
         const { runLinkProcessor } = await import("./jobs/link-processor.js");
         const result = await runLinkProcessor(ctx.stateManager, ctx.jobRunId);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
+      }
+      case "overnight_youtube": {
+        const { runOvernightYoutube } = await import("./jobs/overnight-youtube.js");
+        const result = await runOvernightYoutube(ctx.stateManager, ctx.jobRunId);
         return buildResult(
           job,
           startedAt,
