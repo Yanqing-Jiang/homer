@@ -6,7 +6,7 @@
  * B) OS orphan scan via `ps` for known HOMER patterns not in registry.
  *
  * 6-layer safety before any kill. Enforcement ON by default (set PROCESS_CLEANUP_ENFORCE=0 to disable).
- * Age-based kill: any HOMER-pattern process > 2 hours killed regardless of parent PID.
+ * Age-based kill: any HOMER-pattern process > 6 hours killed regardless of parent PID.
  */
 
 import { execSync } from "child_process";
@@ -16,9 +16,9 @@ import { logger } from "../utils/logger.js";
 // @ts-ignore
 import type Database from "better-sqlite3";
 
-const IDLE_THRESHOLD_MS = 30 * 60 * 1000; // 30 min no activity
-const RECENT_ACTIVITY_MS = 5 * 60 * 1000; // 5 min — spare if active recently
-const ORPHAN_AGE_KILL_MS = 2 * 60 * 60 * 1000; // 2 hours — kill any HOMER process older than this
+const IDLE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours no activity
+const RECENT_ACTIVITY_MS = 15 * 60 * 1000; // 15 min — spare if active recently
+const ORPHAN_AGE_KILL_MS = 6 * 60 * 60 * 1000; // 6 hours — kill any HOMER process older than this
 
 // Patterns to find HOMER-spawned processes in `ps`
 const ORPHAN_PATTERNS = [

@@ -26,7 +26,7 @@ export async function runMemoryGitCommit(stateManager?: StateManager): Promise<{
 
     // Initialize git if needed
     if (!existsSync(`${MEMORY_DIR}/.git`)) {
-      execSync("git init", { cwd: MEMORY_DIR, timeout: 10_000 });
+      execSync("git init", { cwd: MEMORY_DIR, timeout: 30_000 });
       execSync('printf "*.db\\n*.db-journal\\n*.db-wal\\n.DS_Store\\n" > .gitignore', {
         cwd: MEMORY_DIR,
         timeout: 5_000,
@@ -42,7 +42,7 @@ export async function runMemoryGitCommit(stateManager?: StateManager): Promise<{
     const status = execSync("git status --porcelain", {
       cwd: MEMORY_DIR,
       encoding: "utf-8",
-      timeout: 10_000,
+      timeout: 30_000,
     }).trim();
 
     if (!status) {
@@ -63,7 +63,7 @@ export async function runMemoryGitCommit(stateManager?: StateManager): Promise<{
     const date = new Date().toISOString().slice(0, 10);
     const commitMsg = `memory: ${date} — ${added} added, ${modified} modified, ${deleted} deleted`;
 
-    execSync("git add -A", { cwd: MEMORY_DIR, timeout: 10_000 });
+    execSync("git add -A", { cwd: MEMORY_DIR, timeout: 30_000 });
     execSync(`git commit -m "${commitMsg}"`, { cwd: MEMORY_DIR, timeout: 30_000 });
 
     // Clear dirty flag
