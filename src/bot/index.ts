@@ -16,7 +16,6 @@ import { registerOvernightCommands, handleOvernightMessage } from "./handlers/ov
 import { handleYouTubeUrl, initializeYouTubeHandler } from "./handlers/youtube.js";
 import { registerJobApprovalHandlers } from "./handlers/job-approval.js";
 import { registerJobCommands, setJobScheduler } from "./handlers/job-commands.js";
-import { registerOutcomeHandlers } from "./handlers/outcome.js";
 import { handleCallRequest } from "./handlers/phone-call.js";
 import { handleSmsRequest } from "./handlers/sms.js";
 import { registerCallFollowupHandlers } from "./handlers/call-followup.js";
@@ -147,9 +146,6 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
   // Register job hunt approval callbacks and commands
   registerJobApprovalHandlers(bot, stateManager);
   registerJobCommands(bot, stateManager);
-
-  // Register outcome check callbacks
-  registerOutcomeHandlers(bot);
 
   // Register call follow-up and SMS reply inline button callbacks
   registerCallFollowupHandlers(bot);
