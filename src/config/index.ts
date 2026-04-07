@@ -26,7 +26,7 @@ const configSchema = z.object({
     allowedChatId: z.number().int().positive("ALLOWED_CHAT_ID must be a positive integer"),
   }),
   session: z.object({
-    ttlHours: z.number().int().positive().default(4),
+    ttlHours: z.number().int().positive().default(8),
   }),
   paths: z.object({
     lanes: z.string().default(runtimePaths.lanesDir),
@@ -97,7 +97,7 @@ function loadConfig(): Config {
       allowedChatId: parseInt(process.env.ALLOWED_CHAT_ID ?? "0", 10),
     },
     session: {
-      ttlHours: parseInt(process.env.SESSION_TTL_HOURS ?? "4", 10),
+      ttlHours: parseInt(process.env.SESSION_TTL_HOURS ?? "8", 10),
     },
     paths: {
       lanes: process.env.LANES_PATH ?? runtimePaths.lanesDir,
