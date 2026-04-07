@@ -149,7 +149,7 @@ export class MemoryIndexer {
   /**
    * Index all standard memory files
    */
-  async indexAllMemoryFiles(): Promise<{ indexed: number; skipped: number; errors: number }> {
+  async indexAllMemoryFiles(): Promise<{ indexed: number; skipped: number; errors: number; transcriptsIndexed?: number }> {
     const stats = { indexed: 0, skipped: 0, errors: 0 };
 
     // Core memory files (identity, preferences, tools)
@@ -289,8 +289,121 @@ export class MemoryIndexer {
       }
     }
 
-    logger.info(stats, "Completed memory file indexing");
+    // Index session transcripts for verbatim search (migration 075)
+    const transcriptStats = await this.indexTranscripts();
+    stats.indexed += transcriptStats.indexed;
+    stats.skipped += transcriptStats.skipped;
+    stats.errors += transcriptStats.errors;
+
+    logger.info({ ...stats, transcriptsIndexed: transcriptStats.indexed }, "Completed memory file indexing");
+    return { ...stats, transcriptsIndexed: transcriptStats.indexed };
+  }
+
+  /**
+   * Index session transcripts for verbatim search.
+   * Parses messages_json, extracts conversational text (user/assistant only),
+   * chunks it, and inserts into transcript_fts. Incremental — skips already-indexed.
+   */
+  async indexTranscripts(): Promise<{ indexed: number; skipped: number; errors: number }> {
+    const stats = { indexed: 0, skipped: 0, errors: 0 };
+
+    try {
+      // Check if tables exist (migration 075 may not have run yet)
+      const hasTable = this.db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='transcript_index_meta'"
+      ).get();
+      if (!hasTable) {
+        logger.debug("transcript_index_meta table not found, skipping transcript indexing");
+        return stats;
+      }
+
+      // Get unindexed transcripts
+      const unindexed = this.db.prepare(`
+        SELECT st.content_hash, st.agent, st.project, st.started_at, st.messages_json
+        FROM session_transcripts st
+        LEFT JOIN transcript_index_meta tim ON st.content_hash = tim.content_hash
+        WHERE tim.content_hash IS NULL
+      `).all() as Array<{
+        content_hash: string;
+        agent: string;
+        project: string | null;
+        started_at: string | null;
+        messages_json: string;
+      }>;
+
+      if (unindexed.length === 0) return stats;
+
+      logger.info({ count: unindexed.length }, "Indexing unindexed session transcripts");
+
+      const insertFts = this.db.prepare(
+        `INSERT INTO transcript_fts (content, content_hash, chunk_index, agent, project, started_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      );
+      const insertMeta = this.db.prepare(
+        `INSERT OR IGNORE INTO transcript_index_meta (content_hash, chunk_count, indexed_at)
+         VALUES (?, ?, ?)`
+      );
+
+      for (const row of unindexed) {
+        try {
+          const text = this.extractConversationalText(row.messages_json);
+          if (!text || text.length < 50) {
+            // Record in meta to avoid re-processing empty/tiny transcripts
+            insertMeta.run(row.content_hash, 0, new Date().toISOString());
+            stats.skipped++;
+            continue;
+          }
+
+          const chunks = chunkText(text, 512, 50);
+
+          const insertMany = this.db.transaction(() => {
+            for (const chunk of chunks) {
+              insertFts.run(
+                chunk.content,
+                row.content_hash,
+                chunk.chunkIndex,
+                row.agent,
+                row.project ?? null,
+                row.started_at ?? null,
+              );
+            }
+            insertMeta.run(row.content_hash, chunks.length, new Date().toISOString());
+          });
+          insertMany();
+
+          stats.indexed++;
+        } catch (err) {
+          logger.error({ error: err, contentHash: row.content_hash }, "Failed to index transcript");
+          stats.errors++;
+        }
+      }
+
+      logger.info(stats, "Transcript indexing complete");
+    } catch (err) {
+      logger.debug({ error: err }, "Transcript indexing skipped (tables may not exist)");
+    }
+
     return stats;
+  }
+
+  /**
+   * Extract searchable conversational text from messages_json.
+   * Keeps only user/assistant turns, skips system messages and tiny replies.
+   */
+  private extractConversationalText(messagesJson: string): string {
+    try {
+      const messages = JSON.parse(messagesJson) as Array<{ role: string; content: string | unknown }>;
+      const parts: string[] = [];
+      for (const msg of messages) {
+        if (msg.role !== "user" && msg.role !== "assistant") continue;
+        const content = typeof msg.content === "string" ? msg.content : "";
+        if (content.length < 10) continue;
+        parts.push(`[${msg.role}] ${content}`);
+      }
+      return parts.join("\n\n");
+    } catch {
+      return "";
+    }
   }
 
   /**

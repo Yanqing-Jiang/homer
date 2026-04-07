@@ -154,6 +154,7 @@ export async function handle(
       let scrapeResults: Array<{ id: string; source: string; title: string; url: string | null; scraped_at: string; rank: number }> = [];
       let ideaResults: Array<{ id: string; title: string; status: string; source: string; link: string | null; created_at: string; content: string; rank: number }> = [];
       let youtubeResults: Array<{ video_id: string; title: string; channel_name: string; relevance_score: number; processed_at: string; content: string; rank: number }> = [];
+      let transcriptResults: Array<{ content_hash: string; agent: string; project: string | null; started_at: string | null; content: string; rank: number }> = [];
       try {
         const sm = deps.getSharedStateManager();
         // Escape FTS5 query: preserve quoted phrases, implicit AND for terms
@@ -276,6 +277,20 @@ export async function handle(
           } catch (err) {
             logger.debug({ error: err }, "YouTube FTS search failed (table may not exist)");
           }
+
+          try {
+            transcriptResults = sm.getDb().prepare(`
+              SELECT content_hash, agent, project, started_at,
+                     snippet(transcript_fts, 0, '>>>', '<<<', '...', 50) as content,
+                     bm25(transcript_fts) as rank
+              FROM transcript_fts
+              WHERE transcript_fts MATCH ?
+              ORDER BY rank
+              LIMIT ?
+            `).all(escapedTerms, maxResults) as typeof transcriptResults;
+          } catch (err) {
+            logger.debug({ error: err }, "Transcript FTS search failed (table may not exist)");
+          }
         }
       } catch (err) {
         logger.debug({ error: err }, "Session summaries FTS search failed (table may not exist yet)");
@@ -314,6 +329,7 @@ export async function handle(
       const normScrapes = normalizeBM25(scrapeResults);
       const normIdeas = normalizeBM25(ideaResults);
       const normYoutube = normalizeBM25(youtubeResults);
+      const normTranscripts = normalizeBM25(transcriptResults);
 
       // Build unified ranked results across all tables
       type UnifiedResult = { type: string; normalizedRank: number; data: Record<string, unknown> };
@@ -361,6 +377,13 @@ export async function handle(
         unified.push({
           type: "youtube", normalizedRank: r.normalizedRank,
           data: { videoId: r.video_id, title: r.title, channelName: r.channel_name, relevanceScore: r.relevance_score, content: r.content, processedAt: r.processed_at, rank: r.rank },
+        });
+      }
+      for (const r of normTranscripts) {
+        // Demote transcripts to 70% — fallback tier behind curated memory & summaries
+        unified.push({
+          type: "transcript", normalizedRank: r.normalizedRank * 0.7,
+          data: { contentHash: r.content_hash, agent: r.agent, project: r.project, startedAt: r.started_at, content: r.content, rank: r.rank },
         });
       }
 
@@ -429,6 +452,11 @@ export async function handle(
           type: "youtube" as const, videoId: r.video_id, title: r.title,
           channelName: r.channel_name, relevanceScore: r.relevance_score,
           content: r.content, processedAt: r.processed_at, rank: r.rank, normalizedRank: r.normalizedRank,
+        })),
+        transcripts: normTranscripts.map((r) => ({
+          type: "transcript" as const, contentHash: r.content_hash, agent: r.agent,
+          project: r.project, startedAt: r.started_at, content: r.content,
+          rank: r.rank, normalizedRank: r.normalizedRank,
         })),
       };
 
@@ -516,7 +544,8 @@ export async function handle(
 
     case "memory_reindex": {
       const stats = await deps.indexer.indexAllMemoryFiles();
-      return { content: [{ type: "text", text: `Reindexed: ${stats.indexed} files, ${stats.skipped} skipped, ${stats.errors} errors` }] };
+      const transcriptNote = stats.transcriptsIndexed ? `, ${stats.transcriptsIndexed} transcripts indexed` : "";
+      return { content: [{ type: "text", text: `Reindexed: ${stats.indexed} files, ${stats.skipped} skipped, ${stats.errors} errors${transcriptNote}` }] };
     }
 
     case "memory_context": {
