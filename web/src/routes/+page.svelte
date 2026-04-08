@@ -214,13 +214,17 @@
 
 	// Switch executor
 	async function switchExecutor(executor: api.ExecutorType, model?: string) {
-		if (!sessionId) return;
 		try {
+			// Create session if needed so executor state persists
+			if (!sessionId) {
+				const ensuredId = await ensureSessionForAttachments();
+				if (!ensuredId) return;
+			}
 			if (currentAbort) {
 				currentAbort.abort();
 			}
 			resetStreamingState();
-			const result = await api.setExecutor(sessionId, executor, model);
+			const result = await api.setExecutor(sessionId!, executor, model);
 			currentExecutor = result.executor;
 			currentModel = result.model;
 			executorMessageCount = 0;
