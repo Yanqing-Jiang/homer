@@ -118,6 +118,8 @@ export class CLIRunManager {
   private activeRuns: Map<string, ActiveRun> = new Map();
   /** In-memory partial output for streaming non-Claude executors to web SSE */
   private partialOutputs: Map<string, string> = new Map();
+  /** In-memory step event queues for streaming non-Claude executors to web SSE */
+  private stepQueues: Map<string, import("./claude.js").StreamStepEvent[]> = new Map();
 
   get activeCount(): number {
     return this.activeRuns.size;
@@ -133,6 +135,15 @@ export class CLIRunManager {
 
   getPartialOutput(runId: string): string | undefined {
     return this.partialOutputs.get(runId);
+  }
+
+  /** Drain pending step events (returns and clears the queue) */
+  drainStepEvents(runId: string): import("./claude.js").StreamStepEvent[] {
+    const queue = this.stepQueues.get(runId);
+    if (!queue || queue.length === 0) return [];
+    const events = [...queue];
+    queue.length = 0;
+    return events;
   }
 
   cancelRun(lane: string, reason = "cancelled"): boolean {
@@ -338,6 +349,7 @@ ${pendingContext.context}
               signal: abortController.signal,
               sessionId: executorKind === executor ? sessionId ?? undefined : undefined,
               onPartial: params.onPartial,
+              onEvent: params.onEvent,
             });
             return {
               output: result.output,
@@ -433,10 +445,17 @@ ${pendingContext.context}
           executorUsed = "chatgpt";
           newSessionId = result.claudeSessionId ?? null;
         } else {
-          // Wire onPartial to store partial output for SSE consumers (web UI)
+          // Wire onPartial/onEvent to store in-memory for SSE consumers (web UI)
           if (!params.onPartial) {
             params.onPartial = (text: string) => {
               this.partialOutputs.set(runId, text);
+            };
+          }
+          if (!params.onEvent) {
+            params.onEvent = (event) => {
+              let queue = this.stepQueues.get(runId);
+              if (!queue) { queue = []; this.stepQueues.set(runId, queue); }
+              queue.push(event);
             };
           }
           const result = await runExecutor(executor as ExecutorKind);
@@ -552,6 +571,7 @@ ${pendingContext.context}
         releaseSlot();
         this.activeRuns.delete(params.lane);
         this.partialOutputs.delete(runId);
+        this.stepQueues.delete(runId);
       }
     })();
 
