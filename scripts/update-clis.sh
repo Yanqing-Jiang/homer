@@ -34,4 +34,9 @@ echo "[gemini] Updating..."
 npm install -g @google/gemini-cli@latest 2>&1 | tail -3
 echo "[gemini] $(gemini --version 2>/dev/null)"
 
+# OpenCLI — npm global
+echo "[opencli] Updating..."
+npm install -g @jackwener/opencli@latest 2>&1 | tail -3
+echo "[opencli] $(opencli --version 2>/dev/null)"
+
 echo "=== Done ==="
