@@ -233,6 +233,12 @@ export function registerRunRoutes(
         sendEvent("partial", { runId, delta });
       }
 
+      // Emit step events (tool_use, tool_result) for non-streaming executors
+      const steps = runManager.drainStepEvents(runId);
+      for (const step of steps) {
+        sendEvent("step", { runId, ...step });
+      }
+
       if (run.status !== lastStatus) {
         lastStatus = run.status;
         sendEvent("status", { runId, status: run.status, executor: run.executor });
