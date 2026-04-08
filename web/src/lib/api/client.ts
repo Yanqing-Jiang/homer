@@ -1299,6 +1299,7 @@ export function streamRunEvents(
 	callbacks: {
 		onStatus?: (data: { runId: string; status: string; executor?: string }) => void;
 		onPartial?: (data: { runId: string; delta: string }) => void;
+		onStep?: (data: { runId: string; type: string; id?: string; tool?: string; label: string; labelDone: string; preview?: string }) => void;
 		onHeartbeat?: () => void;
 		onError?: (err: { message: string }) => void;
 	}
@@ -1349,6 +1350,13 @@ export function streamRunEvents(
 							try {
 								const parsed = JSON.parse(sseEvent.data);
 								callbacks.onPartial?.(parsed);
+							} catch {
+								// ignore parse errors
+							}
+						} else if (sseEvent.event === 'step') {
+							try {
+								const parsed = JSON.parse(sseEvent.data);
+								callbacks.onStep?.(parsed);
 							} catch {
 								// ignore parse errors
 							}
