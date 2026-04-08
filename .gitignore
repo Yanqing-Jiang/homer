@@ -15,8 +15,11 @@ night_mode/
 config/
 output/
 
-# Personal documentation
-architecture.md
+# Documentation & non-code files (user rule: no docs in nightly push)
+*.md
+*.csv
+*.pptx
+*.docx
 
 # Browser profiles
 profiles/

@@ -204,6 +204,7 @@ export function registerRunRoutes(
 
     let eventId = 0;
     let lastStatus: string | null = null;
+    let lastPartialLen = 0;
 
     const sendEvent = (type: string, data: Record<string, unknown>) => {
       eventId++;
@@ -223,6 +224,15 @@ export function registerRunRoutes(
         cleanup();
         return;
       }
+
+      // Emit partial output deltas for non-streaming executors (codex, kimi, etc.)
+      const partial = runManager.getPartialOutput(runId);
+      if (partial && partial.length > lastPartialLen) {
+        const delta = partial.slice(lastPartialLen);
+        lastPartialLen = partial.length;
+        sendEvent("partial", { runId, delta });
+      }
+
       if (run.status !== lastStatus) {
         lastStatus = run.status;
         sendEvent("status", { runId, status: run.status, executor: run.executor });
