@@ -13,6 +13,8 @@ export interface CodexCLIOptions {
   sessionId?: string;
   model?: string;
   reasoningEffort?: string;
+  /** Called with cumulative text as codex streams tokens */
+  onPartial?: (text: string) => void;
 }
 
 export interface CodexCLIResult extends ExecutorResult {
@@ -51,6 +53,7 @@ export async function executeCodexCLI(
     sessionId,
     model,
     reasoningEffort = "high",
+    onPartial,
   } = options;
 
   return new Promise((resolve, reject) => {
@@ -189,7 +192,12 @@ export async function executeCodexCLI(
               const text =
                 item.text ||
                 (typeof item.content === "string" ? item.content : "");
-              if (text) responseChunks.push(text);
+              if (text) {
+                responseChunks.push(text);
+                if (onPartial) {
+                  try { onPartial(responseChunks.join("")); } catch { /* don't crash executor */ }
+                }
+              }
               continue;
             }
             if (item.type === "error") {
