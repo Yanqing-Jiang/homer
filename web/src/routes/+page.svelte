@@ -992,6 +992,16 @@ Just confirm when done. Keep your response brief.`;
 								? (streamingContent === 'Thinking...' ? '' : streamingContent) + data.delta
 								: streamingContent;
 						},
+						onStep: (data) => {
+							if (isStale()) return;
+							if (data.type === 'tool_use') {
+								streamingSteps = [...streamingSteps, { ...data, startedAt: Date.now(), completed: false }];
+							} else if (data.type === 'tool_result' && data.id) {
+								streamingSteps = streamingSteps.map(s =>
+									s.id === data.id ? { ...s, completed: true } : s
+								);
+							}
+						},
 						onStatus: async (data) => {
 							if (isStale()) return;
 							if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {

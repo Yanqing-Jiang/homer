@@ -1,5 +1,6 @@
 import { spawn } from "child_process";
 import type { ExecutorResult } from "./types.js";
+import type { StreamStepEvent } from "./claude.js";
 import { logger } from "../utils/logger.js";
 import { processRegistry } from "../process/registry.js";
 
@@ -15,6 +16,8 @@ export interface CodexCLIOptions {
   reasoningEffort?: string;
   /** Called with cumulative text as codex streams tokens */
   onPartial?: (text: string) => void;
+  /** Called with structured step events (tool_use, tool_result) */
+  onEvent?: (event: StreamStepEvent) => void;
 }
 
 export interface CodexCLIResult extends ExecutorResult {
@@ -27,6 +30,11 @@ interface CodexStreamItem {
   text?: string;
   message?: string;
   content?: string;
+  command?: string;
+  aggregated_output?: string;
+  exit_code?: number | null;
+  status?: string;
+  changes?: Array<{ path?: string; kind?: string }>;
 }
 
 interface CodexStreamEvent {
@@ -54,6 +62,7 @@ export async function executeCodexCLI(
     model,
     reasoningEffort = "high",
     onPartial,
+    onEvent,
   } = options;
 
   return new Promise((resolve, reject) => {
@@ -181,6 +190,18 @@ export async function executeCodexCLI(
             continue;
           }
 
+          // Emit step events for tool activity (command_execution, file_change)
+          if (event.type === "item.started" && onEvent) {
+            const item = event.item;
+            if (item?.type === "command_execution" && item.command) {
+              const shortCmd = item.command.replace(/^\/bin\/\w+\s+-lc\s+'?/, "").replace(/'$/, "").slice(0, 80);
+              try { onEvent({ type: "tool_use", id: item.id, tool: "Bash", label: `Running: ${shortCmd}`, labelDone: `Ran: ${shortCmd}`, preview: item.command }); } catch { /* */ }
+            } else if (item?.type === "file_change" && item.changes?.length) {
+              const desc = item.changes.map(c => `${c.kind ?? "edit"} ${c.path?.split("/").pop() ?? "file"}`).join(", ");
+              try { onEvent({ type: "tool_use", id: item.id, tool: "Edit", label: `Editing: ${desc}`, labelDone: `Edited: ${desc}` }); } catch { /* */ }
+            }
+          }
+
           if (event.type === "item.completed" || event.type === "item.delta") {
             const item = event.item;
             if (!item) continue;
@@ -199,6 +220,13 @@ export async function executeCodexCLI(
                 }
               }
               continue;
+            }
+            // Emit tool_result for completed tool items
+            if (onEvent && event.type === "item.completed" && (item.type === "command_execution" || item.type === "file_change")) {
+              const preview = item.type === "command_execution"
+                ? (item.exit_code === 0 ? item.aggregated_output?.slice(0, 200) : `exit ${item.exit_code}`)
+                : undefined;
+              try { onEvent({ type: "tool_result", id: item.id, label: "", labelDone: "", preview }); } catch { /* */ }
             }
             if (item.type === "error") {
               const message = item.message || item.text;
