@@ -30,7 +30,12 @@ function extractExternalUrls(text: string): string[] {
 function deriveTitle(text: string, author: string): string {
   const clean = text.replace(/\s+/g, " ").trim();
   if (!clean || clean.length < 5) return `X: @${author} bookmark`;
-  const firstSentence = clean.split(/[.!?\n]/)[0]?.trim() || clean;
+  // URL-only tweets: the text IS a link, not a sentence
+  if (/^https?:\/\/\S+$/.test(clean)) return `X: @${author} shared link`;
+  // Strip leading URLs before deriving title (media tweets start with t.co links)
+  const withoutLeadingUrl = clean.replace(/^https?:\/\/\S+\s*/, "").trim();
+  const source = withoutLeadingUrl.length > 10 ? withoutLeadingUrl : clean;
+  const firstSentence = source.split(/[.!?\n]/)[0]?.trim() || source;
   return firstSentence.length > 80 ? `${firstSentence.slice(0, 77)}...` : firstSentence;
 }
 
@@ -42,8 +47,12 @@ export interface TwitterBookmark {
   id: string;
   text: string;
   author: string;
+  authorName?: string;
   title: string;
   urls: string[];
+  likes?: number;
+  retweets?: number;
+  createdAt?: string;
 }
 
 export function mapOpenCLIBookmark(b: OpenCLIBookmark): TwitterBookmark {
@@ -51,8 +60,12 @@ export function mapOpenCLIBookmark(b: OpenCLIBookmark): TwitterBookmark {
     id: b.id,
     text: b.text,
     author: b.author,
+    authorName: b.name,
     title: deriveTitle(b.text, b.author),
     urls: extractExternalUrls(b.text),
+    likes: b.likes,
+    retweets: b.retweets,
+    createdAt: b.created_at,
   };
 }
 

@@ -57,8 +57,12 @@ interface TwitterBookmark {
   id: string;
   text: string;
   author: string;
+  authorName?: string;
   title: string;
   urls: string[];
+  likes?: number;
+  retweets?: number;
+  createdAt?: string;
 }
 
 /** Extract content between unique markers from LLM output. */
@@ -75,7 +79,12 @@ function extractMarkedBlock(raw: string, startMarker: string, endMarker: string)
 function deriveBookmarkTitle(text: string, author: string): string {
   const clean = text.replace(/\s+/g, " ").trim();
   if (!clean || clean.length < 5) return `X: @${author} bookmark`;
-  const firstSentence = clean.split(/[.!?\n]/)[0]?.trim() || clean;
+  // URL-only tweets: the text IS a link, not a sentence
+  if (/^https?:\/\/\S+$/.test(clean)) return `X: @${author} shared link`;
+  // Strip leading URLs before deriving title (media tweets start with t.co links)
+  const withoutLeadingUrl = clean.replace(/^https?:\/\/\S+\s*/, "").trim();
+  const source = withoutLeadingUrl.length > 10 ? withoutLeadingUrl : clean;
+  const firstSentence = source.split(/[.!?\n]/)[0]?.trim() || source;
   return firstSentence.length > 80
     ? `${firstSentence.slice(0, 77)}...`
     : firstSentence;
@@ -314,7 +323,7 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
     let lastError = "";
 
     // Retry strategy: try full count, then smaller if it fails
-    for (const maxItems of [10, 6]) {
+    for (const maxItems of [30, 15]) {
       try {
         bookmarks = await runBookmarkExtraction(maxItems);
         logger.info({ count: bookmarks.length, target: maxItems }, "Bookmark extraction succeeded");
@@ -377,6 +386,17 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
         "Bookmark enrichment complete"
       );
 
+      // Pack enrichment data for scrape insertion downstream
+      const enrichmentPayload = JSON.stringify({
+        external_urls: allUrls,
+        likes: bookmark.likes,
+        retweets: bookmark.retweets,
+        created_at: bookmark.createdAt,
+        author_name: bookmark.authorName,
+        deep_fetched: enriched.deepContent != null,
+        thread_read: fullText != null && fullText.length > bookmark.text.length,
+      });
+
       ideas.push({
         id: `tweet_${bookmark.id}`,
         title: bookmark.title,
@@ -386,6 +406,7 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
         link: tweetUrl,
         tags: ["x-bookmark"],
         timestamp,
+        enrichment: enrichmentPayload,
         ...(externalUrl ? { context: `External link: ${externalUrl}` } : {}),
       });
     }
@@ -494,9 +515,31 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
 
     // Write new bookmarks to scrapes table only — synthesizer handles idea creation
     for (const idea of newIdeas) {
-      const externalUrls = idea.context?.startsWith("External link:")
-        ? [idea.context.replace("External link: ", "")]
-        : [];
+      // Unpack enrichment data from scrapeTwitterBookmarks
+      const enrichment = idea.enrichment ? JSON.parse(idea.enrichment) : {};
+      const externalUrls: string[] = enrichment.external_urls ?? (
+        idea.context?.startsWith("External link:")
+          ? [idea.context.replace("External link: ", "")]
+          : []
+      );
+
+      const meta: Record<string, unknown> = {
+        tags: idea.tags,
+        external_urls: externalUrls,
+        likes: enrichment.likes,
+        retweets: enrichment.retweets,
+        created_at: enrichment.created_at,
+        author_name: enrichment.author_name,
+      };
+
+      // If ingest already deep-fetched, mark it so deep-fetch.ts skips re-processing
+      if (enrichment.deep_fetched || enrichment.thread_read) {
+        meta.deep_fetch = {
+          completed: true,
+          urls: externalUrls.map((u: string) => ({ url: u, method: "ingest-inline" })),
+          source: "ingest",
+        };
+      }
 
       insertScrape(db, {
         id: idea.id,
@@ -505,7 +548,7 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
         title: idea.title,
         author: idea.content.match(/@(\w+)/)?.[1] ?? undefined,
         raw_content: idea.content,
-        metadata: JSON.stringify({ tags: idea.tags, external_urls: externalUrls }),
+        metadata: JSON.stringify(meta),
       });
 
       existingIds.add(idea.id);

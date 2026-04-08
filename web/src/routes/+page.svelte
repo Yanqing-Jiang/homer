@@ -970,7 +970,7 @@ Just confirm when done. Keep your response brief.`;
 
 				currentAbort = stream;
 			} else {
-				// Non-Claude: execute + poll (no SSE streaming)
+				// Non-Claude: execute + SSE streaming via run events
 				streamingContent = 'Thinking...';
 				try {
 					const result = await api.executeMessage(
@@ -981,36 +981,47 @@ Just confirm when done. Keep your response brief.`;
 					);
 					const runId = result.runId;
 
-					const pollInterval = setInterval(async () => {
-						try {
-							const run = await api.getRun(runId);
-							if (run.run.status === 'completed' || run.run.status === 'failed' || run.run.status === 'cancelled') {
-								clearInterval(pollInterval);
-								const output = run.run.output || (run.run.error ?? '');
-								const expiredPattern = /session expired|session not found/i;
-								if (expiredPattern.test(output) || expiredPattern.test(run.run.error ?? '')) {
-									sessionExpired = true;
+					const eventStream = api.streamRunEvents(runId, {
+						onPartial: (data) => {
+							if (isStale()) return;
+							streamingContent = data.delta
+								? (streamingContent === 'Thinking...' ? '' : streamingContent) + data.delta
+								: streamingContent;
+						},
+						onStatus: async (data) => {
+							if (isStale()) return;
+							if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
+								try {
+									const run = await api.getRun(runId);
+									const output = run.run.output || (run.run.error ?? '');
+									const expiredPattern = /session expired|session not found/i;
+									if (expiredPattern.test(output) || expiredPattern.test(run.run.error ?? '')) {
+										sessionExpired = true;
+									}
+									if (output) {
+										messages = [...messages, { role: 'assistant', content: output, timestamp: new Date() }];
+									} else if (data.status === 'cancelled') {
+										chatError = 'Run cancelled.';
+									}
+								} catch {
+									// Use streamed content as fallback
+									const fallback = streamingContent !== 'Thinking...' ? streamingContent : '';
+									if (fallback) {
+										messages = [...messages, { role: 'assistant', content: fallback, timestamp: new Date() }];
+									}
 								}
-								if (output) {
-									messages = [...messages, { role: 'assistant', content: output, timestamp: new Date() }];
-								} else if (run.run.status === 'cancelled') {
-									chatError = 'Run cancelled.';
-								}
-								streamingContent = '';
-								isStreaming = false;
-								currentAbort = null;
+								resetStreamingState();
 								executorMessageCount++;
 							}
-						} catch (e) {
-							clearInterval(pollInterval);
-							chatError = e instanceof Error ? e.message : 'Failed to check run status';
-							streamingContent = '';
-							isStreaming = false;
-							currentAbort = null;
-						}
-					}, 2000);
+						},
+						onError: (err) => {
+							if (isStale()) return;
+							chatError = err.message;
+							resetStreamingState();
+						},
+					});
 
-					currentAbort = { abort: () => clearInterval(pollInterval) };
+					currentAbort = eventStream;
 				} catch (execError) {
 					console.error('Execute error:', execError);
 					chatError = execError instanceof Error ? execError.message : 'Execution failed';

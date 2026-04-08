@@ -116,6 +116,8 @@ function buildPrompt(params: {
 export class CLIRunManager {
   private stateManager: StateManager;
   private activeRuns: Map<string, ActiveRun> = new Map();
+  /** In-memory partial output for streaming non-Claude executors to web SSE */
+  private partialOutputs: Map<string, string> = new Map();
 
   get activeCount(): number {
     return this.activeRuns.size;
@@ -127,6 +129,10 @@ export class CLIRunManager {
 
   getActiveRun(lane: string): ActiveRun | null {
     return this.activeRuns.get(lane) ?? null;
+  }
+
+  getPartialOutput(runId: string): string | undefined {
+    return this.partialOutputs.get(runId);
   }
 
   cancelRun(lane: string, reason = "cancelled"): boolean {
@@ -331,6 +337,7 @@ ${pendingContext.context}
               timeout: 1800000,
               signal: abortController.signal,
               sessionId: executorKind === executor ? sessionId ?? undefined : undefined,
+              onPartial: params.onPartial,
             });
             return {
               output: result.output,
@@ -426,6 +433,12 @@ ${pendingContext.context}
           executorUsed = "chatgpt";
           newSessionId = result.claudeSessionId ?? null;
         } else {
+          // Wire onPartial to store partial output for SSE consumers (web UI)
+          if (!params.onPartial) {
+            params.onPartial = (text: string) => {
+              this.partialOutputs.set(runId, text);
+            };
+          }
           const result = await runExecutor(executor as ExecutorKind);
           output = result.output;
           exitCode = result.exitCode;
@@ -538,6 +551,7 @@ ${pendingContext.context}
       } finally {
         releaseSlot();
         this.activeRuns.delete(params.lane);
+        this.partialOutputs.delete(runId);
       }
     })();
 

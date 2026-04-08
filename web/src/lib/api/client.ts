@@ -1298,6 +1298,7 @@ export function streamRunEvents(
 	runId: string,
 	callbacks: {
 		onStatus?: (data: { runId: string; status: string; executor?: string }) => void;
+		onPartial?: (data: { runId: string; delta: string }) => void;
 		onHeartbeat?: () => void;
 		onError?: (err: { message: string }) => void;
 	}
@@ -1341,6 +1342,13 @@ export function streamRunEvents(
 							try {
 								const parsed = JSON.parse(sseEvent.data);
 								callbacks.onStatus?.(parsed);
+							} catch {
+								// ignore parse errors
+							}
+						} else if (sseEvent.event === 'partial') {
+							try {
+								const parsed = JSON.parse(sseEvent.data);
+								callbacks.onPartial?.(parsed);
 							} catch {
 								// ignore parse errors
 							}
