@@ -16,7 +16,7 @@
 import type Database from "better-sqlite3";
 import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
-import { executeClaudeCommand } from "../../executors/claude.js";
+import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { getActiveVersion, getRecentScores, getVersionHistory } from "../../harness/manager.js";
 import { getTraceStats } from "../../executors/trace-writer.js";
 import { SKILL_PATHS, getPrompts } from "./prompts/idea-synthesizer.js";
@@ -159,9 +159,10 @@ Respond with this exact structure:
 ## Risk Assessment
 (what could go wrong, what to monitor)`;
 
-    const result = await executeClaudeCommand(proposerPrompt, {
+    const result = await executeCodexCLI(proposerPrompt, {
       cwd: PATHS.homerRoot,
-      model: "sonnet",
+      model: "gpt-5.4",
+      reasoningEffort: "high",
     });
 
     if (result.exitCode !== 0 || !result.output.trim()) {

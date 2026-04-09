@@ -1,8 +1,8 @@
 /**
- * Weekly Memory Consolidation — Claude Opus 1M handler
+ * Weekly Memory Consolidation — Codex GPT-5.4 handler
  *
  * Reads the past 7 days of daily logs + permanent memory files,
- * sends to Claude Opus (1M context) for cross-day analysis, then:
+ * sends to Codex GPT-5.4 for cross-day analysis, then:
  * 1. Appends a weekly summary to the current daily log
  * 2. Promotes key facts to permanent memory files
  *
@@ -12,7 +12,7 @@
 
 import { readFile, appendFile } from "fs/promises";
 import { existsSync } from "fs";
-import { executeClaudeCommand } from "../../executors/claude.js";
+import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { logger } from "../../utils/logger.js";
 import { StateManager, type SessionSummaryRow } from "../../state/manager.js";
 import { buildSchedulerContext, buildGoalScoreboard } from "../shared-context.js";
@@ -32,7 +32,7 @@ const FILE_PATH_MAP: Record<string, string> = {
   "tools.md": PATHS.tools,
   "preferences.md": PATHS.preferences,
 };
-const MAX_INPUT_CHARS = 800_000; // ~200K tokens, within Opus 1M context
+const MAX_INPUT_CHARS = 800_000; // ~200K tokens, within Codex's 1M-token context
 
 const PERMANENT_FILES = [
   { path: PATHS.me, label: "me.md (identity, goals, ambition)" },
@@ -180,7 +180,7 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
   const startDate = dates[0];
   const endDate = dates[dates.length - 1];
 
-  logger.info({ startDate, endDate, days: daysBack }, "Starting weekly memory consolidation via Claude Opus 1M");
+  logger.info({ startDate, endDate, days: daysBack }, "Starting weekly memory consolidation via Codex GPT-5.4");
 
   // Build dynamic system prompt — no hardcoded bio
   let systemPrompt: string;
@@ -270,20 +270,21 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
   }
 
   const inputSizeKB = Math.round(fullInput.length / 1024);
-  logger.info({ logsFound, inputSizeKB, totalRawSizeKB: Math.round(totalSize / 1024) }, "Sending to Claude Opus 1M");
+  logger.info({ logsFound, inputSizeKB, totalRawSizeKB: Math.round(totalSize / 1024) }, "Sending to Codex GPT-5.4 high reasoning");
 
   try {
-    const result = await executeClaudeCommand(
+    const result = await executeCodexCLI(
       systemPrompt + "\n\n---\n\n" + fullInput,
       {
         cwd: process.env.HOME ?? "/Users/yj",
-        model: "opus[1m]",
+        model: "gpt-5.4",
+        reasoningEffort: "high",
         timeout: 600_000, // 10 min — large context needs more time
       },
     );
 
     if (result.exitCode !== 0) {
-      return { success: false, output: "", error: `Claude Opus error: ${result.output}` };
+      return { success: false, output: "", error: `Codex error: ${result.output}` };
     }
 
     const response = result.output;
@@ -335,7 +336,7 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
     // Append weekly summary to today's daily log
     const todayDate = getTodayDateString();
     const todayLogPath = `${DAILY_LOG_DIR}/${todayDate}.md`;
-    const summaryBlock = `\n\n---\n\n## Weekly Consolidation (${startDate} → ${endDate})\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via Claude Opus*\n\n${weeklySummary}\n`;
+    const summaryBlock = `\n\n---\n\n## Weekly Consolidation (${startDate} → ${endDate})\n*Generated ${new Date().toLocaleTimeString("en-US", { hour12: false })} by HOMER via Codex GPT-5.4*\n\n${weeklySummary}\n`;
 
     if (existsSync(todayLogPath)) {
       await appendFile(todayLogPath, summaryBlock);

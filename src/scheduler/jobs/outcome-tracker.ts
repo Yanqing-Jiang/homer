@@ -3,7 +3,7 @@
  *
  * Flow:
  * 1. Query pending outcome_checks where check_at <= now
- * 2. For each, use Claude Sonnet to check for evidence of outcome
+ * 2. For each, use Codex GPT-5.4 to check for evidence of outcome
  * 3. Auto-resolve when evidence is clear; send to Telegram when ambiguous
  */
 
@@ -12,7 +12,7 @@ import type Database from "better-sqlite3";
 import type { Bot } from "grammy";
 import { InlineKeyboard } from "grammy";
 import { z } from "zod";
-import { executeClaudeCommand } from "../../executors/claude.js";
+import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import {
   formatScheduledTelegramHtml,
@@ -146,9 +146,9 @@ Based on the evidence, determine the outcome:
 Return JSON: { "outcome": "yes|no|partial|ambiguous", "confidence": 0.0-1.0, "evidence": "one sentence summary" }`;
 
   try {
-    const result = await executeClaudeCommand(
+    const result = await executeCodexCLI(
       prompt + "\n\nReturn ONLY valid JSON, no markdown fences.",
-      { cwd: process.env.HOME ?? "/Users/yj", model: "sonnet", timeout: 120_000, signal },
+      { cwd: process.env.HOME ?? "/Users/yj", model: "gpt-5.4", reasoningEffort: "high", timeout: 120_000, signal },
     );
 
     if (result.exitCode === 0 && result.output) {

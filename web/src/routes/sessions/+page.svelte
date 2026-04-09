@@ -4,6 +4,7 @@
 	import { useAuth } from '$lib/hooks/useAuth.svelte';
 	import * as api from '$lib/api/client';
 	import { toast } from '$lib/stores/toasts.svelte';
+	import { buildStreamingStepsFromRunEvents } from '$lib/utils/run-steps';
 
 	const auth = useAuth();
 
@@ -33,6 +34,7 @@
 	let messageInput = $state('');
 	let sendingMessage = $state(false);
 	let streamingContent = $state('');
+	let streamingSteps = $state<Array<api.StepEvent & { startedAt: number; completed: boolean }>>([]);
 	let textareaRef = $state<HTMLTextAreaElement | null>(null);
 
 	// File attachment state (client-only)
@@ -43,6 +45,8 @@
 	// Thread live updates via SSE
 	// NOT $state — must not trigger $effect re-runs
 	let threadSubscription: { abort: () => void } | null = null;
+	let runSubscription: { abort: () => void } | null = null;
+	let activeRunId: string | null = null;
 
 	$effect(() => {
 		const tid = selectedThread?.id;
@@ -68,7 +72,149 @@
 	onDestroy(() => {
 		threadSubscription?.abort();
 		threadSubscription = null;
+		runSubscription?.abort();
+		runSubscription = null;
 	});
+
+	function resetStreamingState() {
+		streamingContent = '';
+		streamingSteps = [];
+		activeRunId = null;
+		runSubscription?.abort();
+		runSubscription = null;
+	}
+
+	function applyStreamingStep(step: api.StepEvent) {
+		if (step.type === 'tool_use') {
+			streamingSteps = [...streamingSteps, { ...step, startedAt: Date.now(), completed: false }];
+			return;
+		}
+
+		if (step.type === 'tool_result') {
+			if (step.id) {
+				const existing = streamingSteps.find((s) => s.id === step.id && s.type === 'tool_use');
+				if (existing) {
+					streamingSteps = streamingSteps.map((s) =>
+						s.id === step.id && s.type === 'tool_use'
+							? {
+									...s,
+									completed: true,
+									labelDone: step.labelDone || s.labelDone,
+									preview: step.preview ?? s.preview
+								}
+							: s
+					);
+					return;
+				}
+			}
+
+			streamingSteps = [
+				...streamingSteps,
+				{
+					...step,
+					type: 'tool_use',
+					label: step.label || step.labelDone || 'Working...',
+					labelDone: step.labelDone || step.label || 'Finished',
+					startedAt: Date.now(),
+					completed: true
+				}
+			];
+			return;
+		}
+
+		if (step.type === 'thinking') {
+			if (step.id) {
+				const existing = streamingSteps.find((s) => s.id === step.id && s.type === 'thinking');
+				if (existing) {
+					streamingSteps = streamingSteps.map((s) =>
+						s.id === step.id && s.type === 'thinking'
+							? { ...s, ...step, completed: true, startedAt: s.startedAt }
+							: s
+					);
+					return;
+				}
+			}
+
+			streamingSteps = [...streamingSteps, { ...step, startedAt: Date.now(), completed: true }];
+		}
+	}
+
+	function activityLabel(step: api.StepEvent & { completed: boolean }): string {
+		if (step.type === 'thinking') {
+			return step.labelDone || step.label;
+		}
+		return step.completed ? step.labelDone : step.label;
+	}
+
+	function activityIcon(step: api.StepEvent & { completed: boolean }): 'spark' | 'done' | 'spinner' {
+		if (step.type === 'thinking') return 'spark';
+		return step.completed ? 'done' : 'spinner';
+	}
+
+	async function handleRunFinished(
+		runId: string,
+		threadId: string,
+		status: 'completed' | 'failed' | 'cancelled'
+	) {
+		if (!selectedThread || selectedThread.id !== threadId || activeRunId !== runId) return;
+
+		sendingMessage = false;
+		try {
+			const updated = await api.getThread(threadId);
+			if (selectedThread?.id === threadId) {
+				selectedThread = updated;
+			}
+			if (status === 'failed' || status === 'cancelled') {
+				const run = await api.getRun(runId);
+				if (status === 'failed') {
+					error = run.run.error || 'Run failed';
+				} else if (status === 'cancelled') {
+					error = 'Run cancelled';
+				}
+			}
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to refresh thread';
+		} finally {
+			resetStreamingState();
+		}
+	}
+
+	function startRunStream(runId: string, threadId: string) {
+		if (activeRunId === runId && runSubscription) return;
+
+		runSubscription?.abort();
+		runSubscription = null;
+		activeRunId = runId;
+
+		runSubscription = api.streamRunEvents(runId, {
+			onPartial: (data) => {
+				if (selectedThread?.id !== threadId || activeRunId !== runId) return;
+				if (data.delta) {
+					streamingContent += data.delta;
+				}
+			},
+			onStep: (data) => {
+				if (selectedThread?.id !== threadId || activeRunId !== runId) return;
+				applyStreamingStep(data);
+			},
+			onStatus: async (data) => {
+				if (selectedThread?.id !== threadId || activeRunId !== runId) return;
+				if (
+					data.status === 'completed' ||
+					data.status === 'failed' ||
+					data.status === 'cancelled'
+				) {
+					await handleRunFinished(runId, threadId, data.status);
+				}
+			},
+			onError: (err) => {
+				if (selectedThread?.id !== threadId || activeRunId !== runId) return;
+				sendingMessage = false;
+				error = err.message;
+				resetStreamingState();
+			}
+		});
+	}
 
 	// Load sessions on mount
 	onMount(async () => {
@@ -110,6 +256,7 @@
 
 	async function openSession(session: api.ChatSession) {
 		try {
+			resetStreamingState();
 			const fullSession = await api.getSession(session.id);
 			selectedSession = fullSession;
 			selectedThread = null;
@@ -120,8 +267,18 @@
 
 	async function openThread(thread: api.Thread) {
 		try {
+			resetStreamingState();
 			const fullThread = await api.getThread(thread.id);
 			selectedThread = fullThread;
+			if (
+				fullThread.activeRun &&
+				fullThread.activeRun.status === 'running' &&
+				fullThread.activeRun.executor !== 'claude' &&
+				fullThread.activeRun.executor !== 'chatgpt'
+			) {
+				streamingSteps = buildStreamingStepsFromRunEvents(fullThread.activeRun.events);
+				startRunStream(fullThread.activeRun.id, fullThread.id);
+			}
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to load thread';
 		}
@@ -246,7 +403,7 @@
 		messageInput = '';
 		attachedFiles = [];
 		sendingMessage = true;
-		streamingContent = '';
+		resetStreamingState();
 
 		// Reset textarea height
 		if (textareaRef) {
@@ -339,7 +496,6 @@
 
 		// Non-Claude executors: run + status events
 		try {
-			streamingContent = 'Running...';
 			const result = await api.executeMessage(
 				threadId,
 				executionContent,
@@ -353,30 +509,10 @@
 					)
 				};
 			}
-
-			api.streamRunEvents(result.runId, {
-				onStatus: async (data) => {
-					if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
-						sendingMessage = false;
-						streamingContent = '';
-						if (!selectedThread || selectedThread.id !== threadId) return;
-						try {
-							const updated = await api.getThread(threadId);
-							selectedThread = updated;
-						} catch (err) {
-							error = err instanceof Error ? err.message : 'Failed to refresh thread';
-						}
-					}
-				},
-				onError: (err) => {
-					sendingMessage = false;
-					streamingContent = '';
-					error = err.message;
-				}
-			});
+			startRunStream(result.runId, threadId);
 		} catch (err) {
 			sendingMessage = false;
-			streamingContent = '';
+			resetStreamingState();
 			error = err instanceof Error ? err.message : 'Execution failed';
 			toast.error('Execution failed');
 			messageInput = typedContent;
@@ -385,11 +521,13 @@
 	}
 
 	function closeSession() {
+		resetStreamingState();
 		selectedSession = null;
 		selectedThread = null;
 	}
 
 	function closeThread() {
+		resetStreamingState();
 		selectedThread = null;
 	}
 
@@ -906,7 +1044,86 @@
 										</svg>
 									</div>
 									<div class="message-content">
-										<p class="message-text">{streamingContent}<span class="cursor">|</span></p>
+										{#if streamingSteps.length > 0}
+											<div class="activity-panel">
+												<div class="activity-panel-header">
+													<span class="activity-panel-title">Run activity</span>
+													<span class="activity-panel-count">{streamingSteps.length} step{streamingSteps.length === 1 ? '' : 's'}</span>
+												</div>
+												<div class="activity-list">
+													{#each streamingSteps as step (step.id ?? `${step.type}:${step.label}:${step.startedAt}`)}
+														<div class="activity-item" class:completed={step.completed} class:thinking={step.type === 'thinking'}>
+															<div class="activity-icon">
+																{#if activityIcon(step) === 'spark'}
+																	<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+																		<path d="M12 2L9.5 9.5L2 12L9.5 14.5L12 22L14.5 14.5L22 12L14.5 9.5L12 2Z" />
+																	</svg>
+																{:else if activityIcon(step) === 'done'}
+																	<svg class="activity-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+																		<path d="M20 6L9 17l-5-5" />
+																	</svg>
+																{:else}
+																	<span class="activity-spinner"></span>
+																{/if}
+															</div>
+															<div class="activity-body">
+																<div class="activity-label">{activityLabel(step)}</div>
+																{#if step.preview}
+																	<div class="activity-preview">{step.preview}</div>
+																{/if}
+															</div>
+														</div>
+													{/each}
+												</div>
+											</div>
+										{/if}
+										{#if streamingContent}
+											<p class="message-text">{streamingContent}<span class="cursor">|</span></p>
+										{:else if streamingSteps.length > 0}
+											<div class="activity-waiting">Preparing final response...</div>
+										{/if}
+									</div>
+								</div>
+							{:else if streamingSteps.length > 0}
+								<div class="message assistant streaming">
+									<div class="message-avatar">
+										<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+											<path d="M12 2L9.5 9.5L2 12L9.5 14.5L12 22L14.5 14.5L22 12L14.5 9.5L12 2Z" />
+										</svg>
+									</div>
+									<div class="message-content">
+										<div class="activity-panel">
+											<div class="activity-panel-header">
+												<span class="activity-panel-title">Run activity</span>
+												<span class="activity-panel-count">{streamingSteps.length} step{streamingSteps.length === 1 ? '' : 's'}</span>
+											</div>
+											<div class="activity-list">
+												{#each streamingSteps as step (step.id ?? `${step.type}:${step.label}:${step.startedAt}`)}
+													<div class="activity-item" class:completed={step.completed} class:thinking={step.type === 'thinking'}>
+														<div class="activity-icon">
+															{#if activityIcon(step) === 'spark'}
+																<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+																	<path d="M12 2L9.5 9.5L2 12L9.5 14.5L12 22L14.5 14.5L22 12L14.5 9.5L12 2Z" />
+																</svg>
+															{:else if activityIcon(step) === 'done'}
+																<svg class="activity-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+																	<path d="M20 6L9 17l-5-5" />
+																</svg>
+															{:else}
+																<span class="activity-spinner"></span>
+															{/if}
+														</div>
+														<div class="activity-body">
+															<div class="activity-label">{activityLabel(step)}</div>
+															{#if step.preview}
+																<div class="activity-preview">{step.preview}</div>
+															{/if}
+														</div>
+													</div>
+												{/each}
+											</div>
+										</div>
+										<div class="activity-waiting">Preparing final response...</div>
 									</div>
 								</div>
 							{/if}
@@ -1712,6 +1929,111 @@
 		color: #666;
 	}
 
+	.activity-panel {
+		border: 1px solid #d1d5db;
+		border-radius: 10px;
+		background: #fff;
+		box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
+		margin-bottom: 12px;
+		overflow: hidden;
+	}
+
+	.activity-panel-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 10px 12px;
+		background: #f8fafc;
+		border-bottom: 1px solid #e5e7eb;
+	}
+
+	.activity-panel-title {
+		font-size: 12px;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: #475569;
+	}
+
+	.activity-panel-count {
+		font-size: 12px;
+		color: #64748b;
+	}
+
+	.activity-list {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.activity-item {
+		display: flex;
+		gap: 10px;
+		padding: 12px;
+		border-top: 1px solid #f1f5f9;
+	}
+
+	.activity-item:first-child {
+		border-top: none;
+	}
+
+	.activity-item.thinking {
+		background: #fcfcfd;
+	}
+
+	.activity-item.completed .activity-label {
+		color: #0f172a;
+	}
+
+	.activity-icon {
+		width: 20px;
+		height: 20px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		color: #2563eb;
+	}
+
+	.activity-spinner {
+		width: 14px;
+		height: 14px;
+		border: 2px solid #cbd5e1;
+		border-top-color: #2563eb;
+		border-radius: 50%;
+		animation: spin 1s linear infinite;
+	}
+
+	.activity-check {
+		color: #16a34a;
+	}
+
+	.activity-body {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.activity-label {
+		font-size: 14px;
+		font-weight: 600;
+		color: #334155;
+		line-height: 1.4;
+	}
+
+	.activity-preview {
+		font-size: 12px;
+		color: #64748b;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.activity-waiting {
+		font-size: 13px;
+		color: #64748b;
+		padding: 4px 2px 0;
+	}
+
 	.cursor {
 		animation: blink 1s infinite;
 	}
@@ -1724,6 +2046,12 @@
 		51%,
 		100% {
 			opacity: 0;
+		}
+	}
+
+	@keyframes spin {
+		to {
+			transform: rotate(360deg);
 		}
 	}
 
