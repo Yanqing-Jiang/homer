@@ -79,6 +79,57 @@ function createLintKeyboard(claimId: string): InlineKeyboard {
     .text("✅ Keep", `m:lk:${id}`);
 }
 
+// ── Batch keyboard rebuild ──────────────────────────────────
+
+/**
+ * After a single item action (approve/reject), rebuild the batch keyboard
+ * to visually mark processed items.
+ */
+async function updateBatchKeyboard(
+  ctx: { editMessageReplyMarkup: (opts: { reply_markup: InlineKeyboard }) => Promise<unknown> },
+  messageId: number,
+): Promise<void> {
+  const db = stateManagerRef?.getDb();
+  if (!db) return;
+
+  // Find all claims in this batch (same telegram_message_id)
+  const batchClaims = db.prepare(`
+    SELECT id, status FROM knowledge_claims
+    WHERE telegram_message_id = ?
+    ORDER BY created_at ASC
+  `).all(messageId) as Array<{ id: string; status: string }>;
+
+  if (batchClaims.length === 0) return;
+
+  const keyboard = new InlineKeyboard();
+  for (let i = 0; i < batchClaims.length; i++) {
+    const c = batchClaims[i]!;
+    const id = c.id.slice(-10);
+    const label = `${i + 1}`;
+
+    if (c.status === "approved" || c.status === "validated") {
+      keyboard.text(`✅ ${label} done`, `m:noop`).text(`  `, `m:noop`).text(`  `, `m:noop`);
+    } else if (c.status === "rejected" || c.status === "archived") {
+      keyboard.text(`❌ ${label} skip`, `m:noop`).text(`  `, `m:noop`).text(`  `, `m:noop`);
+    } else {
+      keyboard.text(`✅ ${label}`, `m:a:${id}`).text(`💬 ${label}`, `m:p:${id}`).text(`❌ ${label}`, `m:r:${id}`);
+    }
+    keyboard.row();
+  }
+
+  // Only show bulk actions if some items are still pending
+  const hasPending = batchClaims.some(c => c.status === "candidate" || c.status === "stale");
+  if (hasPending) {
+    keyboard.text("✅ Approve All", "m:aa").text("❌ Dismiss All", "m:da");
+  }
+
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: keyboard });
+  } catch {
+    // Message may have been deleted or keyboard unchanged — ignore
+  }
+}
+
 // ── Public API ──────────────────────────────────────────────
 
 /**
@@ -171,6 +222,11 @@ export async function sendLintFindings(
 export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManager): void {
   stateManagerRef = stateManager;
 
+  // Noop handler for already-processed buttons
+  bot.callbackQuery(/^m:noop$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+  });
+
   // Helper: find claim by callback ID suffix
   function findClaim(idSuffix: string): KnowledgeClaim | null {
     const db = stateManagerRef?.getDb();
@@ -183,7 +239,7 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
     return getClaim(db, row.id);
   }
 
-  // ── Approve (single item — toast only, no message edit for batch compatibility) ──
+  // ── Approve (single item — update keyboard to show completion) ──
   bot.callbackQuery(/^m:a:(.+)$/, async (ctx) => {
     const idSuffix = ctx.match?.[1];
     if (!idSuffix) { await ctx.answerCallbackQuery("Invalid"); return; }
@@ -201,10 +257,13 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
       ? (markClaimValidated(db, claim.id), true)
       : await approveCandidate(db, claim.id, cms);
 
-    await ctx.answerCallbackQuery(ok ? `Approved: "${claim.content.slice(0, 40)}..." ✅` : "Approval failed");
+    await ctx.answerCallbackQuery(ok ? `✅ Approved` : "Approval failed");
+    if (ok && ctx.callbackQuery.message) {
+      await updateBatchKeyboard(ctx, ctx.callbackQuery.message.message_id);
+    }
   });
 
-  // ── Reject (single item — toast only) ──
+  // ── Reject (single item — update keyboard to show completion) ──
   bot.callbackQuery(/^m:r:(.+)$/, async (ctx) => {
     const idSuffix = ctx.match?.[1];
     if (!idSuffix) { await ctx.answerCallbackQuery("Invalid"); return; }
@@ -219,7 +278,10 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
       rejectCandidate(db, claim.id);
     }
 
-    await ctx.answerCallbackQuery(`Rejected: "${claim.content.slice(0, 40)}..." ❌`);
+    await ctx.answerCallbackQuery(`❌ Rejected`);
+    if (ctx.callbackQuery.message) {
+      await updateBatchKeyboard(ctx, ctx.callbackQuery.message.message_id);
+    }
   });
 
   // ── Reply (unified edit + talk) ──
