@@ -35,6 +35,18 @@
 		return `${API_BASE}/api/uploads/${att.sessionId}/${att.id}/raw`;
 	}
 
+	function activityLabel(step: StepEvent & { completed: boolean }): string {
+		if (step.type === 'thinking') {
+			return step.labelDone || step.label;
+		}
+		return step.completed ? step.labelDone : step.label;
+	}
+
+	function activityIcon(step: StepEvent & { completed: boolean }): 'spark' | 'tool' | 'done' | 'spinner' {
+		if (step.type === 'thinking') return 'spark';
+		return step.completed ? 'done' : 'spinner';
+	}
+
 	/** Filter out legacy string[] attachments — only render structured objects */
 	function richAttachments(atts: unknown[] | undefined): MessageAttachment[] {
 		if (!atts) return [];
@@ -124,19 +136,36 @@
 				</div>
 				<div class="message-content">
 					{#if steps.length > 0}
-						<div class="step-pills">
+						<div class="activity-panel">
+							<div class="activity-panel-header">
+								<span class="activity-panel-title">Run activity</span>
+								<span class="activity-panel-count">{steps.length} step{steps.length === 1 ? '' : 's'}</span>
+							</div>
+							<div class="activity-list">
 							{#each steps as step (step.id ?? step.label + step.startedAt)}
-								<div class="step-pill" class:completed={step.completed}>
-									{#if step.completed}
-										<svg class="step-check" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-											<path d="M20 6L9 17l-5-5"/>
-										</svg>
-									{:else}
-										<span class="step-spinner"></span>
-									{/if}
-									<span class="step-label">{step.completed ? step.labelDone : step.label}</span>
+								<div class="activity-item" class:completed={step.completed} class:thinking={step.type === 'thinking'}>
+									<div class="activity-icon">
+										{#if activityIcon(step) === 'spark'}
+											<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+												<path d="M12 2L9.5 9.5L2 12L9.5 14.5L12 22L14.5 14.5L22 12L14.5 9.5L12 2Z"/>
+											</svg>
+										{:else if activityIcon(step) === 'done'}
+											<svg class="activity-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+												<path d="M20 6L9 17l-5-5"/>
+											</svg>
+										{:else}
+											<span class="activity-spinner"></span>
+										{/if}
+									</div>
+									<div class="activity-body">
+										<div class="activity-label">{activityLabel(step)}</div>
+										{#if step.preview}
+											<div class="activity-preview">{step.preview}</div>
+										{/if}
+									</div>
 								</div>
 							{/each}
+							</div>
 						</div>
 					{/if}
 					{#if streamingContent}
@@ -145,6 +174,8 @@
 						</div>
 					{:else if steps.length === 0}
 						<div class="message-bubble"><span class="typing-indicator"><span></span><span></span><span></span></span></div>
+					{:else}
+						<div class="activity-waiting">Preparing final response...</div>
 					{/if}
 				</div>
 			</div>
@@ -296,59 +327,121 @@
 		40% { transform: scale(1); }
 	}
 
-	/* Step Pills */
-	.step-pills {
+	/* Activity panel */
+	.activity-panel {
+		margin-bottom: 10px;
+		border: 1px solid rgba(0, 120, 212, 0.12);
+		border-radius: 12px;
+		background:
+			linear-gradient(180deg, rgba(0, 120, 212, 0.08) 0%, rgba(255, 255, 255, 0.96) 32%),
+			#ffffff;
+		box-shadow: 0 10px 24px rgba(0, 0, 0, 0.04);
+		overflow: hidden;
+	}
+
+	.activity-panel-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 10px 14px;
+		border-bottom: 1px solid rgba(0, 120, 212, 0.1);
+		background: rgba(0, 120, 212, 0.04);
+	}
+
+	.activity-panel-title {
+		font-size: 12px;
+		font-weight: 600;
+		letter-spacing: 0.02em;
+		text-transform: uppercase;
+		color: #004578;
+	}
+
+	.activity-panel-count {
+		font-size: 12px;
+		color: #5e6a75;
+	}
+
+	.activity-list {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.activity-item {
+		display: flex;
+		gap: 10px;
+		align-items: flex-start;
+		padding: 10px 14px;
+		border-top: 1px solid rgba(0, 0, 0, 0.04);
+	}
+
+	.activity-item:first-child {
+		border-top: none;
+	}
+
+	.activity-item.completed {
+		background: rgba(255, 255, 255, 0.72);
+	}
+
+	.activity-item.thinking {
+		background: rgba(0, 120, 212, 0.03);
+	}
+
+	.activity-icon {
+		width: 18px;
+		height: 18px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		color: #0078d4;
+		flex-shrink: 0;
+		margin-top: 1px;
+	}
+
+	.activity-body {
+		min-width: 0;
+		flex: 1;
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
-		margin-bottom: 8px;
 	}
 
-	.step-pill {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
+	.activity-label {
+		font-size: 13px;
+		line-height: 1.45;
+		color: #1b1b1b;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.activity-preview {
 		font-size: 12px;
-		color: #0078d4;
-		padding: 4px 10px;
-		border-radius: 12px;
-		background: linear-gradient(90deg, rgba(0, 120, 212, 0.08) 0%, rgba(0, 120, 212, 0.04) 50%, rgba(0, 120, 212, 0.08) 100%);
-		background-size: 200% 100%;
-		animation: shimmer 1.5s ease-in-out infinite;
-		width: fit-content;
-		max-width: 400px;
+		line-height: 1.45;
+		color: #5e6a75;
+		padding: 8px 10px;
+		border-radius: 8px;
+		background: rgba(245, 247, 250, 0.95);
+		border: 1px solid rgba(208, 215, 222, 0.8);
+		white-space: pre-wrap;
+		word-break: break-word;
 	}
 
-	.step-pill.completed {
-		color: #8b949e;
-		background: rgba(139, 148, 158, 0.08);
-		animation: none;
-	}
-
-	.step-label {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.step-spinner {
-		width: 10px;
-		height: 10px;
+	.activity-spinner {
+		width: 12px;
+		height: 12px;
 		border: 2px solid rgba(0, 120, 212, 0.3);
 		border-top-color: #0078d4;
 		border-radius: 50%;
 		animation: spin 0.8s linear infinite;
-		flex-shrink: 0;
 	}
 
-	.step-check {
-		flex-shrink: 0;
-		color: #8b949e;
+	.activity-check {
+		color: #2f7d4c;
 	}
 
-	@keyframes shimmer {
-		0% { background-position: 200% 0; }
-		100% { background-position: -200% 0; }
+	.activity-waiting {
+		padding: 0 2px;
+		font-size: 12px;
+		color: #5e6a75;
 	}
 
 	@keyframes spin {

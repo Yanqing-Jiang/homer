@@ -11,7 +11,7 @@
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { z } from "zod";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
-import { executeClaudeCommand } from "../../executors/claude.js";
+import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
 import { getRecentScrapes } from "../../scraping/scrape-store.js";
 import { storeJobArtifact } from "./artifact-store.js";
@@ -141,17 +141,19 @@ Return ONLY a valid JSON object (no markdown, no preamble):
 
 If no patterns or ideas found, use empty arrays.`;
 
-    const result = await executeClaudeCommand(prompt, {
+    const result = await executeCodexCLI(prompt, {
       cwd: process.env.HOME ?? "/Users/yj",
-      model: "sonnet",
+      model: "gpt-5.4",
+      reasoningEffort: "high",
       timeout: 1_200_000, // 20 min — matches schedule.json config
     });
 
     if (result.exitCode !== 0 || !result.output || result.output.length < 50) {
       // Single retry with same timeout
-      const retry = await executeClaudeCommand(prompt, {
+      const retry = await executeCodexCLI(prompt, {
         cwd: process.env.HOME ?? "/Users/yj",
-        model: "sonnet",
+        model: "gpt-5.4",
+        reasoningEffort: "high",
         timeout: 1_200_000,
       });
       if (retry.exitCode !== 0 || !retry.output || retry.output.length < 50) {
@@ -231,7 +233,7 @@ If no patterns or ideas found, use empty arrays.`;
     }
 
     const resultParts: string[] = [];
-    resultParts.push("single Sonnet call");
+    resultParts.push("single Codex call");
     if (patternsWritten > 0) resultParts.push(`${patternsWritten} patterns updated`);
     const ideaCreated = ideaSaveResults.filter((r) => r.action === "created").length;
     const ideaEnhanced = ideaSaveResults.filter((r) => r.action === "enhanced").length;

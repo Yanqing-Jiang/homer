@@ -27,6 +27,7 @@ export interface CodexCLIResult extends ExecutorResult {
 interface CodexStreamItem {
   id?: string;
   type?: string;
+  phase?: string;
   text?: string;
   message?: string;
   content?: string;
@@ -42,6 +43,34 @@ interface CodexStreamEvent {
   thread_id?: string;
   item?: CodexStreamItem;
   message?: string;
+}
+
+function getItemText(item: CodexStreamItem): string {
+  return item.text || (typeof item.content === "string" ? item.content : "");
+}
+
+function getCommandLabel(command: string): { label: string; labelDone: string } {
+  const shortCmd = command
+    .replace(/^\/bin\/\w+\s+-lc\s+'?/, "")
+    .replace(/'$/, "")
+    .slice(0, 80);
+  return {
+    label: `Running: ${shortCmd}`,
+    labelDone: `Ran: ${shortCmd}`,
+  };
+}
+
+function getFileChangeLabel(changes: Array<{ path?: string; kind?: string }>): {
+  label: string;
+  labelDone: string;
+} {
+  const desc = changes
+    .map((c) => `${c.kind ?? "edit"} ${c.path?.split("/").pop() ?? "file"}`)
+    .join(", ");
+  return {
+    label: `Editing: ${desc}`,
+    labelDone: `Edited: ${desc}`,
+  };
 }
 
 /**
@@ -194,11 +223,32 @@ export async function executeCodexCLI(
           if (event.type === "item.started" && onEvent) {
             const item = event.item;
             if (item?.type === "command_execution" && item.command) {
-              const shortCmd = item.command.replace(/^\/bin\/\w+\s+-lc\s+'?/, "").replace(/'$/, "").slice(0, 80);
-              try { onEvent({ type: "tool_use", id: item.id, tool: "Bash", label: `Running: ${shortCmd}`, labelDone: `Ran: ${shortCmd}`, preview: item.command }); } catch { /* */ }
+              const labels = getCommandLabel(item.command);
+              try {
+                onEvent({
+                  type: "tool_use",
+                  id: item.id,
+                  tool: "Bash",
+                  label: labels.label,
+                  labelDone: labels.labelDone,
+                  preview: item.command,
+                });
+              } catch {
+                /* */
+              }
             } else if (item?.type === "file_change" && item.changes?.length) {
-              const desc = item.changes.map(c => `${c.kind ?? "edit"} ${c.path?.split("/").pop() ?? "file"}`).join(", ");
-              try { onEvent({ type: "tool_use", id: item.id, tool: "Edit", label: `Editing: ${desc}`, labelDone: `Edited: ${desc}` }); } catch { /* */ }
+              const labels = getFileChangeLabel(item.changes);
+              try {
+                onEvent({
+                  type: "tool_use",
+                  id: item.id,
+                  tool: "Edit",
+                  label: labels.label,
+                  labelDone: labels.labelDone,
+                });
+              } catch {
+                /* */
+              }
             }
           }
 
@@ -210,23 +260,63 @@ export async function executeCodexCLI(
               item.type === "assistant_message" ||
               item.type === "message"
             ) {
-              const text =
-                item.text ||
-                (typeof item.content === "string" ? item.content : "");
+              const text = getItemText(item);
               if (text) {
-                responseChunks.push(text);
-                if (onPartial) {
-                  try { onPartial(responseChunks.join("")); } catch { /* don't crash executor */ }
+                if (item.phase === "commentary" && onEvent) {
+                  try {
+                    onEvent({
+                      type: "thinking",
+                      id: item.id,
+                      label: text,
+                      labelDone: text,
+                      preview: text,
+                    });
+                  } catch {
+                    /* don't crash executor */
+                  }
+                } else {
+                  responseChunks.push(text);
+                  if (onPartial) {
+                    try {
+                      onPartial(responseChunks.join(""));
+                    } catch {
+                      /* don't crash executor */
+                    }
+                  }
                 }
               }
               continue;
             }
             // Emit tool_result for completed tool items
-            if (onEvent && event.type === "item.completed" && (item.type === "command_execution" || item.type === "file_change")) {
-              const preview = item.type === "command_execution"
-                ? (item.exit_code === 0 ? item.aggregated_output?.slice(0, 200) : `exit ${item.exit_code}`)
-                : undefined;
-              try { onEvent({ type: "tool_result", id: item.id, label: "", labelDone: "", preview }); } catch { /* */ }
+            if (
+              onEvent &&
+              event.type === "item.completed" &&
+              (item.type === "command_execution" || item.type === "file_change")
+            ) {
+              const preview =
+                item.type === "command_execution"
+                  ? item.exit_code === 0
+                    ? item.aggregated_output?.slice(0, 200)
+                    : `exit ${item.exit_code}`
+                  : undefined;
+              const labels =
+                item.type === "command_execution" && item.command
+                  ? getCommandLabel(item.command)
+                  : item.type === "file_change" && item.changes?.length
+                    ? getFileChangeLabel(item.changes)
+                    : { label: "Working...", labelDone: "Finished" };
+              try {
+                onEvent({
+                  type: "tool_result",
+                  id: item.id,
+                  tool: item.type === "command_execution" ? "Bash" : "Edit",
+                  label: labels.label,
+                  labelDone: labels.labelDone,
+                  preview,
+                });
+              } catch {
+                /* */
+              }
             }
             if (item.type === "error") {
               const message = item.message || item.text;
@@ -266,10 +356,8 @@ export async function executeCodexCLI(
               item?.type === "assistant_message" ||
               item?.type === "message"
             ) {
-              const text =
-                item.text ||
-                (typeof item.content === "string" ? item.content : "");
-              if (text) responseChunks.push(text);
+              const text = item ? getItemText(item) : "";
+              if (text && item?.phase !== "commentary") responseChunks.push(text);
             } else if (item?.type === "error") {
               const message = item.message || item.text;
               if (message) errorChunks.push(message);
