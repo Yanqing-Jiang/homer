@@ -344,8 +344,8 @@ If nothing to promote, use an empty array.`;
             sessionIds,
           });
 
-          if (claimId && confidence >= 0.75) {
-            // Auto-approve high-confidence claims — no Telegram card needed
+          if (claimId && confidence >= 0.95) {
+            // Auto-approve only near-certain claims — most go to Telegram for review
             const ok = await approveCandidate(db, claimId, canonicalMemory);
             if (ok) {
               db.prepare(`UPDATE knowledge_claims SET decided_by = 'auto-approve' WHERE id = ?`).run(claimId);
@@ -374,7 +374,7 @@ If nothing to promote, use an empty array.`;
           ).get() as { c: number };
 
           if (totalPending.c > 50 || oldestAge > 14) {
-            const autoApproved = await autoApproveHighConfidence(db, canonicalMemory, 0.8);
+            const autoApproved = await autoApproveHighConfidence(db, canonicalMemory, 0.95);
             if (autoApproved > 0) {
               writtenPromos = autoApproved;
               logger.warn({ autoApproved, queueSize: totalPending.c, oldestAgeDays: Math.round(oldestAge) },
@@ -436,7 +436,7 @@ If nothing to promote, use an empty array.`;
       parts.push(`${candidatesCreated} candidates queued for review`);
     }
     if (autoApprovedCount > 0) {
-      parts.push(`${autoApprovedCount} auto-approved (confidence >= 0.75)`);
+      parts.push(`${autoApprovedCount} auto-approved (confidence >= 0.95)`);
     }
     if (autoRejectedCount > 0) {
       parts.push(`${autoRejectedCount} auto-rejected (confidence < 0.5)`);

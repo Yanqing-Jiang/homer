@@ -323,7 +323,7 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
     let lastError = "";
 
     // Retry strategy: try full count, then smaller if it fails
-    for (const maxItems of [30, 15]) {
+    for (const maxItems of [10, 6]) {
       try {
         bookmarks = await runBookmarkExtraction(maxItems);
         logger.info({ count: bookmarks.length, target: maxItems }, "Bookmark extraction succeeded");
