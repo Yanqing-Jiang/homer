@@ -3,6 +3,7 @@
  * Used by both +page.svelte and sessions/+page.svelte.
  */
 import * as api from '$lib/api/client';
+import { buildStreamingStepsFromRunEvents } from '$lib/utils/run-steps';
 
 export interface DisplayMessage {
 	id?: string;
@@ -111,14 +112,7 @@ export async function loadThread(tId: string): Promise<void> {
 
 	// Restore active run step state from persisted run events
 	if (thread.activeRun && thread.activeRun.status === 'running') {
-		streamingSteps = thread.activeRun.events.map((e: api.RunEvent) => ({
-			type: e.kind,
-			id: e.payloadJson ? JSON.parse(e.payloadJson).toolId : undefined,
-			label: e.label ?? '',
-			labelDone: e.labelDone ?? '',
-			startedAt: new Date(e.createdAt).getTime(),
-			completed: e.kind === 'tool_result',
-		}));
+		streamingSteps = buildStreamingStepsFromRunEvents(thread.activeRun.events);
 		isStreaming = true;
 	}
 }

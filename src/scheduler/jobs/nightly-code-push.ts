@@ -2,7 +2,7 @@
  * Auto-commit ~/homer/ code changes and push to GitHub nightly.
  * Provides: version history, backup, and triggers GitHub Actions (web UI rebuild).
  *
- * Uses Claude Sonnet to generate descriptive commit messages from the staged diff.
+ * Uses Codex GPT-5.4 to generate descriptive commit messages from the staged diff.
  *
  * NOTE: Does NOT run `npm run deploy` — that kills the running daemon (launchctl bootout).
  * Web UI rebuild is handled by GitHub Actions on push. Daemon code changes deploy manually.
@@ -11,7 +11,7 @@
 import { execSync } from "child_process";
 import { existsSync } from "fs";
 import { logger } from "../../utils/logger.js";
-import { executeClaudeCommand } from "../../executors/claude.js";
+import { executeCodexCLI } from "../../executors/codex-cli.js";
 
 const PROJECT_DIR = "/Users/yj/homer";
 const PUSH_RETRIES = 3;
@@ -24,8 +24,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Use Claude Sonnet to generate a descriptive commit message from the staged diff.
- * Falls back to a generic message if Sonnet is unavailable or fails.
+ * Use Codex GPT-5.4 to generate a descriptive commit message from the staged diff.
+ * Falls back to a generic message if Codex is unavailable or fails.
  */
 async function generateCommitMessage(date: string, fileCount: number): Promise<string> {
   const fallback = `chore: nightly snapshot ${date} (${fileCount} files)`;
@@ -62,22 +62,23 @@ Write a commit message with:
 
 Output ONLY the commit message. No preamble, no explanation, no markdown fences.`;
 
-    const result = await executeClaudeCommand(prompt, {
+    const result = await executeCodexCLI(prompt, {
       cwd: PROJECT_DIR,
-      model: "sonnet",
+      model: "gpt-5.4",
+      reasoningEffort: "high",
       timeout: 600_000,
     });
 
     const output = result.output?.trim() ?? "";
     if (!output || output.length < 10) {
-      logger.warn(`${logPrefix()} Sonnet returned empty response, using fallback`);
+      logger.warn(`${logPrefix()} Codex returned empty response, using fallback`);
       return fallback;
     }
 
-    logger.info(`${logPrefix()} Generated commit message via Sonnet`);
+    logger.info(`${logPrefix()} Generated commit message via Codex`);
     return output;
   } catch (err: any) {
-    logger.warn(`${logPrefix()} Sonnet commit generation failed: ${err.message ?? err}, using fallback`);
+    logger.warn(`${logPrefix()} Codex commit generation failed: ${err.message ?? err}, using fallback`);
     return fallback;
   }
 }
@@ -129,7 +130,7 @@ export async function runNightlyCodePush(): Promise<{
       logger.info({ fileCount: lines.length }, `${prefix} Staging changes...`);
       execSync("git add -A", { cwd: PROJECT_DIR, timeout: 30_000 });
 
-      // Generate descriptive commit message via Claude Sonnet
+      // Generate descriptive commit message via Codex GPT-5.4
       commitMsg = await generateCommitMessage(date, lines.length);
 
       execSync(`git commit -F -`, {

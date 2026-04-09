@@ -456,6 +456,21 @@ ${pendingContext.context}
               let queue = this.stepQueues.get(runId);
               if (!queue) { queue = []; this.stepQueues.set(runId, queue); }
               queue.push(event);
+              if (params.threadId) {
+                this.stateManager.createRunEvent({
+                  id: randomUUID(),
+                  runId,
+                  threadId: params.threadId,
+                  kind: event.type,
+                  label: event.label,
+                  labelDone: event.labelDone,
+                  payload: {
+                    toolId: event.id,
+                    preview: event.preview,
+                    tool: event.tool,
+                  },
+                });
+              }
             };
           }
           const result = await runExecutor(executor as ExecutorKind);

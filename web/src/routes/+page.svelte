@@ -13,6 +13,7 @@
 	import SearchDropdown from '$lib/components/SearchDropdown.svelte';
 	import { clickOutside } from '$lib/actions/clickOutside';
 	import { toast } from '$lib/stores/toasts.svelte';
+	import { buildStreamingStepsFromRunEvents } from '$lib/utils/run-steps';
 
 	const auth = useAuth();
 
@@ -48,6 +49,61 @@
 		streamingContent = '';
 		streamingSteps = [];
 		currentAbort = null;
+	}
+
+	function applyStreamingStep(step: api.StepEvent) {
+		if (step.type === 'tool_use') {
+			streamingSteps = [...streamingSteps, { ...step, startedAt: Date.now(), completed: false }];
+			return;
+		}
+
+		if (step.type === 'tool_result') {
+			if (step.id) {
+				const existing = streamingSteps.find((s) => s.id === step.id && s.type === 'tool_use');
+				if (existing) {
+					streamingSteps = streamingSteps.map((s) =>
+						s.id === step.id && s.type === 'tool_use'
+							? {
+									...s,
+									completed: true,
+									labelDone: step.labelDone || s.labelDone,
+									preview: step.preview ?? s.preview,
+								}
+							: s
+					);
+					return;
+				}
+			}
+
+			streamingSteps = [
+				...streamingSteps,
+				{
+					...step,
+					type: 'tool_use',
+					label: step.label || step.labelDone || 'Working...',
+					labelDone: step.labelDone || step.label || 'Finished',
+					startedAt: Date.now(),
+					completed: true,
+				},
+			];
+			return;
+		}
+
+		if (step.type === 'thinking') {
+			if (step.id) {
+				const existing = streamingSteps.find((s) => s.id === step.id && s.type === 'thinking');
+				if (existing) {
+					streamingSteps = streamingSteps.map((s) =>
+						s.id === step.id && s.type === 'thinking'
+							? { ...s, ...step, completed: true, startedAt: s.startedAt }
+							: s
+					);
+					return;
+				}
+			}
+
+			streamingSteps = [...streamingSteps, { ...step, startedAt: Date.now(), completed: true }];
+		}
 	}
 
 	// Session dropdown state
@@ -654,14 +710,7 @@
 
 			// Restore active run step state from persisted run events
 			if (thread.activeRun && thread.activeRun.status === 'running') {
-				streamingSteps = thread.activeRun.events.map((e: api.RunEvent) => ({
-					type: e.kind as 'tool_use' | 'tool_result' | 'thinking',
-					id: e.payloadJson ? JSON.parse(e.payloadJson).toolId : undefined,
-					label: e.label ?? '',
-					labelDone: e.labelDone ?? '',
-					startedAt: new Date(e.createdAt).getTime(),
-					completed: e.kind === 'tool_result',
-				}));
+				streamingSteps = buildStreamingStepsFromRunEvents(thread.activeRun.events);
 				isStreaming = true;
 			}
 		} catch (e) {
@@ -975,7 +1024,7 @@ Just confirm when done. Keep your response brief.`;
 				currentAbort = stream;
 			} else {
 				// Non-Claude: execute + SSE streaming via run events
-				streamingContent = 'Thinking...';
+				streamingContent = '';
 				try {
 					const result = await api.executeMessage(
 						threadId,
@@ -988,19 +1037,13 @@ Just confirm when done. Keep your response brief.`;
 					const eventStream = api.streamRunEvents(runId, {
 						onPartial: (data) => {
 							if (isStale()) return;
-							streamingContent = data.delta
-								? (streamingContent === 'Thinking...' ? '' : streamingContent) + data.delta
-								: streamingContent;
+							if (data.delta) {
+								streamingContent += data.delta;
+							}
 						},
 						onStep: (data) => {
 							if (isStale()) return;
-							if (data.type === 'tool_use') {
-								streamingSteps = [...streamingSteps, { ...data, startedAt: Date.now(), completed: false }];
-							} else if (data.type === 'tool_result' && data.id) {
-								streamingSteps = streamingSteps.map(s =>
-									s.id === data.id ? { ...s, completed: true } : s
-								);
-							}
+							applyStreamingStep(data);
 						},
 						onStatus: async (data) => {
 							if (isStale()) return;
@@ -1019,7 +1062,7 @@ Just confirm when done. Keep your response brief.`;
 									}
 								} catch {
 									// Use streamed content as fallback
-									const fallback = streamingContent !== 'Thinking...' ? streamingContent : '';
+									const fallback = streamingContent.trim();
 									if (fallback) {
 										messages = [...messages, { role: 'assistant', content: fallback, timestamp: new Date() }];
 									}

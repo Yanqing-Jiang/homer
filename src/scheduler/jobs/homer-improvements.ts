@@ -1,7 +1,7 @@
 /**
- * HOMER Improvements — Claude Opus 1M codebase analysis + executable plan generation.
+ * HOMER Improvements — Codex GPT-5.4 codebase analysis + executable plan generation.
  *
- * Runs Claude Opus (1M context) for codebase analysis and structured JSON output.
+ * Runs Codex GPT-5.4 with high reasoning for codebase analysis and structured JSON output.
  * Single-pass — no consolidation step needed.
  *
  * Prompt priority: critical issues/fixes → impactful optimizations → Yanqing's goals.
@@ -13,7 +13,7 @@ import { readFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { execSync } from "child_process";
 import { z } from "zod";
-import { executeClaudeCommand } from "../../executors/claude.js";
+import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { buildSchedulerContext } from "../shared-context.js";
 import { loadIdeasFromDir } from "../../ideas/parser.js";
@@ -25,7 +25,7 @@ import { storeJobArtifact } from "./artifact-store.js";
 import { PATHS } from "../../config/paths.js";
 
 const HOMER_DIR = "/Users/yj/homer";
-const OUTPUT_DIR = "/Users/yj/homer/output/claude";
+const OUTPUT_DIR = "/Users/yj/homer/output/codex";
 const MAX_SOURCE_CHARS = 80_000;
 
 // Priority files to read — core modules that improvements would target
@@ -263,14 +263,15 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
       buildHealth, recentFailures, sourceContext, fileListing,
       schedulerContext, existingTitles, archivedTitles,
       outputPath,
-      agentLabel: "Claude Opus (codebase analysis)",
+      agentLabel: "Codex GPT-5.4 (codebase analysis)",
     });
 
-    logger.info("Running homer-improvements: Claude Opus 1M");
+    logger.info("Running homer-improvements: Codex GPT-5.4 high reasoning");
 
-    const result = await executeClaudeCommand(prompt, {
+    const result = await executeCodexCLI(prompt, {
       cwd: HOMER_DIR,
-      model: "opus[1m]",
+      model: "gpt-5.4",
+      reasoningEffort: "high",
       timeout: 1_200_000, // 20 min
     });
 
@@ -286,7 +287,7 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
     }
 
     if (!rawJson) {
-      return { success: false, output: "", error: "Claude Opus produced no parseable output" };
+      return { success: false, output: "", error: "Codex produced no parseable output" };
     }
 
     // Store artifact
