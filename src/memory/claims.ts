@@ -425,7 +425,7 @@ export function archiveClaim(db: Database.Database, claimId: string): boolean {
   const result = db.prepare(`
     UPDATE knowledge_claims
     SET status = 'archived', updated_at = datetime('now'), decided_at = datetime('now'), decided_by = 'user'
-    WHERE id = ? AND status IN ('approved', 'candidate')
+    WHERE id = ? AND status IN ('approved', 'candidate', 'stale')
   `).run(claimId);
 
   return result.changes > 0;
