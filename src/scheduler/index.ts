@@ -159,7 +159,6 @@ export class Scheduler {
       reindex: "memory-reindex",
       embeddings: "memory-embeddings",
       context_bridge: "context-bridge-refresh",
-      git_commit: "memory-git-commit",
     };
 
     memoryEvents.on("pipeline:dirty", ({ pipeline }: { pipeline: string }) => {

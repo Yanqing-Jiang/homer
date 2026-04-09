@@ -7,14 +7,11 @@
 import { logger } from "../../utils/logger.js";
 import type { StateManager } from "../../state/manager.js";
 
-export async function runMemoryGitCommit(stateManager?: StateManager): Promise<{
+export async function runMemoryGitCommit(_stateManager?: StateManager): Promise<{
   success: boolean;
   output: string;
   error?: string;
 }> {
-  if (stateManager) {
-    stateManager.clearPipelineDirty("git_commit");
-  }
   const output = "Memory git commit disabled by user rule";
   logger.info(output);
   return { success: true, output };
