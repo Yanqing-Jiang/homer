@@ -407,7 +407,7 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
     let approved = 0;
     for (const c of batchItems) {
       const ok = c.status === "stale"
-        ? (markClaimValidated(db, c.id), true)
+        ? markClaimValidated(db, c.id)
         : await approveCandidate(db, c.id, cms);
       if (ok) approved++;
     }
@@ -438,19 +438,19 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
       return;
     }
 
+    let dismissed = 0;
     for (const c of batchItems) {
-      if (c.status === "stale") {
-        archiveClaim(db, c.id);
-      } else {
-        rejectCandidate(db, c.id);
-      }
+      const ok = c.status === "stale"
+        ? archiveClaim(db, c.id)
+        : rejectCandidate(db, c.id);
+      if (ok) dismissed++;
     }
 
     await ctx.editMessageText(
-      `❌ <b>Dismissed ${batchItems.length} items</b>`,
+      `❌ <b>Dismissed ${dismissed} items</b>`,
       { parse_mode: "HTML" },
     );
-    await ctx.answerCallbackQuery(`Dismissed ${batchItems.length} items`);
+    await ctx.answerCallbackQuery(`Dismissed ${dismissed} items`);
   });
 
   // ── Reply capture (unified edit/reject handler) ──
@@ -469,9 +469,12 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
     const intent = detectReplyIntent(replyText, replyCtx.originalContent);
 
     if (intent === "reject") {
-      rejectCandidate(db, replyCtx.claimId);
+      // Try reject (candidate) first, fall back to archive (stale/approved)
+      const ok = rejectCandidate(db, replyCtx.claimId) || archiveClaim(db, replyCtx.claimId);
       await ctx.reply(
-        formatScheduledTelegramHtml(`❌ <b>Rejected</b>\n<s>"${escapeHtml(replyCtx.originalContent.slice(0, 120))}"</s>`),
+        formatScheduledTelegramHtml(ok
+          ? `❌ <b>Rejected</b>\n<s>"${escapeHtml(replyCtx.originalContent.slice(0, 120))}"</s>`
+          : `⚠️ Already processed`),
         { parse_mode: "HTML", reply_parameters: { message_id: ctx.message.message_id } },
       );
       return;
