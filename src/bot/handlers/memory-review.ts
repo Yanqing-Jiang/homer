@@ -20,7 +20,6 @@ import {
   rejectCandidate,
   editAndApprove,
   getClaim,
-  setClaimTelegramMessage,
   markClaimValidated,
   archiveClaim,
   type KnowledgeClaim,
@@ -92,11 +91,11 @@ async function updateBatchKeyboard(
   const db = stateManagerRef?.getDb();
   if (!db) return;
 
-  // Find all claims in this batch (same telegram_message_id)
+  // Find all claims in this batch, preserving original display order
   const batchClaims = db.prepare(`
     SELECT id, status FROM knowledge_claims
     WHERE telegram_message_id = ?
-    ORDER BY created_at ASC
+    ORDER BY batch_position ASC, created_at ASC
   `).all(messageId) as Array<{ id: string; status: string }>;
 
   if (batchClaims.length === 0) return;
@@ -107,10 +106,10 @@ async function updateBatchKeyboard(
     const id = c.id.slice(-10);
     const label = `${i + 1}`;
 
-    if (c.status === "approved" || c.status === "validated") {
-      keyboard.text(`✅ ${label} done`, `m:noop`).text(`  `, `m:noop`).text(`  `, `m:noop`);
+    if (c.status === "approved") {
+      keyboard.text(`✅ ${label} done`, `m:noop`).text(`—`, `m:noop`).text(`—`, `m:noop`);
     } else if (c.status === "rejected" || c.status === "archived") {
-      keyboard.text(`❌ ${label} skip`, `m:noop`).text(`  `, `m:noop`).text(`  `, `m:noop`);
+      keyboard.text(`❌ ${label} skip`, `m:noop`).text(`—`, `m:noop`).text(`—`, `m:noop`);
     } else {
       keyboard.text(`✅ ${label}`, `m:a:${id}`).text(`💬 ${label}`, `m:p:${id}`).text(`❌ ${label}`, `m:r:${id}`);
     }
@@ -179,9 +178,12 @@ export async function sendMemoryMoments(
       parse_mode: "HTML",
       reply_markup: keyboard,
     });
-    // Track telegram_message_id for all candidates in this batch
-    for (const claim of candidates) {
-      setClaimTelegramMessage(db, claim.id, sent.message_id);
+    // Track telegram_message_id and batch position for all candidates
+    const setBatch = db.prepare(
+      `UPDATE knowledge_claims SET telegram_message_id = ?, batch_position = ? WHERE id = ?`
+    );
+    for (let i = 0; i < candidates.length; i++) {
+      setBatch.run(sent.message_id, i, candidates[i]!.id);
     }
   } catch (err) {
     logger.error({ error: err, count: candidates.length }, "Failed to send batched Memory Moments");
@@ -254,10 +256,10 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
     const db = stateManagerRef!.getDb();
     const cms = getCanonicalMemoryService(stateManagerRef!, getMemoryIndexer());
     const ok = claim.status === "stale"
-      ? (markClaimValidated(db, claim.id), true)
+      ? markClaimValidated(db, claim.id)
       : await approveCandidate(db, claim.id, cms);
 
-    await ctx.answerCallbackQuery(ok ? `✅ Approved` : "Approval failed");
+    await ctx.answerCallbackQuery(ok ? `✅ Approved` : "Already processed");
     if (ok && ctx.callbackQuery.message) {
       await updateBatchKeyboard(ctx, ctx.callbackQuery.message.message_id);
     }
@@ -270,16 +272,18 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
 
     const claim = findClaim(idSuffix);
     if (!claim) { await ctx.answerCallbackQuery("Claim not found"); return; }
-
-    const db = stateManagerRef!.getDb();
-    if (claim.status === "stale") {
-      archiveClaim(db, claim.id);
-    } else {
-      rejectCandidate(db, claim.id);
+    if (claim.status !== "candidate" && claim.status !== "stale") {
+      await ctx.answerCallbackQuery(`Already ${claim.status}`);
+      return;
     }
 
-    await ctx.answerCallbackQuery(`❌ Rejected`);
-    if (ctx.callbackQuery.message) {
+    const db = stateManagerRef!.getDb();
+    const ok = claim.status === "stale"
+      ? archiveClaim(db, claim.id)
+      : rejectCandidate(db, claim.id);
+
+    await ctx.answerCallbackQuery(ok ? `❌ Rejected` : "Already processed");
+    if (ok && ctx.callbackQuery.message) {
       await updateBatchKeyboard(ctx, ctx.callbackQuery.message.message_id);
     }
   });
@@ -380,24 +384,31 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
     await ctx.answerCallbackQuery("Marked as valid ✅");
   });
 
-  // ── Bulk: Approve All ──
+  // ── Bulk: Approve All (scoped to current message batch) ──
   bot.callbackQuery(/^m:aa$/, async (ctx) => {
     const db = stateManagerRef?.getDb();
     if (!db) { await ctx.answerCallbackQuery("DB unavailable"); return; }
 
-    const candidates = db.prepare(
-      `SELECT id FROM knowledge_claims WHERE status = 'candidate' ORDER BY created_at DESC LIMIT 10`
-    ).all() as Array<{ id: string }>;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!messageId) { await ctx.answerCallbackQuery("No message context"); return; }
 
-    if (candidates.length === 0) {
-      await ctx.answerCallbackQuery("No pending candidates");
+    const batchItems = db.prepare(
+      `SELECT id, status FROM knowledge_claims
+       WHERE telegram_message_id = ? AND status IN ('candidate', 'stale')
+       ORDER BY batch_position ASC`
+    ).all(messageId) as Array<{ id: string; status: string }>;
+
+    if (batchItems.length === 0) {
+      await ctx.answerCallbackQuery("No pending items");
       return;
     }
 
     const cms = getCanonicalMemoryService(stateManagerRef!, getMemoryIndexer());
     let approved = 0;
-    for (const c of candidates) {
-      const ok = await approveCandidate(db, c.id, cms);
+    for (const c of batchItems) {
+      const ok = c.status === "stale"
+        ? (markClaimValidated(db, c.id), true)
+        : await approveCandidate(db, c.id, cms);
       if (ok) approved++;
     }
 
@@ -408,29 +419,38 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
     await ctx.answerCallbackQuery(`Approved ${approved} items ✅`);
   });
 
-  // ── Bulk: Dismiss All ──
+  // ── Bulk: Dismiss All (scoped to current message batch) ──
   bot.callbackQuery(/^m:da$/, async (ctx) => {
     const db = stateManagerRef?.getDb();
     if (!db) { await ctx.answerCallbackQuery("DB unavailable"); return; }
 
-    const candidates = db.prepare(
-      `SELECT id FROM knowledge_claims WHERE status = 'candidate' ORDER BY created_at DESC LIMIT 10`
-    ).all() as Array<{ id: string }>;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!messageId) { await ctx.answerCallbackQuery("No message context"); return; }
 
-    if (candidates.length === 0) {
-      await ctx.answerCallbackQuery("No pending candidates");
+    const batchItems = db.prepare(
+      `SELECT id, status FROM knowledge_claims
+       WHERE telegram_message_id = ? AND status IN ('candidate', 'stale')
+       ORDER BY batch_position ASC`
+    ).all(messageId) as Array<{ id: string; status: string }>;
+
+    if (batchItems.length === 0) {
+      await ctx.answerCallbackQuery("No pending items");
       return;
     }
 
-    for (const c of candidates) {
-      rejectCandidate(db, c.id);
+    for (const c of batchItems) {
+      if (c.status === "stale") {
+        archiveClaim(db, c.id);
+      } else {
+        rejectCandidate(db, c.id);
+      }
     }
 
     await ctx.editMessageText(
-      `❌ <b>Dismissed ${candidates.length} items</b>`,
+      `❌ <b>Dismissed ${batchItems.length} items</b>`,
       { parse_mode: "HTML" },
     );
-    await ctx.answerCallbackQuery(`Dismissed ${candidates.length} items`);
+    await ctx.answerCallbackQuery(`Dismissed ${batchItems.length} items`);
   });
 
   // ── Reply capture (unified edit/reject handler) ──
