@@ -18,7 +18,7 @@ import type { SkillFrontmatter, SkillStatus } from "../skills/types.js";
 import type { StateManager } from "../state/manager.js";
 import type { MemoryIndexer } from "./indexer.js";
 
-const ALL_WRITE_PIPELINES = ["reindex", "embeddings", "context_bridge", "git_commit"] as const;
+const ALL_WRITE_PIPELINES = ["reindex", "embeddings", "context_bridge"] as const;
 
 export class CanonicalMemoryService {
   private sm: StateManager;
