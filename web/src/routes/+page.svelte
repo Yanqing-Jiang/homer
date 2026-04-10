@@ -37,6 +37,7 @@
 	let isStreaming = $state(false);
 	let streamingContent = $state('');
 	let streamingSteps = $state<Array<api.StepEvent & { startedAt: number; completed: boolean }>>([]);
+	let activeRunId = $state<string | null>(null);
 	let currentAbort = $state<{ abort: () => void } | null>(null);
 	let chatError = $state<string | null>(null);
 	let lastFailedMessage = $state<string | null>(null);
@@ -45,9 +46,11 @@
 	let activeStreamGen = 0; // generation counter to guard stale callbacks
 
 	function resetStreamingState() {
+		activeStreamGen += 1;
 		isStreaming = false;
 		streamingContent = '';
 		streamingSteps = [];
+		activeRunId = null;
 		currentAbort = null;
 	}
 
@@ -104,6 +107,91 @@
 
 			streamingSteps = [...streamingSteps, { ...step, startedAt: Date.now(), completed: true }];
 		}
+	}
+
+	function applyMessageChunk(chunk: api.MessageChunkEvent) {
+		if (chunk.phase === 'final_answer' && chunk.delta) {
+			streamingContent += chunk.delta;
+		}
+	}
+
+	function restoreActiveRunState(activeRun: api.ThreadActiveRun) {
+		streamingSteps = buildStreamingStepsFromRunEvents(activeRun.events);
+		streamingContent =
+			activeRun.streamPhase === 'final_answer' ? (activeRun.streamText ?? '') : '';
+		isStreaming = true;
+		activeRunId = activeRun.id;
+	}
+
+	function startRunEventStream(
+		runId: string,
+		executor: string,
+		options?: { preserveState?: boolean }
+	) {
+		const preserveState = options?.preserveState ?? false;
+		const gen = ++activeStreamGen;
+		const isStale = () => gen !== activeStreamGen;
+
+		if (!preserveState) {
+			streamingContent = '';
+			streamingSteps = [];
+		}
+
+		isStreaming = true;
+		activeRunId = runId;
+
+		const eventStream = api.streamRunEvents(runId, {
+			onPartial: (data) => {
+				if (isStale() || executor === 'codex') return;
+				if (data.delta) {
+					streamingContent += data.delta;
+				}
+			},
+			onMessageChunk: (data) => {
+				if (isStale()) return;
+				applyMessageChunk(data);
+			},
+			onStep: (data) => {
+				if (isStale()) return;
+				applyStreamingStep(data);
+			},
+			onStatus: async (data) => {
+				if (isStale()) return;
+				if (
+					data.status === 'completed' ||
+					data.status === 'failed' ||
+					data.status === 'cancelled'
+				) {
+					try {
+						const run = await api.getRun(runId);
+						const output = run.run.output || (run.run.error ?? '');
+						const expiredPattern = /session expired|session not found/i;
+						if (expiredPattern.test(output) || expiredPattern.test(run.run.error ?? '')) {
+							sessionExpired = true;
+						}
+						if (output) {
+							messages = [...messages, { role: 'assistant', content: output, timestamp: new Date() }];
+						} else if (data.status === 'cancelled') {
+							chatError = 'Run cancelled.';
+						}
+					} catch {
+						const fallback = streamingContent.trim();
+						if (fallback) {
+							messages = [...messages, { role: 'assistant', content: fallback, timestamp: new Date() }];
+						}
+					}
+					resetStreamingState();
+					executorMessageCount++;
+				}
+			},
+			onError: (err) => {
+				if (isStale()) return;
+				chatError = err.message;
+				resetStreamingState();
+			}
+		});
+
+		currentAbort = eventStream;
 	}
 
 	// Session dropdown state
@@ -710,8 +798,12 @@
 
 			// Restore active run step state from persisted run events
 			if (thread.activeRun && thread.activeRun.status === 'running') {
-				streamingSteps = buildStreamingStepsFromRunEvents(thread.activeRun.events);
-				isStreaming = true;
+				restoreActiveRunState(thread.activeRun);
+				if (thread.activeRun.executor !== 'claude' && thread.activeRun.executor !== 'chatgpt') {
+					startRunEventStream(thread.activeRun.id, thread.activeRun.executor, {
+						preserveState: true
+					});
+				}
 			}
 		} catch (e) {
 			console.error('Failed to load thread messages:', e);
@@ -1033,52 +1125,7 @@ Just confirm when done. Keep your response brief.`;
 						currentRichAttachments.length > 0 ? currentRichAttachments : undefined,
 					);
 					const runId = result.runId;
-
-					const eventStream = api.streamRunEvents(runId, {
-						onPartial: (data) => {
-							if (isStale()) return;
-							if (data.delta) {
-								streamingContent += data.delta;
-							}
-						},
-						onStep: (data) => {
-							if (isStale()) return;
-							applyStreamingStep(data);
-						},
-						onStatus: async (data) => {
-							if (isStale()) return;
-							if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
-								try {
-									const run = await api.getRun(runId);
-									const output = run.run.output || (run.run.error ?? '');
-									const expiredPattern = /session expired|session not found/i;
-									if (expiredPattern.test(output) || expiredPattern.test(run.run.error ?? '')) {
-										sessionExpired = true;
-									}
-									if (output) {
-										messages = [...messages, { role: 'assistant', content: output, timestamp: new Date() }];
-									} else if (data.status === 'cancelled') {
-										chatError = 'Run cancelled.';
-									}
-								} catch {
-									// Use streamed content as fallback
-									const fallback = streamingContent.trim();
-									if (fallback) {
-										messages = [...messages, { role: 'assistant', content: fallback, timestamp: new Date() }];
-									}
-								}
-								resetStreamingState();
-								executorMessageCount++;
-							}
-						},
-						onError: (err) => {
-							if (isStale()) return;
-							chatError = err.message;
-							resetStreamingState();
-						},
-					});
-
-					currentAbort = eventStream;
+					startRunEventStream(runId, currentExecutor);
 				} catch (execError) {
 					console.error('Execute error:', execError);
 					chatError = execError instanceof Error ? execError.message : 'Execution failed';
@@ -1370,7 +1417,13 @@ Just confirm when done. Keep your response brief.`;
 					{/if}
 
 					<!-- Chat Messages Area -->
-					<ChatMessages {messages} {isStreaming} {streamingContent} steps={streamingSteps} />
+					<ChatMessages
+						{messages}
+						{isStreaming}
+						{streamingContent}
+						steps={streamingSteps}
+						activityKey={activeRunId ?? threadId ?? 'chat'}
+					/>
 
 					<!-- Chat Input Area -->
 					<ChatInput

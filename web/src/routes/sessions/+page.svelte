@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { StatusBadge, EmptyState, AuthOverlay } from '$lib/components';
+	import { StatusBadge, EmptyState, AuthOverlay, RunActivityPanel } from '$lib/components';
 	import { useAuth } from '$lib/hooks/useAuth.svelte';
 	import * as api from '$lib/api/client';
 	import { toast } from '$lib/stores/toasts.svelte';
@@ -43,10 +43,9 @@
 	let uploadError = $state<string | null>(null);
 
 	// Thread live updates via SSE
-	// NOT $state — must not trigger $effect re-runs
 	let threadSubscription: { abort: () => void } | null = null;
 	let runSubscription: { abort: () => void } | null = null;
-	let activeRunId: string | null = null;
+	let activeRunId = $state<string | null>(null);
 
 	$effect(() => {
 		const tid = selectedThread?.id;
@@ -139,16 +138,10 @@
 		}
 	}
 
-	function activityLabel(step: api.StepEvent & { completed: boolean }): string {
-		if (step.type === 'thinking') {
-			return step.labelDone || step.label;
+	function applyMessageChunk(chunk: api.MessageChunkEvent) {
+		if (chunk.phase === 'final_answer' && chunk.delta) {
+			streamingContent += chunk.delta;
 		}
-		return step.completed ? step.labelDone : step.label;
-	}
-
-	function activityIcon(step: api.StepEvent & { completed: boolean }): 'spark' | 'done' | 'spinner' {
-		if (step.type === 'thinking') return 'spark';
-		return step.completed ? 'done' : 'spinner';
 	}
 
 	async function handleRunFinished(
@@ -179,19 +172,34 @@
 		}
 	}
 
-	function startRunStream(runId: string, threadId: string) {
+	function startRunStream(
+		runId: string,
+		threadId: string,
+		executor: string,
+		options?: { preserveState?: boolean }
+	) {
 		if (activeRunId === runId && runSubscription) return;
+		const preserveState = options?.preserveState ?? false;
 
 		runSubscription?.abort();
 		runSubscription = null;
 		activeRunId = runId;
+		if (!preserveState) {
+			streamingContent = '';
+			streamingSteps = [];
+		}
 
 		runSubscription = api.streamRunEvents(runId, {
 			onPartial: (data) => {
 				if (selectedThread?.id !== threadId || activeRunId !== runId) return;
+				if (executor === 'codex') return;
 				if (data.delta) {
 					streamingContent += data.delta;
 				}
+			},
+			onMessageChunk: (data) => {
+				if (selectedThread?.id !== threadId || activeRunId !== runId) return;
+				applyMessageChunk(data);
 			},
 			onStep: (data) => {
 				if (selectedThread?.id !== threadId || activeRunId !== runId) return;
@@ -277,7 +285,13 @@
 				fullThread.activeRun.executor !== 'chatgpt'
 			) {
 				streamingSteps = buildStreamingStepsFromRunEvents(fullThread.activeRun.events);
-				startRunStream(fullThread.activeRun.id, fullThread.id);
+				streamingContent =
+					fullThread.activeRun.streamPhase === 'final_answer'
+						? (fullThread.activeRun.streamText ?? '')
+						: '';
+				startRunStream(fullThread.activeRun.id, fullThread.id, fullThread.activeRun.executor, {
+					preserveState: true
+				});
 			}
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to load thread';
@@ -509,7 +523,7 @@
 					)
 				};
 			}
-			startRunStream(result.runId, threadId);
+			startRunStream(result.runId, threadId, provider);
 		} catch (err) {
 			sendingMessage = false;
 			resetStreamingState();
@@ -1045,37 +1059,11 @@
 									</div>
 									<div class="message-content">
 										{#if streamingSteps.length > 0}
-											<div class="activity-panel">
-												<div class="activity-panel-header">
-													<span class="activity-panel-title">Run activity</span>
-													<span class="activity-panel-count">{streamingSteps.length} step{streamingSteps.length === 1 ? '' : 's'}</span>
-												</div>
-												<div class="activity-list">
-													{#each streamingSteps as step (step.id ?? `${step.type}:${step.label}:${step.startedAt}`)}
-														<div class="activity-item" class:completed={step.completed} class:thinking={step.type === 'thinking'}>
-															<div class="activity-icon">
-																{#if activityIcon(step) === 'spark'}
-																	<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-																		<path d="M12 2L9.5 9.5L2 12L9.5 14.5L12 22L14.5 14.5L22 12L14.5 9.5L12 2Z" />
-																	</svg>
-																{:else if activityIcon(step) === 'done'}
-																	<svg class="activity-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-																		<path d="M20 6L9 17l-5-5" />
-																	</svg>
-																{:else}
-																	<span class="activity-spinner"></span>
-																{/if}
-															</div>
-															<div class="activity-body">
-																<div class="activity-label">{activityLabel(step)}</div>
-																{#if step.preview}
-																	<div class="activity-preview">{step.preview}</div>
-																{/if}
-															</div>
-														</div>
-													{/each}
-												</div>
-											</div>
+											<RunActivityPanel
+												steps={streamingSteps}
+												isRunning={activeRunId !== null}
+												storageKey={activeRunId ?? selectedThread.id}
+											/>
 										{/if}
 										{#if streamingContent}
 											<p class="message-text">{streamingContent}<span class="cursor">|</span></p>
@@ -1092,37 +1080,11 @@
 										</svg>
 									</div>
 									<div class="message-content">
-										<div class="activity-panel">
-											<div class="activity-panel-header">
-												<span class="activity-panel-title">Run activity</span>
-												<span class="activity-panel-count">{streamingSteps.length} step{streamingSteps.length === 1 ? '' : 's'}</span>
-											</div>
-											<div class="activity-list">
-												{#each streamingSteps as step (step.id ?? `${step.type}:${step.label}:${step.startedAt}`)}
-													<div class="activity-item" class:completed={step.completed} class:thinking={step.type === 'thinking'}>
-														<div class="activity-icon">
-															{#if activityIcon(step) === 'spark'}
-																<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-																	<path d="M12 2L9.5 9.5L2 12L9.5 14.5L12 22L14.5 14.5L22 12L14.5 9.5L12 2Z" />
-																</svg>
-															{:else if activityIcon(step) === 'done'}
-																<svg class="activity-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-																	<path d="M20 6L9 17l-5-5" />
-																</svg>
-															{:else}
-																<span class="activity-spinner"></span>
-															{/if}
-														</div>
-														<div class="activity-body">
-															<div class="activity-label">{activityLabel(step)}</div>
-															{#if step.preview}
-																<div class="activity-preview">{step.preview}</div>
-															{/if}
-														</div>
-													</div>
-												{/each}
-											</div>
-										</div>
+										<RunActivityPanel
+											steps={streamingSteps}
+											isRunning={activeRunId !== null}
+											storageKey={activeRunId ?? selectedThread.id}
+										/>
 										<div class="activity-waiting">Preparing final response...</div>
 									</div>
 								</div>
@@ -1978,10 +1940,6 @@
 
 	.activity-item.thinking {
 		background: #fcfcfd;
-	}
-
-	.activity-item.completed .activity-label {
-		color: #0f172a;
 	}
 
 	.activity-icon {
