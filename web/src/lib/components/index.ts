@@ -12,3 +12,4 @@ export { default as ExecutorBadge } from './ExecutorBadge.svelte';
 export { default as ChatMessages } from './ChatMessages.svelte';
 export { default as ChatInput } from './ChatInput.svelte';
 export { default as SessionDropdown } from './SessionDropdown.svelte';
+export { default as RunActivityPanel } from './RunActivityPanel.svelte';

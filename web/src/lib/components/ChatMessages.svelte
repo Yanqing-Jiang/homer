@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { renderMarkdown, formatTime } from '$lib/utils/markdown';
 	import { highlightAction } from '$lib/actions/highlight';
+	import RunActivityPanel from './RunActivityPanel.svelte';
 
 	import type { StepEvent, MessageAttachment } from '$lib/api/client';
 
@@ -10,12 +11,14 @@
 		messages,
 		isStreaming,
 		streamingContent,
-		steps = []
+		steps = [],
+		activityKey = 'chat'
 	}: {
 		messages: Array<{ id?: string; role: 'user' | 'assistant'; content: string; timestamp: Date; attachments?: MessageAttachment[] }>;
 		isStreaming: boolean;
 		streamingContent: string;
 		steps?: Array<StepEvent & { startedAt: number; completed: boolean }>;
+		activityKey?: string;
 	} = $props();
 
 	function formatFileSize(bytes: number): string {
@@ -33,18 +36,6 @@
 
 	function rawUrl(att: MessageAttachment): string {
 		return `${API_BASE}/api/uploads/${att.sessionId}/${att.id}/raw`;
-	}
-
-	function activityLabel(step: StepEvent & { completed: boolean }): string {
-		if (step.type === 'thinking') {
-			return step.labelDone || step.label;
-		}
-		return step.completed ? step.labelDone : step.label;
-	}
-
-	function activityIcon(step: StepEvent & { completed: boolean }): 'spark' | 'tool' | 'done' | 'spinner' {
-		if (step.type === 'thinking') return 'spark';
-		return step.completed ? 'done' : 'spinner';
 	}
 
 	/** Filter out legacy string[] attachments — only render structured objects */
@@ -136,37 +127,7 @@
 				</div>
 				<div class="message-content">
 					{#if steps.length > 0}
-						<div class="activity-panel">
-							<div class="activity-panel-header">
-								<span class="activity-panel-title">Run activity</span>
-								<span class="activity-panel-count">{steps.length} step{steps.length === 1 ? '' : 's'}</span>
-							</div>
-							<div class="activity-list">
-							{#each steps as step (step.id ?? step.label + step.startedAt)}
-								<div class="activity-item" class:completed={step.completed} class:thinking={step.type === 'thinking'}>
-									<div class="activity-icon">
-										{#if activityIcon(step) === 'spark'}
-											<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-												<path d="M12 2L9.5 9.5L2 12L9.5 14.5L12 22L14.5 14.5L22 12L14.5 9.5L12 2Z"/>
-											</svg>
-										{:else if activityIcon(step) === 'done'}
-											<svg class="activity-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-												<path d="M20 6L9 17l-5-5"/>
-											</svg>
-										{:else}
-											<span class="activity-spinner"></span>
-										{/if}
-									</div>
-									<div class="activity-body">
-										<div class="activity-label">{activityLabel(step)}</div>
-										{#if step.preview}
-											<div class="activity-preview">{step.preview}</div>
-										{/if}
-									</div>
-								</div>
-							{/each}
-							</div>
-						</div>
+						<RunActivityPanel steps={steps} isRunning={isStreaming} storageKey={activityKey} />
 					{/if}
 					{#if streamingContent}
 						<div class="message-bubble markdown-content" use:highlightAction>

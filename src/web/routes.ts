@@ -1,8 +1,10 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { StateManager } from "../state/manager.js";
 import { QueueManager } from "../queue/manager.js";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, statSync } from "fs";
 import { execSync } from "child_process";
+import { dirname, extname, join, normalize, resolve } from "path";
+import { fileURLToPath } from "url";
 import { config } from "../config/index.js";
 import type { Scheduler, RegisteredJob } from "../scheduler/index.js";
 import { getClaudeAuthStatus, isClaudeHealthy } from "../utils/claude-auth.js";
@@ -53,6 +55,95 @@ export function setWebCLIRunManager(manager: CLIRunManager): void {
 // Store recent log entries for SSE
 const recentLogs: string[] = [];
 const MAX_LOG_ENTRIES = 100;
+const ROUTES_DIR = dirname(fileURLToPath(import.meta.url));
+const WEB_BUILD_DIR = resolve(ROUTES_DIR, "../../web/build");
+const WEB_BUILD_INDEX = join(WEB_BUILD_DIR, "index.html");
+
+function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function getStaticContentType(filePath: string): string {
+  switch (extname(filePath).toLowerCase()) {
+    case ".html":
+      return "text/html; charset=utf-8";
+    case ".js":
+      return "application/javascript; charset=utf-8";
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".json":
+      return "application/json; charset=utf-8";
+    case ".svg":
+      return "image/svg+xml";
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".webp":
+      return "image/webp";
+    case ".gif":
+      return "image/gif";
+    case ".txt":
+      return "text/plain; charset=utf-8";
+    case ".map":
+      return "application/json; charset=utf-8";
+    case ".woff":
+      return "font/woff";
+    case ".woff2":
+      return "font/woff2";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function resolveWebBuildFile(rawPath: string): string | null {
+  if (!existsSync(WEB_BUILD_INDEX)) {
+    return null;
+  }
+
+  const pathname = decodeURIComponent((rawPath.split("?")[0] || "/").split("#")[0] || "/");
+  const normalized = normalize(pathname).replace(/^(\.\.[/\\])+/, "");
+  const relativePath = normalized.startsWith("/") ? normalized.slice(1) : normalized;
+  const candidates: string[] = [];
+
+  if (!relativePath) {
+    candidates.push(WEB_BUILD_INDEX);
+  } else {
+    candidates.push(join(WEB_BUILD_DIR, relativePath));
+    if (!extname(relativePath)) {
+      candidates.push(join(WEB_BUILD_DIR, `${relativePath}.html`));
+      candidates.push(join(WEB_BUILD_DIR, relativePath, "index.html"));
+    }
+    candidates.push(WEB_BUILD_INDEX);
+  }
+
+  for (const candidate of candidates) {
+    const resolved = resolve(candidate);
+    if (!resolved.startsWith(WEB_BUILD_DIR)) {
+      continue;
+    }
+    if (isFile(resolved)) {
+      return resolved;
+    }
+  }
+
+  return null;
+}
+
+function serveWebBuildFile(rawPath: string, reply: FastifyReply): FastifyReply | null {
+  const filePath = resolveWebBuildFile(rawPath);
+  if (!filePath) {
+    return null;
+  }
+
+  reply.type(getStaticContentType(filePath));
+  return reply.send(readFileSync(filePath));
+}
 
 export function createRoutes(
   server: FastifyInstance,
@@ -563,11 +654,25 @@ export function createRoutes(
     return { success: triggered, jobId: id, jobName: job.config.name };
   });
 
-  // Dashboard HTML
-  server.get("/", async (_request: FastifyRequest, reply: FastifyReply) => {
-    reply.type("text/html");
-    return getDashboardHtml();
-  });
+  const hasWebBuild = existsSync(WEB_BUILD_INDEX);
+
+  if (hasWebBuild) {
+    // Serve the Svelte web app at the root. Keep the legacy dashboard on /dashboard.
+    server.get("/", async (_request: FastifyRequest, reply: FastifyReply) => {
+      return serveWebBuildFile("/", reply);
+    });
+
+    server.get("/dashboard", async (_request: FastifyRequest, reply: FastifyReply) => {
+      reply.type("text/html");
+      return getDashboardHtml();
+    });
+  } else {
+    // Dashboard HTML fallback when the Svelte app has not been built yet.
+    server.get("/", async (_request: FastifyRequest, reply: FastifyReply) => {
+      reply.type("text/html");
+      return getDashboardHtml();
+    });
+  }
 
   // HTMX partials
   server.get("/partials/sessions", async () => {
@@ -595,6 +700,21 @@ export function createRoutes(
     const jobs = schedulerRef.getJobs();
     return getScheduledJobsPartial(jobs, stateManager);
   });
+
+  if (hasWebBuild) {
+    server.setNotFoundHandler(async (request, reply) => {
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return reply.status(404).send({ error: "Not found" });
+      }
+
+      const served = serveWebBuildFile(request.raw.url || request.url, reply);
+      if (served) {
+        return served;
+      }
+
+      return reply.status(404).send({ error: "Not found" });
+    });
+  }
 }
 
 function addLogEntry(entry: string): void {
