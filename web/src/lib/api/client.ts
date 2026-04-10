@@ -260,8 +260,20 @@ export interface ThreadActiveRun {
 	id: string;
 	status: string;
 	executor: string;
-	startedAt: string;
+	startedAt: number;
+	streamText: string | null;
+	streamPhase: string | null;
+	streamSeq: number;
+	streamUpdatedAt: number | null;
 	events: RunEvent[];
+}
+
+export interface MessageChunkEvent {
+	runId: string;
+	seq: number;
+	id?: string;
+	phase: string;
+	delta: string;
 }
 
 export async function getThread(
@@ -1276,6 +1288,10 @@ export interface CLIRunRecord {
 	exitCode: number | null;
 	output: string | null;
 	error: string | null;
+	streamText: string | null;
+	streamPhase: string | null;
+	streamSeq: number;
+	streamUpdatedAt: number | null;
 }
 
 export async function executeMessage(
@@ -1299,6 +1315,7 @@ export function streamRunEvents(
 	callbacks: {
 		onStatus?: (data: { runId: string; status: string; executor?: string }) => void;
 		onPartial?: (data: { runId: string; delta: string }) => void;
+		onMessageChunk?: (data: MessageChunkEvent) => void;
 		onStep?: (data: { runId: string; type: string; id?: string; tool?: string; label: string; labelDone: string; preview?: string }) => void;
 		onHeartbeat?: () => void;
 		onError?: (err: { message: string }) => void;
@@ -1350,6 +1367,13 @@ export function streamRunEvents(
 							try {
 								const parsed = JSON.parse(sseEvent.data);
 								callbacks.onPartial?.(parsed);
+							} catch {
+								// ignore parse errors
+							}
+						} else if (sseEvent.event === 'message_chunk') {
+							try {
+								const parsed = JSON.parse(sseEvent.data);
+								callbacks.onMessageChunk?.(parsed);
 							} catch {
 								// ignore parse errors
 							}
