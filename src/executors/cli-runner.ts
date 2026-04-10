@@ -28,6 +28,8 @@ export interface CLIRunStartParams {
   suppressContext?: boolean;
   /** Called with cumulative text as Claude streams tokens */
   onPartial?: (text: string) => void;
+  /** Called with phased message chunks for non-Claude streaming executors */
+  onMessageChunk?: (chunk: RunMessageChunk) => void;
   /** Called with structured step events (tool_use, tool_result, thinking) */
   onEvent?: (event: import("./claude.js").StreamStepEvent) => void;
 }
@@ -40,6 +42,14 @@ export interface CLIRunResult {
   duration: number;
   executor: CLIExecutor;
   sessionId?: string | null;
+}
+
+export interface RunMessageChunk {
+  runId: string;
+  seq: number;
+  id?: string;
+  phase: string;
+  delta: string;
 }
 
 interface ActiveRun {
@@ -120,6 +130,8 @@ export class CLIRunManager {
   private partialOutputs: Map<string, string> = new Map();
   /** In-memory step event queues for streaming non-Claude executors to web SSE */
   private stepQueues: Map<string, import("./claude.js").StreamStepEvent[]> = new Map();
+  /** In-memory phased message chunk queues for streaming non-Claude executors to web SSE */
+  private messageChunkQueues: Map<string, RunMessageChunk[]> = new Map();
 
   get activeCount(): number {
     return this.activeRuns.size;
@@ -144,6 +156,14 @@ export class CLIRunManager {
     const events = [...queue];
     queue.length = 0;
     return events;
+  }
+
+  drainMessageChunks(runId: string): RunMessageChunk[] {
+    const queue = this.messageChunkQueues.get(runId);
+    if (!queue || queue.length === 0) return [];
+    const chunks = [...queue];
+    queue.length = 0;
+    return chunks;
   }
 
   cancelRun(lane: string, reason = "cancelled"): boolean {
@@ -269,6 +289,7 @@ ${pendingContext.context}
         let newSessionId: string | null | undefined = null;
         let newSessionAccountId: number | null | undefined = null;
         let executorUsed: CLIExecutor = executor;
+        let nextMessageSeq = 0;
 
         const runExecutor = async (
           executorKind: ExecutorKind,
@@ -348,6 +369,17 @@ ${pendingContext.context}
               timeout: 1800000,
               signal: abortController.signal,
               sessionId: executorKind === executor ? sessionId ?? undefined : undefined,
+              onMessageChunk: params.onMessageChunk
+                ? ({ id, phase, delta }) => {
+                    params.onMessageChunk?.({
+                      runId,
+                      seq: ++nextMessageSeq,
+                      id,
+                      phase,
+                      delta,
+                    });
+                  }
+                : undefined,
               onPartial: params.onPartial,
               onEvent: params.onEvent,
             });
@@ -446,9 +478,25 @@ ${pendingContext.context}
           newSessionId = result.claudeSessionId ?? null;
         } else {
           // Wire onPartial/onEvent to store in-memory for SSE consumers (web UI)
-          if (!params.onPartial) {
+          if (executor !== "codex" && !params.onPartial) {
             params.onPartial = (text: string) => {
               this.partialOutputs.set(runId, text);
+            };
+          }
+          if (executor === "codex" && !params.onMessageChunk) {
+            params.onMessageChunk = (chunk) => {
+              let queue = this.messageChunkQueues.get(runId);
+              if (!queue) {
+                queue = [];
+                this.messageChunkQueues.set(runId, queue);
+              }
+              queue.push(chunk);
+              this.stateManager.updateCliRunStream(runId, {
+                appendDelta: chunk.phase === "final_answer" ? chunk.delta : null,
+                phase: chunk.phase,
+                seq: chunk.seq,
+                updatedAt: Date.now(),
+              });
             };
           }
           if (!params.onEvent) {
@@ -587,6 +635,7 @@ ${pendingContext.context}
         this.activeRuns.delete(params.lane);
         this.partialOutputs.delete(runId);
         this.stepQueues.delete(runId);
+        this.messageChunkQueues.delete(runId);
       }
     })();
 

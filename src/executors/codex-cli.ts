@@ -16,6 +16,12 @@ export interface CodexCLIOptions {
   reasoningEffort?: string;
   /** Called with cumulative text as codex streams tokens */
   onPartial?: (text: string) => void;
+  /** Called with phased message chunks so commentary and final answer stay separate */
+  onMessageChunk?: (chunk: {
+    id?: string;
+    phase: string;
+    delta: string;
+  }) => void;
   /** Called with structured step events (tool_use, tool_result) */
   onEvent?: (event: StreamStepEvent) => void;
 }
@@ -47,6 +53,16 @@ interface CodexStreamEvent {
 
 function getItemText(item: CodexStreamItem): string {
   return item.text || (typeof item.content === "string" ? item.content : "");
+}
+
+function getChunkKey(item: CodexStreamItem): string {
+  return `${item.id ?? "anon"}:${item.phase ?? "unknown"}`;
+}
+
+function getDelta(previous: string | undefined, current: string): string {
+  if (!current) return "";
+  if (!previous) return current;
+  return current.startsWith(previous) ? current.slice(previous.length) : current;
 }
 
 function getCommandLabel(command: string): { label: string; labelDone: string } {
@@ -91,6 +107,7 @@ export async function executeCodexCLI(
     model,
     reasoningEffort = "high",
     onPartial,
+    onMessageChunk,
     onEvent,
   } = options;
 
@@ -146,6 +163,7 @@ export async function executeCodexCLI(
     let capturedSessionId: string | undefined;
     const responseChunks: string[] = [];
     const errorChunks: string[] = [];
+    const lastItemText = new Map<string, string>();
 
     const finalize = (exitCode: number, output: string) => {
       if (settled) return;
@@ -262,20 +280,36 @@ export async function executeCodexCLI(
             ) {
               const text = getItemText(item);
               if (text) {
+                const key = getChunkKey(item);
+                const delta = getDelta(lastItemText.get(key), text);
+                lastItemText.set(key, text);
+                if (!delta) continue;
+
                 if (item.phase === "commentary" && onEvent) {
                   try {
                     onEvent({
                       type: "thinking",
                       id: item.id,
-                      label: text,
-                      labelDone: text,
-                      preview: text,
+                      label: delta,
+                      labelDone: delta,
+                      preview: delta,
                     });
                   } catch {
                     /* don't crash executor */
                   }
+                } else if (onMessageChunk) {
+                  try {
+                    onMessageChunk({
+                      id: item.id,
+                      phase: item.phase ?? "unknown",
+                      delta,
+                    });
+                  } catch {
+                    /* don't crash executor */
+                  }
+                  responseChunks.push(delta);
                 } else {
-                  responseChunks.push(text);
+                  responseChunks.push(delta);
                   if (onPartial) {
                     try {
                       onPartial(responseChunks.join(""));
@@ -357,7 +391,45 @@ export async function executeCodexCLI(
               item?.type === "message"
             ) {
               const text = item ? getItemText(item) : "";
-              if (text && item?.phase !== "commentary") responseChunks.push(text);
+              if (text) {
+                const key = item ? getChunkKey(item) : "anon:unknown";
+                const delta = getDelta(lastItemText.get(key), text);
+                lastItemText.set(key, text);
+                if (item?.phase === "commentary" && onEvent && delta) {
+                  try {
+                    onEvent({
+                      type: "thinking",
+                      id: item.id,
+                      label: delta,
+                      labelDone: delta,
+                      preview: delta,
+                    });
+                  } catch {
+                    /* */
+                  }
+                } else if (delta) {
+                  if (onMessageChunk) {
+                    try {
+                      onMessageChunk({
+                        id: item?.id,
+                        phase: item?.phase ?? "unknown",
+                        delta,
+                      });
+                    } catch {
+                      /* */
+                    }
+                  } else if (onPartial) {
+                    try {
+                      responseChunks.push(delta);
+                      onPartial(responseChunks.join(""));
+                    } catch {
+                      /* */
+                    }
+                  } else {
+                    responseChunks.push(delta);
+                  }
+                }
+              }
             } else if (item?.type === "error") {
               const message = item.message || item.text;
               if (message) errorChunks.push(message);

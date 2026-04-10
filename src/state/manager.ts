@@ -1695,6 +1695,46 @@ export class StateManager {
     );
   }
 
+  updateCliRunStream(runId: string, updates: {
+    appendDelta?: string | null;
+    phase?: string | null;
+    seq?: number | null;
+    updatedAt?: number | null;
+  }): void {
+    const fields: string[] = [];
+    const params: Array<string | number | null> = [];
+
+    if (updates.appendDelta) {
+      fields.push("stream_text = COALESCE(stream_text, '') || ?");
+      params.push(updates.appendDelta);
+    }
+
+    if (updates.phase !== undefined) {
+      fields.push("stream_phase = ?");
+      params.push(updates.phase);
+    }
+
+    if (updates.seq !== undefined) {
+      fields.push("stream_seq = ?");
+      params.push(updates.seq);
+    }
+
+    if (updates.updatedAt !== undefined) {
+      fields.push("stream_updated_at = ?");
+      params.push(updates.updatedAt);
+    }
+
+    if (fields.length === 0) return;
+
+    params.push(runId);
+
+    this._db.prepare(
+      `UPDATE cli_runs
+       SET ${fields.join(", ")}
+       WHERE id = ?`
+    ).run(...params);
+  }
+
   updateCliRunStatus(runId: string, status: CLIRunStatus): void {
     this._db.prepare(
       `UPDATE cli_runs SET status = ? WHERE id = ?`
@@ -1742,7 +1782,9 @@ export class StateManager {
     const row = this._db.prepare(
       `SELECT id, lane, executor, thread_id as threadId, status,
               started_at as startedAt, completed_at as completedAt,
-              exit_code as exitCode, output, error
+              exit_code as exitCode, output, error,
+              stream_text as streamText, stream_phase as streamPhase,
+              stream_seq as streamSeq, stream_updated_at as streamUpdatedAt
        FROM cli_runs WHERE id = ?`
     ).get(runId) as CLIRunRecord | undefined;
     return row ?? null;
@@ -1752,7 +1794,9 @@ export class StateManager {
     const row = this._db.prepare(
       `SELECT id, lane, executor, thread_id as threadId, status,
               started_at as startedAt, completed_at as completedAt,
-              exit_code as exitCode, output, error
+              exit_code as exitCode, output, error,
+              stream_text as streamText, stream_phase as streamPhase,
+              stream_seq as streamSeq, stream_updated_at as streamUpdatedAt
        FROM cli_runs
        WHERE lane = ? AND status = 'running'
        ORDER BY started_at DESC
@@ -2408,6 +2452,10 @@ export interface CLIRunRecord {
   exitCode: number | null;
   output: string | null;
   error: string | null;
+  streamText: string | null;
+  streamPhase: string | null;
+  streamSeq: number;
+  streamUpdatedAt: number | null;
 }
 
 export interface ScheduledJobRun {

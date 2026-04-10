@@ -113,6 +113,7 @@ export async function loadThread(tId: string): Promise<void> {
 	// Restore active run step state from persisted run events
 	if (thread.activeRun && thread.activeRun.status === 'running') {
 		streamingSteps = buildStreamingStepsFromRunEvents(thread.activeRun.events);
+		streamingContent = thread.activeRun.streamPhase === 'final_answer' ? (thread.activeRun.streamText ?? '') : '';
 		isStreaming = true;
 	}
 }

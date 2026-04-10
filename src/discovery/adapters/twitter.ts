@@ -6,7 +6,8 @@
 
 import type { SourceConfig, RawDiscoveryItem } from "../types.js";
 import { BaseAdapter } from "./base.js";
-import { fetchTwitterBookmarks, isOpenCLIHealthy, isRetryableOpenCLIError } from "../../executors/opencli.js";
+import { fetchTwitterBookmarks, fetchTwitterArticle, isOpenCLIHealthy, isRetryableOpenCLIError } from "../../executors/opencli.js";
+import type { OpenCLIArticle } from "../../executors/opencli.js";
 import { mapBookmarkToDiscoveryItem } from "../../executors/opencli-mappers.js";
 import { executeBrowserScrape } from "../../executors/browser-scrape.js";
 import {
@@ -54,7 +55,7 @@ export class TwitterAdapter extends BaseAdapter {
     // Try opencli first
     const cliResult = await fetchTwitterBookmarks(maxItems);
     if (cliResult.exitCode === 0 && cliResult.data && cliResult.data.length > 0) {
-      return cliResult.data.map(b => {
+      const items = cliResult.data.map(b => {
         const item = mapBookmarkToDiscoveryItem(b);
         // Use adapter's generateId for consistency with other adapters
         return {
@@ -66,6 +67,7 @@ export class TwitterAdapter extends BaseAdapter {
           rawContent: JSON.stringify(b),
         };
       });
+      return this.enrichWithDeepLinks(items);
     }
 
     // Fallback to browser scrape on infra errors
@@ -102,6 +104,69 @@ export class TwitterAdapter extends BaseAdapter {
     }
 
     return bookmarks.map(b => this.transformBookmark(b));
+  }
+
+  /**
+   * Enrich bookmarks that are URL-only or contain t.co links by fetching
+   * the full article content via `opencli twitter article`.
+   */
+  private async enrichWithDeepLinks(items: RawDiscoveryItem[]): Promise<RawDiscoveryItem[]> {
+    const TCO_RE = /https?:\/\/t\.co\/\S+/;
+    const MAX_CONCURRENT = 3;
+
+    // Find items worth enriching: URL-only tweets or tweets with t.co links
+    const enrichable = items.filter(item => {
+      const tweetId = item.metadata.tweetId;
+      if (!tweetId) return false;
+      const text = (item.description || "").trim();
+      // URL-only tweet (just a t.co link, maybe with emoji/whitespace)
+      const stripped = text.replace(/[\s\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "");
+      if (TCO_RE.test(stripped) && stripped.replace(TCO_RE, "").length < 10) return true;
+      // Tweet with a t.co source link (e.g. "... Source: https://t.co/xxx")
+      return TCO_RE.test(text);
+    });
+
+    if (enrichable.length === 0) return items;
+
+    // Fetch articles in batches to avoid hammering opencli
+    const articleMap = new Map<string, OpenCLIArticle>();
+    for (let i = 0; i < enrichable.length; i += MAX_CONCURRENT) {
+      const batch = enrichable.slice(i, i + MAX_CONCURRENT);
+      const results = await Promise.allSettled(
+        batch.map(async (item) => {
+          const tweetId = item.metadata.tweetId!;
+          const result = await fetchTwitterArticle(tweetId);
+          if (result.exitCode === 0 && result.data?.content) {
+            return { tweetId, article: result.data };
+          }
+          return null;
+        }),
+      );
+      for (const r of results) {
+        if (r.status === "fulfilled" && r.value) {
+          articleMap.set(r.value.tweetId, r.value.article);
+        }
+      }
+    }
+
+    if (articleMap.size === 0) return items;
+
+    // Merge article content into discovery items
+    return items.map(item => {
+      const article = articleMap.get(item.metadata.tweetId || "");
+      if (!article) return item;
+      return {
+        ...item,
+        title: article.title || item.title,
+        description: article.content.slice(0, 500),
+        rawContent: article.content,
+        metadata: {
+          ...item.metadata,
+          deepLinked: true,
+          articleTitle: article.title,
+        },
+      };
+    });
   }
 
   private transformBookmark(bookmark: ParsedBookmark): RawDiscoveryItem {

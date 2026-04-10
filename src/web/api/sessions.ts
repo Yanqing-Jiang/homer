@@ -492,6 +492,10 @@ export function registerSessionRoutes(
         status: activeRun.status,
         executor: activeRun.executor,
         startedAt: activeRun.startedAt,
+        streamText: activeRun.streamText,
+        streamPhase: activeRun.streamPhase,
+        streamSeq: activeRun.streamSeq,
+        streamUpdatedAt: activeRun.streamUpdatedAt,
         events: runEvents,
       } : null,
     };

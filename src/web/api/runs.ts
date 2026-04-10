@@ -225,12 +225,20 @@ export function registerRunRoutes(
         return;
       }
 
-      // Emit partial output deltas for non-streaming executors (codex, kimi, etc.)
-      const partial = runManager.getPartialOutput(runId);
-      if (partial && partial.length > lastPartialLen) {
-        const delta = partial.slice(lastPartialLen);
-        lastPartialLen = partial.length;
-        sendEvent("partial", { runId, delta });
+      // Emit partial output deltas for legacy non-Codex executors.
+      if (run.executor !== "codex") {
+        const partial = runManager.getPartialOutput(runId);
+        if (partial && partial.length > lastPartialLen) {
+          const delta = partial.slice(lastPartialLen);
+          lastPartialLen = partial.length;
+          sendEvent("partial", { runId, delta });
+        }
+      }
+
+      // Emit phased message chunks for Codex.
+      const messageChunks = runManager.drainMessageChunks(runId);
+      for (const chunk of messageChunks) {
+        sendEvent("message_chunk", { ...chunk });
       }
 
       // Emit step events (tool_use, tool_result) for non-streaming executors
