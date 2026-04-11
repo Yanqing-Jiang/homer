@@ -203,7 +203,7 @@ async function sendHealthMessage(
 
 // Handlers safe to retry (idempotent, no user-facing side effects)
 const RETRYABLE_HANDLERS = new Set([
-  "ideas_explore", "nightly_memory", "session_harvester", "memory_embeddings", "memory_reindex",
+  "ideas_explore", "nightly_memory", "session_harvester", "memory_embeddings", "memory_reindex", "morning_review",
   "learning_engine", "homer_improvements", "session_summaries", "weekly_consolidation",
   "memory_cleanup", "planning_reminder", "content_scraper", "outcome_tracker",
   "preference_updater", "idea_dedup", "memory_git_commit", "nightly_code_push", "db_backup",
@@ -770,23 +770,13 @@ async function runHandler(
         const { runNightlyMemory } = await import("./jobs/nightly-memory.js");
         const result = await runNightlyMemory(ctx.stateManager);
 
-        // Post-nightly: send unified Memory Review batch (candidates + stale items)
-        if (result.success && ctx.bot) {
-          try {
-            const { getPendingCandidates, getStaleClaims } = await import("../memory/claims.js");
-            const { sendMemoryMoments } = await import("../bot/handlers/memory-review.js");
-            const { config: appConfig } = await import("../config/index.js");
-            const db = ctx.stateManager.getDb();
-            const candidates = getPendingCandidates(db, 5);
-            const stale = getStaleClaims(db, 3);
-            const allItems = [...candidates, ...stale];
-            if (allItems.length > 0) {
-              await sendMemoryMoments(ctx.bot, appConfig.telegram.allowedChatId, allItems);
-              logger.info({ candidates: candidates.length, stale: stale.length }, "Sent unified Memory Review to Telegram");
-            }
-          } catch (err) {
-            logger.debug({ error: err }, "Memory Review delivery skipped");
-          }
+        // Memory review delivery deferred to 9 AM morning review job.
+        // Claims accumulate silently overnight; morning-review handler sends them all at once.
+        if (result.success) {
+          const { getPendingCandidates } = await import("../memory/claims.js");
+          const db = ctx.stateManager.getDb();
+          const pending = getPendingCandidates(db, 1).length;
+          logger.info({ pending }, "Nightly memory complete — candidates queued for 9 AM morning review");
         }
 
         return buildResult(
@@ -909,6 +899,38 @@ async function runHandler(
           result.success ? { notificationIntent: "operational_status" } : {}
         );
       }
+      case "morning_review": {
+        // Consolidated 9 AM morning review — memory candidates, ideas, cleanup proposals, skills
+        let parts: string[] = [];
+
+        // 1. Send morning review summary (memory + cleanup + skills + health)
+        try {
+          const { sendMorningReview } = await import("../bot/handlers/morning-review.js");
+          await sendMorningReview(ctx.bot, ctx.chatId, ctx.stateManager);
+          parts.push("morning review sent");
+        } catch (err) {
+          logger.debug({ error: err }, "Morning review summary skipped");
+        }
+
+        // 2. Send ideas for review (previously at 7 AM, now consolidated)
+        try {
+          const ideaCount = await sendBatchIdeasForReview(ctx.bot, ctx.chatId);
+          if (ideaCount > 0) parts.push(`${ideaCount} ideas sent`);
+        } catch (err) {
+          logger.debug({ error: err }, "Ideas review skipped");
+        }
+
+        const output = parts.length > 0
+          ? `Morning review: ${parts.join(", ")}`
+          : "Morning review: nothing pending";
+
+        return buildResult(job, startedAt, true, output, undefined,
+          parts.length > 0
+            ? { notificationIntent: "decision_request", sideEffectDelivered: true }
+            : { notificationIntent: "operational_status" }
+        );
+      }
+
       case "planning_reminder": {
         const { runPlanningReminder } = await import("./jobs/planning-reminder.js");
         const result = await runPlanningReminder();

@@ -52,6 +52,8 @@ const CLAIM_BADGES: Record<string, string> = {
   preference: "🎯",
   question: "❓",
   lesson: "⚠️",
+  skill: "🧩",
+  cleanup: "🧹",
 };
 
 // ── Intent Detection ────────────────────────────────────────
