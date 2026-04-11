@@ -364,10 +364,45 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
         : null;
       if (fullText && !isLinkOnly) threadReadsUsed++;
 
+      // Fix: when opencli truncated bookmark text to a t.co self-link,
+      // the original enrichBookmark() finds no external URLs. Re-extract
+      // from the full thread text and deep-fetch any article URLs found.
+      if (fullText && fullText.length > bookmark.text.length && !enriched.deepContent) {
+        const SOCIAL_DOMAINS = ["x.com", "twitter.com", "t.co", "linkedin.com", "instagram.com"];
+        const threadUrlRe = /https?:\/\/[^\s"'<>\])}，。]+/g;
+        const threadExtUrls = [...new Set(fullText.match(threadUrlRe) || [])]
+          .filter(u => {
+            try {
+              const h = new URL(u).hostname;
+              return !SOCIAL_DOMAINS.some(d => h === d || h.endsWith(`.${d}`));
+            } catch { return false; }
+          });
+        if (threadExtUrls.length > 0) {
+          const target = threadExtUrls[0]!;
+          logger.debug({ url: target, author: bookmark.author }, "Deep-fetching from thread-read URL");
+          const dfResult = await fetchAndExtract(target);
+          if (dfResult.method !== "failed" && dfResult.content.length > 100) {
+            const cap = dfResult.content.slice(0, DEEP_FETCH_MAX_CHARS);
+            enriched.deepContent = dfResult.title ? `# ${dfResult.title}\n\n${cap}` : cap;
+            enriched.resolvedUrls = [...new Set([...enriched.resolvedUrls, ...threadExtUrls])];
+            logger.info({ url: target, chars: dfResult.content.length, method: dfResult.method }, "Thread-URL deep-fetch OK");
+          }
+        }
+      }
+
+      // Re-derive title from full text when original was truncated to "shared link"
+      if (fullText && bookmark.title.includes("shared link")) {
+        bookmark.title = deriveBookmarkTitle(fullText, bookmark.author);
+      }
+
       // Best content: thread text > deep-fetched article > original bookmark text
       let content: string;
       if (fullText && fullText.length > bookmark.text.length) {
         content = fullText;
+        // Append deep-fetched article if the thread references an external URL
+        if (enriched.deepContent) {
+          content += `\n\n---\n[Deep-linked article]\n${enriched.deepContent}`;
+        }
       } else if (enriched.deepContent) {
         content = enriched.deepContent;
       } else {
