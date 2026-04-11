@@ -130,14 +130,18 @@ export async function approveCandidate(
   if (claim.status === "approved") return true; // idempotent
   if (!["candidate", "stale"].includes(claim.status)) return false;
 
-  // Transition: candidate → applying (crash-safe intermediate state)
-  db.prepare(`
-    UPDATE knowledge_claims SET status = 'applying', updated_at = datetime('now') WHERE id = ?
+  // Transition: candidate/stale → applying (crash-safe intermediate state, race-safe)
+  const transition = db.prepare(`
+    UPDATE knowledge_claims SET status = 'applying', updated_at = datetime('now')
+    WHERE id = ? AND status IN ('candidate', 'stale')
   `).run(claimId);
+  if (transition.changes === 0) return false; // lost race or already processing
+
+  const originalStatus = claim.status; // preserve for rollback
 
   try {
     // Write to canonical memory file (preserve original source if known)
-    const source = claim.status === "stale" ? "weekly" : "nightly";
+    const source = originalStatus === "stale" ? "weekly" : "nightly";
     await canonicalMemory.promoteToFile(
       claim.content,
       claim.target_file,
@@ -145,23 +149,23 @@ export async function approveCandidate(
       source,
     );
 
-    // Transition: applying → approved
+    // Transition: applying → approved (guarded)
     db.prepare(`
       UPDATE knowledge_claims
       SET status = 'approved', decided_at = datetime('now'), decided_by = 'user', updated_at = datetime('now')
-      WHERE id = ?
+      WHERE id = ? AND status = 'applying'
     `).run(claimId);
 
     logger.info({ claimId, target: claim.target_file }, "Candidate approved and promoted");
     return true;
   } catch (err) {
-    // Rollback: applying → candidate/stale (so user can retry)
+    // Rollback: applying → original status (so user can retry)
     db.prepare(`
-      UPDATE knowledge_claims SET status = 'candidate', updated_at = datetime('now') WHERE id = ? AND status = 'applying'
-    `).run(claimId);
+      UPDATE knowledge_claims SET status = ?, updated_at = datetime('now') WHERE id = ? AND status = 'applying'
+    `).run(originalStatus, claimId);
 
     const msg = err instanceof Error ? err.message : String(err);
-    logger.error({ claimId, error: msg }, "Candidate approval failed — rolled back to candidate");
+    logger.error({ claimId, error: msg }, "Candidate approval failed — rolled back to %s", originalStatus);
     return false;
   }
 }

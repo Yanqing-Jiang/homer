@@ -331,13 +331,15 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
     if (!claim) { await ctx.answerCallbackQuery("Claim not found"); return; }
 
     const db = stateManagerRef!.getDb();
-    archiveClaim(db, claim.id);
+    const ok = archiveClaim(db, claim.id);
 
-    await ctx.editMessageText(
-      `🗑 <b>Archived</b>\n<s>"${escapeHtml(claim.content.slice(0, 120))}"</s>`,
-      { parse_mode: "HTML" },
-    );
-    await ctx.answerCallbackQuery("Archived");
+    if (ok) {
+      await ctx.editMessageText(
+        `🗑 <b>Archived</b>\n<s>"${escapeHtml(claim.content.slice(0, 120))}"</s>`,
+        { parse_mode: "HTML" },
+      );
+    }
+    await ctx.answerCallbackQuery(ok ? "Archived" : "Already processed");
   });
 
   // ── Lint: Update (start thread) ──
@@ -374,14 +376,21 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
     const claim = findClaim(idSuffix);
     if (!claim) { await ctx.answerCallbackQuery("Claim not found"); return; }
 
-    const db = stateManagerRef!.getDb();
-    markClaimValidated(db, claim.id);
+    if (claim.status !== "stale" && claim.status !== "approved") {
+      await ctx.answerCallbackQuery(`Cannot validate ${claim.status} claim`);
+      return;
+    }
 
-    await ctx.editMessageText(
-      `✅ <b>Still valid</b>\n"${escapeHtml(claim.content.slice(0, 120))}"`,
-      { parse_mode: "HTML" },
-    );
-    await ctx.answerCallbackQuery("Marked as valid ✅");
+    const db = stateManagerRef!.getDb();
+    const ok = markClaimValidated(db, claim.id);
+
+    if (ok) {
+      await ctx.editMessageText(
+        `✅ <b>Still valid</b>\n"${escapeHtml(claim.content.slice(0, 120))}"`,
+        { parse_mode: "HTML" },
+      );
+    }
+    await ctx.answerCallbackQuery(ok ? "Marked as valid ✅" : "Already processed");
   });
 
   // ── Bulk: Approve All (scoped to current message batch) ──
@@ -461,7 +470,10 @@ export function registerMemoryReviewHandlers(bot: Bot, stateManager: StateManage
     const replyCtx = pendingReplies.get(replyTo);
     if (!replyCtx) return next();
 
-    pendingReplies.delete(replyTo);
+    // Delete all map entries for this claim to prevent double-mutation
+    for (const [key, val] of pendingReplies) {
+      if (val.claimId === replyCtx.claimId) pendingReplies.delete(key);
+    }
     const db = stateManagerRef?.getDb();
     if (!db) return next();
 
