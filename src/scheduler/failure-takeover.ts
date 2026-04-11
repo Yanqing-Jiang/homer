@@ -348,8 +348,9 @@ export async function runFailureTakeover(params: {
   stateManager: StateManager;
   bot: Bot;
   chatId: number;
+  disableScheduledJob?: (jobId: string) => boolean;
 }): Promise<TakeoverResult | null> {
-  const { job, failedResult, runId, stateManager, bot, chatId } = params;
+  const { job, failedResult, runId, stateManager, bot, chatId, disableScheduledJob } = params;
   _stateManagerRef = stateManager;
   const jobId = job.config.id;
   const startTime = Date.now();
@@ -496,6 +497,7 @@ export async function runFailureTakeover(params: {
             bot,
             chatId,
             jobRunId: runId,
+            disableScheduledJob,
           });
         } else {
           retryResult = await executeScheduledJob(job, undefined, {
