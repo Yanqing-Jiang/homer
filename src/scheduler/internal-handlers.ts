@@ -37,6 +37,8 @@ interface InternalJobContext {
   jobRunId?: number;
   /** AbortSignal from the scheduler hang-watchdog. Pass to LLM calls and batch loops. */
   signal?: AbortSignal;
+  /** Runtime disable: stops the cron task and persists to DB. Provided by Scheduler. */
+  disableScheduledJob?: (jobId: string) => boolean;
 }
 
 interface HealthAlertState {
@@ -543,11 +545,20 @@ async function runHealthCheck(
           }
         } else if (triageResult.action === "disable_job" && triageResult.jobId) {
           try {
+            // Use the runtime callback to stop the live cron task AND persist to DB
+            const disabled = ctx.disableScheduledJob?.(triageResult.jobId) ?? false;
+            if (!disabled) {
+              // Fallback: persist to DB only (cron task stays until restart)
+              db.prepare(
+                "UPDATE scheduled_job_state SET enabled = 0, updated_at = ? WHERE job_id = ?"
+              ).run(new Date().toISOString(), triageResult.jobId);
+            }
+            // Also reset stuck state and mark consecutive failures high
             db.prepare(
-              "UPDATE scheduled_job_state SET is_running = 0, enabled = 0, consecutive_failures = 999, updated_at = ? WHERE job_id = ?"
+              "UPDATE scheduled_job_state SET is_running = 0, consecutive_failures = 999, updated_at = ? WHERE job_id = ?"
             ).run(new Date().toISOString(), triageResult.jobId);
-            triageOutput += ` (disabled ${triageResult.jobId})`;
-            logger.warn({ jobId: triageResult.jobId, reason: triageResult.reason }, "Health triage: disabled job");
+            triageOutput += ` (disabled ${triageResult.jobId}${disabled ? ", cron stopped" : ", DB only"})`;
+            logger.warn({ jobId: triageResult.jobId, reason: triageResult.reason, runtimeDisabled: disabled }, "Health triage: disabled job");
           } catch (disableErr) {
             logger.warn({ error: disableErr, jobId: triageResult.jobId }, "Health triage: failed to disable job");
           }
