@@ -530,6 +530,7 @@ export class Scheduler {
               chatId: this.chatId,
               jobRunId: runId,
               signal: controller.signal,
+              disableScheduledJob: (jobId) => this.cronManager.disableJob(jobId, this.stateManager),
             })
           : executeScheduledJob(job, onProgress, {
               ...(takeoverEnabled ? { skipDiagnosis: true } : {}),
@@ -571,6 +572,7 @@ export class Scheduler {
             stateManager: this.stateManager,
             bot: this.bot,
             chatId: this.chatId,
+            disableScheduledJob: (id) => this.cronManager.disableJob(id, this.stateManager),
           });
 
           if (!takeoverResult) {
