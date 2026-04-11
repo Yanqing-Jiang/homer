@@ -72,6 +72,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   };
 });
 
+// ── Result size budgeting ──────────────────────────────────
+// Prevents large MCP responses from blowing up the context window.
+// When a response exceeds the threshold, it's truncated with a note.
+const RESULT_SIZE_BUDGET = {
+  maxCharsPerResult: 100_000,  // Per-result threshold
+  previewSize: 1_500,          // Inline preview when truncated
+  // Tools that are exempt from truncation (need full content)
+  exempt: new Set(["memory_read", "memory_context"]),
+};
+
+function applyResultBudget(
+  toolName: string,
+  result: { content: Array<{ type: string; text?: string }> }
+): typeof result {
+  if (RESULT_SIZE_BUDGET.exempt.has(toolName)) return result;
+
+  for (const item of result.content) {
+    if (item && item.type === "text" && "text" in item && typeof item.text === "string" && item.text.length > RESULT_SIZE_BUDGET.maxCharsPerResult) {
+      const originalLength = item.text.length;
+      const preview = item.text.slice(0, RESULT_SIZE_BUDGET.previewSize);
+      (item as { type: string; text: string }).text = `${preview}\n\n--- TRUNCATED (${Math.round(originalLength / 1024)}KB → ${Math.round(RESULT_SIZE_BUDGET.previewSize / 1024)}KB) ---\nFull result exceeded ${Math.round(RESULT_SIZE_BUDGET.maxCharsPerResult / 1024)}KB budget. Use more specific queries or filters to reduce result size.`;
+    }
+  }
+
+  return result;
+}
+
 /**
  * Handle tool calls — dispatch to the first matching module
  */
@@ -81,7 +108,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     for (const mod of toolModules) {
       const result = await mod.handle(name, (args ?? {}) as Record<string, unknown>, deps);
-      if (result !== null) return result;
+      if (result !== null) return applyResultBudget(name, result);
     }
 
     return {
