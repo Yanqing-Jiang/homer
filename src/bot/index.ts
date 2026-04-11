@@ -21,6 +21,7 @@ import { handleSmsRequest } from "./handlers/sms.js";
 import { registerCallFollowupHandlers } from "./handlers/call-followup.js";
 import { registerSmsReplyHandlers } from "./handlers/sms-reply.js";
 import { registerMemoryReviewHandlers } from "./handlers/memory-review.js";
+import { registerMorningReviewCallbacks } from "./handlers/morning-review.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { StateManager } from "../state/manager.js";
 import { sendThinkingIndicator, editWithResponse, TelegramDraftStream, sendFinalResponse, TelegramTypingLoop } from "./streaming.js";
@@ -153,6 +154,9 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
 
   // Register memory review handlers (human-gated memory curation)
   registerMemoryReviewHandlers(bot, stateManager);
+
+  // Register morning review callbacks (consolidated 9 AM approval session)
+  registerMorningReviewCallbacks(bot, config.telegram.allowedChatId, stateManager);
 
   // Initialize YouTube URL handler
   initializeYouTubeHandler(stateManager);

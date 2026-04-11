@@ -111,6 +111,33 @@ export const definitions: ToolDefinition[] = [
     },
   },
   {
+    name: "memory_replace",
+    description: "Replace specific content in a memory file by substring match. Routes through claims pipeline for human review. Use when a fact is outdated or needs correction.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        file: { type: "string", enum: ["me", "work", "life", "preferences", "tools"], description: "Target memory file" },
+        old_text: { type: "string", description: "Exact text to find (substring match)" },
+        new_text: { type: "string", description: "Replacement text" },
+        reason: { type: "string", description: "Why this replacement is needed" },
+      },
+      required: ["file", "old_text", "new_text"],
+    },
+  },
+  {
+    name: "memory_remove",
+    description: "Remove specific content from a memory file by substring match. Routes through claims pipeline for human review. Use when a fact is no longer relevant.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        file: { type: "string", enum: ["me", "work", "life", "preferences", "tools"], description: "Target memory file" },
+        text: { type: "string", description: "Exact text to remove (substring match)" },
+        reason: { type: "string", description: "Why this content should be removed" },
+      },
+      required: ["file", "text"],
+    },
+  },
+  {
     name: "memory_suggest",
     description: "Suggest a fact for permanent memory, queued for human review via Telegram. Use instead of memory_promote when the fact should be reviewed before persisting. Good for preserving valuable synthesis from conversations.",
     inputSchema: {
@@ -486,12 +513,28 @@ export async function handle(
     }
 
     case "memory_promote": {
+      // Rerouted through claims pipeline for HITL — direct writes bypass all review.
+      // High confidence (0.95) makes it auto-approve eligible but still logged.
       const { content, file, section } = args as { content: string; file: "me" | "work" | "life" | "preferences" | "tools"; section?: string };
-      const promoted = await deps.canonicalMemory.promoteToFile(content, file, section ?? null, "mcp");
-      if (!promoted) {
-        return { content: [{ type: "text", text: `Skipped — duplicate (already promoted to ${file}.md)` }] };
+      const sm = deps.getSharedStateManager();
+      try {
+        const { insertCandidate } = await import("../../memory/claims.js");
+        const claimId = insertCandidate(sm.getDb(), {
+          content,
+          targetFile: file,
+          section: section ?? "",
+          claimType: "fact",
+          confidence: 0.95,
+        });
+        if (!claimId) {
+          return { content: [{ type: "text", text: `Skipped — duplicate (already pending or promoted to ${file}.md)` }] };
+        }
+        return { content: [{ type: "text", text: `Queued for review (${claimId}) → ${file}.md${section ? ` / "${section}"` : ""}. High confidence — will auto-approve or appear in next Memory Moments.` }] };
+      } catch (err) {
+        // Fail closed: do NOT fall back to direct write — HITL gate must be honored.
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Failed to queue for review: ${msg}. Use memory_suggest as alternative.` }] };
       }
-      return { content: [{ type: "text", text: `Promoted to ${file}.md${section ? ` under "${section}"` : ""}` }] };
     }
 
     case "memory_read": {
@@ -673,6 +716,75 @@ export async function handle(
         return { content: [{ type: "text", text: JSON.stringify(rows, null, 2) }] };
       } catch {
         return { content: [{ type: "text", text: "knowledge_claims table not yet available (migration 069 pending)" }] };
+      }
+    }
+
+    case "memory_replace": {
+      // Route through claims for HITL review
+      const { file: replFile, old_text, new_text, reason } = args as {
+        file: string; old_text: string; new_text: string; reason?: string;
+      };
+      const replSm = deps.getSharedStateManager();
+      try {
+        const { insertCandidate } = await import("../../memory/claims.js");
+        const claimContent = [
+          `REPLACE in ${replFile}.md`,
+          reason ? `Reason: ${reason}` : "",
+          "",
+          "--- Old Text ---",
+          old_text,
+          "",
+          "--- New Text ---",
+          new_text,
+        ].filter(Boolean).join("\n");
+
+        const claimId = insertCandidate(replSm.getDb(), {
+          content: claimContent,
+          targetFile: replFile as "me" | "work" | "life" | "preferences" | "tools",
+          section: "replace",
+          claimType: "replace",
+          confidence: 0.85,
+        });
+        if (!claimId) {
+          return { content: [{ type: "text", text: "Skipped — duplicate replacement proposal" }] };
+        }
+        return { content: [{ type: "text", text: `Replacement queued for review (${claimId}). Will appear in next Memory Moments.` }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Failed to queue replacement: ${msg}` }] };
+      }
+    }
+
+    case "memory_remove": {
+      // Route through claims for HITL review
+      const { file: rmFile, text: rmText, reason: rmReason } = args as {
+        file: string; text: string; reason?: string;
+      };
+      const rmSm = deps.getSharedStateManager();
+      try {
+        const { insertCandidate } = await import("../../memory/claims.js");
+        const claimContent = [
+          `REMOVE from ${rmFile}.md`,
+          rmReason ? `Reason: ${rmReason}` : "",
+          "",
+          "--- Text to Remove ---",
+          rmText,
+        ].filter(Boolean).join("\n");
+
+        const claimId = insertCandidate(rmSm.getDb(), {
+          content: claimContent,
+          targetFile: rmFile as "me" | "work" | "life" | "preferences" | "tools",
+          section: "remove",
+          claimType: "remove",
+          confidence: 0.80,
+        });
+        if (!claimId) {
+          return { content: [{ type: "text", text: "Skipped — duplicate removal proposal" }] };
+        }
+        return { content: [{ type: "text", text: `Removal queued for review (${claimId}). Will appear in next Memory Moments.` }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Failed to queue removal: ${msg}` }] };
       }
     }
 

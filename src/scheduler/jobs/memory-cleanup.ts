@@ -15,8 +15,8 @@ import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { executeClaudeCommand } from "../../executors/claude.js";
 import { logger } from "../../utils/logger.js";
-import { getMemoryIndexer } from "../../memory/indexer.js";
-import { getCanonicalMemoryService } from "../../memory/canonical-service.js";
+// getMemoryIndexer and getCanonicalMemoryService no longer needed —
+// cleanup now stages proposals via claims pipeline (HITL-gated)
 import { buildSchedulerContext } from "../shared-context.js";
 import { StateManager } from "../../state/manager.js";
 import { PATHS } from "../../config/paths.js";
@@ -284,14 +284,57 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
         continue;
       }
 
-      // 5. Write cleaned file via CanonicalMemoryService
-      const canonicalMemory = getCanonicalMemoryService(sm, getMemoryIndexer());
-      await canonicalMemory.writeCleanedFile(file.path, cleaned + "\n", "memory-cleanup");
-
+      // 5. Stage cleanup proposal via claims pipeline (HITL-gated)
+      // Instead of writing directly, insert as a cleanup claim for morning review.
       const pctChange = Math.round((1 - cleanedLines / originalLines) * 100);
+
+      try {
+        const { insertCandidate } = await import("../../memory/claims.js");
+        const claimContent = [
+          `CLEANUP: ${file.name} (${originalLines} → ${cleanedLines} lines, -${pctChange}%)`,
+          "",
+          "--- Changelog ---",
+          changelog,
+          "",
+          "--- Cleaned Content ---",
+          cleaned,
+        ].join("\n");
+
+        const targetFile = file.name.replace(".md", "") as "preferences" | "tools" | "work" | "life";
+        const claimId = insertCandidate(sm.getDb(), {
+          content: claimContent,
+          targetFile,
+          section: "cleanup",
+          claimType: "cleanup",
+          confidence: 0.85,
+        });
+
+        if (claimId) {
+          logger.info(
+            { file: file.name, claimId, originalLines, cleanedLines, pctChange, duration: result.duration },
+            "Cleanup staged for review (claim)"
+          );
+        } else {
+          logger.debug({ file: file.name }, "Cleanup claim skipped (duplicate)");
+        }
+      } catch (claimErr) {
+        // Fail closed: do NOT fall back to direct write — HITL gate must be honored.
+        // Cleanup result is preserved in the job output for manual review.
+        logger.error({ error: claimErr, file: file.name }, "Failed to stage cleanup claim — skipping file (HITL enforced, no direct write fallback)");
+        results.push({
+          fileName: file.name,
+          success: false,
+          originalLines,
+          cleanedLines,
+          changelog,
+          error: "Claims table unavailable — cleanup staged but not applied",
+        });
+        continue;
+      }
+
       logger.info(
         { file: file.name, originalLines, cleanedLines, pctChange, duration: result.duration },
-        "Memory file cleaned"
+        "Memory file cleanup processed"
       );
 
       results.push({
