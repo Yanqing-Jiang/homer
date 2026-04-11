@@ -13,7 +13,7 @@ import type { CanonicalMemoryService } from "./canonical-service.js";
 
 // ── Types ────────────────────────────────────────────────────
 
-export type ClaimType = "fact" | "decision" | "preference" | "question" | "lesson";
+export type ClaimType = "fact" | "decision" | "preference" | "question" | "lesson" | "skill" | "cleanup" | "replace" | "remove";
 export type ClaimStatus = "candidate" | "applying" | "approved" | "rejected" | "expired" | "stale" | "archived";
 export type TargetFile = "me" | "work" | "life" | "preferences" | "tools";
 
@@ -123,8 +123,8 @@ export async function approveCandidate(
   canonicalMemory: CanonicalMemoryService,
 ): Promise<boolean> {
   const claim = db.prepare(`
-    SELECT id, content, target_file, section, status FROM knowledge_claims WHERE id = ?
-  `).get(claimId) as { id: string; content: string; target_file: string; section: string | null; status: string } | undefined;
+    SELECT id, content, target_file, section, claim_type, status FROM knowledge_claims WHERE id = ?
+  `).get(claimId) as { id: string; content: string; target_file: string; section: string | null; claim_type: string; status: string } | undefined;
 
   if (!claim) return false;
   if (claim.status === "approved") return true; // idempotent
@@ -140,14 +140,25 @@ export async function approveCandidate(
   const originalStatus = claim.status; // preserve for rollback
 
   try {
-    // Write to canonical memory file (preserve original source if known)
-    const source = originalStatus === "stale" ? "weekly" : "nightly";
-    await canonicalMemory.promoteToFile(
-      claim.content,
-      claim.target_file,
-      claim.section,
-      source,
-    );
+    // Route by claim type
+    if (claim.claim_type === "cleanup") {
+      await applyCleanupClaim(claim, canonicalMemory);
+    } else if (claim.claim_type === "skill") {
+      await applySkillClaim(claim, canonicalMemory);
+    } else if (claim.claim_type === "replace") {
+      await applyReplaceClaim(claim, canonicalMemory);
+    } else if (claim.claim_type === "remove") {
+      await applyRemoveClaim(claim, canonicalMemory);
+    } else {
+      // Standard fact/decision/preference/lesson claims: promote to file
+      const source = originalStatus === "stale" ? "weekly" : "nightly";
+      await canonicalMemory.promoteToFile(
+        claim.content,
+        claim.target_file,
+        claim.section,
+        source,
+      );
+    }
 
     // Transition: applying → approved (guarded)
     db.prepare(`
@@ -156,7 +167,7 @@ export async function approveCandidate(
       WHERE id = ? AND status = 'applying'
     `).run(claimId);
 
-    logger.info({ claimId, target: claim.target_file }, "Candidate approved and promoted");
+    logger.info({ claimId, target: claim.target_file, type: claim.claim_type }, "Candidate approved and promoted");
     return true;
   } catch (err) {
     // Rollback: applying → original status (so user can retry)
@@ -167,6 +178,107 @@ export async function approveCandidate(
     const msg = err instanceof Error ? err.message : String(err);
     logger.error({ claimId, error: msg }, "Candidate approval failed — rolled back to %s", originalStatus);
     return false;
+  }
+}
+
+/**
+ * Apply a cleanup claim — extract cleaned content and overwrite the target file.
+ */
+async function applyCleanupClaim(
+  claim: { content: string; target_file: string },
+  canonicalMemory: CanonicalMemoryService,
+): Promise<void> {
+  // Parse cleaned content from claim body (format: "--- Cleaned Content ---\n{content}")
+  const cleanedMarker = "--- Cleaned Content ---";
+  const idx = claim.content.indexOf(cleanedMarker);
+  if (idx === -1) {
+    throw new Error("Cleanup claim missing '--- Cleaned Content ---' marker");
+  }
+  const cleaned = claim.content.slice(idx + cleanedMarker.length).trim();
+  if (!cleaned) {
+    throw new Error("Cleanup claim has empty cleaned content");
+  }
+
+  const { PATHS } = await import("../config/paths.js");
+  const filePath = `${PATHS.memory}/${claim.target_file}.md`;
+  await canonicalMemory.writeCleanedFile(filePath, cleaned + "\n", "cleanup-approved");
+}
+
+/**
+ * Apply a skill claim — parse skill data and upsert.
+ */
+async function applySkillClaim(
+  claim: { content: string; target_file: string },
+  canonicalMemory: CanonicalMemoryService,
+): Promise<void> {
+  // Parse skill from claim content (format: "SKILL: {title}\n\nTrigger: {trigger}\n\n{body}")
+  const lines = claim.content.split("\n");
+  const titleLine = lines.find(l => l.startsWith("SKILL: "));
+  const triggerLine = lines.find(l => l.startsWith("Trigger: "));
+
+  const title = titleLine?.replace("SKILL: ", "").trim() ?? "untitled-skill";
+  const trigger = triggerLine?.replace("Trigger: ", "").trim() ?? "";
+  const bodyStart = lines.findIndex(l => l.startsWith("Trigger: "));
+  const body = bodyStart >= 0 ? lines.slice(bodyStart + 1).join("\n").trim() : claim.content;
+
+  const id = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 64);
+
+  await canonicalMemory.upsertSkill({
+    id,
+    title,
+    status: "draft" as const,
+    trigger,
+    category: claim.target_file === "tools" ? "devops" : "general",
+    source: "auto" as const,
+    requires_approval: true,
+    created: new Date().toISOString().slice(0, 10),
+  }, body);
+}
+
+/**
+ * Apply a replace claim — find old text and replace with new text in the target file.
+ */
+async function applyReplaceClaim(
+  claim: { content: string; target_file: string },
+  canonicalMemory: CanonicalMemoryService,
+): Promise<void> {
+  const oldMarker = "--- Old Text ---";
+  const newMarker = "--- New Text ---";
+  const oldIdx = claim.content.indexOf(oldMarker);
+  const newIdx = claim.content.indexOf(newMarker);
+
+  if (oldIdx === -1 || newIdx === -1) {
+    throw new Error("Replace claim missing '--- Old Text ---' or '--- New Text ---' markers");
+  }
+
+  const oldText = claim.content.slice(oldIdx + oldMarker.length, newIdx).trim();
+  const newText = claim.content.slice(newIdx + newMarker.length).trim();
+
+  if (!oldText) throw new Error("Replace claim has empty old text");
+
+  const replaced = await canonicalMemory.replaceInFile(claim.target_file, oldText, newText, "replace-approved");
+  if (!replaced) {
+    throw new Error(`Old text not found in ${claim.target_file}.md`);
+  }
+}
+
+/**
+ * Apply a remove claim — find and remove text from the target file.
+ */
+async function applyRemoveClaim(
+  claim: { content: string; target_file: string },
+  canonicalMemory: CanonicalMemoryService,
+): Promise<void> {
+  const marker = "--- Text to Remove ---";
+  const idx = claim.content.indexOf(marker);
+  if (idx === -1) throw new Error("Remove claim missing '--- Text to Remove ---' marker");
+
+  const textToRemove = claim.content.slice(idx + marker.length).trim();
+  if (!textToRemove) throw new Error("Remove claim has empty text");
+
+  const removed = await canonicalMemory.removeFromFile(claim.target_file, textToRemove, "remove-approved");
+  if (!removed) {
+    throw new Error(`Text not found in ${claim.target_file}.md`);
   }
 }
 

@@ -6,10 +6,10 @@
  * so the Scheduler can debounce reactive triggers.
  */
 
-import { appendFile, writeFile, mkdir } from "fs/promises";
+import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { createHash } from "crypto";
 import { watch, type FSWatcher } from "fs";
-import { basename } from "path";
+import { basename, dirname, join } from "path";
 import { PATHS } from "../config/paths.js";
 import { logger } from "../utils/logger.js";
 import { memoryEvents } from "../events/memory-events.js";
@@ -17,6 +17,42 @@ import { serializeSkillMarkdown } from "../skills/markdown.js";
 import type { SkillFrontmatter, SkillStatus } from "../skills/types.js";
 import type { StateManager } from "../state/manager.js";
 import type { MemoryIndexer } from "./indexer.js";
+import { scanMemoryContent } from "../skills/guard.js";
+
+// ── Atomic file I/O helpers ─────────────────────────────────
+
+/**
+ * Atomically write content to a file using temp-file + rename.
+ * Ensures readers never see a partially-written file.
+ * The temp file is created in the same directory to guarantee
+ * same-filesystem rename (which is atomic on POSIX).
+ */
+async function atomicWriteFile(filePath: string, content: string): Promise<void> {
+  const dir = dirname(filePath);
+  const tmpPath = join(dir, `.tmp-${basename(filePath)}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  await writeFile(tmpPath, content, "utf-8");
+  try {
+    await rename(tmpPath, filePath);
+  } catch (err) {
+    // Clean up orphaned temp file on rename failure
+    try { const { unlink } = await import("fs/promises"); await unlink(tmpPath); } catch { /* best-effort */ }
+    throw err;
+  }
+}
+
+/**
+ * Atomically append content to a file by reading, appending, and atomic-writing.
+ * Uses sync read to minimize the race window between read and write.
+ */
+async function atomicAppendFile(filePath: string, content: string): Promise<void> {
+  let existing = "";
+  try {
+    existing = await readFile(filePath, "utf-8");
+  } catch {
+    // File doesn't exist yet — start fresh
+  }
+  await atomicWriteFile(filePath, existing + content);
+}
 
 const ALL_WRITE_PIPELINES = ["reindex", "embeddings", "context_bridge"] as const;
 
@@ -59,6 +95,13 @@ export class CanonicalMemoryService {
     section: string | null,
     source: string,
   ): Promise<boolean> {
+    // Security scan — defense-in-depth for bypass paths
+    const scanError = scanMemoryContent(content);
+    if (scanError) {
+      logger.warn({ file, content: content.slice(0, 60), scanError }, "Blocked memory promotion: security scan");
+      return false;
+    }
+
     // CAS dedup
     if (this.sm.checkFactExists(content, file)) {
       logger.debug({ file, content: content.slice(0, 60) }, "Skipping duplicate promoted fact");
@@ -70,7 +113,7 @@ export class CanonicalMemoryService {
     if (section) toAppend += `## ${section}\n`;
     toAppend += `${content}\n`;
 
-    await appendFile(filePath, toAppend, "utf-8");
+    await atomicAppendFile(filePath, toAppend);
     this.trackSelfWrite(`${file}.md`);
 
     const validSources = new Set(["mcp", "nightly", "weekly", "unknown"]);
@@ -99,7 +142,14 @@ export class CanonicalMemoryService {
    * Replaces inline writeFile in memory-cleanup.ts.
    */
   async writeCleanedFile(path: string, content: string, source: string): Promise<void> {
-    await writeFile(path, content, "utf-8");
+    // Security scan — defense-in-depth for cleanup content
+    const scanError = scanMemoryContent(content);
+    if (scanError) {
+      logger.warn({ path, scanError }, "Blocked writeCleanedFile: security scan");
+      throw new Error(`Security scan blocked write to ${basename(path)}: ${scanError}`);
+    }
+
+    await atomicWriteFile(path, content);
     this.trackSelfWrite(basename(path));
 
     for (const pipeline of ALL_WRITE_PIPELINES) {
@@ -118,12 +168,83 @@ export class CanonicalMemoryService {
     this.markDirty("embeddings", "session_event");
   }
 
+  // ── Surgical memory mutations ──────────────────────────────
+
+  /**
+   * Replace content in a memory file by substring match.
+   * Used by stale-review "Update" action and memory_replace MCP tool.
+   * Returns true if replacement was made, false if oldText not found.
+   */
+  async replaceInFile(
+    file: string,
+    oldText: string,
+    newText: string,
+    source: string,
+  ): Promise<boolean> {
+    const filePath = `${PATHS.memory}/${file}.md`;
+    let content: string;
+    try {
+      content = await readFile(filePath, "utf-8");
+    } catch {
+      logger.warn({ file }, "replaceInFile: file not found");
+      return false;
+    }
+
+    if (!content.includes(oldText)) {
+      logger.debug({ file, oldText: oldText.slice(0, 40) }, "replaceInFile: substring not found");
+      return false;
+    }
+
+    // Security scan the new content
+    const scanError = scanMemoryContent(newText);
+    if (scanError) {
+      logger.warn({ file, scanError }, "replaceInFile blocked by security scan");
+      return false;
+    }
+
+    const updated = content.replace(oldText, newText);
+    await atomicWriteFile(filePath, updated);
+    this.trackSelfWrite(`${file}.md`);
+
+    for (const pipeline of ALL_WRITE_PIPELINES) {
+      this.markDirty(pipeline, `replace:${source}`);
+    }
+
+    try {
+      const context = file === "work" ? "work" : file === "life" ? "life" : "general";
+      await this.indexer.indexFile(filePath, context as "work" | "life" | "general");
+    } catch (err) {
+      logger.warn({ err, filePath }, "Inline indexing failed after replace");
+    }
+
+    logger.info({ file, source, oldLen: oldText.length, newLen: newText.length }, "Replaced content in memory file");
+    return true;
+  }
+
+  /**
+   * Remove content from a memory file by substring match.
+   * Used by stale-review "Remove" action and memory_remove MCP tool.
+   * Returns true if removal was made, false if text not found.
+   */
+  async removeFromFile(
+    file: string,
+    textToRemove: string,
+    source: string,
+  ): Promise<boolean> {
+    return this.replaceInFile(file, textToRemove, "", source);
+  }
+
   // ── Skill operations ──────────────────────────────────────
 
   /**
    * Create or update a skill in the catalog and write its markdown file.
    */
   async upsertSkill(frontmatter: SkillFrontmatter, body: string): Promise<void> {
+    // Auto-sourced skills require approval before promotion to active
+    if (frontmatter.source === "auto" && frontmatter.requires_approval === undefined) {
+      frontmatter.requires_approval = true;
+    }
+
     const filePath = `${PATHS.skills}/${frontmatter.id}.md`;
     const content = serializeSkillMarkdown(frontmatter, body);
     const contentHash = createHash("sha256").update(content).digest("hex");
@@ -131,15 +252,15 @@ export class CanonicalMemoryService {
     // Ensure skills directory exists
     await mkdir(PATHS.skills, { recursive: true });
 
-    // Write the file
-    await writeFile(filePath, content, "utf-8");
+    // Write the file atomically (temp + rename)
+    await atomicWriteFile(filePath, content);
     this.trackSelfWrite(`${frontmatter.id}.md`);
 
     // Upsert into skills_catalog
     try {
       this.sm.getDb().prepare(`
-        INSERT INTO skills_catalog (id, title, status, trigger_pattern, category, source, content_hash, file_path, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        INSERT INTO skills_catalog (id, title, status, trigger_pattern, category, source, content_hash, file_path, requires_approval, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT(id) DO UPDATE SET
           title = excluded.title,
           status = excluded.status,
@@ -147,11 +268,12 @@ export class CanonicalMemoryService {
           category = excluded.category,
           source = excluded.source,
           content_hash = excluded.content_hash,
-          file_path = excluded.file_path
+          file_path = excluded.file_path,
+          requires_approval = excluded.requires_approval
       `).run(
         frontmatter.id, frontmatter.title, frontmatter.status,
         frontmatter.trigger, frontmatter.category, frontmatter.source,
-        contentHash, filePath,
+        contentHash, filePath, frontmatter.requires_approval ? 1 : 0,
       );
     } catch (err) {
       logger.warn({ err, skillId: frontmatter.id }, "Failed to upsert skill catalog entry (table may not exist)");
@@ -239,6 +361,11 @@ export class CanonicalMemoryService {
       const rate = total > 0 ? row.success_count / total : 0;
 
       if (row.success_count >= 3 && rate >= 0.60) {
+        // Gate on requires_approval — skill must go through Telegram review before activation
+        if (row.requires_approval) {
+          logger.info({ skillId, successCount: row.success_count, rate }, "Skill ready for promotion but requires approval — skipping auto-promote");
+          return null;
+        }
         const newStatus: SkillStatus = "active";
         this.sm.getDb().prepare(`
           UPDATE skills_catalog SET status = ?, last_promoted_at = datetime('now') WHERE id = ?
