@@ -133,62 +133,166 @@ async function updateBatchKeyboard(
 
 // ── Public API ──────────────────────────────────────────────
 
+// ── Rendering helpers ───────────────────────────────────────
+
+export interface SendMemoryMomentsOptions {
+  /** Custom header text, e.g. "🌅 Morning Review — Sun, Apr 12" */
+  title?: string;
+  /** Optional subtitle line shown under the header (e.g. counts). */
+  subtitle?: string;
+  /** When true, render full content inline instead of truncating. */
+  expanded?: boolean;
+  /** Character budget per chunk. Defaults to 3500 (Telegram hard limit is 4096). */
+  chunkCharBudget?: number;
+  /** Override the starting ordinal for global numbering continuity. */
+  startOrdinal?: number;
+}
+
+const DEFAULT_CHUNK_BUDGET = 3500;
+
 /**
- * Send Memory Moments as a single batched Telegram message. Called after nightly job.
- * One message with numbered items + per-item and bulk action buttons.
+ * Render a single candidate block in compact or expanded mode.
+ * Compact: 150-char content preview. Expanded: full content inline.
+ */
+function renderCandidateBlock(
+  claim: KnowledgeClaim,
+  ordinal: number,
+  expanded: boolean,
+): string {
+  const badge = CLAIM_BADGES[claim.claimType] ?? "📝";
+  const conf = Math.round(claim.confidence * 100);
+  const statusTag = claim.status === "stale" ? "STALE" : claim.claimType.toUpperCase();
+  const target = `<code>${escapeHtml(claim.targetFile)}.md</code>${claim.section ? ` / ${escapeHtml(claim.section)}` : ""}`;
+
+  const lines: string[] = [];
+  lines.push(`<b>${ordinal}.</b> ${badge} [${statusTag}] (${conf}%)`);
+  lines.push(`→ ${target}`);
+  if (expanded) {
+    // Full content, cap at 2000 chars to keep a single item from dominating a chunk
+    const body = claim.content.length > 2000 ? claim.content.slice(0, 2000) + "…" : claim.content;
+    lines.push(`<blockquote>${escapeHtml(body)}</blockquote>`);
+  } else {
+    lines.push(`<i>"${escapeHtml(claim.content.slice(0, 150))}"</i>`);
+  }
+  return lines.join("\n");
+}
+
+interface CandidateChunk {
+  items: KnowledgeClaim[];
+  startIndex: number; // index into the full candidates array
+  body: string;
+}
+
+/**
+ * Split candidates into chunks such that each chunk's rendered body stays under
+ * the char budget. Preserves input order and ordinal continuity.
+ */
+function splitCandidateBatches(
+  candidates: KnowledgeClaim[],
+  options: { title: string; subtitle?: string; expanded: boolean; startOrdinal: number; chunkCharBudget: number },
+): CandidateChunk[] {
+  const chunks: CandidateChunk[] = [];
+  let cursor = 0;
+
+  while (cursor < candidates.length) {
+    const items: KnowledgeClaim[] = [];
+    let body = "";
+    const startIndex = cursor;
+
+    while (cursor < candidates.length) {
+      const ordinal = options.startOrdinal + cursor;
+      const block = renderCandidateBlock(candidates[cursor]!, ordinal, options.expanded);
+      const candidateBody = body ? body + "\n\n" + block : block;
+      // Reserve ~200 chars for header + chunk pagination suffix
+      if (candidateBody.length > options.chunkCharBudget && items.length > 0) break;
+      body = candidateBody;
+      items.push(candidates[cursor]!);
+      cursor++;
+    }
+
+    chunks.push({ items, startIndex, body });
+  }
+
+  return chunks;
+}
+
+/**
+ * Send Memory Moments as one or more batched Telegram messages. Each chunk
+ * renders numbered items inline with per-item action buttons + chunk-local
+ * bulk actions. Global numbering is preserved across chunks.
+ *
+ * Called by morning review (expanded=true) and by ad-hoc review flows (compact).
  */
 export async function sendMemoryMoments(
   bot: Bot,
   chatId: number,
   candidates: KnowledgeClaim[],
+  options: SendMemoryMomentsOptions = {},
 ): Promise<void> {
   if (candidates.length === 0) return;
 
   const db = stateManagerRef?.getDb();
   if (!db) return;
 
-  // Build single batched message
-  const lines: string[] = [`📋 <b>Memory Review</b> (${candidates.length} items)\n━━━━━━━━━━━━`];
+  const expanded = options.expanded ?? false;
+  const chunkCharBudget = options.chunkCharBudget ?? DEFAULT_CHUNK_BUDGET;
+  const startOrdinal = options.startOrdinal ?? 1;
+  const title = options.title ?? `📋 Memory Review (${candidates.length} items)`;
 
-  for (let i = 0; i < candidates.length; i++) {
-    const claim = candidates[i]!;
-    const badge = CLAIM_BADGES[claim.claimType] ?? "📝";
-    const conf = Math.round(claim.confidence * 100);
-    const statusTag = claim.status === "stale" ? "STALE" : claim.claimType.toUpperCase();
-    lines.push(`\n<b>${i + 1}.</b> ${badge} [${statusTag}] (${conf}%)`);
-    lines.push(`<i>"${escapeHtml(claim.content.slice(0, 150))}"</i>`);
-    lines.push(`→ <code>${escapeHtml(claim.targetFile)}.md</code>${claim.section ? ` / ${escapeHtml(claim.section)}` : ""}`);
-  }
+  const chunks = splitCandidateBatches(candidates, {
+    title,
+    subtitle: options.subtitle,
+    expanded,
+    startOrdinal,
+    chunkCharBudget,
+  });
 
-  const text = formatScheduledTelegramHtml(lines.join("\n"));
+  const totalChunks = chunks.length;
+  const setBatch = db.prepare(
+    `UPDATE knowledge_claims SET telegram_message_id = ?, batch_position = ? WHERE id = ?`
+  );
 
-  // Build keyboard: one row per item [Approve] [Reply] [Reject], then bulk actions
-  const keyboard = new InlineKeyboard();
-  for (let i = 0; i < candidates.length; i++) {
-    const id = candidates[i]!.id.slice(-10);
-    const label = `${i + 1}`;
-    keyboard
-      .text(`✅ ${label}`, `m:a:${id}`)
-      .text(`💬 ${label}`, `m:p:${id}`)
-      .text(`❌ ${label}`, `m:r:${id}`)
-      .row();
-  }
-  keyboard.text("✅ Approve All", "m:aa").text("❌ Dismiss All", "m:da");
+  for (let ci = 0; ci < chunks.length; ci++) {
+    const chunk = chunks[ci]!;
+    const chunkHeader = totalChunks > 1
+      ? `<b>${escapeHtml(title)}</b> (${ci + 1}/${totalChunks})`
+      : `<b>${escapeHtml(title)}</b>`;
+    const subtitleLine = options.subtitle ? `\n<i>${escapeHtml(options.subtitle)}</i>` : "";
+    const divider = "\n━━━━━━━━━━━━\n";
+    const text = formatScheduledTelegramHtml(chunkHeader + subtitleLine + divider + chunk.body);
 
-  try {
-    const sent = await bot.api.sendMessage(chatId, text, {
-      parse_mode: "HTML",
-      reply_markup: keyboard,
-    });
-    // Track telegram_message_id and batch position for all candidates
-    const setBatch = db.prepare(
-      `UPDATE knowledge_claims SET telegram_message_id = ?, batch_position = ? WHERE id = ?`
-    );
-    for (let i = 0; i < candidates.length; i++) {
-      setBatch.run(sent.message_id, i, candidates[i]!.id);
+    // Build keyboard: one row per item in this chunk + chunk-scoped bulk actions
+    const keyboard = new InlineKeyboard();
+    for (let i = 0; i < chunk.items.length; i++) {
+      const globalIdx = chunk.startIndex + i;
+      const claim = chunk.items[i]!;
+      const id = claim.id.slice(-10);
+      const label = `${startOrdinal + globalIdx}`;
+      keyboard
+        .text(`✅ ${label}`, `m:a:${id}`)
+        .text(`💬 ${label}`, `m:p:${id}`)
+        .text(`❌ ${label}`, `m:r:${id}`)
+        .row();
     }
-  } catch (err) {
-    logger.error({ error: err, count: candidates.length }, "Failed to send batched Memory Moments");
+    keyboard.text("✅ Approve All", "m:aa").text("❌ Dismiss All", "m:da");
+    if (ci === chunks.length - 1) {
+      keyboard.row().text("⏰ Review Later", "mr:skip");
+    }
+
+    try {
+      const sent = await bot.api.sendMessage(chatId, text, {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
+      for (let i = 0; i < chunk.items.length; i++) {
+        setBatch.run(sent.message_id, chunk.startIndex + i, chunk.items[i]!.id);
+      }
+    } catch (err) {
+      logger.error(
+        { error: err, chunkIndex: ci, chunkSize: chunk.items.length },
+        "Failed to send Memory Moments chunk",
+      );
+    }
   }
 }
 
