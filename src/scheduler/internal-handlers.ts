@@ -204,7 +204,7 @@ async function sendHealthMessage(
 // Handlers safe to retry (idempotent, no user-facing side effects)
 const RETRYABLE_HANDLERS = new Set([
   "ideas_explore", "nightly_memory", "session_harvester", "memory_embeddings", "memory_reindex", "morning_review",
-  "learning_engine", "homer_improvements", "session_summaries", "weekly_consolidation",
+  "weekly_memory_audit", "learning_engine", "homer_improvements", "session_summaries", "weekly_consolidation",
   "memory_cleanup", "planning_reminder", "content_scraper", "outcome_tracker",
   "preference_updater", "idea_dedup", "memory_git_commit", "nightly_code_push", "db_backup",
   "idea_synthesizer", "idea_deep_linker", "link_processor", "archive_verify", "health_check", "context_bridge",
@@ -899,6 +899,24 @@ async function runHandler(
           result.success ? { notificationIntent: "operational_status" } : {}
         );
       }
+      case "weekly_memory_audit": {
+        try {
+          const { sendWeeklyMemoryAudit } = await import("../bot/handlers/weekly-memory-audit.js");
+          const result = await sendWeeklyMemoryAudit(ctx.bot, ctx.chatId, ctx.stateManager);
+          return buildResult(
+            job,
+            startedAt,
+            true,
+            `Weekly audit: ${result}`,
+            undefined,
+            { notificationIntent: "decision_request", sideEffectDelivered: true },
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return buildResult(job, startedAt, false, "Weekly audit failed", msg, {});
+        }
+      }
+
       case "morning_review": {
         // Consolidated 9 AM morning review — memory candidates, ideas, cleanup proposals, skills
         let parts: string[] = [];
