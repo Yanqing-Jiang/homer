@@ -7,6 +7,10 @@ import { chunkText } from "../search/chunker.js";
 import { generateEmbedding, generateQueryEmbedding, cosineSimilarity, mergeRRF } from "./embeddings.js";
 import { PATHS } from "../config/paths.js";
 
+// Bump when chunking strategy, prompt task type, or model dimension changes.
+// embed_version on memory_embeddings rows is set from this value at insert time.
+const EMBED_VERSION = 1;
+
 /**
  * Memory index search result
  */
@@ -505,13 +509,36 @@ export class MemoryIndexer {
   async generateEmbeddings(): Promise<{ generated: number; skipped: number; errors: number }> {
     const stats = { generated: 0, skipped: 0, errors: 0 };
 
-    // Get all memory chunks without embeddings
-    const chunks = this.db.prepare(`
-      SELECT f.file_path, f.chunk_index, f.content
+    // Get memory chunks that need (re-)embedding: missing, lower embed_version, or
+    // a content_hash drift (caught in JS since SQLite has no native SHA256).
+    const candidateChunks = this.db.prepare(`
+      SELECT f.file_path, f.chunk_index, f.content,
+             e.embed_version, e.content_hash
       FROM memory_fts f
       LEFT JOIN memory_embeddings e ON f.file_path = e.file_path AND f.chunk_index = e.chunk_index
       WHERE e.file_path IS NULL
-    `).all() as Array<{ file_path: string; chunk_index: number; content: string }>;
+         OR e.embed_version IS NULL
+         OR e.embed_version < ?
+         OR e.content_hash IS NULL
+    `).all(EMBED_VERSION) as Array<{ file_path: string; chunk_index: number; content: string; embed_version: number | null; content_hash: string | null }>;
+
+    const driftedChunks = this.db.prepare(`
+      SELECT f.file_path, f.chunk_index, f.content, e.content_hash
+      FROM memory_fts f
+      JOIN memory_embeddings e ON f.file_path = e.file_path AND f.chunk_index = e.chunk_index
+      WHERE e.content_hash IS NOT NULL AND e.embed_version >= ?
+    `).all(EMBED_VERSION) as Array<{ file_path: string; chunk_index: number; content: string; content_hash: string }>;
+
+    const driftHits: Array<{ file_path: string; chunk_index: number; content: string }> = [];
+    for (const row of driftedChunks) {
+      const actual = createHash("sha256").update(row.content).digest("hex");
+      if (actual !== row.content_hash) driftHits.push({ file_path: row.file_path, chunk_index: row.chunk_index, content: row.content });
+    }
+
+    const chunks: Array<{ file_path: string; chunk_index: number; content: string }> = [
+      ...candidateChunks.map(c => ({ file_path: c.file_path, chunk_index: c.chunk_index, content: c.content })),
+      ...driftHits,
+    ];
 
     // Also get session summaries not yet embedded (using session:{id} as file_path key)
     let sessionChunks: Array<{ file_path: string; chunk_index: number; content: string }> = [];
@@ -532,20 +559,24 @@ export class MemoryIndexer {
     logger.info({ memoryChunks: chunks.length, sessionChunks: sessionChunks.length }, "Generating embeddings for chunks");
 
     const insertStmt = this.db.prepare(`
-      INSERT OR REPLACE INTO memory_embeddings (file_path, chunk_index, embedding, dimensions, updated_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO memory_embeddings (file_path, chunk_index, embedding, dimensions, model, embed_version, content_hash, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const chunk of allChunks) {
       try {
         const result = await generateEmbedding(chunk.content);
         const buffer = Buffer.from(result.embedding.buffer);
+        const contentHash = createHash("sha256").update(chunk.content).digest("hex");
 
         insertStmt.run(
           chunk.file_path,
           chunk.chunk_index,
           buffer,
           result.dimensions,
+          result.model,
+          EMBED_VERSION,
+          contentHash,
           Date.now()
         );
 

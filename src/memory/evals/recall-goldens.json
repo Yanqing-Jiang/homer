@@ -1,0 +1,56 @@
+[
+  {
+    "id": "amc-wipes-segmentation",
+    "query": "AMC wipes segmentation",
+    "context": "work",
+    "expectedFile": "work.md",
+    "minScore": 0.6,
+    "shouldContainAny": ["AMC", "wipes"],
+    "notes": "Active project — must be retrievable from work.md."
+  },
+  {
+    "id": "profitsphere-chargeback-gap",
+    "query": "ProfitSphere chargeback mismatch",
+    "context": "work",
+    "expectedFile": "work.md",
+    "minScore": 0.55,
+    "shouldContainAny": ["ProfitSphere", "chargeback", "$1.55M", "7.54%"],
+    "notes": "Headline finding from the chargeback pipeline."
+  },
+  {
+    "id": "mahoraga-paper-trading",
+    "query": "MAHORAGA paper trading IBKR",
+    "context": "work",
+    "expectedFile": "work.md",
+    "minScore": 0.55,
+    "shouldContainAny": ["MAHORAGA", "IBKR"],
+    "notes": "Trading bot setup."
+  },
+  {
+    "id": "okc-wedding",
+    "query": "OKC wedding date",
+    "context": "life",
+    "expectedFile": "life.md",
+    "minScore": 0.5,
+    "shouldContainAny": ["OKC", "wedding", "June"],
+    "notes": "Personal milestone."
+  },
+  {
+    "id": "career-positioning-narrative",
+    "query": "Director of Agents career narrative",
+    "context": "work",
+    "expectedFile": "me.md",
+    "minScore": 0.5,
+    "shouldContainAny": ["Director of Agents", "$250", "$350"],
+    "notes": "Career framing — should surface from me.md goals."
+  },
+  {
+    "id": "preferences-terse-responses",
+    "query": "communication style preference terse",
+    "context": "general",
+    "expectedFile": "preferences.md",
+    "minScore": 0.45,
+    "shouldContainAny": ["terse", "concise", "summary"],
+    "notes": "Style preferences should be findable."
+  }
+]
