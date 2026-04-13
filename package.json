@@ -18,6 +18,7 @@
     "test:watch": "vitest",
     "test:router": "tsx scripts/test-router.ts",
     "test:swarm": "npx tsx --test src/executors/__tests__/parse-swarm-json.test.ts",
+    "eval:memory": "tsx src/memory/evals/run.ts",
     "app:build": "bash scripts/build-homer-app.sh /Users/yj/Applications/Homer.app",
     "app:service:status": "bash scripts/manage-app-service.sh status",
     "app:service:register": "bash scripts/manage-app-service.sh register",
