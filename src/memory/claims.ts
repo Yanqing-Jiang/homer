@@ -2,7 +2,10 @@
  * Knowledge Claims Service — human-gated memory evolution.
  *
  * Manages the claim lifecycle: candidate → applying → approved / rejected / expired.
- * All memory promotions route through here when features.humanGatedMemory is enabled.
+ * All memory promotions route through here — HITL is permanent policy. Confidence-based routing:
+ *   >= 0.95       → auto-approve (write directly, no Telegram prompt)
+ *   0.20 … 0.95   → HITL (candidate queued for user review on Telegram)
+ *   < 0.20        → dropped upstream as noise
  */
 
 import { createHash } from "crypto";
@@ -61,9 +64,9 @@ function claimId(): string {
   return `kc_${ts}_${rand}`;
 }
 
-function contentHash(content: string, targetFile: string): string {
+function contentHash(content: string, targetFile: string, section?: string | null): string {
   return createHash("sha256")
-    .update(content.trim().toLowerCase().replace(/\s+/g, " ") + "::" + targetFile)
+    .update(content.trim().toLowerCase().replace(/\s+/g, " ") + "::" + targetFile + "::" + (section ?? ""))
     .digest("hex");
 }
 
@@ -78,7 +81,7 @@ export function insertCandidate(
   candidate: ClaimCandidate,
 ): string | null {
   const id = claimId();
-  const hash = contentHash(candidate.content, candidate.targetFile);
+  const hash = contentHash(candidate.content, candidate.targetFile, candidate.section);
 
   // Check for existing pending or approved claim with same hash
   const existing = db.prepare(`
@@ -152,12 +155,26 @@ export async function approveCandidate(
     } else {
       // Standard fact/decision/preference/lesson claims: promote to file
       const source = originalStatus === "stale" ? "weekly" : "nightly";
-      await canonicalMemory.promoteToFile(
+      const written = await canonicalMemory.promoteToFile(
         claim.content,
         claim.target_file,
         claim.section,
         source,
       );
+      // promoteToFile returns false for security-scan blocks OR section-aware dedup hits.
+      // Don't mark the claim 'approved' in that case — it would misreport that memory was
+      // mutated. Route to 'rejected' with a reason the UI can surface.
+      if (!written) {
+        // Write blocked (security scan or section-aware duplicate). Revert to
+        // 'candidate' so the user can retry — a later attempt might succeed if
+        // the duplicate is cleared or the content edited.
+        db.prepare(`
+          UPDATE knowledge_claims SET status = 'candidate', updated_at = datetime('now')
+          WHERE id = ? AND status = 'applying'
+        `).run(claimId);
+        logger.info({ claimId, target: claim.target_file }, "Candidate reverted — promoteToFile returned false (scan block or duplicate)");
+        return false;
+      }
     }
 
     // Transition: applying → approved (guarded)
@@ -312,12 +329,12 @@ export async function editAndApprove(
   canonicalMemory: CanonicalMemoryService,
 ): Promise<boolean> {
   const claim = db.prepare(`
-    SELECT id, content, target_file, status FROM knowledge_claims WHERE id = ?
-  `).get(claimId) as { id: string; content: string; target_file: string; status: string } | undefined;
+    SELECT id, content, target_file, section, status FROM knowledge_claims WHERE id = ?
+  `).get(claimId) as { id: string; content: string; target_file: string; section: string | null; status: string } | undefined;
 
   if (!claim || !["candidate", "stale"].includes(claim.status)) return false;
 
-  const newHash = contentHash(newContent, claim.target_file);
+  const newHash = contentHash(newContent, claim.target_file, claim.section);
 
   // Update content + hash
   db.prepare(`

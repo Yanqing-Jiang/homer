@@ -18,7 +18,6 @@ import { getCanonicalMemoryService } from "../../memory/canonical-service.js";
 import type { StateManager } from "../../state/manager.js";
 import { trackPromotion } from "../../outcomes/hooks.js";
 import { PATHS } from "../../config/paths.js";
-import { config } from "../../config/index.js";
 import { hasMigration } from "../../state/migrations/index.js";
 import { insertCandidate, approveCandidate, expireStaleCandidates, autoApproveHighConfidence, getPendingCandidates } from "../../memory/claims.js";
 import type { ClaimType, TargetFile } from "../../memory/claims.js";
@@ -309,9 +308,10 @@ If nothing to promote, use an empty array.`;
       }
     }
 
-    // Determine whether to use human-gated mode
     const db = stateManager.getDb();
-    const useHumanGated = config.features.humanGatedMemory && hasMigration(db, "069_knowledge_claims.sql");
+    if (!hasMigration(db, "069_knowledge_claims.sql")) {
+      return { success: false, output: "", error: "knowledge_claims migration missing — HITL pipeline cannot run" };
+    }
 
     const canonicalMemory = getCanonicalMemoryService(stateManager, getMemoryIndexer());
     let writtenPromos = 0;
@@ -322,101 +322,79 @@ If nothing to promote, use an empty array.`;
     let autoApprovedCount = 0;
     let autoRejectedCount = 0;
 
-    if (useHumanGated) {
-      // ── Human-gated mode with confidence-based auto-approve ──
-      for (const promo of promotions) {
-        const confidence = promo.confidence ?? 0.5;
+    // Confidence-based routing (HITL is permanent):
+    //   >= 0.95       → auto-approve (write directly, no Telegram prompt)
+    //   0.20 … 0.95   → HITL (queue as candidate, user reviews on Telegram)
+    //   < 0.20        → silently drop as noise
+    for (const promo of promotions) {
+      const confidence = promo.confidence ?? 0.5;
 
-        // Auto-reject low-confidence extractions
-        if (confidence < 0.5) {
-          autoRejectedCount++;
-          logger.debug({ file: promo.file, confidence, content: promo.content.slice(0, 60) }, "Auto-rejected low-confidence extraction");
-          continue;
-        }
-
-        try {
-          const claimId = insertCandidate(db, {
-            content: promo.content,
-            targetFile: promo.file as TargetFile,
-            section: promo.section,
-            claimType: (promo.claim_type ?? "fact") as ClaimType,
-            confidence,
-            sessionIds,
-          });
-
-          if (claimId && confidence >= 0.95) {
-            // Auto-approve only near-certain claims — most go to Telegram for review
-            const ok = await approveCandidate(db, claimId, canonicalMemory);
-            if (ok) {
-              db.prepare(`UPDATE knowledge_claims SET decided_by = 'auto-approve' WHERE id = ?`).run(claimId);
-              autoApprovedCount++;
-              writtenPromos++;
-              logger.info({ file: promo.file, confidence, content: promo.content.slice(0, 60) }, "Auto-approved high-confidence claim");
-            }
-          } else if (claimId) {
-            candidatesCreated++;
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          writeErrors.push(`Candidate insert error for ${promo.file}: ${msg}`);
-          logger.error({ error: msg, file: promo.file }, "Failed to insert candidate");
-        }
+      if (confidence < 0.20) {
+        autoRejectedCount++;
+        logger.debug({ file: promo.file, confidence, content: promo.content.slice(0, 60) }, "Dropped as noise (confidence < 0.20)");
+        continue;
       }
 
-      // Queue health fallback: auto-approve if backlog is too large
       try {
-        const pending = getPendingCandidates(db, 1);
-        if (pending.length > 0) {
-          const oldest = pending[0]!;
-          const oldestAge = (Date.now() - new Date(oldest.createdAt).getTime()) / 86400000;
-          const totalPending = db.prepare(
-            "SELECT COUNT(*) as c FROM knowledge_claims WHERE status = 'candidate'"
-          ).get() as { c: number };
+        const claimId = insertCandidate(db, {
+          content: promo.content,
+          targetFile: promo.file as TargetFile,
+          section: promo.section,
+          claimType: (promo.claim_type ?? "fact") as ClaimType,
+          confidence,
+          sessionIds,
+        });
 
-          if (totalPending.c > 50 || oldestAge > 14) {
-            const autoApproved = await autoApproveHighConfidence(db, canonicalMemory, 0.95);
-            if (autoApproved > 0) {
-              writtenPromos = autoApproved;
-              logger.warn({ autoApproved, queueSize: totalPending.c, oldestAgeDays: Math.round(oldestAge) },
-                "Queue health fallback: auto-approved high-confidence candidates");
-            }
-          }
-        }
-      } catch (err) {
-        logger.debug({ error: err }, "Queue health check skipped");
-      }
-
-      // Expire stale candidates (>7 days)
-      try {
-        expireStaleCandidates(db, 7);
-      } catch { /* best-effort */ }
-
-      logger.info({ candidatesCreated, autoApprovedCount, autoRejectedCount, promotions: promotions.length }, "Human-gated mode: processed promotions");
-    } else {
-      // ── Legacy mode: direct auto-promotion ──
-      for (const promo of promotions) {
-        const filePath = PERMANENT_FILES[promo.file];
-        if (!filePath) {
-          writeErrors.push(`Unknown target file: ${promo.file}`);
-          continue;
-        }
-
-        try {
-          const ok = await canonicalMemory.promoteToFile(promo.content, promo.file, promo.section, "nightly");
+        if (claimId && confidence >= 0.95) {
+          const ok = await approveCandidate(db, claimId, canonicalMemory);
           if (ok) {
+            db.prepare(`UPDATE knowledge_claims SET decided_by = 'auto-approve' WHERE id = ?`).run(claimId);
+            autoApprovedCount++;
             writtenPromos++;
-            logger.info({ file: promo.file, section: promo.section, content: promo.content.slice(0, 80) }, "Promoted fact to permanent memory");
+            logger.info({ file: promo.file, confidence, content: promo.content.slice(0, 60) }, "Auto-approved high-confidence claim");
             try {
               trackPromotion(db, promo.content.slice(0, 80), promo.file);
             } catch { /* outcome tracking best-effort */ }
           }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          writeErrors.push(`Write error for ${promo.file}: ${msg}`);
-          logger.error({ error: msg, file: promo.file }, "Failed to promote fact");
+        } else if (claimId) {
+          candidatesCreated++;
         }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        writeErrors.push(`Candidate insert error for ${promo.file}: ${msg}`);
+        logger.error({ error: msg, file: promo.file }, "Failed to insert candidate");
       }
     }
+
+    // Queue health fallback: auto-approve if backlog is too large
+    try {
+      const pending = getPendingCandidates(db, 1);
+      if (pending.length > 0) {
+        const oldest = pending[0]!;
+        const oldestAge = (Date.now() - new Date(oldest.createdAt).getTime()) / 86400000;
+        const totalPending = db.prepare(
+          "SELECT COUNT(*) as c FROM knowledge_claims WHERE status = 'candidate'"
+        ).get() as { c: number };
+
+        if (totalPending.c > 50 || oldestAge > 14) {
+          const autoApproved = await autoApproveHighConfidence(db, canonicalMemory, 0.95);
+          if (autoApproved > 0) {
+            writtenPromos = autoApproved;
+            logger.warn({ autoApproved, queueSize: totalPending.c, oldestAgeDays: Math.round(oldestAge) },
+              "Queue health fallback: auto-approved high-confidence candidates");
+          }
+        }
+      }
+    } catch (err) {
+      logger.debug({ error: err }, "Queue health check skipped");
+    }
+
+    // Expire stale candidates (>7 days)
+    try {
+      expireStaleCandidates(db, 7);
+    } catch { /* best-effort */ }
+
+    logger.info({ candidatesCreated, autoApprovedCount, autoRejectedCount, promotions: promotions.length }, "HITL: processed promotions");
 
     // Mark sessions as processed only if no write errors (allows retry on failure)
     if (writeErrors.length === 0) {
@@ -439,9 +417,9 @@ If nothing to promote, use an empty array.`;
       parts.push(`${autoApprovedCount} auto-approved (confidence >= 0.95)`);
     }
     if (autoRejectedCount > 0) {
-      parts.push(`${autoRejectedCount} auto-rejected (confidence < 0.5)`);
+      parts.push(`${autoRejectedCount} dropped as noise (confidence < 0.20)`);
     }
-    if (writtenPromos > 0 || (!useHumanGated && promotions.length > 0)) {
+    if (writtenPromos > 0) {
       parts.push(`Promoted ${writtenPromos}/${promotions.length} facts`);
     }
     parts.push(`${sessions.length} sessions processed`);

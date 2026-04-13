@@ -146,7 +146,7 @@ export function generateFlushContent(
 
 /**
  * Execute a pre-timeout flush for a session.
- * Writes to session_summaries via stateManager.insertDaemonEvent.
+ * Writes to session_summaries via stateManager.insertFlushCheckpoint.
  */
 export async function executeFlush(
   data: SessionFlushData,
@@ -167,7 +167,7 @@ export async function executeFlush(
     const content = generateFlushContent(data, summary);
     const project = data.context === "default" ? "general" : data.context;
 
-    stateManager.insertDaemonEvent(
+    stateManager.insertFlushCheckpoint(
       `session-flush [${project}]`,
       content,
       project,

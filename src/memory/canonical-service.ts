@@ -102,9 +102,9 @@ export class CanonicalMemoryService {
       return false;
     }
 
-    // CAS dedup
-    if (this.sm.checkFactExists(content, file)) {
-      logger.debug({ file, content: content.slice(0, 60) }, "Skipping duplicate promoted fact");
+    // CAS dedup (section-aware — same content can file under different sections)
+    if (this.sm.checkFactExists(content, file, section)) {
+      logger.debug({ file, section, content: content.slice(0, 60) }, "Skipping duplicate promoted fact");
       return false;
     }
 
@@ -157,15 +157,6 @@ export class CanonicalMemoryService {
     }
 
     logger.info({ path, source }, "Wrote cleaned file via CanonicalMemoryService");
-  }
-
-  /**
-   * Insert a session event into session_summaries.
-   * Replaces inline insertDaemonEvent calls.
-   */
-  insertSessionEvent(title: string, content: string, context?: string): void {
-    this.sm.insertDaemonEvent(title, content, context || "general");
-    this.markDirty("embeddings", "session_event");
   }
 
   // ── Surgical memory mutations ──────────────────────────────
