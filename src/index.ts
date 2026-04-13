@@ -15,7 +15,6 @@ import { createWebServer, startWebServer, stopWebServer } from "./web/server.js"
 import { setWebMeetingsManager, setWebBot, setWebCLIRunManager } from "./web/routes.js";
 import { MeetingManager } from "./meetings/index.js";
 import { Scheduler } from "./scheduler/index.js";
-import { setWriterStateManager } from "./memory/writer.js";
 import { getMemoryIndexer, closeMemoryIndexer } from "./memory/indexer.js";
 import { executeClaudeCommand } from "./executors/claude.js";
 import { initializeGeminiCLIAccountManager, closeGeminiCLIAccountManager } from "./executors/gemini-cli.js";
@@ -77,9 +76,6 @@ async function main(): Promise<void> {
 
   // Initialize state manager
   const stateManager = new StateManager(config.paths.database);
-
-  // Wire writer to use session_summaries instead of daily logs
-  setWriterStateManager(stateManager);
 
   // CLI run manager (non-streaming executor control)
   const cliRunManager = new CLIRunManager(stateManager);
@@ -222,12 +218,8 @@ async function main(): Promise<void> {
         claudeSessionId: conversationId,
       });
 
-      // Process memory updates from voice interaction
-      const { processResponse } = await import("./utils/response-processor.js");
-      const { cleanedContent } = await processResponse(result.output, "general");
-
       return {
-        response: cleanedContent,
+        response: result.output,
         conversationId: result.claudeSessionId,
       };
     };

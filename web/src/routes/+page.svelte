@@ -304,7 +304,6 @@
 
 	// Local-only commands (always available, not from API)
 	const localCommands: api.CommandDefinition[] = [
-		{ name: '/log-memory', category: 'memory', description: 'Log session summary to daily memory' },
 		{ name: '/push', category: 'system', description: 'Commit & push homer changes' },
 		{ name: '/push-web', category: 'system', description: 'Build + push + restart (full deploy)' },
 	];
@@ -418,14 +417,6 @@
 			showSlashCommands = false;
 			// Also start a new session
 			selectSession(null);
-			return;
-		}
-
-		// For /log-memory, log session to daily memory
-		if (cmd.name === '/log-memory') {
-			showSlashCommands = false;
-			chatInput = buildLogMemoryMessage('work');
-			handleSendMessage();
 			return;
 		}
 
@@ -811,41 +802,6 @@
 		}
 	}
 
-	function compileSessionSummary(): string {
-		if (messages.length === 0) {
-			return 'No messages in this session.';
-		}
-		// Compile a concise summary of the session
-		const summary: string[] = [];
-		summary.push(`Session: ${currentSessionName}`);
-		summary.push(`Messages: ${messages.length}`);
-		summary.push('');
-		// Include key user messages (truncated)
-		const userMsgs = messages.filter(m => m.role === 'user');
-		if (userMsgs.length > 0) {
-			summary.push('Topics discussed:');
-			userMsgs.slice(0, 5).forEach((m, i) => {
-				const content = m.content.slice(0, 100) + (m.content.length > 100 ? '...' : '');
-				summary.push(`- ${content}`);
-			});
-			if (userMsgs.length > 5) {
-				summary.push(`- ... and ${userMsgs.length - 5} more messages`);
-			}
-		}
-		return summary.join('\n');
-	}
-
-	function buildLogMemoryMessage(context: string = 'work'): string {
-		const summary = compileSessionSummary();
-		return `Please use the memory_append MCP tool to log the following session summary to daily memory with context "${context}":
-
----
-${summary}
----
-
-Just confirm when done. Keep your response brief.`;
-	}
-
 	async function continueInNewThread() {
 		if (!sessionId) return;
 		try {
@@ -938,14 +894,6 @@ Just confirm when done. Keep your response brief.`;
 					await resetExecutor();
 					selectSession(null);
 					chatInput = queryPart || '';
-					return;
-				}
-
-				// Handle /log-memory command - transform and resend
-				if (matchedCmd.name === '/log-memory') {
-					const context = queryPart || 'work';
-					chatInput = buildLogMemoryMessage(context);
-					await handleSendMessage();
 					return;
 				}
 
