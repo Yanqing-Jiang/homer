@@ -137,10 +137,10 @@ If no promotions needed, output: []
 </promotions>
 
 <lint_findings>
-(JSON array, each with: "file", "stale_text", "reason", "suggestion")
+(JSON array, each with: "file", "section" (header text under which the stale line lives, or null), "stale_text", "reason", "suggestion")
 Example:
 [
-  {"file": "work.md", "stale_text": "JT on vacation until ~Apr 11", "reason": "date passed", "suggestion": "remove or update with current status"}
+  {"file": "work.md", "section": "Active Projects", "stale_text": "JT on vacation until ~Apr 11", "reason": "date passed", "suggestion": "remove or update with current status"}
 ]
 If no findings: []
 </lint_findings>`;
@@ -314,7 +314,7 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
 
     // Parse lint findings
     const lintMatch = response.match(/<lint_findings>([\s\S]*?)<\/lint_findings>/);
-    let lintFindings: Array<{ file: string; stale_text: string; reason: string; suggestion: string }> = [];
+    let lintFindings: Array<{ file: string; section?: string | null; stale_text: string; reason: string; suggestion: string }> = [];
 
     if (lintMatch) {
       try {
@@ -381,6 +381,7 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
             section: "",
             claimType: "fact" as ClaimType,
             confidence: 0.7,
+            originChannel: "weekly-consolidation",
           });
           if (claimId) {
             promotionsApplied++;

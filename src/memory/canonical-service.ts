@@ -56,16 +56,94 @@ async function atomicAppendFile(filePath: string, content: string): Promise<void
 
 const ALL_WRITE_PIPELINES = ["reindex", "embeddings", "context_bridge"] as const;
 
+function sha256(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+async function readFileOrEmpty(path: string): Promise<string> {
+  try {
+    return await readFile(path, "utf-8");
+  } catch {
+    return "";
+  }
+}
+
+export interface WriteOpts {
+  claimId?: string | null;
+  actor?: string;
+}
+
 export class CanonicalMemoryService {
   private sm: StateManager;
   private indexer: MemoryIndexer;
   private recentSelfWrites = new Map<string, number>(); // filename -> expiry timestamp
   private _watcher: FSWatcher | null = null;
   private selfWriteTTL = 2000; // 2 seconds
+  // Per-file write serialization — every mutating method runs inside withLock(path).
+  // Without this, MCP and scheduler can interleave on the same canonical file and the
+  // mutation ledger's pre_hash → post_hash chain would have gaps.
+  private fileLocks = new Map<string, Promise<void>>();
 
   constructor(sm: StateManager, indexer: MemoryIndexer) {
     this.sm = sm;
     this.indexer = indexer;
+  }
+
+  // ── Per-file write serialization ───────────────────────────
+
+  private async withLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.fileLocks.get(path) ?? Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((r) => { release = r; });
+    this.fileLocks.set(path, previous.then(() => next));
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      // Clean up only if we're still the tail; otherwise a newer waiter owns it.
+      if (this.fileLocks.get(path) === previous.then(() => next)) {
+        this.fileLocks.delete(path);
+      }
+    }
+  }
+
+  private recordMutation(args: {
+    targetFile: string;
+    section: string | null;
+    operation: "append" | "replace" | "remove" | "write";
+    oldText: string | null;
+    newText: string | null;
+    preHash: string;
+    postHash: string;
+    source: string;
+    claimId?: string | null;
+    actor?: string;
+  }): void {
+    if (args.preHash === args.postHash) return; // no-op write, don't pollute ledger
+    const id = `mm_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    try {
+      this.sm.getDb().prepare(`
+        INSERT INTO memory_mutations (
+          id, claim_id, target_file, section, operation,
+          old_text, new_text, pre_hash, post_hash, source, actor
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        args.claimId ?? null,
+        args.targetFile,
+        args.section,
+        args.operation,
+        args.oldText,
+        args.newText,
+        args.preHash,
+        args.postHash,
+        args.source,
+        args.actor ?? "system",
+      );
+    } catch (err) {
+      logger.warn({ err, targetFile: args.targetFile }, "Failed to record memory_mutation (table may not exist yet)");
+    }
   }
 
   // ── Dirty-flag pass-through ─────────────────────────────────
@@ -94,6 +172,7 @@ export class CanonicalMemoryService {
     file: string,
     section: string | null,
     source: string,
+    opts: WriteOpts = {},
   ): Promise<boolean> {
     // Security scan — defense-in-depth for bypass paths
     const scanError = scanMemoryContent(content);
@@ -113,8 +192,19 @@ export class CanonicalMemoryService {
     if (section) toAppend += `## ${section}\n`;
     toAppend += `${content}\n`;
 
-    await atomicAppendFile(filePath, toAppend);
-    this.trackSelfWrite(`${file}.md`);
+    await this.withLock(filePath, async () => {
+      const before = await readFileOrEmpty(filePath);
+      const preHash = sha256(before);
+      await atomicAppendFile(filePath, toAppend);
+      const after = await readFileOrEmpty(filePath);
+      const postHash = sha256(after);
+      this.trackSelfWrite(`${file}.md`);
+      this.recordMutation({
+        targetFile: filePath, section, operation: "append",
+        oldText: null, newText: toAppend,
+        preHash, postHash, source, claimId: opts.claimId, actor: opts.actor,
+      });
+    });
 
     const validSources = new Set(["mcp", "nightly", "weekly", "unknown"]);
     const factSource = (validSources.has(source) ? source : "unknown") as "mcp" | "nightly" | "weekly" | "unknown";
@@ -141,7 +231,7 @@ export class CanonicalMemoryService {
    * Write a cleaned/modified memory file.
    * Replaces inline writeFile in memory-cleanup.ts.
    */
-  async writeCleanedFile(path: string, content: string, source: string): Promise<void> {
+  async writeCleanedFile(path: string, content: string, source: string, opts: WriteOpts = {}): Promise<void> {
     // Security scan — defense-in-depth for cleanup content
     const scanError = scanMemoryContent(content);
     if (scanError) {
@@ -149,8 +239,18 @@ export class CanonicalMemoryService {
       throw new Error(`Security scan blocked write to ${basename(path)}: ${scanError}`);
     }
 
-    await atomicWriteFile(path, content);
-    this.trackSelfWrite(basename(path));
+    await this.withLock(path, async () => {
+      const before = await readFileOrEmpty(path);
+      const preHash = sha256(before);
+      await atomicWriteFile(path, content);
+      const postHash = sha256(content);
+      this.trackSelfWrite(basename(path));
+      this.recordMutation({
+        targetFile: path, section: null, operation: "write",
+        oldText: before, newText: content,
+        preHash, postHash, source, claimId: opts.claimId, actor: opts.actor,
+      });
+    });
 
     for (const pipeline of ALL_WRITE_PIPELINES) {
       this.markDirty(pipeline, `write:${source}`);
@@ -171,45 +271,57 @@ export class CanonicalMemoryService {
     oldText: string,
     newText: string,
     source: string,
+    opts: WriteOpts = {},
   ): Promise<boolean> {
     const filePath = `${PATHS.memory}/${file}.md`;
-    let content: string;
-    try {
-      content = await readFile(filePath, "utf-8");
-    } catch {
-      logger.warn({ file }, "replaceInFile: file not found");
-      return false;
-    }
+    return await this.withLock(filePath, async () => {
+      let content: string;
+      try {
+        content = await readFile(filePath, "utf-8");
+      } catch {
+        logger.warn({ file }, "replaceInFile: file not found");
+        return false;
+      }
 
-    if (!content.includes(oldText)) {
-      logger.debug({ file, oldText: oldText.slice(0, 40) }, "replaceInFile: substring not found");
-      return false;
-    }
+      if (!content.includes(oldText)) {
+        logger.debug({ file, oldText: oldText.slice(0, 40) }, "replaceInFile: substring not found");
+        return false;
+      }
 
-    // Security scan the new content
-    const scanError = scanMemoryContent(newText);
-    if (scanError) {
-      logger.warn({ file, scanError }, "replaceInFile blocked by security scan");
-      return false;
-    }
+      // Security scan the new content
+      const scanError = scanMemoryContent(newText);
+      if (scanError) {
+        logger.warn({ file, scanError }, "replaceInFile blocked by security scan");
+        return false;
+      }
 
-    const updated = content.replace(oldText, newText);
-    await atomicWriteFile(filePath, updated);
-    this.trackSelfWrite(`${file}.md`);
+      const preHash = sha256(content);
+      const updated = content.replace(oldText, newText);
+      await atomicWriteFile(filePath, updated);
+      const postHash = sha256(updated);
+      this.trackSelfWrite(`${file}.md`);
 
-    for (const pipeline of ALL_WRITE_PIPELINES) {
-      this.markDirty(pipeline, `replace:${source}`);
-    }
+      const op: "replace" | "remove" = newText === "" ? "remove" : "replace";
+      this.recordMutation({
+        targetFile: filePath, section: null, operation: op,
+        oldText, newText: newText === "" ? null : newText,
+        preHash, postHash, source, claimId: opts.claimId, actor: opts.actor,
+      });
 
-    try {
-      const context = file === "work" ? "work" : file === "life" ? "life" : "general";
-      await this.indexer.indexFile(filePath, context as "work" | "life" | "general");
-    } catch (err) {
-      logger.warn({ err, filePath }, "Inline indexing failed after replace");
-    }
+      for (const pipeline of ALL_WRITE_PIPELINES) {
+        this.markDirty(pipeline, `replace:${source}`);
+      }
 
-    logger.info({ file, source, oldLen: oldText.length, newLen: newText.length }, "Replaced content in memory file");
-    return true;
+      try {
+        const context = file === "work" ? "work" : file === "life" ? "life" : "general";
+        await this.indexer.indexFile(filePath, context as "work" | "life" | "general");
+      } catch (err) {
+        logger.warn({ err, filePath }, "Inline indexing failed after replace");
+      }
+
+      logger.info({ file, source, oldLen: oldText.length, newLen: newText.length }, "Replaced content in memory file");
+      return true;
+    });
   }
 
   /**
@@ -221,8 +333,9 @@ export class CanonicalMemoryService {
     file: string,
     textToRemove: string,
     source: string,
+    opts: WriteOpts = {},
   ): Promise<boolean> {
-    return this.replaceInFile(file, textToRemove, "", source);
+    return this.replaceInFile(file, textToRemove, "", source, opts);
   }
 
   // ── Skill operations ──────────────────────────────────────

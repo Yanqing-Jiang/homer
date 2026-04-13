@@ -307,6 +307,7 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
           section: "cleanup",
           claimType: "cleanup",
           confidence: 0.85,
+          originChannel: "weekly-consolidation",
         });
 
         if (claimId) {

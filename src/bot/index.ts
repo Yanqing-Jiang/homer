@@ -371,6 +371,57 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
   });
 
   // /debug - system status for remote diagnosis
+  bot.command("memory", async (ctx) => {
+    const args = (ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
+    const sub = args[0]?.toLowerCase();
+
+    if (sub === "undo") {
+      const target = args[1];
+      if (!target) {
+        await ctx.reply("Usage: /memory undo <claim-id-or-suffix>");
+        return;
+      }
+      const db = stateManager.getDb();
+      const row = db.prepare(`SELECT id FROM knowledge_claims WHERE id = ? OR id LIKE ? LIMIT 1`)
+        .get(target, `%${target}`) as { id: string } | undefined;
+      if (!row) {
+        await ctx.reply(`No claim matches "${target}"`);
+        return;
+      }
+      const { undoLatestForClaim } = await import("../memory/undo.js");
+      const result = await undoLatestForClaim(stateManager, row.id);
+      if (result.ok) {
+        await ctx.reply(`✅ ${result.reason} (claim ${row.id})`);
+      } else {
+        const conflict = result.conflict
+          ? `\n\nExpected post_hash: ${result.conflict.expectedHash.slice(0, 12)}…\nActual file hash: ${result.conflict.actualHash.slice(0, 12)}…`
+          : "";
+        await ctx.reply(`⚠️ Undo refused: ${result.reason}${conflict}`);
+      }
+      return;
+    }
+
+    if (sub === "pending") {
+      const db = stateManager.getDb();
+      const counts = db.prepare(`
+        SELECT COUNT(*) as total,
+               SUM(CASE WHEN created_at < datetime('now', '-7 days') THEN 1 ELSE 0 END) as old
+        FROM knowledge_claims WHERE status = 'candidate'
+      `).get() as { total: number; old: number };
+      const oldest = db.prepare(`
+        SELECT created_at FROM knowledge_claims WHERE status = 'candidate'
+        ORDER BY created_at ASC LIMIT 1
+      `).get() as { created_at: string } | undefined;
+      const oldestAge = oldest
+        ? Math.round((Date.now() - new Date(oldest.created_at).getTime()) / 86400000)
+        : 0;
+      await ctx.reply(`📋 ${counts.total} pending claims (${counts.old} > 7 days). Oldest: ${oldestAge}d.`);
+      return;
+    }
+
+    await ctx.reply("Usage:\n  /memory undo <claim-id>\n  /memory pending");
+  });
+
   bot.command("debug", async (ctx) => {
     try {
       const healthRes = await fetch("http://127.0.0.1:3000/health");

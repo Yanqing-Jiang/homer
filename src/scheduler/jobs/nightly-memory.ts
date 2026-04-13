@@ -19,8 +19,9 @@ import type { StateManager } from "../../state/manager.js";
 import { trackPromotion } from "../../outcomes/hooks.js";
 import { PATHS } from "../../config/paths.js";
 import { hasMigration } from "../../state/migrations/index.js";
-import { insertCandidate, approveCandidate, expireStaleCandidates, autoApproveHighConfidence, getPendingCandidates } from "../../memory/claims.js";
+import { insertCandidate, approveCandidate, expireStaleCandidates, getPendingCandidates } from "../../memory/claims.js";
 import type { ClaimType, TargetFile } from "../../memory/claims.js";
+import { wouldConflict } from "../../memory/conflict-detection.js";
 
 type MemoryFileKey = "me" | "work" | "life" | "preferences" | "tools";
 
@@ -249,7 +250,30 @@ Return ONLY a valid JSON object (no markdown, no preamble):
 {"promotions": [{"content": "fact to promote", "file": "me"|"work"|"life"|"preferences"|"tools", "section": "Section Name", "confidence": 0.8, "claim_type": "fact"}]}
 
 Each promotion MUST include:
-- "confidence": 0.0-1.0 (how certain this is worth remembering: 0.9+ = obvious, 0.5 = maybe, <0.3 = skip)
+- "confidence": 0.0-1.0 — meaning is calibrated against this rubric:
+
+  • **0.95–1.00 (auto-approve eligible)** — explicit, unambiguous, written by Yanqing in the session.
+    Example: "I just got the B3 promotion at P&G, effective May 1." → 0.97
+    Example: "Decided to use ClickHouse over DuckDB for ProfitSphere." → 0.96
+    Use only when the session text contains this fact essentially verbatim.
+
+  • **0.70–0.94 (queue for HITL review)** — clear from context, but inferred or paraphrased.
+    Example: Session shows multiple references to "the new analytics copilot" → "Yanqing renamed Next-Gen Analytics Copilot to NA DCOM Intelligence" → 0.85
+    Use when you're confident in the fact but had to assemble it from multiple turns.
+
+  • **0.40–0.69 (queue for HITL, low priority)** — plausible but ambiguous, single mention, hedged language.
+    Example: "I'm thinking about pivoting MAHORAGA to options" → "Yanqing is considering MAHORAGA pivot to options" → 0.55
+    Use when the session signals an idea or direction, not a commitment.
+
+  • **0.20–0.39 (will be queued but likely rejected)** — speculation, off-hand mention, low signal.
+    Example: A passing reference to "maybe trying Cursor" → 0.30
+
+  • **< 0.20 (silently dropped — do not return)** — chatter, jokes, framing without substance.
+    Do not emit promotions in this band; the daemon discards them.
+
+  When in doubt, calibrate down — the cost of a missed fact is one Telegram review next session;
+  the cost of a confident wrong fact is corrupted canonical memory.
+
 - "claim_type": one of "fact"|"decision"|"preference"|"question"|"lesson"
   - fact: objective information worth persisting
   - decision: a choice made (outcome can be checked later)
@@ -321,6 +345,7 @@ If nothing to promote, use an empty array.`;
 
     let autoApprovedCount = 0;
     let autoRejectedCount = 0;
+    let conflictDeferredCount = 0;
 
     // Confidence-based routing (HITL is permanent):
     //   >= 0.95       → auto-approve (write directly, no Telegram prompt)
@@ -343,18 +368,32 @@ If nothing to promote, use an empty array.`;
           claimType: (promo.claim_type ?? "fact") as ClaimType,
           confidence,
           sessionIds,
+          originChannel: "nightly-extractor",
         });
 
         if (claimId && confidence >= 0.95) {
-          const ok = await approveCandidate(db, claimId, canonicalMemory);
-          if (ok) {
-            db.prepare(`UPDATE knowledge_claims SET decided_by = 'auto-approve' WHERE id = ?`).run(claimId);
-            autoApprovedCount++;
-            writtenPromos++;
-            logger.info({ file: promo.file, confidence, content: promo.content.slice(0, 60) }, "Auto-approved high-confidence claim");
-            try {
-              trackPromotion(db, promo.content.slice(0, 80), promo.file);
-            } catch { /* outcome tracking best-effort */ }
+          // Conflict guard: don't auto-approve if memory already has a near-duplicate.
+          // Forces HITL when the new claim looks like it might be contradicting (or restating)
+          // something already canonicalized — the kind of mistake calibration alone can't catch.
+          const conflict = await wouldConflict(promo.content, promo.file, getMemoryIndexer());
+          if (conflict.conflict) {
+            conflictDeferredCount++;
+            candidatesCreated++;
+            logger.info(
+              { file: promo.file, confidence, reason: conflict.reason, neighborScore: conflict.neighborScore, content: promo.content.slice(0, 60) },
+              "Auto-approve deferred to HITL by conflict guard",
+            );
+          } else {
+            const ok = await approveCandidate(db, claimId, canonicalMemory);
+            if (ok) {
+              db.prepare(`UPDATE knowledge_claims SET decided_by = 'auto-approve' WHERE id = ?`).run(claimId);
+              autoApprovedCount++;
+              writtenPromos++;
+              logger.info({ file: promo.file, confidence, content: promo.content.slice(0, 60) }, "Auto-approved high-confidence claim");
+              try {
+                trackPromotion(db, promo.content.slice(0, 80), promo.file);
+              } catch { /* outcome tracking best-effort */ }
+            }
           }
         } else if (claimId) {
           candidatesCreated++;
@@ -366,7 +405,9 @@ If nothing to promote, use an empty array.`;
       }
     }
 
-    // Queue health fallback: auto-approve if backlog is too large
+    // Queue health alert: surface backlog in job output (no auto-approve bypass).
+    // HITL is permanent — review on Telegram, the daemon never silently approves.
+    let backlogWarning: string | null = null;
     try {
       const pending = getPendingCandidates(db, 1);
       if (pending.length > 0) {
@@ -377,12 +418,8 @@ If nothing to promote, use an empty array.`;
         ).get() as { c: number };
 
         if (totalPending.c > 50 || oldestAge > 14) {
-          const autoApproved = await autoApproveHighConfidence(db, canonicalMemory, 0.95);
-          if (autoApproved > 0) {
-            writtenPromos = autoApproved;
-            logger.warn({ autoApproved, queueSize: totalPending.c, oldestAgeDays: Math.round(oldestAge) },
-              "Queue health fallback: auto-approved high-confidence candidates");
-          }
+          backlogWarning = `⚠️ Memory review backlog: ${totalPending.c} pending, oldest ${Math.round(oldestAge)}d. Run /memory pending on Telegram.`;
+          logger.warn({ queueSize: totalPending.c, oldestAgeDays: Math.round(oldestAge) }, "Memory review backlog above threshold");
         }
       }
     } catch (err) {
@@ -419,12 +456,18 @@ If nothing to promote, use an empty array.`;
     if (autoRejectedCount > 0) {
       parts.push(`${autoRejectedCount} dropped as noise (confidence < 0.20)`);
     }
+    if (conflictDeferredCount > 0) {
+      parts.push(`${conflictDeferredCount} deferred to HITL by conflict guard`);
+    }
     if (writtenPromos > 0) {
       parts.push(`Promoted ${writtenPromos}/${promotions.length} facts`);
     }
     parts.push(`${sessions.length} sessions processed`);
     if (writeErrors.length > 0) {
       parts.push(`errors: ${writeErrors.join("; ")}`);
+    }
+    if (backlogWarning) {
+      parts.push(backlogWarning);
     }
     // ── Nightly maintenance: purge old executor feedback, archive stale skills ──
     try {

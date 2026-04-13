@@ -49,11 +49,29 @@ function getSyncState(db: Database.Database): SyncState {
 
 async function fetchNewRows(sinceId: number): Promise<D1Row[]> {
   const sql = `SELECT id, name, email, phone, group_size, events, dietary, message, ip, user_agent, created_at FROM rsvps WHERE id > ${sinceId} ORDER BY id ASC LIMIT 500`;
-  const { stdout } = await execFileP(
-    WRANGLER,
-    ["d1", "execute", D1_DB_NAME, "--remote", "--command", sql, "--json"],
-    { cwd: PROJECT_CWD, timeout: 60_000, maxBuffer: 10 * 1024 * 1024 }
-  );
+  let stdout: string;
+  try {
+    const result = await execFileP(
+      WRANGLER,
+      ["d1", "execute", D1_DB_NAME, "--remote", "--command", sql, "--json"],
+      { cwd: PROJECT_CWD, timeout: 60_000, maxBuffer: 10 * 1024 * 1024 }
+    );
+    stdout = result.stdout;
+  } catch (err) {
+    // execFile rejects with an ExecException that carries stdout/stderr + exit code.
+    // The default `err.message` is just "Command failed: <cmd>" with no root cause,
+    // so unwrap stderr/stdout + code to surface the real wrangler error upstream.
+    const e = err as { stderr?: string; stdout?: string; code?: number | string; signal?: string; message?: string };
+    const stderr = (e.stderr ?? "").toString().trim();
+    const stdoutTrim = (e.stdout ?? "").toString().trim();
+    const detail = [
+      e.code !== undefined ? `exit=${e.code}` : null,
+      e.signal ? `signal=${e.signal}` : null,
+      stderr ? `stderr=${stderr.slice(0, 800)}` : null,
+      stdoutTrim && !stderr ? `stdout=${stdoutTrim.slice(0, 400)}` : null,
+    ].filter(Boolean).join(" | ");
+    throw new Error(`wrangler d1 execute failed: ${detail || e.message || "unknown error"}`);
+  }
 
   const parsed = JSON.parse(stdout) as Array<{ results?: D1Row[] }>;
   return parsed[0]?.results ?? [];

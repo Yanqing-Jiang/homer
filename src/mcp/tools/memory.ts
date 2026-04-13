@@ -141,6 +141,17 @@ export const definitions: ToolDefinition[] = [
       required: ["content", "file"],
     },
   },
+  {
+    name: "memory_debug",
+    description: "Diagnostic view of the memory pipeline for one session: which claims the extractor produced, what confidence each got, where each was routed (auto-approve / HITL / rejected / stale), and whether they landed in a memory file. Read-only. Use when memory feels off and you want to see why something was or wasn't remembered. Dropped-as-noise claims (confidence < 0.20) are not stored and so cannot be shown.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string", description: "Specific session_summaries.id to inspect. If omitted, returns the most recent processed session." },
+        last_n: { type: "number", description: "When session_id is omitted, inspect the N most recent processed sessions (default: 1, max: 5)." },
+      },
+    },
+  },
 ];
 
 export async function handle(
@@ -526,6 +537,7 @@ export async function handle(
           section: section ?? "",
           claimType: "fact",
           confidence: 0.95,
+          originChannel: "mcp-promote",
         });
         if (!claimId) {
           return { content: [{ type: "text", text: `Skipped — duplicate (already pending or promoted to ${file}.md)` }] };
@@ -745,6 +757,7 @@ export async function handle(
           section: "replace",
           claimType: "replace",
           confidence: 0.85,
+          originChannel: "mcp-replace",
         });
         if (!claimId) {
           return { content: [{ type: "text", text: "Skipped — duplicate replacement proposal" }] };
@@ -778,6 +791,7 @@ export async function handle(
           section: "remove",
           claimType: "remove",
           confidence: 0.80,
+          originChannel: "mcp-remove",
         });
         if (!claimId) {
           return { content: [{ type: "text", text: "Skipped — duplicate removal proposal" }] };
@@ -804,6 +818,7 @@ export async function handle(
           claimType: (claim_type ?? "fact") as "fact" | "decision" | "preference" | "question" | "lesson",
           confidence: confidence ?? 0.7,
           sessionIds: session_id ? [session_id] : undefined,
+          originChannel: "mcp-suggest",
         });
         if (!claimId) {
           return { content: [{ type: "text", text: `Skipped — duplicate (already pending or approved in ${file}.md)` }] };
@@ -813,6 +828,94 @@ export async function handle(
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Failed to suggest: ${msg}` }] };
       }
+    }
+
+    case "memory_debug": {
+      const { session_id, last_n } = args as { session_id?: string; last_n?: number };
+      const sm = deps.getSharedStateManager();
+      const db = sm.getDb();
+
+      let sessions: Array<{ id: string; title: string; project: string | null; agent: string; started_at: string | null; processed_for_promotion: number }>;
+      if (session_id) {
+        sessions = db.prepare(`
+          SELECT id, title, project, agent, started_at, processed_for_promotion
+          FROM session_summaries WHERE id = ?
+        `).all(session_id) as typeof sessions;
+        if (sessions.length === 0) {
+          return { content: [{ type: "text", text: `No session_summaries row with id=${session_id}` }] };
+        }
+      } else {
+        const limit = Math.min(Math.max(last_n ?? 1, 1), 5);
+        sessions = db.prepare(`
+          SELECT id, title, project, agent, started_at, processed_for_promotion
+          FROM session_summaries
+          WHERE processed_for_promotion = 1
+          ORDER BY started_at DESC
+          LIMIT ?
+        `).all(limit) as typeof sessions;
+      }
+
+      const placeholders = sessions.map(() => "?").join(",") || "''";
+      const claimRows = db.prepare(`
+        SELECT
+          id, content, target_file, section, claim_type,
+          confidence, status, decided_by, decided_at, created_at,
+          telegram_message_id, session_id
+        FROM knowledge_claims
+        WHERE session_id IN (${placeholders})
+        ORDER BY created_at ASC
+      `).all(...sessions.map(s => s.id)) as Array<{
+        id: string; content: string; target_file: string; section: string | null; claim_type: string;
+        confidence: number; status: string; decided_by: string | null; decided_at: string | null;
+        created_at: string; telegram_message_id: number | null; session_id: string;
+      }>;
+
+      const routeOf = (c: typeof claimRows[number]): string => {
+        if (c.status === "approved" && c.decided_by === "auto-approve") return "auto-approve (>=0.95)";
+        if (c.status === "approved") return `HITL-approved by ${c.decided_by ?? "user"}`;
+        if (c.status === "candidate") return "HITL-pending";
+        if (c.status === "rejected") return `HITL-rejected by ${c.decided_by ?? "user"}`;
+        if (c.status === "stale") return "stale (lint flagged)";
+        if (c.status === "expired") return "expired (>7d unreviewed)";
+        if (c.status === "applying") return "in-flight (applying)";
+        if (c.status === "archived") return "archived";
+        return c.status;
+      };
+
+      const counts: Record<string, number> = {};
+      for (const c of claimRows) {
+        const r = routeOf(c);
+        counts[r] = (counts[r] ?? 0) + 1;
+      }
+
+      const out = {
+        sessions: sessions.map(s => ({
+          id: s.id,
+          title: s.title,
+          project: s.project,
+          agent: s.agent,
+          started_at: s.started_at,
+          processed: s.processed_for_promotion === 1,
+        })),
+        routing_counts: counts,
+        claims: claimRows.map(c => ({
+          id: c.id,
+          session_id: c.session_id,
+          content: c.content.length > 200 ? c.content.slice(0, 200) + "…" : c.content,
+          target: `${c.target_file}.md${c.section ? ` / ${c.section}` : ""}`,
+          claim_type: c.claim_type,
+          confidence: c.confidence,
+          routing: routeOf(c),
+          decided_at: c.decided_at,
+          telegram_message_id: c.telegram_message_id,
+        })),
+        notes: [
+          "Claims with confidence < 0.20 are dropped as noise and not stored — they will not appear here.",
+          "Sub-agent sessions are skipped by the harvester and so produce no claims.",
+        ],
+      };
+
+      return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] };
     }
 
     default:

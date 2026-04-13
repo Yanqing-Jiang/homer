@@ -20,6 +20,18 @@ export type ClaimType = "fact" | "decision" | "preference" | "question" | "lesso
 export type ClaimStatus = "candidate" | "applying" | "approved" | "rejected" | "expired" | "stale" | "archived";
 export type TargetFile = "me" | "work" | "life" | "preferences" | "tools";
 
+export type OriginChannel =
+  | "nightly-extractor"
+  | "weekly-consolidation"
+  | "telegram-review"
+  | "mcp-suggest"
+  | "mcp-promote"
+  | "mcp-replace"
+  | "mcp-remove"
+  | "canonical-backfill"
+  | "weekly-audit"
+  | "unknown";
+
 export interface ClaimCandidate {
   content: string;
   targetFile: TargetFile;
@@ -28,6 +40,7 @@ export interface ClaimCandidate {
   confidence: number;
   sessionIds?: string[];
   sourceUrl?: string;
+  originChannel?: OriginChannel;
 }
 
 export interface KnowledgeClaim {
@@ -105,10 +118,11 @@ export function insertCandidate(
   db.prepare(`
     INSERT INTO knowledge_claims (
       id, content, content_hash, target_file, section,
-      claim_type, confidence, status, review_at, session_id, source_url, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'candidate', ?, ?, ?, datetime('now'))
+      claim_type, confidence, status, review_at, session_id, source_url, origin_channel, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'candidate', ?, ?, ?, ?, datetime('now'))
   `).run(id, candidate.content, hash, candidate.targetFile, candidate.section,
-    candidate.claimType, candidate.confidence, reviewAt, sessionId, candidate.sourceUrl ?? null);
+    candidate.claimType, candidate.confidence, reviewAt, sessionId, candidate.sourceUrl ?? null,
+    candidate.originChannel ?? "unknown");
 
   logger.info({ claimId: id, type: candidate.claimType, confidence: candidate.confidence, target: candidate.targetFile },
     "Inserted candidate claim");
@@ -160,6 +174,7 @@ export async function approveCandidate(
         claim.target_file,
         claim.section,
         source,
+        { claimId, actor: "user" },
       );
       // promoteToFile returns false for security-scan blocks OR section-aware dedup hits.
       // Don't mark the claim 'approved' in that case — it would misreport that memory was
@@ -202,7 +217,7 @@ export async function approveCandidate(
  * Apply a cleanup claim — extract cleaned content and overwrite the target file.
  */
 async function applyCleanupClaim(
-  claim: { content: string; target_file: string },
+  claim: { id?: string; content: string; target_file: string },
   canonicalMemory: CanonicalMemoryService,
 ): Promise<void> {
   // Parse cleaned content from claim body (format: "--- Cleaned Content ---\n{content}")
@@ -218,7 +233,7 @@ async function applyCleanupClaim(
 
   const { PATHS } = await import("../config/paths.js");
   const filePath = `${PATHS.memory}/${claim.target_file}.md`;
-  await canonicalMemory.writeCleanedFile(filePath, cleaned + "\n", "cleanup-approved");
+  await canonicalMemory.writeCleanedFile(filePath, cleaned + "\n", "cleanup-approved", { claimId: claim.id ?? null, actor: "user" });
 }
 
 /**
@@ -256,7 +271,7 @@ async function applySkillClaim(
  * Apply a replace claim — find old text and replace with new text in the target file.
  */
 async function applyReplaceClaim(
-  claim: { content: string; target_file: string },
+  claim: { id?: string; content: string; target_file: string },
   canonicalMemory: CanonicalMemoryService,
 ): Promise<void> {
   const oldMarker = "--- Old Text ---";
@@ -273,7 +288,7 @@ async function applyReplaceClaim(
 
   if (!oldText) throw new Error("Replace claim has empty old text");
 
-  const replaced = await canonicalMemory.replaceInFile(claim.target_file, oldText, newText, "replace-approved");
+  const replaced = await canonicalMemory.replaceInFile(claim.target_file, oldText, newText, "replace-approved", { claimId: claim.id ?? null, actor: "user" });
   if (!replaced) {
     throw new Error(`Old text not found in ${claim.target_file}.md`);
   }
@@ -283,7 +298,7 @@ async function applyReplaceClaim(
  * Apply a remove claim — find and remove text from the target file.
  */
 async function applyRemoveClaim(
-  claim: { content: string; target_file: string },
+  claim: { id?: string; content: string; target_file: string },
   canonicalMemory: CanonicalMemoryService,
 ): Promise<void> {
   const marker = "--- Text to Remove ---";
@@ -293,7 +308,7 @@ async function applyRemoveClaim(
   const textToRemove = claim.content.slice(idx + marker.length).trim();
   if (!textToRemove) throw new Error("Remove claim has empty text");
 
-  const removed = await canonicalMemory.removeFromFile(claim.target_file, textToRemove, "remove-approved");
+  const removed = await canonicalMemory.removeFromFile(claim.target_file, textToRemove, "remove-approved", { claimId: claim.id ?? null, actor: "user" });
   if (!removed) {
     throw new Error(`Text not found in ${claim.target_file}.md`);
   }
@@ -375,37 +390,6 @@ export function expireStaleCandidates(db: Database.Database, maxAgeDays: number 
   }
 
   return result.changes;
-}
-
-/**
- * Auto-approve high-confidence candidates when queue is backing up.
- */
-export async function autoApproveHighConfidence(
-  db: Database.Database,
-  canonicalMemory: CanonicalMemoryService,
-  minConfidence: number = 0.8,
-): Promise<number> {
-  const candidates = db.prepare(`
-    SELECT id FROM knowledge_claims
-    WHERE status = 'candidate' AND confidence >= ?
-    ORDER BY confidence DESC
-    LIMIT 10
-  `).all(minConfidence) as Array<{ id: string }>;
-
-  let approved = 0;
-  for (const c of candidates) {
-    const ok = await approveCandidate(db, c.id, canonicalMemory);
-    if (ok) {
-      db.prepare(`UPDATE knowledge_claims SET decided_by = 'auto-approve' WHERE id = ?`).run(c.id);
-      approved++;
-    }
-  }
-
-  if (approved > 0) {
-    logger.info({ approved, minConfidence }, "Auto-approved high-confidence candidates (queue health fallback)");
-  }
-
-  return approved;
 }
 
 // ── Queries ──────────────────────────────────────────────────
@@ -571,20 +555,32 @@ export function archiveClaim(db: Database.Database, claimId: string): boolean {
  */
 export function flagClaimsStale(
   db: Database.Database,
-  findings: Array<{ file: string; stale_text: string; reason: string; suggestion: string }>,
+  findings: Array<{ file: string; section?: string | null; stale_text: string; reason: string; suggestion: string }>,
 ): KnowledgeClaim[] {
   const staleClaims: KnowledgeClaim[] = [];
 
   for (const finding of findings) {
     const targetFile = finding.file.replace(/\.md$/, "");
-    // Try to match by first 50 chars of the stale text
+    // Match by first 50 chars of the stale text. When the lint finding includes a section,
+    // restrict to that section — section-blind matching can flag the wrong claim if the same
+    // substring appears under multiple headings (e.g., "Active Projects" vs "Completed").
+    // ORDER BY created_at ASC keeps the choice deterministic when section info is missing.
     const searchText = finding.stale_text.slice(0, 50).replace(/'/g, "''");
+    const findingSection = (finding as { section?: string | null }).section ?? null;
 
-    const matched = db.prepare(`
-      SELECT * FROM knowledge_claims
-      WHERE status = 'approved' AND target_file = ? AND content LIKE ?
-      LIMIT 1
-    `).get(targetFile, `%${searchText}%`) as any | undefined;
+    const matched = (findingSection !== null
+      ? db.prepare(`
+          SELECT * FROM knowledge_claims
+          WHERE status = 'approved' AND target_file = ? AND section = ? AND content LIKE ?
+          ORDER BY created_at ASC
+          LIMIT 1
+        `).get(targetFile, findingSection, `%${searchText}%`)
+      : db.prepare(`
+          SELECT * FROM knowledge_claims
+          WHERE status = 'approved' AND target_file = ? AND content LIKE ?
+          ORDER BY created_at ASC
+          LIMIT 1
+        `).get(targetFile, `%${searchText}%`)) as any | undefined;
 
     if (matched) {
       db.prepare(`
