@@ -16,11 +16,8 @@ import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { logger } from "../../utils/logger.js";
 import { StateManager, type SessionSummaryRow } from "../../state/manager.js";
 import { buildSchedulerContext, buildGoalScoreboard } from "../shared-context.js";
-import { getMemoryIndexer } from "../../memory/indexer.js";
-import { getCanonicalMemoryService } from "../../memory/canonical-service.js";
 import { flagClaimsStale, insertCandidate, type KnowledgeClaim, type TargetFile, type ClaimType } from "../../memory/claims.js";
 import { PATHS } from "../../config/paths.js";
-import { config } from "../../config/index.js";
 import { hasMigration } from "../../state/migrations/index.js";
 
 const DAILY_LOG_DIR = PATHS.daily;
@@ -351,9 +348,11 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
     const validFiles = new Set(PERMANENT_FILES.map(f => f.path.split("/").pop()));
     const dedupSm = stateManager ?? new StateManager(DB_PATH);
     const ownedDedupSm = !stateManager;
-    const canonicalMemory = getCanonicalMemoryService(dedupSm, getMemoryIndexer());
-
-    const useHumanGated = config.features.humanGatedMemory && hasMigration(dedupSm.getDb(), "069_knowledge_claims.sql");
+    if (!hasMigration(dedupSm.getDb(), "069_knowledge_claims.sql")) {
+      logger.warn("knowledge_claims migration missing — weekly consolidation HITL pipeline cannot run");
+      if (ownedDedupSm) dedupSm.close();
+      return { success: false, output: "", error: "knowledge_claims migration missing" };
+    }
 
     try {
       for (const promo of promotions) {
@@ -372,32 +371,25 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
           continue;
         }
 
-        if (useHumanGated) {
-          // Route through knowledge_claims for human review
-          try {
-            const claimId = insertCandidate(dedupSm.getDb(), {
-              content: promo.content,
-              targetFile: fileKey as TargetFile,
-              section: "",
-              claimType: "fact" as ClaimType,
-              confidence: 0.7,
-            });
-            if (claimId) {
-              promotionsApplied++;
-              promotionLog.push(`→ ${fileName}: ${promo.reason} (queued for review)`);
-              logger.info({ file: fileName, reason: promo.reason }, "Weekly promotion queued as candidate for review");
-            }
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            logger.error({ error: msg, file: fileName }, "Failed to insert weekly candidate");
-          }
-        } else {
-          const promoted = await canonicalMemory.promoteToFile(promo.content, fileKey, null, "weekly");
-          if (promoted) {
+        // Route through knowledge_claims for human review. Weekly consolidation
+        // doesn't carry per-promo confidence, so everything lands in the 0.20-0.95
+        // HITL band (0.7 default) — never auto-approved.
+        try {
+          const claimId = insertCandidate(dedupSm.getDb(), {
+            content: promo.content,
+            targetFile: fileKey as TargetFile,
+            section: "",
+            claimType: "fact" as ClaimType,
+            confidence: 0.7,
+          });
+          if (claimId) {
             promotionsApplied++;
-            promotionLog.push(`→ ${fileName}: ${promo.reason}`);
-            logger.info({ file: fileName, reason: promo.reason }, "Promoted fact to permanent memory");
+            promotionLog.push(`→ ${fileName}: ${promo.reason} (queued for review)`);
+            logger.info({ file: fileName, reason: promo.reason }, "Weekly promotion queued as candidate for review");
           }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.error({ error: msg, file: fileName }, "Failed to insert weekly candidate");
         }
       }
 

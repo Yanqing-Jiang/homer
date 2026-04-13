@@ -81,9 +81,7 @@ const configSchema = z.object({
     phoneNumber: z.string().default(""),
     apiKeySid: z.string().default(""),
   }),
-  features: z.object({
-    humanGatedMemory: z.boolean().default(false),
-  }).default({}),
+  features: z.object({}).default({}),
   logLevel: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
 });
 
@@ -150,9 +148,7 @@ function loadConfig(): Config {
       phoneNumber: process.env.TWILIO_PHONE_NUMBER ?? "",
       apiKeySid: process.env.TWILIO_API_KEY_SID ?? "",
     },
-    features: {
-      humanGatedMemory: process.env.FEATURE_HUMAN_GATED_MEMORY === "true",
-    },
+    features: {},
     logLevel: process.env.LOG_LEVEL ?? "info",
   };
 

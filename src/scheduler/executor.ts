@@ -5,7 +5,6 @@ import { withSlot } from "../executors/concurrency.js";
 import { processRegistry } from "../process/registry.js";
 import type { RegisteredJob, JobExecutionResult, ProgressCallback, ProgressEvent } from "./types.js";
 import { LANE_CWD, DEFAULT_JOB_TIMEOUT } from "./types.js";
-import { processMemoryUpdates } from "../memory/writer.js";
 import { executeKimiCLI } from "../executors/kimi-cli.js";
 import { executeCodexCLI } from "../executors/codex-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
@@ -628,22 +627,6 @@ async function executeClaudeJob(
 Stderr:
 ${stderr.trim()}`
           : stderr.trim();
-      }
-
-      if (success) {
-        // Process memory updates from scheduled job output
-        try {
-          const { cleanedResponse, updatesWritten, targets } = await processMemoryUpdates(
-            output,
-            config.lane
-          );
-          if (updatesWritten > 0) {
-            logger.info({ jobId: config.id, updatesWritten, targets }, "Memory updated from scheduled job");
-          }
-          output = cleanedResponse;
-        } catch (memErr) {
-          logger.warn({ error: memErr, jobId: config.id }, "Failed to process memory updates");
-        }
       }
 
       if (emitCompleted) {

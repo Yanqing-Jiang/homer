@@ -27,9 +27,14 @@ export interface ParsedSession {
   contentHash: string;
 }
 
+function getCodexSessionsDir(homeDir: string): string {
+  const codexHome = process.env.CODEX_HOME || join(homeDir, ".codex");
+  return join(codexHome, "sessions");
+}
+
 /**
  * Parse Codex CLI session from JSONL file
- * Location: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+ * Location: $CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl (defaults to ~/.codex/sessions)
  */
 export function parseCodexSession(filePath: string): ParsedSession | null {
   try {
@@ -194,7 +199,7 @@ export function parseKimiSession(filePath: string): ParsedSession | null {
  * Scan for Codex session files within a date range
  */
 export function scanCodexSessions(homeDir: string, sinceDays: number = 7, cutoffEpochMs?: number): string[] {
-  const codexDir = join(homeDir, ".codex", "sessions");
+  const codexDir = getCodexSessionsDir(homeDir);
   if (!existsSync(codexDir)) {
     return [];
   }

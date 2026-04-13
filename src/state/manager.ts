@@ -2144,12 +2144,16 @@ export class StateManager {
   // ============================================
 
   /**
-   * Insert a daemon event into session_summaries.
-   * Used by memory_append MCP tool (replaces appendDailyLog).
+   * Insert a pre-timeout flush checkpoint into session_summaries.
+   * Sole caller: memory/flush.ts (captures session state before idle timeout kills it).
+   * Agent-driven journaling was removed — live sessions are captured by session-harvester
+   * reading the CLI jsonl transcripts directly.
    */
-  insertDaemonEvent(title: string, summary: string, project?: string, _source?: string): string {
-    const id = `daemon_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  insertFlushCheckpoint(title: string, summary: string, project?: string): string {
+    const id = `flush_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
+    // Timestamp in hash is intentional: each flush is a unique checkpoint, so we
+    // don't want dedup collapsing sequential flushes of the same session.
     const contentHash = createHash("sha256")
       .update(title + summary + now)
       .digest("hex");
@@ -2304,10 +2308,12 @@ export class StateManager {
 
   /**
    * Compute a SHA-256 hash for dedup of promoted facts.
+   * Section is included so the same content can be filed under different sections
+   * (e.g., a preference relevant to both "Communication" and "Writing Style").
    */
-  private factHash(content: string, targetFile: string): string {
+  private factHash(content: string, targetFile: string, section?: string | null): string {
     return createHash("sha256")
-      .update(this.normalizeForHash(content) + "::" + targetFile)
+      .update(this.normalizeForHash(content) + "::" + targetFile + "::" + (section ?? ""))
       .digest("hex");
   }
 
@@ -2315,8 +2321,8 @@ export class StateManager {
    * Check if a fact has already been promoted (by content hash).
    * Now backed by knowledge_claims instead of promoted_facts.
    */
-  checkFactExists(content: string, targetFile: string): boolean {
-    const hash = this.factHash(content, targetFile);
+  checkFactExists(content: string, targetFile: string, section?: string | null): boolean {
+    const hash = this.factHash(content, targetFile, section);
     const row = this._db.prepare(
       "SELECT 1 FROM knowledge_claims WHERE content_hash = ? AND target_file = ? AND status = 'approved' LIMIT 1"
     ).get(hash, targetFile.replace(".md", ""));
@@ -2333,7 +2339,7 @@ export class StateManager {
     section: string | null,
     source: "nightly" | "weekly" | "mcp" | "unknown"
   ): void {
-    const hash = this.factHash(content, targetFile);
+    const hash = this.factHash(content, targetFile, section);
     const normalizedFile = targetFile.replace(".md", "");
     const existing = this._db.prepare(
       "SELECT 1 FROM knowledge_claims WHERE content_hash = ? AND target_file = ? AND status NOT IN ('rejected', 'archived', 'expired') LIMIT 1"

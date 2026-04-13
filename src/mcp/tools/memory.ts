@@ -1,5 +1,5 @@
 /**
- * Memory tools: search, hybrid_search, generate_embeddings, append, promote, read, reindex, suggestions, context
+ * Memory tools: search, hybrid_search, generate_embeddings, promote, suggest, read, reindex, context, candidates, replace, remove
  */
 
 import { readFile } from "fs/promises";
@@ -16,7 +16,7 @@ const MEMORY_BASE = PATHS.memory;
 export const definitions: ToolDefinition[] = [
   {
     name: "memory_search",
-    description: "Search memory using FTS5 full-text search. Returns ranked results with snippets.",
+    description: "Unified recall across ~/memory/*.md chunks AND operational stores (session summaries, threads, failure takeovers, scrapes, ideas, YouTube, transcripts). Hybrid (vector + BM25) on memory chunks when embeddings exist; BM25 per operational table, fused into one ranked list.",
     inputSchema: {
       type: "object",
       properties: {
@@ -47,18 +47,6 @@ export const definitions: ToolDefinition[] = [
     inputSchema: { type: "object", properties: {} },
   },
   {
-    name: "memory_append",
-    description: "Append a session note to Homer's memory (stored in session_summaries). Use for decisions, blockers, and observations during daemon/scheduled jobs.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        content: { type: "string", description: "Content to append" },
-        context: { type: "string", enum: ["work", "life", "general"], description: "Context tag (default: general)" },
-      },
-      required: ["content"],
-    },
-  },
-  {
     name: "memory_promote",
     description: "Promote a fact to a permanent memory file. Use for lasting information.",
     inputSchema: {
@@ -86,7 +74,7 @@ export const definitions: ToolDefinition[] = [
   },
   {
     name: "memory_reindex",
-    description: "Reindex all memory files for search. Run after major changes.",
+    description: "Refresh the curated memory corpus in memory_fts: core files (me/work/life/preferences/tools), recent daily logs (7-day hot window — older purged), meetings, skills, and transcripts. Does NOT touch trigger-maintained FTS tables (session_summaries_fts, thread_messages_fts, ideas_fts, etc.).",
     inputSchema: { type: "object", properties: {} },
   },
   {
@@ -343,11 +331,33 @@ export async function handle(
 
       const indexStats = deps.indexer.getStats();
       const metaMap = new Map(indexStats.fileStats.map(f => [f.filePath, f.indexedAt]));
-      const enrichedMemory = memoryResults.map(r => ({
-        ...r,
-        source_file: r.filePath,
-        indexed_at: metaMap.get(r.filePath) ?? null,
-      }));
+
+      // Normalize memory-file ranks into [0,1] so they fuse correctly against
+      // per-table BM25 scores below. Two sources to handle:
+      //   - hybridSearch(): carries an RRF `score` (higher = better, rank is a placeholder 0)
+      //   - search():       carries a negative BM25 `rank` (lower = better)
+      const memoryWithScore = memoryResults as Array<typeof memoryResults[number] & { score?: number }>;
+      const hybridScores = memoryWithScore.map(r => r.score).filter((s): s is number => typeof s === "number" && s > 0);
+      const bm25Ranks = memoryWithScore.map(r => r.rank).filter(r => r < 0);
+      const bestHybrid = hybridScores.length > 0 ? Math.max(...hybridScores) : 0;
+      const bestBm25 = bm25Ranks.length > 0 ? Math.min(...bm25Ranks) : 0;
+
+      const enrichedMemory = memoryWithScore.map(r => {
+        let normalizedRank: number;
+        if (typeof r.score === "number" && r.score > 0 && bestHybrid > 0) {
+          normalizedRank = r.score / bestHybrid; // RRF path
+        } else if (r.rank < 0 && bestBm25 < 0) {
+          normalizedRank = r.rank / bestBm25; // plain-FTS path
+        } else {
+          normalizedRank = 0.1; // marginal match
+        }
+        return {
+          ...r,
+          source_file: r.filePath,
+          indexed_at: metaMap.get(r.filePath) ?? null,
+          normalizedRank,
+        };
+      });
 
       // Normalize each table's BM25 scores independently
       const normSessions = normalizeBM25(sessionResults);
@@ -363,10 +373,9 @@ export async function handle(
       const unified: UnifiedResult[] = [];
 
       for (const r of enrichedMemory) {
-        // Memory results from hybrid/FTS search already have their own scoring
         unified.push({
           type: "memory",
-          normalizedRank: r.rank === 0 ? 0 : 1.0, // Memory results are pre-ranked
+          normalizedRank: r.normalizedRank,
           data: { ...r },
         });
       }
@@ -502,14 +511,6 @@ export async function handle(
     case "memory_generate_embeddings": {
       const stats = await deps.indexer.generateEmbeddings();
       return { content: [{ type: "text", text: `Generated ${stats.generated} embeddings, ${stats.skipped} skipped, ${stats.errors} errors` }] };
-    }
-
-    case "memory_append": {
-      const { content, context } = args as { content: string; context?: "work" | "life" | "general" };
-      const time = new Date().toTimeString().slice(0, 5);
-      const title = `[${context || "general"}] ${content.slice(0, 80)}`;
-      deps.canonicalMemory.insertSessionEvent(title, content, context || "general");
-      return { content: [{ type: "text", text: `Appended to session_summaries at ${time}` }] };
     }
 
     case "memory_promote": {

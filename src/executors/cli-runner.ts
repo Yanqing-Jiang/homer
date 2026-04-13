@@ -10,7 +10,6 @@ import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { runWithFallbackChain, DEFAULT_CHAIN, type ExecutorKind } from "./fallback-orchestrator.js";
 import { writeChainTrace } from "./trace-writer.js";
-import { processMemoryUpdates } from "../memory/writer.js";
 import { getExecutorModel, getClaudeDefaultModel } from "../commands/index.js";
 import { buildConversationContext, CONTEXT_DEFAULTS, type ContextSource } from "./context-builder.js";
 
@@ -60,13 +59,14 @@ interface ActiveRun {
 }
 
 const MEMORY_HINT =
-  "If anything should be saved to memory, emit <memory-update target=\"work|life|global\">...</memory-update>.";
+  "Use Homer memory MCP tools directly when memory matters. Call memory_context for fresh current context, memory_read for durable files, memory_search or memory_hybrid_search for lookup, memory_suggest for decisions/preferences/lessons, and memory_promote only for simple stable facts.";
 const TELEGRAM_HINT =
   "Keep responses concise and readable on mobile. Short paragraphs, no HTML, no unnecessary formatting. Get to the point.";
 const CHATGPT_BROWSER_HINT =
   "Use the browser tool to access chatgpt.com and complete the task there. Keep the final response here concise and include any relevant output or links.";
 
-const CODEX_AGENT_PATH = `${process.env.HOME ?? "/Users/yj"}/.codex/AGENT.md`;
+const CODEX_HOME = process.env.CODEX_HOME || `${process.env.HOME ?? "/Users/yj"}/.codex`;
+const CODEX_AGENT_PATH = `${CODEX_HOME}/AGENTS.md`;
 
 let cachedCodexAgent: string | null = null;
 
@@ -76,6 +76,7 @@ function loadCodexAgent(): string {
     cachedCodexAgent = "";
     return cachedCodexAgent;
   }
+
   try {
     cachedCodexAgent = readFileSync(CODEX_AGENT_PATH, "utf-8").trim();
     return cachedCodexAgent;
@@ -99,7 +100,8 @@ function buildPrompt(params: {
     if (agent) parts.push(agent);
   }
 
-  if (params.executor === "gemini" || params.executor === "codex" || params.executor === "opencode") {
+  // Gemini is a pure research/tool CLI — no memory access.
+  if (params.executor === "codex" || params.executor === "opencode") {
     parts.push(MEMORY_HINT);
   }
 
@@ -530,8 +532,7 @@ ${pendingContext.context}
           newSessionAccountId = result.accountId ?? null;
         }
 
-        // Process memory updates (Codex/Gemini encouraged via prompt)
-        const { cleanedResponse } = await processMemoryUpdates(output, "general");
+        const cleanedResponse = output;
 
         const wasCancelled = this.activeRuns.get(params.lane)?.cancelled ?? false;
         if (wasCancelled) {
