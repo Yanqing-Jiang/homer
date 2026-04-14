@@ -100,7 +100,7 @@ export interface MemoryEntrySyncResult {
 
 // ── Parser ─────────────────────────────────────────────────
 
-const FILES_TO_AUDIT_ORDER = ["me.md", "work.md", "life.md", "preferences.md", "tools.md", "goals.md", "projects.md"];
+const FILES_TO_AUDIT_ORDER = ["me.md", "work.md", "preferences.md", "tools.md", "goals.md", "projects.md"];
 
 /**
  * Canonical memory files to audit, in review order.

@@ -69,7 +69,7 @@ export const DISCOVERY_SCHEDULES = {
     enabled: true,
     timeout: 900000, // 15 minutes
     executor: "claude" as const,
-    contextFiles: ["~/memory/me.md", "~/memory/work.md", "~/memory/life.md"],
+    contextFiles: ["~/memory/me.md", "~/memory/work.md"],
     notifyOnSuccess: true,
     notifyOnFailure: true,
   },

@@ -1,7 +1,7 @@
 /**
  * Weekly Memory Cleanup — Claude Opus 1M handler
  *
- * Reviews preferences.md, tools.md, work.md, and life.md with full Yanqing context,
+ * Reviews preferences.md, tools.md, and work.md with full Yanqing context,
  * recent daily logs, and cross-file awareness. The AI's judgment is the quality gate —
  * not rigid size floors or header checks.
  *
@@ -27,7 +27,6 @@ const FILES_TO_CLEAN = [
   { name: "preferences.md", path: PATHS.preferences },
   { name: "tools.md", path: PATHS.tools },
   { name: "work.md", path: PATHS.work },
-  { name: "life.md", path: PATHS.life },
 ] as const;
 
 function getTodayDateString(): string {
@@ -300,7 +299,7 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
           cleaned,
         ].join("\n");
 
-        const targetFile = file.name.replace(".md", "") as "preferences" | "tools" | "work" | "life";
+        const targetFile = file.name.replace(".md", "") as "preferences" | "tools" | "work";
         const claimId = insertCandidate(sm.getDb(), {
           content: claimContent,
           targetFile,

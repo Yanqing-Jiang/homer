@@ -31,11 +31,11 @@ export async function wouldConflict(
   indexer: MemoryIndexer,
 ): Promise<ConflictCheckResult> {
   // Embeddings table key — context filter narrows to the right slice.
-  const context = targetFile === "work" ? "work" : targetFile === "life" ? "life" : "general";
+  const context = targetFile === "work" ? "work" : "general";
 
   let neighbors: Array<{ content: string; score?: number; filePath: string }>;
   try {
-    neighbors = await indexer.hybridSearch(newContent, 5, context as "work" | "life" | "general");
+    neighbors = await indexer.hybridSearch(newContent, 5, context as "work" | "general");
   } catch (err) {
     // If embeddings aren't ready, fall through — better to auto-approve than to block on infrastructure.
     logger.debug({ err }, "Conflict check skipped: hybridSearch failed");

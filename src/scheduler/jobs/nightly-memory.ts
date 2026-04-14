@@ -23,12 +23,11 @@ import { insertCandidate, approveCandidate, expireStaleCandidates, getPendingCan
 import type { ClaimType, TargetFile } from "../../memory/claims.js";
 import { wouldConflict } from "../../memory/conflict-detection.js";
 
-type MemoryFileKey = "me" | "work" | "life" | "preferences" | "tools";
+type MemoryFileKey = "me" | "work" | "preferences" | "tools";
 
 const PERMANENT_FILES: Record<MemoryFileKey, string> = {
   me: PATHS.me,
   work: PATHS.work,
-  life: PATHS.life,
   preferences: PATHS.preferences,
   tools: PATHS.tools,
 };
@@ -41,7 +40,7 @@ const CLAIM_TYPES = ["fact", "decision", "preference", "question", "lesson"] as 
 
 const PromotionSchema = z.object({
   content: z.string().min(10),
-  file: z.enum(["me", "work", "life", "preferences", "tools"]),
+  file: z.enum(["me", "work", "preferences", "tools"]),
   section: z.string().min(1),
   confidence: z.number().min(0).max(1).default(0.5),
   claim_type: z.enum(CLAIM_TYPES).default("fact"),
@@ -210,16 +209,14 @@ COVERAGE PRIORITY (extract in this order):
 1. **Work decisions & project status** — outcomes, milestones, blockers, pivots → work.md
 2. **People & org dynamics** — who said what, relationships, power dynamics, roles → work.md
 3. **Strategic insights** — career positioning, competitive moves, narrative framing → me.md or work.md
-4. **Life context** — events, routines, personal milestones → life.md
-5. **Preferences expressed** — PAY SPECIAL ATTENTION to Explicit User Feedback. If Yanqing archived something with specific notes, extract as a new rule → preferences.md
-6. **Tool configurations** — only if genuinely new configs/subscriptions changed → tools.md
+4. **Preferences expressed** — PAY SPECIAL ATTENTION to Explicit User Feedback. If Yanqing archived something with specific notes, extract as a new rule → preferences.md
+5. **Tool configurations** — only if genuinely new configs/subscriptions changed → tools.md
 
 BIAS CORRECTION: The system currently over-indexes on tools (36%) and preferences (37%). Actively prioritize work, people, and project facts. Only extract tool/preference facts if nothing else is promotable.
 
 For each fact, classify which file it belongs to:
-- me: identity, goals, ambitions, personal milestones
+- me: identity, goals, ambitions, personal milestones, routines, life context
 - work: career, projects, professional contacts, positioning
-- life: life context, routines, health, relationships, travel
 - preferences: communication style, technical choices, workflow preferences
 - tools: tool configs, subscriptions, API keys, service settings
 
@@ -247,7 +244,7 @@ ${sessionInput.length > 80000 ? sessionInput.slice(0, 80000) + "\n\n... (truncat
 ## Output Format
 
 Return ONLY a valid JSON object (no markdown, no preamble):
-{"promotions": [{"content": "fact to promote", "file": "me"|"work"|"life"|"preferences"|"tools", "section": "Section Name", "confidence": 0.8, "claim_type": "fact"}]}
+{"promotions": [{"content": "fact to promote", "file": "me"|"work"|"preferences"|"tools", "section": "Section Name", "confidence": 0.8, "claim_type": "fact"}]}
 
 Each promotion MUST include:
 - "confidence": 0.0-1.0 — meaning is calibrated against this rubric:

@@ -17,10 +17,9 @@ import type { UserContext, DiscoveryEngineConfig } from "./types.js";
 // ============================================
 
 export async function loadUserContext(config: DiscoveryEngineConfig): Promise<UserContext> {
-  const [meContent, workContent, lifeContent, denyContent] = await Promise.all([
+  const [meContent, workContent, denyContent] = await Promise.all([
     safeReadFile(`${config.memoryDir}/me.md`),
     safeReadFile(`${config.memoryDir}/work.md`),
-    safeReadFile(`${config.memoryDir}/life.md`),
     safeReadFile(config.denyHistoryFile),
   ]);
 
@@ -31,7 +30,7 @@ export async function loadUserContext(config: DiscoveryEngineConfig): Promise<Us
     preferences: extractPreferences(meContent, denyContent),
     activeProjects: extractProjects(workContent),
     careerFocus: extractCareerFocus(workContent),
-    currentFocus: extractCurrentFocus(lifeContent),
+    currentFocus: extractCurrentFocus(workContent),
     blocklist: extractBlocklist(denyContent),
     seenItems: new Set(),
   };
@@ -212,11 +211,11 @@ function extractCareerFocus(workContent: string): string[] {
   return focus;
 }
 
-function extractCurrentFocus(lifeContent: string): string[] {
+function extractCurrentFocus(workContent: string): string[] {
   const focus: string[] = [];
 
-  // Extract from Upcoming section
-  const upcomingMatch = lifeContent.match(/## Upcoming[\s\S]*?(?=##|$)/);
+  // Extract from Upcoming section (e.g. in work.md)
+  const upcomingMatch = workContent.match(/## Upcoming[\s\S]*?(?=##|$)/);
   if (upcomingMatch) {
     const keywords = extractKeywords(upcomingMatch[0]);
     focus.push(...keywords);

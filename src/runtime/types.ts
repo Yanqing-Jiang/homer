@@ -13,7 +13,7 @@
 // ENUMS & LITERALS
 // ============================================
 
-export type GoalCategory = 'work' | 'side_income' | 'learning' | 'life' | 'homer';
+export type GoalCategory = 'work' | 'side_income' | 'learning' | 'homer';
 export type GoalStatus = 'active' | 'paused' | 'achieved' | 'abandoned';
 
 export type IntentType = 'research' | 'code' | 'content' | 'analysis' | 'maintenance' | 'notification';
@@ -29,7 +29,7 @@ export type RiskLevel = 'low' | 'medium' | 'high';
 export type EffortEstimate = 'trivial' | 'small' | 'medium' | 'large' | 'epic';
 
 export type Executor = 'claude' | 'gemini' | 'kimi' | 'codex' | 'api';
-export type Lane = 'work' | 'life' | 'default';
+export type Lane = 'work' | 'default';
 
 export type ApprovalDecision = 'approved' | 'rejected' | 'deferred' | 'modified';
 

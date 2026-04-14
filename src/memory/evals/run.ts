@@ -18,7 +18,7 @@ import { PATHS } from "../../config/paths.js";
 interface GoldenCase {
   id: string;
   query: string;
-  context: "work" | "life" | "general";
+  context: "work" | "general";
   expectedFile: string;
   minScore: number;
   shouldContainAny: string[];

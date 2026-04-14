@@ -21,7 +21,6 @@ export const PATHS = {
   // Core memory files
   me: `${mem}/me.md`,
   work: `${mem}/work.md`,
-  life: `${mem}/life.md`,
   preferences: `${mem}/preferences.md`,
   tools: `${mem}/tools.md`,
   patterns: `${mem}/patterns.md`,

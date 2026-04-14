@@ -10,7 +10,6 @@ import { PATHS } from "../config/paths.js";
 const SEARCH_PATHS = [
   PATHS.me,
   PATHS.work,
-  PATHS.life,
   PATHS.preferences,
   PATHS.tools,
 ];

@@ -25,16 +25,14 @@ const DAILY_LOG_DIR = PATHS.daily;
 const FILE_PATH_MAP: Record<string, string> = {
   "me.md": PATHS.me,
   "work.md": PATHS.work,
-  "life.md": PATHS.life,
   "tools.md": PATHS.tools,
   "preferences.md": PATHS.preferences,
 };
 const MAX_INPUT_CHARS = 800_000; // ~200K tokens, within Codex's 1M-token context
 
 const PERMANENT_FILES = [
-  { path: PATHS.me, label: "me.md (identity, goals, ambition)" },
+  { path: PATHS.me, label: "me.md (identity, goals, ambition, routines)" },
   { path: PATHS.work, label: "work.md (career, projects, org)" },
-  { path: PATHS.life, label: "life.md (personal, routines)" },
   { path: PATHS.tools, label: "tools.md (HOMER config, fixes)" },
   { path: PATHS.preferences, label: "preferences.md" },
 ] as const;
@@ -99,7 +97,7 @@ Weekly consolidation focuses on CROSS-DAY SYNTHESIS — patterns and insights th
 
 Criteria for weekly promotion (cross-day only):
 - Recurring themes across 3+ days (e.g., "spent most of the week on X" → work.md)
-- Trend-level career or life shifts visible over the week (work.md, life.md)
+- Trend-level career shifts visible over the week (work.md)
 - Architecture decisions that evolved across multiple sessions (tools.md)
 - Goal progress or priority shifts apparent from the week's arc (me.md)
 - Workflow patterns confirmed by repeated use (preferences.md)
