@@ -25,7 +25,6 @@ const MAX_CONTEXT_CHARS = 100000;
 export interface RawContext {
   me: string;
   work: string;
-  life: string;
   tools: string;
   recentLogs: string[];
 }
@@ -54,18 +53,17 @@ export interface UnifiedContext {
 export async function loadContext(
   memoryDir: string = `${process.env.HOME}/memory`
 ): Promise<UnifiedContext> {
-  const [me, work, life, tools] = await Promise.all([
+  const [me, work, tools] = await Promise.all([
     safeReadFile(join(memoryDir, "me.md")),
     safeReadFile(join(memoryDir, "work.md")),
-    safeReadFile(join(memoryDir, "life.md")),
     safeReadFile(join(memoryDir, "tools.md")),
   ]);
 
   const recentLogs = await loadRecentDailyLogs(memoryDir, 3);
 
   return {
-    raw: { me, work, life, tools, recentLogs },
-    structured: extractStructuredData(me, work, life),
+    raw: { me, work, tools, recentLogs },
+    structured: extractStructuredData(me, work),
   };
 }
 
@@ -75,16 +73,15 @@ export async function loadContext(
 export async function loadRawContext(
   memoryDir: string = `${process.env.HOME}/memory`
 ): Promise<RawContext> {
-  const [me, work, life, tools] = await Promise.all([
+  const [me, work, tools] = await Promise.all([
     safeReadFile(join(memoryDir, "me.md")),
     safeReadFile(join(memoryDir, "work.md")),
-    safeReadFile(join(memoryDir, "life.md")),
     safeReadFile(join(memoryDir, "tools.md")),
   ]);
 
   const recentLogs = await loadRecentDailyLogs(memoryDir, 3);
 
-  return { me, work, life, tools, recentLogs };
+  return { me, work, tools, recentLogs };
 }
 
 // ============================================
@@ -131,8 +128,7 @@ async function loadRecentDailyLogs(
 
 function extractStructuredData(
   meContent: string,
-  workContent: string,
-  lifeContent: string
+  workContent: string
 ): StructuredContext {
   return {
     interests: extractInterests(meContent),
@@ -140,7 +136,7 @@ function extractStructuredData(
     techStack: extractTechStack(meContent),
     activeProjects: extractActiveProjects(workContent),
     careerFocus: extractCareerFocus(workContent),
-    currentFocus: extractCurrentFocus(lifeContent),
+    currentFocus: extractCurrentFocus(workContent),
   };
 }
 

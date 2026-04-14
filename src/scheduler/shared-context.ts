@@ -19,7 +19,6 @@ export { getRecentJobOutputs } from "./job-outputs.js";
 const CONTEXT_FILES: Array<{ path: string; label: string }> = [
   { path: PATHS.me, label: "me.md (Identity, Goals, Ambition)" },
   { path: PATHS.work, label: "work.md (Career, Projects, Org)" },
-  { path: PATHS.life, label: "life.md (Personal Context)" },
   { path: PATHS.tools, label: "tools.md (Tool Configs, Subscriptions)" },
   { path: PATHS.preferences, label: "preferences.md (Communication & Technical Preferences)" },
 ];
