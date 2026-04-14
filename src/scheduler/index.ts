@@ -12,6 +12,7 @@ import { executeInternalJob } from "./internal-handlers.js";
 import { runCompletionCheckup } from "../executors/completion-checkup.js";
 import { routeTelegramNotification } from "../notifications/telegram-router.js";
 import { startHeartbeat, stopHeartbeat, startWatchdog, stopWatchdog } from "./observability.js";
+import { validateAndLogRegistry } from "./registry.js";
 import { memoryEvents } from "../events/memory-events.js";
 import { escapeHtml } from "../utils/telegram-format.js";
 
@@ -93,6 +94,11 @@ export class Scheduler {
 
     // Add system jobs (not in schedule.json — internal daemon tasks)
     jobs.push(...Scheduler.SYSTEM_JOBS);
+
+    // Phase 0.8: validate registry against the actual loaded job universe
+    // (multi-source schedule set + system jobs). Fatal on missing handler files;
+    // warn on cosmetic drift.
+    validateAndLogRegistry({ loadedScheduledIds: jobs.map((j) => j.id) });
 
     // Phase 3: Seed DB rows BEFORE registration so job:updated → updateScheduledJobNextRun works
     this.stateManager.ensureJobStateRows(
