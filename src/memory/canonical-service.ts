@@ -216,9 +216,9 @@ export class CanonicalMemoryService {
     }
 
     // Index the file immediately (best-effort — dirty flags already set for retry)
-    const context = file === "work" ? "work" : file === "life" ? "life" : "general";
+    const context = file === "work" ? "work" : "general";
     try {
-      await this.indexer.indexFile(filePath, context as "work" | "life" | "general");
+      await this.indexer.indexFile(filePath, context as "work" | "general");
     } catch (err) {
       logger.warn({ err, filePath }, "Inline indexing failed after promote — reindex will pick it up");
     }
@@ -313,8 +313,8 @@ export class CanonicalMemoryService {
       }
 
       try {
-        const context = file === "work" ? "work" : file === "life" ? "life" : "general";
-        await this.indexer.indexFile(filePath, context as "work" | "life" | "general");
+        const context = file === "work" ? "work" : "general";
+        await this.indexer.indexFile(filePath, context as "work" | "general");
       } catch (err) {
         logger.warn({ err, filePath }, "Inline indexing failed after replace");
       }

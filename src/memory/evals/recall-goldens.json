@@ -27,15 +27,6 @@
     "notes": "Trading bot setup."
   },
   {
-    "id": "okc-wedding",
-    "query": "OKC wedding date",
-    "context": "life",
-    "expectedFile": "life.md",
-    "minScore": 0.5,
-    "shouldContainAny": ["OKC", "wedding", "June"],
-    "notes": "Personal milestone."
-  },
-  {
     "id": "career-positioning-narrative",
     "query": "Director of Agents career narrative",
     "context": "work",

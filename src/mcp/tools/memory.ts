@@ -21,7 +21,7 @@ export const definitions: ToolDefinition[] = [
       type: "object",
       properties: {
         query: { type: "string", description: "Search query (supports OR, phrase matching)" },
-        context: { type: "string", enum: ["work", "life", "general"], description: "Filter by context (optional)" },
+        context: { type: "string", enum: ["work", "general"], description: "Filter by context (optional)" },
         limit: { type: "number", description: "Max results to return (default: 10)" },
         include_archived: { type: "boolean", description: "Include archived sessions in search results (default: false). Archived results rank lower." },
       },
@@ -35,7 +35,7 @@ export const definitions: ToolDefinition[] = [
       type: "object",
       properties: {
         query: { type: "string", description: "Search query (natural language works best)" },
-        context: { type: "string", enum: ["work", "life", "general"], description: "Filter by context (optional)" },
+        context: { type: "string", enum: ["work", "general"], description: "Filter by context (optional)" },
         limit: { type: "number", description: "Max results to return (default: 10)" },
       },
       required: ["query"],
@@ -53,7 +53,7 @@ export const definitions: ToolDefinition[] = [
       type: "object",
       properties: {
         content: { type: "string", description: "Content to add" },
-        file: { type: "string", enum: ["me", "work", "life", "preferences", "tools"], description: "Target file to append to" },
+        file: { type: "string", enum: ["me", "work", "preferences", "tools"], description: "Target file to append to" },
         section: { type: "string", description: "Optional section header to add under" },
       },
       required: ["content", "file"],
@@ -65,7 +65,7 @@ export const definitions: ToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        file: { type: "string", enum: ["me", "work", "life", "preferences", "tools", "daily"], description: "File to read (daily = today's log)" },
+        file: { type: "string", enum: ["me", "work", "preferences", "tools", "daily"], description: "File to read (daily = today's log)" },
         date: { type: "string", description: "For daily: specific date YYYY-MM-DD (default: today)" },
         source: { type: "string", enum: ["file", "archive"], description: "For daily: 'file' reads .md (default), 'archive' reads full raw content from SQLite" },
       },
@@ -74,7 +74,7 @@ export const definitions: ToolDefinition[] = [
   },
   {
     name: "memory_reindex",
-    description: "Refresh the curated memory corpus in memory_fts: core files (me/work/life/preferences/tools), recent daily logs (7-day hot window — older purged), meetings, skills, and transcripts. Does NOT touch trigger-maintained FTS tables (session_summaries_fts, thread_messages_fts, ideas_fts, etc.).",
+    description: "Refresh the curated memory corpus in memory_fts: core files (me/work/preferences/tools), recent daily logs (7-day hot window — older purged), meetings, skills, and transcripts. Does NOT touch trigger-maintained FTS tables (session_summaries_fts, thread_messages_fts, ideas_fts, etc.).",
     inputSchema: { type: "object", properties: {} },
   },
   {
@@ -104,7 +104,7 @@ export const definitions: ToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        file: { type: "string", enum: ["me", "work", "life", "preferences", "tools"], description: "Target memory file" },
+        file: { type: "string", enum: ["me", "work", "preferences", "tools"], description: "Target memory file" },
         old_text: { type: "string", description: "Exact text to find (substring match)" },
         new_text: { type: "string", description: "Replacement text" },
         reason: { type: "string", description: "Why this replacement is needed" },
@@ -118,7 +118,7 @@ export const definitions: ToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        file: { type: "string", enum: ["me", "work", "life", "preferences", "tools"], description: "Target memory file" },
+        file: { type: "string", enum: ["me", "work", "preferences", "tools"], description: "Target memory file" },
         text: { type: "string", description: "Exact text to remove (substring match)" },
         reason: { type: "string", description: "Why this content should be removed" },
       },
@@ -132,7 +132,7 @@ export const definitions: ToolDefinition[] = [
       type: "object",
       properties: {
         content: { type: "string", description: "The fact or synthesis to remember" },
-        file: { type: "string", enum: ["me", "work", "life", "preferences", "tools"], description: "Target memory file" },
+        file: { type: "string", enum: ["me", "work", "preferences", "tools"], description: "Target memory file" },
         section: { type: "string", description: "Optional section header" },
         claim_type: { type: "string", enum: ["fact", "decision", "preference", "question", "lesson"], description: "Type of claim (default: fact)" },
         confidence: { type: "number", description: "0.0-1.0 confidence (default: 0.7)" },
@@ -163,7 +163,7 @@ export async function handle(
     case "memory_search": {
       const { query, context, limit, include_archived } = args as {
         query: string;
-        context?: "work" | "life" | "general";
+        context?: "work" | "general";
         limit?: number;
         include_archived?: boolean;
       };
@@ -511,7 +511,7 @@ export async function handle(
     }
 
     case "memory_hybrid_search": {
-      const { query, context, limit } = args as { query: string; context?: "work" | "life" | "general"; limit?: number };
+      const { query, context, limit } = args as { query: string; context?: "work" | "general"; limit?: number };
       const results = await deps.indexer.hybridSearch(query, limit || 10, context);
       const hybridStats = deps.indexer.getStats();
       const hybridMetaMap = new Map(hybridStats.fileStats.map(f => [f.filePath, f.indexedAt]));
@@ -527,7 +527,7 @@ export async function handle(
     case "memory_promote": {
       // Rerouted through claims pipeline for HITL — direct writes bypass all review.
       // High confidence (0.95) makes it auto-approve eligible but still logged.
-      const { content, file, section } = args as { content: string; file: "me" | "work" | "life" | "preferences" | "tools"; section?: string };
+      const { content, file, section } = args as { content: string; file: "me" | "work" | "preferences" | "tools"; section?: string };
       const sm = deps.getSharedStateManager();
       try {
         const { insertCandidate } = await import("../../memory/claims.js");
@@ -753,7 +753,7 @@ export async function handle(
 
         const claimId = insertCandidate(replSm.getDb(), {
           content: claimContent,
-          targetFile: replFile as "me" | "work" | "life" | "preferences" | "tools",
+          targetFile: replFile as "me" | "work" | "preferences" | "tools",
           section: "replace",
           claimType: "replace",
           confidence: 0.85,
@@ -787,7 +787,7 @@ export async function handle(
 
         const claimId = insertCandidate(rmSm.getDb(), {
           content: claimContent,
-          targetFile: rmFile as "me" | "work" | "life" | "preferences" | "tools",
+          targetFile: rmFile as "me" | "work" | "preferences" | "tools",
           section: "remove",
           claimType: "remove",
           confidence: 0.80,
@@ -813,7 +813,7 @@ export async function handle(
         const { insertCandidate } = await import("../../memory/claims.js");
         const claimId = insertCandidate(sm.getDb(), {
           content,
-          targetFile: file as "me" | "work" | "life" | "preferences" | "tools",
+          targetFile: file as "me" | "work" | "preferences" | "tools",
           section: section ?? "",
           claimType: (claim_type ?? "fact") as "fact" | "decision" | "preference" | "question" | "lesson",
           confidence: confidence ?? 0.7,

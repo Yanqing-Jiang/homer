@@ -154,7 +154,7 @@ export interface UserContext {
   }>;
   careerFocus: string[];
 
-  // From life.md
+  // Upcoming-section focus extracted from work.md
   currentFocus: string[];
 
   // From deny-history.md

@@ -16,7 +16,6 @@ const MEMORY_FILES = [
   { path: `${PATHS.memory}/facts.md`, context: "global" },
   { path: PATHS.preferences, context: "global" },
   { path: "/Users/yj/work/memory.md", context: "work" },
-  { path: "/Users/yj/life/memory.md", context: "life" },
 ];
 
 /**

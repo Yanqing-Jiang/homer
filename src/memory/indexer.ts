@@ -18,7 +18,7 @@ export interface MemorySearchResult {
   filePath: string;
   chunkIndex: number;
   content: string;
-  context: "work" | "life" | "general";
+  context: "work" | "general";
   entryDate: string | null;
   rank: number;
 }
@@ -81,7 +81,7 @@ export class MemoryIndexer {
    */
   async indexFile(
     filePath: string,
-    context: "work" | "life" | "general",
+    context: "work" | "general",
     entryDate?: string
   ): Promise<boolean> {
     if (!existsSync(filePath)) {
@@ -157,10 +157,9 @@ export class MemoryIndexer {
     const stats = { indexed: 0, skipped: 0, errors: 0 };
 
     // Core memory files (identity, preferences, tools)
-    const coreFiles: Array<{ path: string; context: "work" | "life" | "general" }> = [
+    const coreFiles: Array<{ path: string; context: "work" | "general" }> = [
       { path: PATHS.me, context: "general" },
       { path: PATHS.work, context: "work" },
-      { path: PATHS.life, context: "life" },
       { path: PATHS.preferences, context: "general" },
       { path: PATHS.tools, context: "general" },
       { path: PATHS.patterns, context: "general" },
@@ -413,7 +412,7 @@ export class MemoryIndexer {
   /**
    * Search memory files using FTS5 with chunked results
    */
-  search(query: string, limit = 10, context?: "work" | "life" | "general"): MemorySearchResult[] {
+  search(query: string, limit = 10, context?: "work" | "general"): MemorySearchResult[] {
     try {
       // Escape special FTS5 characters
       const escapedQuery = this.escapeFtsQuery(query);
@@ -602,7 +601,7 @@ export class MemoryIndexer {
   async hybridSearch(
     query: string,
     limit = 10,
-    context?: "work" | "life" | "general"
+    context?: "work" | "general"
   ): Promise<Array<MemorySearchResult & { score: number; source: "vector" | "fts" | "both" }>> {
     try {
       // Get FTS5 results
@@ -655,7 +654,7 @@ export class MemoryIndexer {
       const allEmbeddingRows = [...embeddingRows, ...sessionEmbeddingRows];
 
       // Calculate similarities and normalize to common type
-      type SearchItem = { filePath: string; chunkIndex: number; content: string; context: "work" | "life" | "general"; entryDate: string | null };
+      type SearchItem = { filePath: string; chunkIndex: number; content: string; context: "work" | "general"; entryDate: string | null };
       type SearchItemWithScore = SearchItem & { _similarity: number };
 
       const SIMILARITY_FLOOR = 0.40; // Filter garbage vector matches
@@ -669,7 +668,7 @@ export class MemoryIndexer {
               filePath: row.file_path,
               chunkIndex: row.chunk_index,
               content: row.content,
-              context: row.context as "work" | "life" | "general",
+              context: row.context as "work" | "general",
               entryDate: row.entry_date,
               _similarity: similarity,
             } as SearchItemWithScore;

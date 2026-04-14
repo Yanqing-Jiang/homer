@@ -18,7 +18,7 @@ import type { CanonicalMemoryService } from "./canonical-service.js";
 
 export type ClaimType = "fact" | "decision" | "preference" | "question" | "lesson" | "skill" | "cleanup" | "replace" | "remove";
 export type ClaimStatus = "candidate" | "applying" | "approved" | "rejected" | "expired" | "stale" | "archived";
-export type TargetFile = "me" | "work" | "life" | "preferences" | "tools";
+export type TargetFile = "me" | "work" | "preferences" | "tools";
 
 export type OriginChannel =
   | "nightly-extractor"
