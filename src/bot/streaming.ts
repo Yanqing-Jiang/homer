@@ -124,9 +124,27 @@ export class TelegramDraftStream {
       this.lastDisplayedLength = this.pendingText.length;
     } catch (error) {
       const msg = error instanceof Error ? error.message : "";
-      if (!msg.includes("not modified")) {
-        logger.debug({ error }, "Draft stream edit failed");
+      if (msg.includes("not modified")) return;
+      // HTML parse error — retry with plain text of the raw markdown so the
+      // user sees current content instead of a stale or broken state.
+      if (msg.includes("can't parse entities") || msg.includes("Bad Request")) {
+        const plain = raw + " ▌";
+        try {
+          if (!this.messageId) {
+            const m = await this.bot.sendMessage(this.chatId, plain);
+            this.messageId = m.message_id;
+          } else {
+            await this.bot.editMessageText(this.chatId, this.messageId, plain);
+          }
+          this.lastEditTime = Date.now();
+          this.lastDisplayedLength = this.pendingText.length;
+          logger.warn({ err: msg.slice(0, 200) }, "Stream HTML parse failed — fell back to plain text");
+          return;
+        } catch (fallbackErr) {
+          logger.debug({ fallbackErr }, "Plain-text fallback also failed");
+        }
       }
+      logger.debug({ error }, "Draft stream edit failed");
     }
   }
 

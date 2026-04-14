@@ -83,6 +83,26 @@ export function mapOpenCLIArticleToText(article: OpenCLIArticle): string {
   return article.content || "";
 }
 
+// Flatten an opencli `twitter thread` response into one text block:
+// root + same-author follow-ups as the spine, plus notable (≥5 likes) other replies.
+export function mapOpenCLIThreadToText(
+  thread: import("./opencli.js").OpenCLIThreadTweet[],
+  rootAuthor: string,
+): string {
+  if (!thread || thread.length === 0) return "";
+  const root = thread.find(t => !t.in_reply_to) ?? thread[0]!;
+  const spine = thread.filter(t => t !== root && t.author === rootAuthor);
+  const others = thread
+    .filter(t => t !== root && t.author !== rootAuthor && (t.likes ?? 0) >= 5)
+    .sort((a, b) => (b.likes ?? 0) - (a.likes ?? 0))
+    .slice(0, 10);
+
+  const parts: string[] = [`**@${root.author}**: ${root.text}`];
+  for (const r of spine) parts.push(`**@${r.author}** (cont'd): ${r.text}`);
+  for (const r of others) parts.push(`**@${r.author}** (reply, ${r.likes ?? 0}♥): ${r.text}`);
+  return parts.join("\n\n");
+}
+
 // ============================================
 // LINKEDIN TIMELINE → ScrapedPost
 // ============================================
