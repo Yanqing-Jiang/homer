@@ -49,9 +49,9 @@ function validateJob(job: unknown, sourceFile: string): ScheduledJobConfig | nul
     return null;
   }
 
-  const validLanes = ["work", "life", "default", "trading"];
+  const validLanes = ["work", "default", "trading"];
   const lane = typeof j.lane === "string" && validLanes.includes(j.lane)
-    ? j.lane as "work" | "life" | "default" | "trading"
+    ? j.lane as "work" | "default" | "trading"
     : "default";
 
   return {
@@ -83,7 +83,7 @@ function validateJob(job: unknown, sourceFile: string): ScheduledJobConfig | nul
  */
 async function loadScheduleFile(
   path: string,
-  defaultLane: "work" | "life" | "default" | "trading"
+  defaultLane: "work" | "default" | "trading"
 ): Promise<LoadedSchedule | null> {
   if (!existsSync(path)) {
     logger.debug({ path }, "Schedule file does not exist");

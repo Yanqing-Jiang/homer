@@ -100,7 +100,7 @@ export async function extractMemoryFacts(
 ): Promise<{
   promotions: Array<{
     content: string;
-    file: "me" | "work" | "life" | "preferences" | "tools";
+    file: "me" | "work" | "preferences" | "tools";
     section?: string;
   }>;
   summary: string;
@@ -109,9 +109,8 @@ export async function extractMemoryFacts(
     `Analyze this daily log and extract facts that should be saved to permanent memory.
 
 Categories:
-- me: Identity, personal goals, HOMER config
+- me: Identity, personal goals, routines, life context, HOMER config
 - work: Career, projects, contacts, professional context
-- life: Life context, routines, personal relationships
 - preferences: Communication style, technical preferences
 - tools: Tool configurations, workflows, integrations
 

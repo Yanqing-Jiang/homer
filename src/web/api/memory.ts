@@ -18,7 +18,7 @@ export function registerMemoryRoutes(server: FastifyInstance): void {
     }
 
     const limit = Math.min(parseInt(query.limit ?? "10", 10), 30);
-    const context = (query.context as "work" | "life" | "general" | undefined) || undefined;
+    const context = (query.context as "work" | "general" | undefined) || undefined;
 
     try {
       const indexer = getMemoryIndexer();

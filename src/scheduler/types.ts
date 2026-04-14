@@ -17,7 +17,7 @@ export interface ScheduledJobConfig {
   name: string;
   cron: string;
   query: string;
-  lane: "work" | "life" | "default" | "trading";
+  lane: "work" | "default" | "trading";
   enabled: boolean;
   timeout?: number; // ms, defaults to 600000 (10 min)
   model?: string; // e.g. "sonnet", "haiku", "opus" - defaults to sonnet
@@ -106,7 +106,6 @@ export type ProgressCallback = (event: ProgressEvent) => void;
  */
 export const SCHEDULE_LOCATIONS = [
   { path: "/Users/yj/work/schedule.json", lane: "work" as const },
-  { path: "/Users/yj/life/schedule.json", lane: "life" as const },
   { path: PATHS.schedule, lane: "default" as const },
   ...(process.env.TRADING_SCHEDULE_ENABLED === "1"
     ? [{
@@ -121,7 +120,6 @@ export const SCHEDULE_LOCATIONS = [
  */
 export const LANE_CWD: Record<string, string> = {
   work: "/Users/yj/work",
-  life: "/Users/yj/life",
   default: "/Users/yj",
   trading: process.env.TRADING_CWD ?? "/Users/yj/trading",
 };
