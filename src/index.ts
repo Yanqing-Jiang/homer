@@ -84,6 +84,14 @@ async function main(): Promise<void> {
   logger.info("Running database migrations...");
   runMigrations(stateManager.getDb());
 
+  // Phase 0.9: validate memory-file registry against PATHS (warn-only)
+  try {
+    const { validateAndLogMemoryRegistry } = await import("./memory/registry.js");
+    validateAndLogMemoryRegistry();
+  } catch (err) {
+    logger.warn({ err }, "Memory registry validation failed to run (non-blocking)");
+  }
+
   // Initialize Gemini CLI account manager with shared DB state.
   initializeGeminiCLIAccountManager(stateManager.getDb(), {
     rateLimitCooldownMs: parseIntEnv("GEMINI_RATE_LIMIT_COOLDOWN_MS", 60_000),
