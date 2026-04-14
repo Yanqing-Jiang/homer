@@ -76,6 +76,22 @@ export const CANONICAL_FILES = [
     softCharBudget: 8_000,
     note: "Tooling patterns, CLI notes, how-to snippets",
   },
+  {
+    key: "patterns",
+    label: "Patterns",
+    path: PATHS.patterns,
+    allowedClaimTypes: ["lesson", "fact", "cleanup"],
+    softCharBudget: 8_000,
+    note: "Recurring patterns and playbooks extracted from sessions",
+  },
+  {
+    key: "feedback",
+    label: "Feedback",
+    path: PATHS.feedback,
+    allowedClaimTypes: ["fact", "lesson", "cleanup"],
+    softCharBudget: 6_000,
+    note: "User feedback to the assistant — corrections and confirmations",
+  },
 ] as const satisfies readonly CanonicalFileEntry[];
 
 /** Canonical memory-file key. Narrowed literal union. */

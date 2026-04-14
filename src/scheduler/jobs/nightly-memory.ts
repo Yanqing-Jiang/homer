@@ -23,12 +23,12 @@ import { insertCandidate, approveCandidate, expireStaleCandidates, getPendingCan
 import type { ClaimType, TargetFile } from "../../memory/claims.js";
 import { wouldConflict } from "../../memory/conflict-detection.js";
 import { redactForLLM } from "../../memory/secret-filter.js";
-import { CANONICAL_FILE_KEYS, type CanonicalFileKey } from "../../memory/registry.js";
 
-// Phase 0.9: key type derived from the canonical-file registry (SSoT).
-// Direct PATHS literals preserved for PERMANENT_FILES so strict typing under
-// noUncheckedIndexedAccess treats each key as guaranteed-present.
-type MemoryFileKey = CanonicalFileKey;
+// Phase 0.9: nightly-memory writes only to the core "profile" subset. Keys are
+// hard-coded narrow literals so TS treats PERMANENT_FILES[key] as guaranteed
+// under noUncheckedIndexedAccess. Keep aligned with memory/registry.ts.
+type MemoryFileKey = "me" | "work" | "preferences" | "tools";
+const MEMORY_FILE_KEYS = ["me", "work", "preferences", "tools"] as const;
 
 const PERMANENT_FILES = {
   me: PATHS.me,
@@ -45,7 +45,7 @@ const CLAIM_TYPES = ["fact", "decision", "preference", "question", "lesson"] as 
 
 const PromotionSchema = z.object({
   content: z.string().min(10),
-  file: z.enum(CANONICAL_FILE_KEYS as [string, ...string[]]),
+  file: z.enum(MEMORY_FILE_KEYS),
   section: z.string().min(1),
   confidence: z.number().min(0).max(1).default(0.5),
   claim_type: z.enum(CLAIM_TYPES).default("fact"),
