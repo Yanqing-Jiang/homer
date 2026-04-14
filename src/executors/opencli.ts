@@ -182,6 +182,28 @@ export async function fetchTwitterArticle(tweetId: string, options?: OpenCLIOpti
   return result as OpenCLIResult<OpenCLIArticle>;
 }
 
+export interface OpenCLIThreadTweet {
+  id: string;
+  author: string;
+  text: string;
+  likes?: number;
+  retweets?: number;
+  in_reply_to?: string;
+  created_at?: string;
+  url?: string;
+}
+
+export async function fetchTwitterThread(
+  tweetId: string,
+  limit = 50,
+  options?: OpenCLIOptions,
+): Promise<OpenCLIResult<OpenCLIThreadTweet[]>> {
+  return executeOpenCLI<OpenCLIThreadTweet[]>(
+    ["twitter", "thread", tweetId, "--limit", String(limit)],
+    { timeout: TWITTER_ARTICLE_TIMEOUT, ...options },
+  );
+}
+
 // ---- LinkedIn ----
 
 export interface OpenCLILinkedInPost {

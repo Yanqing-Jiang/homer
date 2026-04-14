@@ -66,34 +66,46 @@ export function formatKV(pairs: Array<[string, string]>): string {
  * Handles: headers → bold, **bold**, *italic*, `code`, ```blocks```,
  * [links](url), bullet lists → •, numbered lists preserved.
  * Strips unsupported markdown table syntax into pre-formatted blocks.
+ *
+ * Escape contract: every literal `<`, `>`, `&` in the input becomes a
+ * safe entity. Tags emitted by this function (<b>, <i>, <code>, <pre>,
+ * <a href>) are the ONLY real HTML in the output.
  */
 export function mdToTelegramHtml(md: string): string {
   let out = md.replace(/\r\n/g, "\n");
 
-  // Fenced code blocks → <pre>
+  // Stage 1: extract fenced code blocks → placeholders (protects content
+  // from both escaping and downstream markdown regex).
+  const blocks: string[] = [];
+  const PLACEHOLDER = (i: number) => `\u0000CODEBLOCK${i}\u0000`;
   out = out.replace(/```(?:[^\n`]*)\n?([\s\S]*?)```/g, (_m, code: string) => {
     const trimmed = code.trim();
-    return trimmed ? `<pre>${escapeHtml(trimmed)}</pre>` : "";
+    if (!trimmed) return "";
+    const idx = blocks.push(`<pre>${escapeHtml(trimmed)}</pre>`) - 1;
+    return PLACEHOLDER(idx);
   });
 
-  // Markdown tables → <pre> block (best we can do in Telegram)
+  // Stage 2: extract markdown tables → placeholders (best-effort pre block).
   out = out.replace(
     /(?:^|\n)(\|.+\|)\n(\|[\s:|-]+\|)\n((?:\|.+\|\n?)+)/gm,
     (_m, header: string, _sep: string, body: string) => {
       const rows = [header, ...body.trim().split("\n")];
-      return `\n<pre>${escapeHtml(rows.join("\n"))}</pre>\n`;
+      const idx = blocks.push(`\n<pre>${escapeHtml(rows.join("\n"))}</pre>\n`) - 1;
+      return PLACEHOLDER(idx);
     },
   );
 
-  // Process line by line for structure
+  // Stage 3: escape ALL remaining HTML entities. After this, any `<` or `>`
+  // in the text is safe. Markdown regexes still work (they use *, _, #, `, [).
+  out = escapeHtml(out);
+
+  // Stage 4: line-level structure on escaped text.
   const lines = out.split("\n");
   out = lines
     .map((line) => {
-      // Headers → bold
       if (/^\s*#{1,6}\s+/.test(line)) {
         return line.replace(/^\s*#{1,6}\s+(.*)/, "<b>$1</b>");
       }
-      // Bullets
       if (/^\s*[-*]\s+/.test(line)) {
         return line.replace(/^\s*[-*]\s+/, "• ");
       }
@@ -101,28 +113,23 @@ export function mdToTelegramHtml(md: string): string {
     })
     .join("\n");
 
-  // Inline formatting (skip inside <pre> blocks)
-  const parts = out.split(/(<pre>[\s\S]*?<\/pre>)/g);
-  out = parts
-    .map((part) => {
-      if (part.startsWith("<pre>")) return part;
-      // Links
-      let p = part.replace(
-        /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
-        (_m, label: string, url: string) => `<a href="${escapeHtml(url)}">${escapeHtml(label)}</a>`,
-      );
-      // Inline code
-      p = p.replace(/`([^`\n]+)`/g, (_m, t: string) => `<code>${escapeHtml(t)}</code>`);
-      // Bold (**text** or __text__)
-      p = p.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
-      p = p.replace(/__([^_\n]+)__/g, "<b>$1</b>");
-      // Italic (*text*)
-      p = p.replace(/(?:^|\s)\*([^*\n]+)\*(?:\s|$)/g, (m, t: string) =>
-        m.replace(`*${t}*`, `<i>${t}</i>`),
-      );
-      return p;
-    })
-    .join("");
+  // Stage 5: inline formatting on escaped text.
+  // Links: [label](url) — url was escaped so &amp; sits inside href fine.
+  out = out.replace(
+    /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    (_m, label: string, url: string) => `<a href="${url}">${label}</a>`,
+  );
+  // Inline code: `text`
+  out = out.replace(/`([^`\n]+)`/g, (_m, t: string) => `<code>${t}</code>`);
+  // Bold: **text** or __text__
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+  out = out.replace(/__([^_\n]+)__/g, "<b>$1</b>");
+  // Italic: *text* with whitespace boundaries (avoids matching mid-word)
+  out = out.replace(/(^|\s)\*([^*\n]+)\*(?=\s|$|[.,;:!?)])/g,
+    (_m, pre: string, t: string) => `${pre}<i>${t}</i>`);
+
+  // Stage 6: restore protected blocks.
+  out = out.replace(/\u0000CODEBLOCK(\d+)\u0000/g, (_m, i: string) => blocks[Number(i)] ?? "");
 
   // Clean up excessive newlines
   return out.replace(/\n{3,}/g, "\n\n").trim();
