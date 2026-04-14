@@ -1366,23 +1366,6 @@ async function runHandler(
               }
         );
       }
-      case "sync_wedding_rsvps": {
-        const { runSyncWeddingRsvps } = await import("./jobs/sync-wedding-rsvps.js");
-        const result = await runSyncWeddingRsvps(ctx.stateManager);
-        const output = result.synced > 0
-          ? `Synced ${result.synced} new RSVPs (${result.totalRsvps} total)`
-          : `No new RSVPs (${result.totalRsvps} total)`;
-        return buildResult(
-          job,
-          startedAt,
-          true,
-          output,
-          undefined,
-          result.synced > 0
-            ? { notificationIntent: "user_info", sideEffectDelivered: true }
-            : { notificationIntent: "operational_status" }
-        );
-      }
       default: {
         return buildResult(job, startedAt, false, "", `Unknown internal handler: ${job.config.handler}`);
       }
