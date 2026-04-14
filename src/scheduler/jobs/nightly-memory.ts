@@ -22,15 +22,20 @@ import { hasMigration } from "../../state/migrations/index.js";
 import { insertCandidate, approveCandidate, expireStaleCandidates, getPendingCandidates } from "../../memory/claims.js";
 import type { ClaimType, TargetFile } from "../../memory/claims.js";
 import { wouldConflict } from "../../memory/conflict-detection.js";
+import { redactForLLM } from "../../memory/secret-filter.js";
+import { CANONICAL_FILE_KEYS, type CanonicalFileKey } from "../../memory/registry.js";
 
-type MemoryFileKey = "me" | "work" | "preferences" | "tools";
+// Phase 0.9: key type derived from the canonical-file registry (SSoT).
+// Direct PATHS literals preserved for PERMANENT_FILES so strict typing under
+// noUncheckedIndexedAccess treats each key as guaranteed-present.
+type MemoryFileKey = CanonicalFileKey;
 
-const PERMANENT_FILES: Record<MemoryFileKey, string> = {
+const PERMANENT_FILES = {
   me: PATHS.me,
   work: PATHS.work,
   preferences: PATHS.preferences,
   tools: PATHS.tools,
-};
+} as const satisfies Record<MemoryFileKey, string>;
 
 // ============================================
 // SCHEMAS
@@ -40,7 +45,7 @@ const CLAIM_TYPES = ["fact", "decision", "preference", "question", "lesson"] as 
 
 const PromotionSchema = z.object({
   content: z.string().min(10),
-  file: z.enum(["me", "work", "preferences", "tools"]),
+  file: z.enum(CANONICAL_FILE_KEYS as [string, ...string[]]),
   section: z.string().min(1),
   confidence: z.number().min(0).max(1).default(0.5),
   claim_type: z.enum(CLAIM_TYPES).default("fact"),
@@ -288,8 +293,12 @@ If nothing to promote, use an empty array.`;
       model: "opus[1m]",
     }, "Running nightly memory via Claude Opus 1M");
 
+    // Phase 0.6: redact secrets from the prompt before sending to LLM.
+    // Session transcripts and daily logs can embed API keys, env exports, etc.
+    const safePrompt = redactForLLM(unifiedPrompt, "nightly-memory");
+
     const result = await executeClaudeCommand(
-      unifiedPrompt + "\n\nReturn ONLY valid JSON, no markdown fences.",
+      safePrompt + "\n\nReturn ONLY valid JSON, no markdown fences.",
       {
         cwd: process.env.HOME ?? "/Users/yj",
         model: "opus[1m]",

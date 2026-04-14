@@ -100,7 +100,14 @@ export interface MemoryEntrySyncResult {
 
 // ── Parser ─────────────────────────────────────────────────
 
-const FILES_TO_AUDIT_ORDER = ["me.md", "work.md", "preferences.md", "tools.md", "goals.md", "projects.md"];
+// Phase 0.9: canonical files come from the registry; "extras" are listed
+// after them in preferred audit order but aren't part of the canonical set.
+import { CANONICAL_FILE_KEYS } from "./registry.js";
+const FILES_TO_AUDIT_ORDER = [
+  ...CANONICAL_FILE_KEYS.map((k) => `${k}.md`),
+  "goals.md",
+  "projects.md",
+];
 
 /**
  * Canonical memory files to audit, in review order.

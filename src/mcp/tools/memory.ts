@@ -10,6 +10,7 @@ import * as ideaDao from "../../ideas/dao.js";
 import { loadPlansFromDir } from "../../plans/parser.js";
 import { getTopPreferences } from "../../preferences/engine.js";
 import type { ToolResult, ToolDeps, ToolDefinition } from "./types.js";
+import type { CanonicalFileKey } from "../../memory/registry.js";
 
 const MEMORY_BASE = PATHS.memory;
 
@@ -527,7 +528,7 @@ export async function handle(
     case "memory_promote": {
       // Rerouted through claims pipeline for HITL — direct writes bypass all review.
       // High confidence (0.95) makes it auto-approve eligible but still logged.
-      const { content, file, section } = args as { content: string; file: "me" | "work" | "preferences" | "tools"; section?: string };
+      const { content, file, section } = args as { content: string; file: CanonicalFileKey; section?: string };
       const sm = deps.getSharedStateManager();
       try {
         const { insertCandidate } = await import("../../memory/claims.js");
@@ -753,7 +754,7 @@ export async function handle(
 
         const claimId = insertCandidate(replSm.getDb(), {
           content: claimContent,
-          targetFile: replFile as "me" | "work" | "preferences" | "tools",
+          targetFile: replFile as CanonicalFileKey,
           section: "replace",
           claimType: "replace",
           confidence: 0.85,
@@ -787,7 +788,7 @@ export async function handle(
 
         const claimId = insertCandidate(rmSm.getDb(), {
           content: claimContent,
-          targetFile: rmFile as "me" | "work" | "preferences" | "tools",
+          targetFile: rmFile as CanonicalFileKey,
           section: "remove",
           claimType: "remove",
           confidence: 0.80,
@@ -813,7 +814,7 @@ export async function handle(
         const { insertCandidate } = await import("../../memory/claims.js");
         const claimId = insertCandidate(sm.getDb(), {
           content,
-          targetFile: file as "me" | "work" | "preferences" | "tools",
+          targetFile: file as CanonicalFileKey,
           section: section ?? "",
           claimType: (claim_type ?? "fact") as "fact" | "decision" | "preference" | "question" | "lesson",
           confidence: confidence ?? 0.7,

@@ -18,7 +18,12 @@ import type { CanonicalMemoryService } from "./canonical-service.js";
 
 export type ClaimType = "fact" | "decision" | "preference" | "question" | "lesson" | "skill" | "cleanup" | "replace" | "remove";
 export type ClaimStatus = "candidate" | "applying" | "approved" | "rejected" | "expired" | "stale" | "archived";
-export type TargetFile = "me" | "work" | "preferences" | "tools";
+
+// Phase 0.9: TargetFile is derived from the canonical file registry (SSoT).
+// Existing imports of TargetFile keep working; new code should prefer
+// CanonicalFileKey from "./registry.js" directly.
+import type { CanonicalFileKey } from "./registry.js";
+export type TargetFile = CanonicalFileKey;
 
 export type OriginChannel =
   | "nightly-extractor"
@@ -231,9 +236,19 @@ async function applyCleanupClaim(
     throw new Error("Cleanup claim has empty cleaned content");
   }
 
+  // Phase 0.3 guard: whole-file rewrites are disabled until surgical cleanup claims land (Phase 1.3).
+  // A hallucinated cleanup silently replacing an entire memory file is a data-loss hazard.
+  // Cleanup claim is preserved in knowledge_claims for manual inspection; approval is blocked.
   const { PATHS } = await import("../config/paths.js");
   const filePath = `${PATHS.memory}/${claim.target_file}.md`;
-  await canonicalMemory.writeCleanedFile(filePath, cleaned + "\n", "cleanup-approved", { claimId: claim.id ?? null, actor: "user" });
+  void cleaned;
+  void filePath;
+  void canonicalMemory;
+  throw new Error(
+    "Whole-file cleanup rewrites are disabled (Phase 0.3). " +
+    "Approve will be re-enabled once surgical replace/remove claims land in Phase 1.3. " +
+    "See ~/homer/output/homer-refactor-plan-final-2026-04-14.md"
+  );
 }
 
 /**

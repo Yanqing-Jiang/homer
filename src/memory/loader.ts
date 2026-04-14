@@ -2,17 +2,18 @@ import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
 import { logger } from "../utils/logger.js";
-import { PATHS } from "../config/paths.js";
+import { CANONICAL_FILES } from "./registry.js";
 
 /**
  * Core memory files to load at session start
- * Claude reads these to understand who it is and the user's context
+ * Claude reads these to understand who it is and the user's context.
+ * Phase 0.9: sourced from canonical file registry; filtered to the subset
+ * relevant to session warmup (excludes tools.md which is skill-reference content).
  */
-const MEMORY_FILES = [
-  PATHS.me,
-  PATHS.work,
-  PATHS.preferences,
-];
+const SESSION_WARMUP_KEYS = ["me", "work", "preferences"] as const;
+const MEMORY_FILES = CANONICAL_FILES
+  .filter((e) => (SESSION_WARMUP_KEYS as readonly string[]).includes(e.key))
+  .map((e) => e.path);
 
 /**
  * Load a single memory file if it exists
