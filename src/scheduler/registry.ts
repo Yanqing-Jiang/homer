@@ -183,13 +183,15 @@ export function validateRegistry(opts: {
 
   const scheduleIds = new Set(opts.loadedScheduledIds);
 
-  // Pull handler files from jobs dir
+  // Pull handler files from jobs dir. Accept .ts (dev) OR .js (prod — daemon
+  // runs from dist/scheduler/jobs/). Skip test files and dotfiles.
   let handlerFiles: Set<string> = new Set();
   try {
     for (const f of readdirSync(opts.jobsDir)) {
-      if (f.endsWith(".ts") && !f.endsWith(".test.ts") && !f.startsWith(".")) {
-        handlerFiles.add(f.replace(/\.ts$/, ""));
-      }
+      if (f.startsWith(".")) continue;
+      if (f.endsWith(".test.ts") || f.endsWith(".test.js")) continue;
+      if (f.endsWith(".ts")) handlerFiles.add(f.replace(/\.ts$/, ""));
+      else if (f.endsWith(".js")) handlerFiles.add(f.replace(/\.js$/, ""));
     }
   } catch (err) {
     logger.warn({ err, path: opts.jobsDir }, "Registry validator: could not list jobs dir");
