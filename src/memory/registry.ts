@@ -1,0 +1,221 @@
+/**
+ * Single Memory-File Registry — SSoT (Phase 0.9)
+ *
+ * The canonical memory files (me/work/preferences/tools) have been hardcoded as
+ * TypeScript literal unions in 7+ places:
+ *   - src/memory/claims.ts            (TargetFile type)
+ *   - src/mcp/tools/memory.ts         (inline union in 3+ callsites)
+ *   - src/memory/loader.ts            (file list for context bridge)
+ *   - src/memory/canonical-audit.ts   (audit scope)
+ *   - src/config/paths.ts             (PATHS constants)
+ *   - src/scheduler/jobs/nightly-memory.ts (MemoryFileKey type)
+ *   - src/scheduler/jobs/memory-cleanup.ts (cleanup scope)
+ *
+ * They drift. This module declares the one authoritative registry. Callers
+ * should import `CANONICAL_FILES` / `CanonicalFileKey` from here instead of
+ * re-typing the union. `claims.ts` re-exports `TargetFile` as an alias so
+ * existing imports keep working.
+ *
+ * Also validates PATHS on startup: every registry entry must have a matching
+ * PATHS key. On drift we warn (non-blocking).
+ */
+
+import { logger } from "../utils/logger.js";
+import { PATHS } from "../config/paths.js";
+
+// ── Canonical memory files ──────────────────────────────────
+
+export interface CanonicalFileEntry {
+  /** literal key used in claim.target_file and MCP tool `file` argument */
+  key: string;
+  /** short human label */
+  label: string;
+  /** absolute path from PATHS */
+  path: string;
+  /**
+   * Section types permitted to write into this file. Declarative hint for the
+   * policy engine (Phase 1.2) and for the structured-claim migration.
+   */
+  allowedClaimTypes: readonly ("fact" | "decision" | "preference" | "question" | "lesson" | "cleanup" | "skill")[];
+  /** Suggested soft char budget (Phase 1.2 will enforce). 0 = no budget. */
+  softCharBudget: number;
+  /** Free-text note */
+  note?: string;
+}
+
+export const CANONICAL_FILES = [
+  {
+    key: "me",
+    label: "About Me",
+    path: PATHS.me,
+    allowedClaimTypes: ["fact", "preference", "decision", "lesson"],
+    softCharBudget: 8_000,
+    note: "Identity, long-horizon goals, personal facts",
+  },
+  {
+    key: "work",
+    label: "Work Projects",
+    path: PATHS.work,
+    allowedClaimTypes: ["fact", "decision", "question", "lesson", "cleanup"],
+    softCharBudget: 15_000,
+    note: "Active work context, projects, decisions",
+  },
+  {
+    key: "preferences",
+    label: "Preferences",
+    path: PATHS.preferences,
+    allowedClaimTypes: ["preference", "fact", "cleanup"],
+    softCharBudget: 6_000,
+    note: "Stylistic and workflow preferences",
+  },
+  {
+    key: "tools",
+    label: "Tools & Skills",
+    path: PATHS.tools,
+    allowedClaimTypes: ["fact", "lesson", "cleanup", "skill"],
+    softCharBudget: 8_000,
+    note: "Tooling patterns, CLI notes, how-to snippets",
+  },
+] as const satisfies readonly CanonicalFileEntry[];
+
+/** Canonical memory-file key. Narrowed literal union. */
+export type CanonicalFileKey = (typeof CANONICAL_FILES)[number]["key"];
+
+/** Array of keys — useful for Zod enums, config validation, etc. */
+export const CANONICAL_FILE_KEYS = CANONICAL_FILES.map((e) => e.key) as readonly CanonicalFileKey[];
+
+/** Set lookup for O(1) validity checks. */
+const CANONICAL_KEY_SET: ReadonlySet<string> = new Set<string>(CANONICAL_FILE_KEYS);
+
+// ── Lookup helpers ──────────────────────────────────────────
+
+export function getCanonicalFileEntry(key: string): CanonicalFileEntry | undefined {
+  return CANONICAL_FILES.find((e) => e.key === key);
+}
+
+export function isCanonicalFileKey(value: unknown): value is CanonicalFileKey {
+  return typeof value === "string" && CANONICAL_KEY_SET.has(value);
+}
+
+export function requireCanonicalFileKey(value: unknown): CanonicalFileKey {
+  if (!isCanonicalFileKey(value)) {
+    throw new Error(
+      `Invalid canonical memory file key: ${JSON.stringify(value)}. ` +
+      `Valid keys: ${CANONICAL_FILE_KEYS.join(", ")}`
+    );
+  }
+  return value;
+}
+
+// ── Validation ──────────────────────────────────────────────
+
+export interface MemoryRegistryDriftReport {
+  clean: boolean;
+  /** Registry entries whose key has no corresponding PATHS[key] string. */
+  registryKeysMissingFromPaths: string[];
+  /** Registry entries where PATHS[key] exists but disagrees with registry.path. */
+  pathsLooksWrong: string[];
+  /** PATHS keys that look canonical (match known memory-file name shape) but aren't in the registry. */
+  pathsLookCanonicalButNotInRegistry: string[];
+}
+
+/**
+ * Known canonical-file key shape: short lowercase identifier for a memory .md.
+ * Not every PATHS key is canonical (many are paths to dirs, the db, etc.),
+ * so we only flag PATHS entries that (a) resolve under memory root and
+ * (b) look like a top-level `<name>.md`.
+ */
+function looksLikeCanonicalMemoryFilePath(key: string, value: string): boolean {
+  if (key === "schedule" || key === "ideasMd" || key === "memory") return false;
+  if (typeof value !== "string") return false;
+  // Must live directly under the memory root as `<key>.md`
+  return value.endsWith(`/${key}.md`) && value.startsWith(PATHS.memory + "/");
+}
+
+/**
+ * Two-way cross-check between the registry and PATHS. Catches drift whether
+ * a canonical file was added to one side and forgotten on the other.
+ */
+export function validateMemoryRegistry(): MemoryRegistryDriftReport {
+  const report: MemoryRegistryDriftReport = {
+    clean: true,
+    registryKeysMissingFromPaths: [],
+    pathsLooksWrong: [],
+    pathsLookCanonicalButNotInRegistry: [],
+  };
+
+  const pathsRecord = PATHS as unknown as Record<string, string>;
+
+  // Forward: every registry entry must have a correct PATHS[key]
+  for (const entry of CANONICAL_FILES) {
+    const pathsValue = pathsRecord[entry.key];
+    if (typeof pathsValue !== "string") {
+      report.registryKeysMissingFromPaths.push(entry.key);
+      continue;
+    }
+    if (pathsValue !== entry.path) {
+      report.pathsLooksWrong.push(
+        `${entry.key}: registry=${entry.path} PATHS=${pathsValue}`
+      );
+    }
+  }
+
+  // Reverse: any PATHS key that looks canonical but isn't registered
+  for (const [key, value] of Object.entries(pathsRecord)) {
+    if (!looksLikeCanonicalMemoryFilePath(key, value)) continue;
+    if (!CANONICAL_KEY_SET.has(key)) {
+      report.pathsLookCanonicalButNotInRegistry.push(key);
+    }
+  }
+
+  report.clean =
+    report.registryKeysMissingFromPaths.length === 0 &&
+    report.pathsLooksWrong.length === 0 &&
+    report.pathsLookCanonicalButNotInRegistry.length === 0;
+
+  return report;
+}
+
+/**
+ * Fatal on wrong paths or missing paths (registry promises a file that isn't
+ * where it claims). Warn on reverse drift (PATHS has a canonical-looking entry
+ * not in the registry — fixable without breaking callers).
+ */
+export function validateAndLogMemoryRegistry(): MemoryRegistryDriftReport {
+  const report = validateMemoryRegistry();
+  if (report.clean) {
+    logger.info(
+      { entryCount: CANONICAL_FILES.length, keys: CANONICAL_FILE_KEYS },
+      "Memory-file registry validated — no drift"
+    );
+    return report;
+  }
+
+  if (report.registryKeysMissingFromPaths.length > 0 || report.pathsLooksWrong.length > 0) {
+    logger.fatal(
+      {
+        registryKeysMissingFromPaths: report.registryKeysMissingFromPaths,
+        pathsLooksWrong: report.pathsLooksWrong,
+      },
+      "Memory-file registry is inconsistent with PATHS — refusing to proceed"
+    );
+    throw new Error(
+      `Memory registry drift (fatal): ` +
+        (report.registryKeysMissingFromPaths.length
+          ? `missingFromPaths=${report.registryKeysMissingFromPaths.join(",")} `
+          : ``) +
+        (report.pathsLooksWrong.length
+          ? `pathsLooksWrong=${report.pathsLooksWrong.join(" | ")}`
+          : ``)
+    );
+  }
+
+  // Reverse drift only — warn so it can be fixed without blocking boot.
+  logger.warn(
+    {
+      pathsLookCanonicalButNotInRegistry: report.pathsLookCanonicalButNotInRegistry,
+    },
+    "Memory-file registry reverse drift (non-fatal): PATHS has canonical-looking entries not in registry"
+  );
+  return report;
+}

@@ -12,6 +12,7 @@
 import { readFile, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import { executeClaudeCommand } from "../../executors/claude.js";
+import { redactForLLM } from "../../memory/secret-filter.js";
 import { logger } from "../../utils/logger.js";
 import { getMemoryIndexer } from "../../memory/indexer.js";
 import { StateManager } from "../../state/manager.js";
@@ -233,8 +234,12 @@ export async function runSessionSummary(
       "Running session summary via Claude Opus 1M"
     );
 
+    // Phase 0.6: redact secrets in session transcripts + daily log before LLM call.
+    const rawPrompt = systemPrompt ? `${systemPrompt}\n\n---\n\n${fullPrompt}` : fullPrompt;
+    const safePrompt = redactForLLM(rawPrompt, "session-summaries");
+
     const result = await executeClaudeCommand(
-      systemPrompt ? `${systemPrompt}\n\n---\n\n${fullPrompt}` : fullPrompt,
+      safePrompt,
       {
         cwd: process.env.HOME ?? "/Users/yj",
         model: "opus[1m]",

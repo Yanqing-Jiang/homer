@@ -28,11 +28,14 @@ export async function notifyJobResult(
   jobRunId?: number
 ): Promise<void> {
   const isSuccess = result.success;
-  const shouldNotify = isSuccess
-    ? job.config.notifyOnSuccess !== false
-    : job.config.notifyOnFailure !== false;
-
   const intent = result.notificationIntent ?? (isSuccess ? "user_info" : "failure_alert");
+
+  // Intent-aware suppression: only operational pings honor notifyOnSuccess/Failure flags.
+  // decision_request (HITL asks) and failure_alert must always be delivered.
+  const isOperationalIntent = intent === "user_info" || intent === "operational_status";
+  const shouldNotify = isOperationalIntent
+    ? (isSuccess ? job.config.notifyOnSuccess !== false : job.config.notifyOnFailure !== false)
+    : true;
   const rawMessage = isSuccess
     ? result.output
     : `❌ <b>${escapeHtml(job.config.name)}</b> failed\n\n${escapeHtml(result.error || "Unknown error")}`;

@@ -23,6 +23,7 @@ import { z } from "zod";
 import type Database from "better-sqlite3";
 import { executeClaudeCommand } from "../../executors/claude.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
+import { redactForLLM } from "../../memory/secret-filter.js";
 import {
   getUnprocessedScrapes,
   getScrapesForStep,
@@ -428,7 +429,7 @@ Return ONLY a JSON object: { "passed": true|false, "reason": "why", "summary": "
 
   let result;
   try {
-    result = await executeClaudeCommand(prompt, {
+    result = await executeClaudeCommand(redactForLLM(prompt, "idea-synthesizer"), {
       cwd: "/tmp",
       model: "sonnet",
       timeout: STEP_TIMEOUT,
@@ -528,7 +529,7 @@ Return ONLY the JSON object.`;
 
   let result;
   try {
-    result = await executeClaudeCommand(prompt, {
+    result = await executeClaudeCommand(redactForLLM(prompt, "idea-synthesizer"), {
       cwd: "/tmp",
       model: "sonnet",
       timeout: STEP_TIMEOUT,
@@ -618,7 +619,7 @@ Return ONLY a JSON object: { "passed": true|false, "reason": "main reason", "str
 
   let result;
   try {
-    result = await executeClaudeCommand(prompt, {
+    result = await executeClaudeCommand(redactForLLM(prompt, "idea-synthesizer"), {
       cwd: "/tmp",
       model: "sonnet",
       timeout: STEP_TIMEOUT,
@@ -725,7 +726,7 @@ Enrich this idea. Return ONLY the JSON object. Omit optional fields if not appli
 
   let result;
   try {
-    result = await executeClaudeCommand(prompt, {
+    result = await executeClaudeCommand(redactForLLM(prompt, "idea-synthesizer"), {
       cwd: "/tmp",
       model: "sonnet",
       timeout: STEP_TIMEOUT,

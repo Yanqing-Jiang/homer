@@ -14,6 +14,7 @@
 import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { executeClaudeCommand } from "../../executors/claude.js";
+import { redactForLLM } from "../../memory/secret-filter.js";
 import { logger } from "../../utils/logger.js";
 // getMemoryIndexer and getCanonicalMemoryService no longer needed —
 // cleanup now stages proposals via claims pipeline (HITL-gated)
@@ -227,8 +228,11 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
     logger.info({ file: file.name, originalLines, sizeKB: Math.round(fileContent.length / 1024) }, "Cleaning memory file");
 
     try {
+      // Phase 0.6: redact secrets in memory-file content + agent context before LLM call.
+      const safePrompt = redactForLLM(agentContext + "\n\n---\n\n" + prompt, "memory-cleanup");
+
       const result = await executeClaudeCommand(
-        agentContext + "\n\n---\n\n" + prompt,
+        safePrompt,
         {
           cwd: process.env.HOME ?? "/Users/yj",
           model: "opus[1m]",

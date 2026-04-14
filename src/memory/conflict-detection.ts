@@ -37,9 +37,9 @@ export async function wouldConflict(
   try {
     neighbors = await indexer.hybridSearch(newContent, 5, context as "work" | "general");
   } catch (err) {
-    // If embeddings aren't ready, fall through — better to auto-approve than to block on infrastructure.
-    logger.debug({ err }, "Conflict check skipped: hybridSearch failed");
-    return { conflict: false };
+    // Fail-closed: if we can't check, defer to HITL rather than silently auto-approve.
+    logger.warn({ err }, "Conflict check unavailable — deferring to HITL");
+    return { conflict: true, reason: "conflict-check-unavailable" };
   }
 
   for (const n of neighbors) {

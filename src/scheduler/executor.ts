@@ -18,6 +18,7 @@ import {
   type ExecutorKind,
 } from "../executors/fallback-orchestrator.js";
 import { writeChainTrace } from "../executors/trace-writer.js";
+import { scanContent } from "../skills/guard.js";
 
 /**
  * Load context files and combine into a single string
@@ -746,6 +747,34 @@ export async function executeScheduledJob(
 ): Promise<JobExecutionResult> {
   const startedAt = new Date();
   const { config } = job;
+
+  // Phase 0.7: security scan on job prompt before dispatch.
+  // Guards against an indirect injection winding up in schedule.json
+  // (e.g. via a third-party-authored job spec or accidental paste).
+  const scan = scanContent(config.query ?? "");
+  if (!scan.clean) {
+    const critical = scan.findings.filter((f) => f.severity === "critical");
+    if (critical.length > 0) {
+      const blockMsg = `Blocked by prompt security scan: ${critical.map((f) => f.patternId).join(", ")}`;
+      logger.error(
+        { jobId: config.id, findings: critical.map((f) => f.patternId) },
+        blockMsg
+      );
+      return {
+        jobId: config.id,
+        jobName: config.name,
+        sourceFile: job.sourceFile,
+        startedAt,
+        completedAt: new Date(),
+        success: false,
+        output: "",
+        error: blockMsg,
+        exitCode: -1,
+        duration: 0,
+        notificationIntent: "failure_alert",
+      };
+    }
+  }
 
   // Emit started event
   onProgress?.({
