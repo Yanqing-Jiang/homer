@@ -72,11 +72,10 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
   { id: "link-processor", name: "Link Processor", kind: "internal", handler: "link_processor", handlerFile: "link-processor", expectedInSchedule: true },
   { id: "memory-embeddings", name: "Memory Embeddings", kind: "internal", handler: "memory_embeddings", handlerFile: "memory-embeddings", expectedInSchedule: true, note: "event-triggered; cron is safety net" },
   { id: "memory-reindex", name: "Memory Reindex", kind: "internal", handler: "memory_reindex", handlerFile: "memory-reindex", expectedInSchedule: true, note: "event-triggered; cron is safety net" },
-  { id: "nightly-code-push", name: "Nightly Code Push", kind: "internal", handler: "nightly_code_push", handlerFile: "nightly-code-push", expectedInSchedule: true, note: "to become preview-before-act in Phase 1.4" },
+  { id: "nightly-code-push", name: "Nightly Code Push", kind: "internal", handler: "nightly_code_push", handlerFile: "nightly-code-push", expectedInSchedule: true, note: "preview-before-act (Phase 1.4)" },
   { id: "nightly-memory", name: "Nightly Memory", kind: "internal", handler: "nightly_memory", handlerFile: "nightly-memory", expectedInSchedule: true },
   { id: "outcome-tracker", name: "Outcome Tracker", kind: "internal", handler: "outcome_tracker", handlerFile: "outcome-tracker", expectedInSchedule: true },
   { id: "overnight-youtube", name: "Overnight YouTube", kind: "internal", handler: "overnight_youtube", handlerFile: "overnight-youtube", expectedInSchedule: true },
-  { id: "planning-reminder", name: "Planning Reminder", kind: "internal", handler: "planning_reminder", handlerFile: "planning-reminder", expectedInSchedule: true, note: "to retire in Phase 4 — morning-review subsumes" },
   { id: "session-harvester", name: "Session Harvester", kind: "internal", handler: "session_harvester", handlerFile: "session-harvester", expectedInSchedule: true },
 ];
 
@@ -129,7 +128,6 @@ const SCHEDULED_CLI_JOBS: JobEntry[] = [
 const UNSCHEDULED_HANDLER_FILES: JobEntry[] = [
   { id: "architecture-updater", name: "Architecture Updater", kind: "event", handler: "architecture_updater", handlerFile: "architecture-updater", expectedInSchedule: false, note: "event-triggered by commits/diffs" },
   { id: "decision-journal", name: "Decision Journal", kind: "event", handler: "decision_journal", handlerFile: "decision-journal", expectedInSchedule: false, note: "event-triggered from session-summaries" },
-  { id: "memory-git-commit", name: "Memory Git Commit", kind: "event", handler: "memory_git_commit", handlerFile: "memory-git-commit", expectedInSchedule: false, note: "disabled by rule (see handler); retire in Phase 4" },
   { id: "preference-updater", name: "Preference Updater", kind: "event", handler: "preference_updater", handlerFile: "preference-updater", expectedInSchedule: false, note: "event-triggered from nightly-memory" },
   { id: "session-summaries", name: "Session Summaries", kind: "event", handler: "session_summaries", handlerFile: "session-summaries", expectedInSchedule: false, note: "event-triggered from session-harvester" },
   { id: "artifact-store", name: "Artifact Store (helper)", kind: "helper", handlerFile: "artifact-store", expectedInSchedule: false, note: "helper module, NOT a job — retire from portfolio vocabulary in Phase 4" },

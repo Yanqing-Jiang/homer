@@ -90,74 +90,117 @@ about what matters in his memory files.`;
 }
 
 /**
- * Sanity check — only catches catastrophic failures, not judgment calls.
- * The AI's understanding of Yanqing IS the quality gate.
- */
-function sanityCheck(
-  original: string,
-  cleaned: string,
-  _fileName: string
-): { valid: boolean; reason?: string } {
-  // Empty output → API error, not a judgment call
-  if (!cleaned.trim()) {
-    return { valid: false, reason: "Empty output (likely API error)" };
-  }
-
-  // Less than 10% of original → truncation or error, not judgment
-  const ratio = cleaned.length / original.length;
-  if (ratio < 0.1) {
-    return {
-      valid: false,
-      reason: `Output is only ${Math.round(ratio * 100)}% of original — likely truncation or API error, not judgment`,
-    };
-  }
-
-  return { valid: true };
-}
-
-/**
- * Build the cleanup prompt for a specific file.
+ * Build the surgical cleanup prompt for a specific file.
+ *
+ * Phase 1.3: emits a JSON array of `update` / `delete` / `noop` actions. Each
+ * action must include enough surrounding context in `old_text` to match
+ * unambiguously in the file. Each action lands as its own HITL claim.
  */
 function buildCleanupPrompt(fileName: string, fileContent: string, date: string): string {
   const lineCount = fileContent.split("\n").length;
 
   return `You've been with Yanqing all week. You know what he did, what he cares about, where he's headed.
 
-Now clean up **${fileName}** (${lineCount} lines). Today is ${date}.
+Now review **${fileName}** (${lineCount} lines). Today is ${date}.
 
-## How to decide
+## Your job
 
-For each piece of content, ask yourself:
+Emit a list of SURGICAL cleanup actions. You do NOT rewrite the file — you
+propose specific edits that Yanqing will review one by one on Telegram.
+
+For each piece of content that should change, ask:
 - Would Yanqing want this 3 months from now?
 - Would it help Homer (his AI system) serve him better?
 - Does it capture a decision, relationship, pattern, or preference?
 
-If YES → keep it with fidelity. Don't paraphrase what's already well-written.
-If NO → let it go, or compress to one line capturing WHAT happened and WHY it mattered.
+If YES and it's well-written → leave it alone.
+If NO or it's cluttered → propose a \`delete\` or \`update\` action.
 
-## Guidelines (not rules)
+## Action types
 
-- Merge duplicates — if the same topic appears in multiple sections, combine into one authoritative version
-- Preserve people, configs, architecture decisions, preferences, relationship context
-- Dated implementation details older than 2 weeks are candidates for compression (keep the decision, drop the step-by-step)
-- Recent activity (last 2 weeks) gets more leeway — it might still be in-flight
-- No size target. The file could grow if it needs structure, or shrink 80% if it's mostly dated noise. Your judgment IS the quality gate.
-- Do NOT invent new information — only reorganize, compress, or remove existing content
-- Keep document structure clean — consistent header levels, no orphaned sections
+- \`update\` — rewrite a block (merge duplicates, compress dated implementation detail, fix drift). Provide \`old_text\` and \`new_text\`.
+- \`delete\` — remove stale or irrelevant content. Provide \`old_text\` only.
+- \`noop\` — skip (used when the file is already clean). Return an empty list instead.
+
+## Critical rules — read carefully
+
+1. \`old_text\` MUST match exactly ONE location in the file. Include 2-3 lines of surrounding context above and below if the target text alone is not unique. If you cannot make it unique, skip the action.
+2. Keep each \`old_text\` small (~3-15 lines). Do not propose large multi-section rewrites.
+3. Do NOT invent new information. \`new_text\` must be a faithful compression / merge / rephrase of existing content only.
+4. \`new_text\` for an \`update\` must preserve every important fact in \`old_text\` (dates, names, configs, decisions).
+5. Actions are applied independently. Assume each action sees the ORIGINAL file state, not the state after earlier actions. Do not chain edits that depend on each other.
+6. Prefer fewer, higher-value actions. A maximum of 12 actions per file. If the file is already clean, return an empty list.
 
 ## Output format
 
-<cleaned>
-(full cleaned file content in markdown — this replaces the entire file)
-</cleaned>
+Return EXACTLY a fenced JSON block and nothing else between tags. No prose.
 
-<changelog>
-(bullet list: what was kept/summarized/merged/removed and why)
-</changelog>
+<actions>
+[
+  {
+    "action": "update",
+    "old_text": "exact verbatim text from the file including 2-3 lines of surrounding context",
+    "new_text": "replacement text",
+    "reason": "why this change"
+  },
+  {
+    "action": "delete",
+    "old_text": "exact verbatim text from the file",
+    "reason": "why this is stale / not worth keeping"
+  }
+]
+</actions>
 
-## File to clean: ${fileName}
+## File: ${fileName}
 
 ${fileContent}`;
+}
+
+/**
+ * Parse the LLM's JSON action list from the <actions>…</actions> block.
+ * Tolerant of surrounding prose and whitespace; rejects anything that isn't a JSON array.
+ */
+interface CleanupAction {
+  action: "update" | "delete" | "noop";
+  old_text: string;
+  new_text?: string;
+  reason?: string;
+}
+
+function parseCleanupActions(raw: string): CleanupAction[] {
+  const match = raw.match(/<actions>([\s\S]*?)<\/actions>/);
+  if (!match?.[1]) return [];
+  const jsonBody = match[1].trim().replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "").trim();
+  if (!jsonBody || jsonBody === "[]") return [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonBody);
+  } catch (err) {
+    logger.warn({ err, preview: jsonBody.slice(0, 200) }, "parseCleanupActions: JSON parse failed");
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+
+  const valid: CleanupAction[] = [];
+  for (const item of parsed) {
+    if (typeof item !== "object" || item === null) continue;
+    const rec = item as Record<string, unknown>;
+    const action = rec.action;
+    const oldText = rec.old_text;
+    const newText = rec.new_text;
+    const reason = rec.reason;
+    if (action !== "update" && action !== "delete" && action !== "noop") continue;
+    if (typeof oldText !== "string" || oldText.trim().length === 0) continue;
+    if (action === "update" && (typeof newText !== "string" || newText.trim().length === 0)) continue;
+    valid.push({
+      action,
+      old_text: oldText,
+      new_text: typeof newText === "string" ? newText : undefined,
+      reason: typeof reason === "string" ? reason : undefined,
+    });
+  }
+  return valid;
 }
 
 // memory_file_snapshots removed in migration 072 — git handles version control
@@ -166,8 +209,10 @@ interface FileResult {
   fileName: string;
   success: boolean;
   originalLines: number;
-  cleanedLines: number;
-  changelog: string;
+  actionsProposed: number;
+  actionsStaged: number;
+  actionsRejected: number;
+  rejectionReasons: string[];
   error?: string;
 }
 
@@ -204,6 +249,7 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
   }
 
   const results: FileResult[] = [];
+  const { insertCandidate } = await import("../../memory/claims.js");
 
   // Process each file independently
   for (const file of FILES_TO_CLEAN) {
@@ -213,8 +259,10 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
         fileName: file.name,
         success: false,
         originalLines: 0,
-        cleanedLines: 0,
-        changelog: "",
+        actionsProposed: 0,
+        actionsStaged: 0,
+        actionsRejected: 0,
+        rejectionReasons: [],
         error: "File not found",
       });
       continue;
@@ -222,10 +270,10 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
 
     const originalLines = fileContent.split("\n").length;
 
-    // Build prompt and call Gemini
+    // Build prompt and call Claude Opus
     const prompt = buildCleanupPrompt(file.name, fileContent, date);
 
-    logger.info({ file: file.name, originalLines, sizeKB: Math.round(fileContent.length / 1024) }, "Cleaning memory file");
+    logger.info({ file: file.name, originalLines, sizeKB: Math.round(fileContent.length / 1024) }, "Reviewing memory file for cleanup");
 
     try {
       // Phase 0.6: redact secrets in memory-file content + agent context before LLM call.
@@ -245,108 +293,111 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
           fileName: file.name,
           success: false,
           originalLines,
-          cleanedLines: 0,
-          changelog: "",
-          error: `Claude Opus error: ${result.output}`,
+          actionsProposed: 0,
+          actionsStaged: 0,
+          actionsRejected: 0,
+          rejectionReasons: [],
+          error: `Claude Opus error: ${result.output.slice(0, 200)}`,
         });
         continue;
       }
 
-      // 3. Parse response
-      const cleanedMatch = result.output.match(/<cleaned>([\s\S]*?)<\/cleaned>/);
-      const changelogMatch = result.output.match(/<changelog>([\s\S]*?)<\/changelog>/);
-
-      if (!cleanedMatch?.[1]) {
+      const actions = parseCleanupActions(result.output);
+      if (actions.length === 0) {
+        logger.info({ file: file.name }, "No cleanup actions proposed (file already clean or parse empty)");
         results.push({
           fileName: file.name,
-          success: false,
+          success: true,
           originalLines,
-          cleanedLines: 0,
-          changelog: "",
-          error: "Failed to parse <cleaned> from response",
+          actionsProposed: 0,
+          actionsStaged: 0,
+          actionsRejected: 0,
+          rejectionReasons: [],
         });
         continue;
       }
 
-      const cleaned = cleanedMatch[1].trim();
-      const changelog = changelogMatch?.[1]?.trim() ?? "(no changelog)";
-      const cleanedLines = cleaned.split("\n").length;
+      // Phase 1.3: each action becomes its own HITL claim. Ambiguous anchors are
+      // rejected up-front so we don't queue a claim we know won't apply.
+      const targetFile = file.name.replace(".md", "") as "preferences" | "tools" | "work";
+      let staged = 0;
+      let rejected = 0;
+      const rejectionReasons: string[] = [];
 
-      // 4. Sanity check (catches API errors, not judgment calls)
-      const check = sanityCheck(fileContent, cleaned, file.name);
-      if (!check.valid) {
-        logger.warn({ file: file.name, reason: check.reason }, "Sanity check failed, keeping original");
-        results.push({
-          fileName: file.name,
-          success: false,
-          originalLines,
-          cleanedLines,
-          changelog,
-          error: `Sanity check: ${check.reason}`,
-        });
-        continue;
-      }
+      for (const action of actions) {
+        if (action.action === "noop") continue;
 
-      // 5. Stage cleanup proposal via claims pipeline (HITL-gated)
-      // Instead of writing directly, insert as a cleanup claim for morning review.
-      const pctChange = Math.round((1 - cleanedLines / originalLines) * 100);
-
-      try {
-        const { insertCandidate } = await import("../../memory/claims.js");
-        const claimContent = [
-          `CLEANUP: ${file.name} (${originalLines} → ${cleanedLines} lines, -${pctChange}%)`,
-          "",
-          "--- Changelog ---",
-          changelog,
-          "",
-          "--- Cleaned Content ---",
-          cleaned,
-        ].join("\n");
-
-        const targetFile = file.name.replace(".md", "") as "preferences" | "tools" | "work";
-        const claimId = insertCandidate(sm.getDb(), {
-          content: claimContent,
-          targetFile,
-          section: "cleanup",
-          claimType: "cleanup",
-          confidence: 0.85,
-          originChannel: "weekly-consolidation",
-        });
-
-        if (claimId) {
-          logger.info(
-            { file: file.name, claimId, originalLines, cleanedLines, pctChange, duration: result.duration },
-            "Cleanup staged for review (claim)"
-          );
-        } else {
-          logger.debug({ file: file.name }, "Cleanup claim skipped (duplicate)");
+        const firstIdx = fileContent.indexOf(action.old_text);
+        if (firstIdx === -1) {
+          rejected += 1;
+          rejectionReasons.push(`not-found: ${action.old_text.slice(0, 40).replace(/\s+/g, " ")}…`);
+          continue;
         }
-      } catch (claimErr) {
-        // Fail closed: do NOT fall back to direct write — HITL gate must be honored.
-        // Cleanup result is preserved in the job output for manual review.
-        logger.error({ error: claimErr, file: file.name }, "Failed to stage cleanup claim — skipping file (HITL enforced, no direct write fallback)");
-        results.push({
-          fileName: file.name,
-          success: false,
-          originalLines,
-          cleanedLines,
-          changelog,
-          error: "Claims table unavailable — cleanup staged but not applied",
-        });
-        continue;
+        // Step by 1 (not old_text.length) so overlapping duplicate anchors are caught.
+        const nextIdx = fileContent.indexOf(action.old_text, firstIdx + 1);
+        if (nextIdx !== -1) {
+          rejected += 1;
+          rejectionReasons.push(`ambiguous: ${action.old_text.slice(0, 40).replace(/\s+/g, " ")}…`);
+          continue;
+        }
+
+        const claimType = action.action === "delete" ? "remove" : "replace";
+        const reason = action.reason?.trim() || "(no reason provided)";
+        const claimContent = action.action === "delete"
+          ? [
+              `CLEANUP (${file.name}) — DELETE`,
+              "",
+              `Reason: ${reason}`,
+              "",
+              "--- Text to Remove ---",
+              action.old_text,
+            ].join("\n")
+          : [
+              `CLEANUP (${file.name}) — UPDATE`,
+              "",
+              `Reason: ${reason}`,
+              "",
+              "--- Old Text ---",
+              action.old_text,
+              "--- New Text ---",
+              action.new_text ?? "",
+            ].join("\n");
+
+        try {
+          const claimId = insertCandidate(sm.getDb(), {
+            content: claimContent,
+            targetFile,
+            section: "cleanup",
+            claimType,
+            confidence: 0.85,
+            originChannel: "weekly-consolidation",
+          });
+          if (claimId) {
+            staged += 1;
+          } else {
+            // Duplicate hash — already staged in a prior run
+            rejected += 1;
+            rejectionReasons.push("duplicate-of-prior-claim");
+          }
+        } catch (claimErr) {
+          rejected += 1;
+          rejectionReasons.push(`claim-insert-failed: ${(claimErr as Error).message.slice(0, 40)}`);
+        }
       }
 
       logger.info(
-        { file: file.name, originalLines, cleanedLines, pctChange, duration: result.duration },
-        "Memory file cleanup processed"
+        { file: file.name, proposed: actions.length, staged, rejected, duration: result.duration },
+        "Cleanup proposals staged as replace/remove claims",
       );
 
       results.push({
         fileName: file.name,
         success: true,
         originalLines,
-        cleanedLines,
-        changelog,
+        actionsProposed: actions.length,
+        actionsStaged: staged,
+        actionsRejected: rejected,
+        rejectionReasons,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -355,30 +406,38 @@ export async function runWeeklyMemoryCleanup(stateManager?: StateManager): Promi
         fileName: file.name,
         success: false,
         originalLines,
-        cleanedLines: 0,
-        changelog: "",
+        actionsProposed: 0,
+        actionsStaged: 0,
+        actionsRejected: 0,
+        rejectionReasons: [],
         error: msg,
       });
     }
   }
 
-  // Dirty flags for reindex/embeddings/context_bridge/git_commit are set by
-  // canonicalMemory.writeCleanedFile() — no inline reindex needed.
-
   // Build summary output
   const successCount = results.filter((r) => r.success).length;
   const totalFiles = results.length;
   const anySuccess = successCount > 0;
+  const totalStaged = results.reduce((sum, r) => sum + r.actionsStaged, 0);
 
-  const lines: string[] = [`Weekly Memory Cleanup (${totalFiles} files)`, "─────────────────────"];
+  const lines: string[] = [
+    `Weekly Memory Cleanup (${totalFiles} files, ${totalStaged} claims staged)`,
+    "─────────────────────",
+  ];
 
   for (const r of results) {
     if (r.success) {
-      const pct = Math.round((1 - r.cleanedLines / r.originalLines) * 100);
-      lines.push(`${r.fileName}: ${r.originalLines} → ${r.cleanedLines} lines (-${pct}%)`);
-      // Add changelog bullets indented
-      for (const entry of r.changelog.split("\n").filter((l) => l.trim().startsWith("-"))) {
-        lines.push(`  ${entry.trim()}`);
+      lines.push(
+        `${r.fileName}: ${r.actionsProposed} proposed → ${r.actionsStaged} staged, ${r.actionsRejected} rejected`,
+      );
+      if (r.rejectionReasons.length > 0) {
+        for (const reason of r.rejectionReasons.slice(0, 5)) {
+          lines.push(`  - ${reason}`);
+        }
+        if (r.rejectionReasons.length > 5) {
+          lines.push(`  - (+${r.rejectionReasons.length - 5} more rejected)`);
+        }
       }
     } else {
       lines.push(`${r.fileName}: SKIPPED — ${r.error}`);
