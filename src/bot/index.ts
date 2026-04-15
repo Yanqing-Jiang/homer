@@ -23,6 +23,7 @@ import { registerSmsReplyHandlers } from "./handlers/sms-reply.js";
 import { registerMemoryReviewHandlers } from "./handlers/memory-review.js";
 import { registerMorningReviewCallbacks } from "./handlers/morning-review.js";
 import { registerWeeklyMemoryAuditHandlers } from "./handlers/weekly-memory-audit.js";
+import { registerCodePushApprovalHandlers } from "./handlers/code-push-approval.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { StateManager } from "../state/manager.js";
 import { sendThinkingIndicator, editWithResponse, TelegramDraftStream, sendFinalResponse, TelegramTypingLoop } from "./streaming.js";
@@ -161,6 +162,9 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
 
   // Register weekly memory audit handlers (Sunday 9 AM canonical memory review)
   registerWeeklyMemoryAuditHandlers(bot, stateManager);
+
+  // Register nightly-code-push approval handlers (Phase 1.4)
+  registerCodePushApprovalHandlers(bot, stateManager);
 
   // Initialize YouTube URL handler
   initializeYouTubeHandler(stateManager);

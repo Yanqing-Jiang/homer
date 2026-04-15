@@ -6,10 +6,10 @@
  * so the Scheduler can debounce reactive triggers.
  */
 
-import { readFile, writeFile, mkdir, rename } from "fs/promises";
+import { readFile, mkdir } from "fs/promises";
 import { createHash } from "crypto";
 import { watch, type FSWatcher } from "fs";
-import { basename, dirname, join } from "path";
+import { basename } from "path";
 import { PATHS } from "../config/paths.js";
 import { logger } from "../utils/logger.js";
 import { memoryEvents } from "../events/memory-events.js";
@@ -18,41 +18,11 @@ import type { SkillFrontmatter, SkillStatus } from "../skills/types.js";
 import type { StateManager } from "../state/manager.js";
 import type { MemoryIndexer } from "./indexer.js";
 import { scanMemoryContent } from "../skills/guard.js";
-
-// ── Atomic file I/O helpers ─────────────────────────────────
-
-/**
- * Atomically write content to a file using temp-file + rename.
- * Ensures readers never see a partially-written file.
- * The temp file is created in the same directory to guarantee
- * same-filesystem rename (which is atomic on POSIX).
- */
-async function atomicWriteFile(filePath: string, content: string): Promise<void> {
-  const dir = dirname(filePath);
-  const tmpPath = join(dir, `.tmp-${basename(filePath)}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-  await writeFile(tmpPath, content, "utf-8");
-  try {
-    await rename(tmpPath, filePath);
-  } catch (err) {
-    // Clean up orphaned temp file on rename failure
-    try { const { unlink } = await import("fs/promises"); await unlink(tmpPath); } catch { /* best-effort */ }
-    throw err;
-  }
-}
-
-/**
- * Atomically append content to a file by reading, appending, and atomic-writing.
- * Uses sync read to minimize the race window between read and write.
- */
-async function atomicAppendFile(filePath: string, content: string): Promise<void> {
-  let existing = "";
-  try {
-    existing = await readFile(filePath, "utf-8");
-  } catch {
-    // File doesn't exist yet — start fresh
-  }
-  await atomicWriteFile(filePath, existing + content);
-}
+import {
+  acquireWriteLock,
+  writeFileAtomic,
+  appendSectionAtomic,
+} from "./fs.js";
 
 const ALL_WRITE_PIPELINES = ["reindex", "embeddings", "context_bridge"] as const;
 
@@ -95,14 +65,15 @@ export class CanonicalMemoryService {
     const previous = this.fileLocks.get(path) ?? Promise.resolve();
     let release!: () => void;
     const next = new Promise<void>((r) => { release = r; });
-    this.fileLocks.set(path, previous.then(() => next));
+    const tail = previous.then(() => next);
+    this.fileLocks.set(path, tail);
     await previous;
     try {
       return await fn();
     } finally {
       release();
       // Clean up only if we're still the tail; otherwise a newer waiter owns it.
-      if (this.fileLocks.get(path) === previous.then(() => next)) {
+      if (this.fileLocks.get(path) === tail) {
         this.fileLocks.delete(path);
       }
     }
@@ -188,22 +159,26 @@ export class CanonicalMemoryService {
     }
 
     const filePath = `${PATHS.memory}/${file}.md`;
-    let toAppend = "\n";
-    if (section) toAppend += `## ${section}\n`;
-    toAppend += `${content}\n`;
 
     await this.withLock(filePath, async () => {
-      const before = await readFileOrEmpty(filePath);
-      const preHash = sha256(before);
-      await atomicAppendFile(filePath, toAppend);
-      const after = await readFileOrEmpty(filePath);
-      const postHash = sha256(after);
-      this.trackSelfWrite(`${file}.md`);
-      this.recordMutation({
-        targetFile: filePath, section, operation: "append",
-        oldText: null, newText: toAppend,
-        preHash, postHash, source, claimId: opts.claimId, actor: opts.actor,
-      });
+      const lock = await acquireWriteLock(filePath, { owner: `promote:${source}` });
+      try {
+        const result = await appendSectionAtomic(filePath, {
+          section,
+          content,
+        });
+        this.trackSelfWrite(`${file}.md`);
+        if (result.changed) {
+          this.recordMutation({
+            targetFile: filePath, section, operation: "append",
+            oldText: null, newText: content,
+            preHash: result.previousHash, postHash: result.nextHash,
+            source, claimId: opts.claimId, actor: opts.actor,
+          });
+        }
+      } finally {
+        await lock.release();
+      }
     });
 
     const validSources = new Set(["mcp", "nightly", "weekly", "unknown"]);
@@ -240,16 +215,21 @@ export class CanonicalMemoryService {
     }
 
     await this.withLock(path, async () => {
-      const before = await readFileOrEmpty(path);
-      const preHash = sha256(before);
-      await atomicWriteFile(path, content);
-      const postHash = sha256(content);
-      this.trackSelfWrite(basename(path));
-      this.recordMutation({
-        targetFile: path, section: null, operation: "write",
-        oldText: before, newText: content,
-        preHash, postHash, source, claimId: opts.claimId, actor: opts.actor,
-      });
+      const lock = await acquireWriteLock(path, { owner: `writeCleanedFile:${source}` });
+      try {
+        const before = await readFileOrEmpty(path);
+        const preHash = sha256(before);
+        await writeFileAtomic(path, content);
+        const postHash = sha256(content);
+        this.trackSelfWrite(basename(path));
+        this.recordMutation({
+          targetFile: path, section: null, operation: "write",
+          oldText: before, newText: content,
+          preHash, postHash, source, claimId: opts.claimId, actor: opts.actor,
+        });
+      } finally {
+        await lock.release();
+      }
     });
 
     for (const pipeline of ALL_WRITE_PIPELINES) {
@@ -275,52 +255,70 @@ export class CanonicalMemoryService {
   ): Promise<boolean> {
     const filePath = `${PATHS.memory}/${file}.md`;
     return await this.withLock(filePath, async () => {
-      let content: string;
+      const lock = await acquireWriteLock(filePath, { owner: `replaceInFile:${source}` });
       try {
-        content = await readFile(filePath, "utf-8");
-      } catch {
-        logger.warn({ file }, "replaceInFile: file not found");
-        return false;
+        let content: string;
+        try {
+          content = await readFile(filePath, "utf-8");
+        } catch {
+          logger.warn({ file }, "replaceInFile: file not found");
+          return false;
+        }
+
+        const firstIdx = content.indexOf(oldText);
+        if (firstIdx === -1) {
+          logger.debug({ file, oldText: oldText.slice(0, 40) }, "replaceInFile: substring not found");
+          return false;
+        }
+        // Phase 1.3: ambiguity check — refuse to replace if oldText matches in multiple
+        // locations. The caller (cleanup LLM or MCP user) must supply enough context to
+        // disambiguate. Silent first-match replace is a data-loss hazard.
+        // Step by 1 (not oldText.length) so overlapping matches are caught.
+        const nextIdx = content.indexOf(oldText, firstIdx + 1);
+        if (nextIdx !== -1) {
+          logger.warn(
+            { file, oldTextPreview: oldText.slice(0, 60), firstIdx, nextIdx },
+            "replaceInFile: ambiguous anchor — multiple matches, refusing to apply",
+          );
+          return false;
+        }
+
+        // Security scan the new content
+        const scanError = scanMemoryContent(newText);
+        if (scanError) {
+          logger.warn({ file, scanError }, "replaceInFile blocked by security scan");
+          return false;
+        }
+
+        const preHash = sha256(content);
+        const updated = content.slice(0, firstIdx) + newText + content.slice(firstIdx + oldText.length);
+        await writeFileAtomic(filePath, updated);
+        const postHash = sha256(updated);
+        this.trackSelfWrite(`${file}.md`);
+
+        const op: "replace" | "remove" = newText === "" ? "remove" : "replace";
+        this.recordMutation({
+          targetFile: filePath, section: null, operation: op,
+          oldText, newText: newText === "" ? null : newText,
+          preHash, postHash, source, claimId: opts.claimId, actor: opts.actor,
+        });
+
+        for (const pipeline of ALL_WRITE_PIPELINES) {
+          this.markDirty(pipeline, `replace:${source}`);
+        }
+
+        try {
+          const context = file === "work" ? "work" : "general";
+          await this.indexer.indexFile(filePath, context as "work" | "general");
+        } catch (err) {
+          logger.warn({ err, filePath }, "Inline indexing failed after replace");
+        }
+
+        logger.info({ file, source, oldLen: oldText.length, newLen: newText.length }, "Replaced content in memory file");
+        return true;
+      } finally {
+        await lock.release();
       }
-
-      if (!content.includes(oldText)) {
-        logger.debug({ file, oldText: oldText.slice(0, 40) }, "replaceInFile: substring not found");
-        return false;
-      }
-
-      // Security scan the new content
-      const scanError = scanMemoryContent(newText);
-      if (scanError) {
-        logger.warn({ file, scanError }, "replaceInFile blocked by security scan");
-        return false;
-      }
-
-      const preHash = sha256(content);
-      const updated = content.replace(oldText, newText);
-      await atomicWriteFile(filePath, updated);
-      const postHash = sha256(updated);
-      this.trackSelfWrite(`${file}.md`);
-
-      const op: "replace" | "remove" = newText === "" ? "remove" : "replace";
-      this.recordMutation({
-        targetFile: filePath, section: null, operation: op,
-        oldText, newText: newText === "" ? null : newText,
-        preHash, postHash, source, claimId: opts.claimId, actor: opts.actor,
-      });
-
-      for (const pipeline of ALL_WRITE_PIPELINES) {
-        this.markDirty(pipeline, `replace:${source}`);
-      }
-
-      try {
-        const context = file === "work" ? "work" : "general";
-        await this.indexer.indexFile(filePath, context as "work" | "general");
-      } catch (err) {
-        logger.warn({ err, filePath }, "Inline indexing failed after replace");
-      }
-
-      logger.info({ file, source, oldLen: oldText.length, newLen: newText.length }, "Replaced content in memory file");
-      return true;
     });
   }
 
@@ -356,9 +354,14 @@ export class CanonicalMemoryService {
     // Ensure skills directory exists
     await mkdir(PATHS.skills, { recursive: true });
 
-    // Write the file atomically (temp + rename)
-    await atomicWriteFile(filePath, content);
-    this.trackSelfWrite(`${frontmatter.id}.md`);
+    // Write the file atomically (temp + fsync + rename + parent dir fsync)
+    const lock = await acquireWriteLock(filePath, { owner: `upsertSkill:${frontmatter.id}` });
+    try {
+      await writeFileAtomic(filePath, content);
+      this.trackSelfWrite(`${frontmatter.id}.md`);
+    } finally {
+      await lock.release();
+    }
 
     // Upsert into skills_catalog
     try {

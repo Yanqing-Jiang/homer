@@ -1,26 +1,46 @@
 /**
- * Auto-commit ~/homer/ code changes and push to GitHub nightly.
- * Provides: version history, backup, and triggers GitHub Actions (web UI rebuild).
+ * Auto-commit ~/homer/ code changes nightly and send a Telegram preview for
+ * approval BEFORE pushing to GitHub.
  *
- * Uses Codex GPT-5.4 to generate descriptive commit messages from the staged diff.
+ * Phase 1.4 — preview-before-act:
+ *   1. If working-tree has changes → `git add -A` + Codex-generated commit → local `git commit`.
+ *      (Local commit is reversible; no external side effect.)
+ *   2. If there are unpushed commits → capture HEAD sha + diff stat + commit subjects.
+ *      Insert a `code_push_proposals` row (`status=pending`, 12h TTL), send a Telegram
+ *      card with Approve / Deny buttons, and return without pushing.
+ *   3. Next nightly run — or a click — revalidates headSha against the live worktree and
+ *      `git push` only if they still match.
  *
- * NOTE: Does NOT run `npm run deploy` — that kills the running daemon (launchctl bootout).
- * Web UI rebuild is handled by GitHub Actions on push. Daemon code changes deploy manually.
+ * Any supersedes-or-expires logic lives in `recordCodePushProposal`; an approved
+ * proposal triggers an immediate push in the button handler (`code-push-approval.ts`).
  */
 
 import { execSync } from "child_process";
 import { existsSync } from "fs";
+import type { Bot } from "grammy";
+import { InlineKeyboard } from "grammy";
 import { logger } from "../../utils/logger.js";
 import { executeCodexCLI } from "../../executors/codex-cli.js";
+import type { StateManager } from "../../state/manager.js";
+import { escapeHtml } from "../../utils/telegram-format.js";
+import { routeTelegramNotification } from "../../notifications/telegram-router.js";
+import {
+  recordCodePushProposal,
+  findOpenCodePushProposal,
+  executeApprovedCodePush,
+  PROJECT_DIR,
+} from "../code-push-proposal.js";
 
-const PROJECT_DIR = "/Users/yj/homer";
 const PUSH_RETRIES = 3;
 const PUSH_RETRY_DELAY_MS = 5_000;
-const GH_BIN = "/opt/homebrew/bin/gh";
 const MAX_DIFF_CHARS = 12_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function logPrefix(): string {
+  return "[NightlyPush]";
 }
 
 /**
@@ -83,11 +103,13 @@ Output ONLY the commit message. No preamble, no explanation, no markdown fences.
   }
 }
 
-function logPrefix(): string {
-  return "[NightlyPush]";
+interface CodePushDeps {
+  bot?: Bot;
+  chatId?: number;
+  stateManager?: StateManager;
 }
 
-export async function runNightlyCodePush(): Promise<{
+export async function runNightlyCodePush(deps: CodePushDeps = {}): Promise<{
   success: boolean;
   output: string;
   error?: string;
@@ -99,38 +121,21 @@ export async function runNightlyCodePush(): Promise<{
       return { success: false, output: "", error: `Directory not found: ${PROJECT_DIR}` };
     }
 
-    // Check for changes
+    // Check for changes to commit locally (commit is reversible, no external effect)
     const status = execSync("git status --porcelain", {
       cwd: PROJECT_DIR,
       encoding: "utf-8",
       timeout: 10_000,
     }).trim();
 
-    if (!status) {
-      // Check for unpushed commits from a previous run that committed but failed to push
-      const unpushed = execSync("git rev-list --count origin/main..HEAD", {
-        cwd: PROJECT_DIR,
-        encoding: "utf-8",
-        timeout: 10_000,
-      }).trim();
-      if (unpushed !== "0") {
-        logger.info(`${prefix} No new changes but ${unpushed} unpushed commit(s) found, pushing...`);
-        // Fall through to push logic below
-      } else {
-        return { success: true, output: "No changes to commit" };
-      }
-    }
-
-    // Stage and commit if there are working tree changes
     let commitMsg = "";
     if (status) {
       const lines = status.split("\n").filter(Boolean);
       const date = new Date().toISOString().slice(0, 10);
 
-      logger.info({ fileCount: lines.length }, `${prefix} Staging changes...`);
+      logger.info({ fileCount: lines.length }, `${prefix} Staging + committing locally...`);
       execSync("git add -A", { cwd: PROJECT_DIR, timeout: 30_000 });
 
-      // Generate descriptive commit message via Codex GPT-5.4
       commitMsg = await generateCommitMessage(date, lines.length);
 
       execSync(`git commit -F -`, {
@@ -138,60 +143,175 @@ export async function runNightlyCodePush(): Promise<{
         timeout: 30_000,
         input: commitMsg,
       });
-      logger.info(`${prefix} Committed: ${commitMsg.split("\n")[0]}`);
+      logger.info(`${prefix} Committed locally: ${commitMsg.split("\n")[0]}`);
     }
 
-    // Push with retry (using gh CLI for auth — osxkeychain fails in daemon context)
-    let pushError: string | undefined;
-    for (let attempt = 1; attempt <= PUSH_RETRIES; attempt++) {
-      try {
-        // Try env var first (reliable in launchd), fall back to gh CLI (interactive)
-        let ghToken = process.env.GH_TOKEN ?? "";
-        if (!ghToken) {
-          ghToken = execSync(`${GH_BIN} auth token`, {
-            encoding: "utf-8",
-            timeout: 5_000,
-          }).trim();
-        }
-        execSync("git push origin main", {
-          cwd: PROJECT_DIR,
-          timeout: 60_000,
-          env: {
-            ...process.env,
-            GH_TOKEN: ghToken,
-            GIT_CONFIG_COUNT: "1",
-            GIT_CONFIG_KEY_0: "credential.helper",
-            GIT_CONFIG_VALUE_0: `!${GH_BIN} auth git-credential`,
-          },
-        });
-        pushError = undefined;
-        break;
-      } catch (err: any) {
-        pushError = err.message ?? String(err);
-        logger.warn(`${prefix} Push attempt ${attempt}/${PUSH_RETRIES} failed: ${pushError}`);
-        if (attempt < PUSH_RETRIES) await sleep(PUSH_RETRY_DELAY_MS);
-      }
+    // Inventory unpushed commits
+    const unpushedRaw = execSync("git rev-list --count origin/main..HEAD", {
+      cwd: PROJECT_DIR,
+      encoding: "utf-8",
+      timeout: 10_000,
+    }).trim();
+    const unpushedCount = parseInt(unpushedRaw, 10) || 0;
+
+    if (unpushedCount === 0) {
+      return { success: true, output: "No changes to commit" };
     }
 
-    if (pushError) {
-      logger.error(`${prefix} Push failed after ${PUSH_RETRIES} attempts`);
-      const desc = commitMsg ? `Committed locally: ${commitMsg.split("\n")[0]}` : "Unpushed commits remain";
+    // Phase 1.4: do NOT push autonomously. Build a preview proposal and wait for approval.
+    const { bot, chatId, stateManager } = deps;
+    if (!bot || !chatId || !stateManager) {
+      logger.warn(
+        `${prefix} Missing bot/chatId/stateManager — cannot create preview. ${unpushedCount} unpushed commit(s) deferred.`,
+      );
       return {
-        success: false,
-        output: desc,
-        error: `Push failed: ${pushError}`,
+        success: true,
+        output: `Deferred push: ${unpushedCount} unpushed commit(s) — Telegram deps unavailable in this context`,
       };
     }
 
-    const output = commitMsg
-      ? `Committed and pushed: ${commitMsg.split("\n")[0]}`
-      : "Pushed previously stranded commit(s)";
-    logger.info(`${prefix} ${output}`);
-    return { success: true, output };
+    const db = stateManager.getDb();
+
+    // If an older approved-but-unexecuted proposal exists AND its head_sha still
+    // matches, execute it now (e.g. daemon restarted between approve and push).
+    const existingApproved = findOpenCodePushProposal(db, "approved");
+    if (existingApproved) {
+      const live = execSync("git rev-parse HEAD", { cwd: PROJECT_DIR, encoding: "utf-8", timeout: 5_000 }).trim();
+      if (live === existingApproved.headSha) {
+        logger.info({ proposalId: existingApproved.id }, `${prefix} Found approved proposal — executing push now`);
+        return await runApprovedPush(db, existingApproved.id);
+      } else {
+        // Stale: worktree moved ahead since approval. Mark stale so new preview supersedes.
+        db.prepare(`UPDATE code_push_proposals SET status='stale', decided_at=datetime('now') WHERE id=?`)
+          .run(existingApproved.id);
+        logger.warn(
+          { proposalId: existingApproved.id, was: existingApproved.headSha, now: live },
+          `${prefix} Approved proposal is stale (HEAD moved) — superseding with fresh preview`,
+        );
+      }
+    }
+
+    // Build fresh preview
+    const headSha = execSync("git rev-parse HEAD", { cwd: PROJECT_DIR, encoding: "utf-8", timeout: 5_000 }).trim();
+    const diffStat = execSync("git diff --stat origin/main..HEAD", {
+      cwd: PROJECT_DIR, encoding: "utf-8", timeout: 15_000,
+    }).trim();
+    const commitSubjects = execSync(`git log origin/main..HEAD --pretty=format:%s`, {
+      cwd: PROJECT_DIR, encoding: "utf-8", timeout: 10_000,
+    }).trim();
+
+    const proposalId = recordCodePushProposal(db, {
+      headSha,
+      unpushedCount,
+      diffStat,
+      commitSubjects,
+    });
+
+    // Send Telegram preview
+    const keyboard = new InlineKeyboard()
+      .text("Approve + push", `cp:${proposalId}:approve`)
+      .text("Deny", `cp:${proposalId}:deny`);
+
+    const subjectsTruncated = commitSubjects.split("\n").slice(0, 8).join("\n");
+    const subjectsOverflow = commitSubjects.split("\n").length > 8 ? `\n… +${commitSubjects.split("\n").length - 8} more` : "";
+    const diffTruncated = diffStat.length > 1500 ? diffStat.slice(0, 1500) + "\n…" : diffStat;
+
+    const text = [
+      `<b>Nightly code push — ${unpushedCount} commit(s) awaiting approval</b>`,
+      "",
+      `<b>HEAD</b>: <code>${escapeHtml(headSha.slice(0, 10))}</code>`,
+      "",
+      `<b>Commits:</b>`,
+      `<pre>${escapeHtml(subjectsTruncated + subjectsOverflow)}</pre>`,
+      `<b>Diff:</b>`,
+      `<pre>${escapeHtml(diffTruncated)}</pre>`,
+    ].join("\n");
+
+    try {
+      // Route through notification router for audit trail + deduplication + intent tagging.
+      // Aligns with the pattern used by job-hunt-followup (Phase 2.5 alignment).
+      const delivery = await routeTelegramNotification({
+        db,
+        sourceType: "scheduler_job",
+        sourceId: `code_push:${proposalId}`,
+        intent: "decision_request",
+        title: `Nightly code push — ${unpushedCount} commit(s)`,
+        messageText: text,
+        metadata: {
+          proposalId,
+          headSha,
+          unpushedCount,
+        },
+        deliver: async () => bot.api.sendMessage(chatId, text, {
+          parse_mode: "HTML",
+          reply_markup: keyboard,
+        }),
+      });
+      if (delivery.decision === "sent" && delivery.telegramMessageId) {
+        db.prepare(`UPDATE code_push_proposals SET telegram_message_id=?, telegram_chat_id=? WHERE id=?`)
+          .run(delivery.telegramMessageId, chatId, proposalId);
+      } else if (delivery.decision === "suppressed") {
+        logger.warn({ proposalId }, `${prefix} Telegram preview suppressed by router`);
+      }
+    } catch (sendErr) {
+      logger.error({ err: sendErr, proposalId }, `${prefix} Failed to send Telegram preview`);
+      // Fall through — proposal row is still in DB; next run can retry sending
+    }
+
+    const summary = commitMsg
+      ? `Committed locally: ${commitMsg.split("\n")[0]} — ${unpushedCount} commit(s) pending approval`
+      : `${unpushedCount} commit(s) pending approval`;
+    logger.info({ proposalId, unpushedCount }, `${prefix} ${summary}`);
+    return { success: true, output: summary };
 
   } catch (error: any) {
     const msg = error instanceof Error ? error.message : String(error);
     logger.error({ error: msg }, `${logPrefix()} Failed`);
     return { success: false, output: "", error: msg };
   }
+}
+
+/**
+ * Runs `git push` for an already-approved proposal. Caller must have verified
+ * (or let `executeApprovedCodePush` verify) that HEAD still matches.
+ */
+async function runApprovedPush(
+  db: ReturnType<StateManager["getDb"]>,
+  proposalId: string,
+): Promise<{ success: boolean; output: string; error?: string }> {
+  const result = await executeApprovedCodePush(db, proposalId, {
+    pushOnce: async () => {
+      const GH_BIN = "/opt/homebrew/bin/gh";
+      let lastErr: string | undefined;
+      for (let attempt = 1; attempt <= PUSH_RETRIES; attempt++) {
+        try {
+          let ghToken = process.env.GH_TOKEN ?? "";
+          if (!ghToken) {
+            ghToken = execSync(`${GH_BIN} auth token`, {
+              encoding: "utf-8",
+              timeout: 5_000,
+            }).trim();
+          }
+          execSync("git push origin main", {
+            cwd: PROJECT_DIR,
+            timeout: 60_000,
+            env: {
+              ...process.env,
+              GH_TOKEN: ghToken,
+              GIT_CONFIG_COUNT: "1",
+              GIT_CONFIG_KEY_0: "credential.helper",
+              GIT_CONFIG_VALUE_0: `!${GH_BIN} auth git-credential`,
+            },
+          });
+          return { ok: true };
+        } catch (err: any) {
+          lastErr = err.message ?? String(err);
+          logger.warn(`${logPrefix()} Push attempt ${attempt}/${PUSH_RETRIES} failed: ${lastErr}`);
+          if (attempt < PUSH_RETRIES) await sleep(PUSH_RETRY_DELAY_MS);
+        }
+      }
+      return { ok: false, error: lastErr ?? "unknown push error" };
+    },
+  });
+  return result;
 }
