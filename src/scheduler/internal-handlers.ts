@@ -205,8 +205,8 @@ async function sendHealthMessage(
 const RETRYABLE_HANDLERS = new Set([
   "ideas_explore", "nightly_memory", "session_harvester", "memory_embeddings", "memory_reindex", "morning_review",
   "weekly_memory_audit", "learning_engine", "homer_improvements", "session_summaries", "weekly_consolidation",
-  "memory_cleanup", "planning_reminder", "content_scraper", "outcome_tracker",
-  "preference_updater", "idea_dedup", "memory_git_commit", "nightly_code_push", "db_backup",
+  "memory_cleanup", "content_scraper", "outcome_tracker",
+  "preference_updater", "idea_dedup", "nightly_code_push", "db_backup",
   "idea_synthesizer", "idea_deep_linker", "link_processor", "archive_verify", "health_check", "context_bridge",
   "harness_auto_improve", "decision_journal",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
@@ -223,18 +223,6 @@ function isTransientError(error?: string): boolean {
   if (!error) return false;
   const lower = error.toLowerCase();
   return TRANSIENT_PATTERNS.some(p => lower.includes(p.toLowerCase()));
-}
-
-function getPlanningReminderIntent(result: {
-  success: boolean;
-  hasActionableContent?: boolean;
-}): NotificationIntent | undefined {
-  if (!result.success) {
-    return undefined;
-  }
-  // Always suppress — morning brief already covers plans/follow-ups,
-  // and ideas review sends actionable items with buttons separately.
-  return "operational_status";
 }
 
 function getHealthResultOptions(output: string): BuildResultOptions {
@@ -949,20 +937,6 @@ async function runHandler(
         );
       }
 
-      case "planning_reminder": {
-        const { runPlanningReminder } = await import("./jobs/planning-reminder.js");
-        const result = await runPlanningReminder();
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          result.success
-            ? { notificationIntent: getPlanningReminderIntent(result) }
-            : {}
-        );
-      }
       case "job_hunt_discover": {
         const { runJobHuntDiscover } = await import("./jobs/job-hunt-discover.js");
         const result = await runJobHuntDiscover(ctx.stateManager.getDb());
@@ -1153,21 +1127,13 @@ async function runHandler(
           result.success ? { notificationIntent: "operational_status" } : {}
         );
       }
-      case "memory_git_commit": {
-        const { runMemoryGitCommit } = await import("./jobs/memory-git-commit.js");
-        const result = await runMemoryGitCommit(ctx.stateManager);
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          result.success ? { notificationIntent: "operational_status" } : {}
-        );
-      }
       case "nightly_code_push": {
         const { runNightlyCodePush } = await import("./jobs/nightly-code-push.js");
-        const result = await runNightlyCodePush();
+        const result = await runNightlyCodePush({
+          bot: ctx.bot,
+          chatId: ctx.chatId,
+          stateManager: ctx.stateManager,
+        });
         return buildResult(
           job,
           startedAt,
