@@ -1167,9 +1167,10 @@ async function handleNewExecution(
   }
 
   try {
-    // Load memory context for new sessions or first message
+    // Load memory context only on the first message of a non-/new session.
+    // /new = explicit clean slate: no bootstrap, no me.md/work.md/preferences.md.
     let memoryContext = "";
-    if (isNewSession || !executorState?.sessionId) {
+    if (!isNewSession && !executorState?.sessionId) {
       const bootstrap = await loadBootstrapFiles();
       if (bootstrap) {
         memoryContext = `<context>\n${bootstrap}\n</context>\n\n`;
