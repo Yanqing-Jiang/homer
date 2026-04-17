@@ -32,7 +32,7 @@ export interface CommandDefinition {
  * Model configurations for each executor
  */
 export const EXECUTOR_MODELS: Record<ExecutorType, string | undefined> = {
-  claude: "opus[1m]",               // Default: Opus 4.6 with 1M context
+  claude: "opus[1m]",               // Alias auto-resolves to latest Opus + 1M context (currently 4.7)
   codex: undefined,                 // Codex CLI (model handled by CLI)
   gemini: GEMINI_CLI_FLASH_MODEL, // Fast, cheap
   kimi: "kimi-k2-5",                // Kimi K2.5 via NVIDIA NIM
