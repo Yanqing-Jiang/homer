@@ -6,7 +6,7 @@
  * B) OS orphan scan via `ps` for known HOMER patterns not in registry.
  *
  * 6-layer safety before any kill. Enforcement ON by default (set PROCESS_CLEANUP_ENFORCE=0 to disable).
- * Age-based kill: any HOMER-pattern process > 6 hours killed regardless of parent PID.
+ * Age-based kill: any tty-less HOMER-pattern process > 6 hours is killed regardless of parent PID.
  */
 
 import { execSync } from "child_process";
@@ -225,17 +225,23 @@ export class CleanupScheduler {
 
   /**
    * Safety checks for orphan processes (not in registry).
-   * Age-based: any HOMER-pattern process > 2 hours is killed regardless of parent.
+   * Age-based: any tty-less HOMER-pattern process > 6 hours is killed regardless of parent.
    */
   private isSafeToKillOrphan(pid: number, _cmdline: string): boolean {
     if (pid <= 1 || pid === process.pid) return false;
 
     try {
-      // Get parent PID and elapsed time
-      const info = execSync(`ps -o ppid=,etime= -p ${pid}`, { encoding: "utf-8", timeout: 2000 }).trim();
+      // Get parent PID, controlling TTY, and elapsed time.
+      // TTY-attached processes are user-interactive and must be spared.
+      const info = execSync(`ps -o ppid=,tty=,etime= -p ${pid}`, { encoding: "utf-8", timeout: 2000 }).trim();
       const parts = info.split(/\s+/);
       const ppid = parseInt(parts[0] ?? "", 10);
-      const etime = parts[1] ?? "";
+      const tty = parts[1] ?? "";
+      const etime = parts[2] ?? "";
+
+      if (tty && tty !== "?" && tty !== "??") {
+        return false;
+      }
 
       // Parse etime (DD-HH:MM:SS or HH:MM:SS or MM:SS)
       const ageMs = parseEtime(etime);
@@ -243,7 +249,7 @@ export class CleanupScheduler {
       // Always safe to kill if parent is init (1) or our daemon
       if (ppid === 1 || ppid === process.pid) return true;
 
-      // Age-based: kill any HOMER process older than 2 hours regardless of parent
+      // Age-based: kill any tty-less HOMER process older than 6 hours regardless of parent
       if (ageMs > ORPHAN_AGE_KILL_MS) {
         logger.info(
           { pid, ppid, ageHours: (ageMs / 3600_000).toFixed(1) },
@@ -252,7 +258,7 @@ export class CleanupScheduler {
         return true;
       }
 
-      // Young process with non-daemon parent — spare it (may be interactive session)
+      // Young tty-less process with non-daemon parent — spare it
       return false;
     } catch {
       return false;
