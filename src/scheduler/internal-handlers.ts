@@ -204,10 +204,11 @@ async function sendHealthMessage(
 // Handlers safe to retry (idempotent, no user-facing side effects)
 const RETRYABLE_HANDLERS = new Set([
   "ideas_explore", "nightly_memory", "session_harvester", "memory_embeddings", "memory_reindex", "morning_review",
-  "weekly_memory_audit", "learning_engine", "homer_improvements", "session_summaries", "weekly_consolidation",
+  "weekly_memory_audit", "homer_improvements", "session_summaries", "weekly_consolidation",
+  "mentor_layer", "career_truth",
   "memory_cleanup", "content_scraper", "outcome_tracker",
   "preference_updater", "idea_dedup", "nightly_code_push", "db_backup",
-  "idea_synthesizer", "idea_deep_linker", "link_processor", "archive_verify", "health_check", "context_bridge",
+  "idea_synthesizer", "idea_deep_linker", "link_processor", "archive_verify", "health_check",
   "harness_auto_improve", "decision_journal",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
   "candidate_expiry",
@@ -801,16 +802,28 @@ async function runHandler(
           result.success ? { notificationIntent: "user_info" } : {}
         );
       }
-      case "learning_engine": {
-        const { runLearningEngine } = await import("./jobs/learning-engine.js");
-        const result = await runLearningEngine(ctx.stateManager.getDb(), ctx.jobRunId);
+      case "mentor_layer": {
+        const { runMentorLayer } = await import("./jobs/mentor-layer.js");
+        const result = await runMentorLayer(ctx.stateManager.getDb(), ctx.jobRunId);
         return buildResult(
           job,
           startedAt,
           result.success,
           result.output,
           result.error,
-          result.success ? { notificationIntent: "operational_status" } : {}
+          result.success ? { notificationIntent: "user_info" } : {}
+        );
+      }
+      case "career_truth": {
+        const { runCareerTruth } = await import("./jobs/career-truth.js");
+        const result = await runCareerTruth(ctx.stateManager.getDb(), ctx.jobRunId);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "user_info" } : {}
         );
       }
       case "harness_auto_improve": {
@@ -840,20 +853,6 @@ async function runHandler(
       case "session_harvester": {
         const { runSessionHarvester } = await import("./jobs/session-harvester.js");
         const result = await runSessionHarvester(ctx.stateManager, ctx.signal);
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          result.success ? { notificationIntent: "operational_status" } : {}
-        );
-      }
-      case "context_bridge": {
-        const { runContextBridge } = await import("./jobs/context-bridge.js");
-        const result = await runContextBridge(ctx.stateManager, {
-          triggerSource: job.config.id,
-        });
         return buildResult(
           job,
           startedAt,

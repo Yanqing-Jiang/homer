@@ -386,8 +386,8 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
         return;
       }
       const db = stateManager.getDb();
-      const row = db.prepare(`SELECT id FROM knowledge_claims WHERE id = ? OR id LIKE ? LIMIT 1`)
-        .get(target, `%${target}`) as { id: string } | undefined;
+      const row = db.prepare(`SELECT id, claim_type, status FROM knowledge_claims WHERE id = ? OR id LIKE ? LIMIT 1`)
+        .get(target, `%${target}`) as { id: string; claim_type: string; status: string } | undefined;
       if (!row) {
         await ctx.reply(`No claim matches "${target}"`);
         return;
@@ -396,12 +396,27 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
       const result = await undoLatestForClaim(stateManager, row.id);
       if (result.ok) {
         await ctx.reply(`✅ ${result.reason} (claim ${row.id})`);
-      } else {
-        const conflict = result.conflict
-          ? `\n\nExpected post_hash: ${result.conflict.expectedHash.slice(0, 12)}…\nActual file hash: ${result.conflict.actualHash.slice(0, 12)}…`
-          : "";
-        await ctx.reply(`⚠️ Undo refused: ${result.reason}${conflict}`);
+        return;
       }
+      // No file-backed mutation. For operational DB-native claims (post-bridge),
+      // the approval never wrote to markdown — undo means archiving the DB row.
+      const durableMarkdownTypes = new Set(["preference"]);
+      const isOperational = !durableMarkdownTypes.has(row.claim_type);
+      const isApproved = row.status === "approved";
+      if (result.reason.startsWith("No mutation found") && isOperational && isApproved) {
+        db.prepare(`
+          UPDATE knowledge_claims
+          SET status = 'archived', archived_at = datetime('now'),
+              archived_reason = 'undo-request', updated_at = datetime('now')
+          WHERE id = ? AND status = 'approved'
+        `).run(row.id);
+        await ctx.reply(`✅ Archived DB-native claim ${row.id} (no markdown mirror existed; status → archived)`);
+        return;
+      }
+      const conflict = result.conflict
+        ? `\n\nExpected post_hash: ${result.conflict.expectedHash.slice(0, 12)}…\nActual file hash: ${result.conflict.actualHash.slice(0, 12)}…`
+        : "";
+      await ctx.reply(`⚠️ Undo refused: ${result.reason}${conflict}`);
       return;
     }
 
@@ -423,7 +438,131 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
       return;
     }
 
-    await ctx.reply("Usage:\n  /memory undo <claim-id>\n  /memory pending");
+    if (sub === "list") {
+      // /memory list [target-file] — counts of approved claims, grouped by target_file
+      const db = stateManager.getDb();
+      const targetFilter = args[1]?.toLowerCase();
+      try {
+        const rows = targetFilter
+          ? db.prepare(`
+              SELECT target_file, claim_type, COUNT(*) as n
+              FROM knowledge_claims
+              WHERE status = 'approved' AND target_file = ?
+              GROUP BY target_file, claim_type
+              ORDER BY n DESC
+            `).all(targetFilter) as Array<{ target_file: string; claim_type: string; n: number }>
+          : db.prepare(`
+              SELECT target_file, claim_type, COUNT(*) as n
+              FROM knowledge_claims
+              WHERE status = 'approved'
+              GROUP BY target_file, claim_type
+              ORDER BY target_file, n DESC
+            `).all() as Array<{ target_file: string; claim_type: string; n: number }>;
+        if (rows.length === 0) {
+          await ctx.reply(targetFilter ? `No approved claims in ${targetFilter}` : "No approved claims yet");
+          return;
+        }
+        const totals = new Map<string, number>();
+        for (const r of rows) totals.set(r.target_file, (totals.get(r.target_file) ?? 0) + r.n);
+        const lines: string[] = ["📚 <b>Approved claims</b>"];
+        let lastFile = "";
+        for (const r of rows) {
+          if (r.target_file !== lastFile) {
+            lines.push(`\n<b>${escapeHtml(r.target_file)}</b> (${totals.get(r.target_file)}):`);
+            lastFile = r.target_file;
+          }
+          lines.push(`  • ${escapeHtml(r.claim_type)}: ${r.n}`);
+        }
+        await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+      } catch (err) {
+        await ctx.reply(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return;
+    }
+
+    if (sub === "show") {
+      // /memory show <query> — FTS search across approved + candidate claims
+      const query = args.slice(1).join(" ").trim();
+      if (!query) {
+        await ctx.reply("Usage: /memory show <query>");
+        return;
+      }
+      const db = stateManager.getDb();
+      try {
+        const escaped = query.replace(/[*()\^$":]/g, "").split(/\s+/).filter(Boolean).join(" ");
+        if (!escaped) {
+          await ctx.reply("Empty search query after sanitization");
+          return;
+        }
+        const rows = db.prepare(`
+          SELECT kc.id, kc.content, kc.target_file, kc.claim_type, kc.status,
+                 kc.domain, kc.event_date, kc.decided_at,
+                 bm25(knowledge_claims_fts) as rank
+          FROM knowledge_claims_fts fts
+          JOIN knowledge_claims kc ON fts.rowid = kc.rowid
+          WHERE knowledge_claims_fts MATCH ?
+            AND kc.status IN ('approved', 'candidate')
+          ORDER BY rank
+          LIMIT 8
+        `).all(escaped) as Array<{ id: string; content: string; target_file: string; claim_type: string; status: string; domain: string | null; event_date: string | null; decided_at: string | null; rank: number }>;
+        if (rows.length === 0) {
+          await ctx.reply(`No matches for "${query}"`);
+          return;
+        }
+        const lines: string[] = [`🔍 <b>${rows.length} matches</b> for "${escapeHtml(query)}"`];
+        for (const r of rows) {
+          const badge = r.status === "approved" ? "✓" : "·";
+          const when = r.event_date ? ` [${escapeHtml(r.event_date)}]` : r.decided_at ? ` [${r.decided_at.slice(0, 10)}]` : "";
+          const dom = r.domain ? `${escapeHtml(r.domain)}/` : "";
+          const snippet = r.content.length > 180 ? r.content.slice(0, 180).trim() + "…" : r.content.trim();
+          lines.push(`\n${badge} <code>${escapeHtml(r.id.slice(-8))}</code> ${dom}${escapeHtml(r.target_file)}:${escapeHtml(r.claim_type)}${when}\n${escapeHtml(snippet)}`);
+        }
+        await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+      } catch (err) {
+        await ctx.reply(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return;
+    }
+
+    if (sub === "recent") {
+      // /memory recent [days=7] — approved claims from the last N days
+      const days = Math.max(1, Math.min(30, Number.parseInt(args[1] ?? "7", 10) || 7));
+      const db = stateManager.getDb();
+      try {
+        const rows = db.prepare(`
+          SELECT id, content, target_file, claim_type, domain, event_date, decided_at
+          FROM knowledge_claims
+          WHERE status = 'approved'
+            AND decided_at >= datetime('now', ?)
+          ORDER BY decided_at DESC
+          LIMIT 15
+        `).all(`-${days} days`) as Array<{ id: string; content: string; target_file: string; claim_type: string; domain: string | null; event_date: string | null; decided_at: string | null }>;
+        if (rows.length === 0) {
+          await ctx.reply(`No approved claims in the last ${days} days`);
+          return;
+        }
+        const lines: string[] = [`🕐 <b>${rows.length} approved</b> in last ${days}d`];
+        for (const r of rows) {
+          const when = r.decided_at?.slice(0, 10) ?? "?";
+          const dom = r.domain ? `${escapeHtml(r.domain)}/` : "";
+          const snippet = r.content.length > 140 ? r.content.slice(0, 140).trim() + "…" : r.content.trim();
+          lines.push(`\n• [${when}] <code>${escapeHtml(r.id.slice(-8))}</code> ${dom}${escapeHtml(r.target_file)}:${escapeHtml(r.claim_type)}\n${escapeHtml(snippet)}`);
+        }
+        await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+      } catch (err) {
+        await ctx.reply(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return;
+    }
+
+    await ctx.reply(
+      "Usage:\n" +
+      "  /memory list [target-file]   — approved claim counts by file/type\n" +
+      "  /memory show <query>         — FTS search on approved + candidate claims\n" +
+      "  /memory recent [days=7]      — approved claims from last N days\n" +
+      "  /memory pending              — pending-candidate queue stats\n" +
+      "  /memory undo <claim-id>      — revert the latest write for a claim",
+    );
   });
 
   bot.command("debug", async (ctx) => {
