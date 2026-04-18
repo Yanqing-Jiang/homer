@@ -6,10 +6,11 @@
  * B) OS orphan scan via `ps` for known HOMER patterns not in registry.
  *
  * 6-layer safety before any kill. Enforcement ON by default (set PROCESS_CLEANUP_ENFORCE=0 to disable).
- * Age-based kill: any tty-less HOMER-pattern process > 6 hours is killed regardless of parent PID.
+ * Age-based kill: tty-less HOMER-pattern process > 6h; or TTY-attached `claude` > 6h with TTY idle > 6h.
  */
 
 import { execSync } from "child_process";
+import { statSync } from "fs";
 import { processRegistry } from "./registry.js";
 import type { ProcessRecord } from "./registry.js";
 import { logger } from "../utils/logger.js";
@@ -225,28 +226,42 @@ export class CleanupScheduler {
 
   /**
    * Safety checks for orphan processes (not in registry).
-   * Age-based: any tty-less HOMER-pattern process > 6 hours is killed regardless of parent.
+   * - tty-less HOMER-pattern process > 6h → kill
+   * - TTY-attached `claude` where etime > 6h AND TTY idle > 6h → kill (process group)
+   * - otherwise spare
    */
-  private isSafeToKillOrphan(pid: number, _cmdline: string): boolean {
+  private isSafeToKillOrphan(pid: number, cmdline: string): boolean {
     if (pid <= 1 || pid === process.pid) return false;
 
     try {
-      // Get parent PID, controlling TTY, and elapsed time.
-      // TTY-attached processes are user-interactive and must be spared.
-      const info = execSync(`ps -o ppid=,tty=,etime= -p ${pid}`, { encoding: "utf-8", timeout: 2000 }).trim();
+      const info = execSync(`ps -o ppid=,pgid=,tty=,etime= -p ${pid}`, { encoding: "utf-8", timeout: 2000 }).trim();
       const parts = info.split(/\s+/);
       const ppid = parseInt(parts[0] ?? "", 10);
-      const tty = parts[1] ?? "";
-      const etime = parts[2] ?? "";
-
-      if (tty && tty !== "?" && tty !== "??") {
-        return false;
-      }
-
-      // Parse etime (DD-HH:MM:SS or HH:MM:SS or MM:SS)
+      const pgid = parseInt(parts[1] ?? "", 10);
+      const tty = parts[2] ?? "";
+      const etime = parts[3] ?? "";
       const ageMs = parseEtime(etime);
 
-      // Always safe to kill if parent is init (1) or our daemon
+      if (tty && tty !== "?" && tty !== "??") {
+        // Only reap abandoned interactive `claude` sessions. Codex/gemini/kimi TTY
+        // processes are short-lived and exit on their own.
+        if (!/\bclaude\b/.test(cmdline)) return false;
+        if (ageMs <= ORPHAN_AGE_KILL_MS) return false;
+        const ttyIdleMs = getTtyIdleMs(tty);
+        if (ttyIdleMs <= ORPHAN_AGE_KILL_MS) return false;
+        logger.info(
+          {
+            pid,
+            pgid,
+            ageHours: (ageMs / 3600_000).toFixed(1),
+            ttyIdleHours: (ttyIdleMs / 3600_000).toFixed(1),
+          },
+          "Stale TTY claude session, safe to kill"
+        );
+        return true;
+      }
+
+      // Always safe to kill tty-less if parent is init (1) or our daemon
       if (ppid === 1 || ppid === process.pid) return true;
 
       // Age-based: kill any tty-less HOMER process older than 6 hours regardless of parent
@@ -268,11 +283,15 @@ export class CleanupScheduler {
   private handleOrphan(pid: number, command: string): CleanupAction {
     if (this.enforce) {
       try {
-        process.kill(pid, "SIGTERM");
+        // If PID is its own process-group leader, signal the whole group so
+        // MCP/tool children (mcp-remote, notebooklm-mcp, tsserver, etc.) die too.
+        // Otherwise fall back to PID-only to avoid hitting the wrong group.
+        const target = isProcessGroupLeader(pid) ? -pid : pid;
+        process.kill(target, "SIGTERM");
         setTimeout(() => {
           try {
-            process.kill(pid, 0);
-            process.kill(pid, "SIGKILL");
+            process.kill(target, 0);
+            process.kill(target, "SIGKILL");
           } catch { /* already dead */ }
         }, 5000);
         return { pid, command, action: "killed", reason: "orphan: not in registry" };
@@ -306,6 +325,32 @@ export class CleanupScheduler {
     } catch {
       // Best effort
     }
+  }
+}
+
+/**
+ * TTY device activity on macOS/devfs: atime moves on input read, mtime on output write.
+ * Use max of the two so we capture both directions of terminal I/O.
+ */
+function getTtyIdleMs(tty: string): number {
+  try {
+    const dev = `/dev/${tty}`;
+    const s = statSync(dev);
+    return Date.now() - Math.max(s.atimeMs, s.mtimeMs);
+  } catch {
+    return 0; // unreadable → treat as active (spare)
+  }
+}
+
+function isProcessGroupLeader(pid: number): boolean {
+  try {
+    const pgid = parseInt(
+      execSync(`ps -o pgid= -p ${pid}`, { encoding: "utf-8", timeout: 2000 }).trim(),
+      10
+    );
+    return pgid === pid;
+  } catch {
+    return false;
   }
 }
 

@@ -136,7 +136,22 @@ export function insertCandidate(
 }
 
 /**
- * Approve a candidate claim. Promotes to canonical memory file.
+ * Claim types that still mirror to ~/memory/*.md on approval.
+ *
+ * Post-bridge-retirement (2026-04-17), operational facts (fact/decision/
+ * question/insight/commitment/lesson/hypothesis) live in `knowledge_claims`
+ * only and are reached via homer-memory MCP + knowledge_claims_fts. Preferences
+ * remain file-backed because they're durable identity/workflow guidance that
+ * belongs in human-readable `~/memory/preferences.md`.
+ *
+ * Special applicators (cleanup/skill/replace/remove) route through dedicated
+ * handlers, not this set.
+ */
+const DURABLE_MARKDOWN_TYPES = new Set(["preference"]);
+
+/**
+ * Approve a candidate claim. Durable types still mirror to markdown;
+ * operational types stay DB-only and are reached via knowledge_claims_fts.
  * Idempotent: returns true if approved (or already approved), false if not in approvable state.
  */
 export async function approveCandidate(
@@ -171,8 +186,8 @@ export async function approveCandidate(
       await applyReplaceClaim(claim, canonicalMemory);
     } else if (claim.claim_type === "remove") {
       await applyRemoveClaim(claim, canonicalMemory);
-    } else {
-      // Standard fact/decision/preference/lesson claims: promote to file
+    } else if (DURABLE_MARKDOWN_TYPES.has(claim.claim_type)) {
+      // Durable types (preference) still mirror to ~/memory/*.md
       const source = originalStatus === "stale" ? "weekly" : "nightly";
       const written = await canonicalMemory.promoteToFile(
         claim.content,
@@ -182,12 +197,9 @@ export async function approveCandidate(
         { claimId, actor: "user" },
       );
       // promoteToFile returns false for security-scan blocks OR section-aware dedup hits.
-      // Don't mark the claim 'approved' in that case — it would misreport that memory was
-      // mutated. Route to 'rejected' with a reason the UI can surface.
+      // Don't mark the claim 'approved' in that case — revert to candidate so the user
+      // can retry after the duplicate clears or the content is edited.
       if (!written) {
-        // Write blocked (security scan or section-aware duplicate). Revert to
-        // 'candidate' so the user can retry — a later attempt might succeed if
-        // the duplicate is cleared or the content edited.
         db.prepare(`
           UPDATE knowledge_claims SET status = 'candidate', updated_at = datetime('now')
           WHERE id = ? AND status = 'applying'
@@ -195,6 +207,15 @@ export async function approveCandidate(
         logger.info({ claimId, target: claim.target_file }, "Candidate reverted — promoteToFile returned false (scan block or duplicate)");
         return false;
       }
+    } else {
+      // Operational types (fact/decision/question/insight/commitment/lesson/hypothesis)
+      // stay DB-native. The knowledge_claims_fts trigger keeps search in sync
+      // automatically; no markdown write. CanonicalMemoryService indexing path
+      // would duplicate content into file FTS — skip it.
+      logger.info(
+        { claimId, target: claim.target_file, type: claim.claim_type },
+        "Approved as DB-native claim (no markdown mirror)",
+      );
     }
 
     // Transition: applying → approved (guarded)

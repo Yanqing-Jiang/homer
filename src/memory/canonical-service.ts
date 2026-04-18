@@ -24,7 +24,7 @@ import {
   appendSectionAtomic,
 } from "./fs.js";
 
-const ALL_WRITE_PIPELINES = ["reindex", "embeddings", "context_bridge"] as const;
+const ALL_WRITE_PIPELINES = ["reindex", "embeddings"] as const;
 
 function sha256(content: string): string {
   return createHash("sha256").update(content).digest("hex");
@@ -136,7 +136,7 @@ export class CanonicalMemoryService {
 
   /**
    * Promote content to a permanent memory file.
-   * Replaces inline appendFile + recordPromotedFact + markContextBridgeDirty + indexFile.
+   * Replaces inline appendFile + recordPromotedFact + indexFile.
    */
   async promoteToFile(
     content: string,

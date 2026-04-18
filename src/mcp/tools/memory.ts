@@ -162,11 +162,12 @@ export async function handle(
 ): Promise<ToolResult | null> {
   switch (name) {
     case "memory_search": {
-      const { query, context, limit, include_archived } = args as {
+      const { query, context, limit, include_archived, include_candidates } = args as {
         query: string;
         context?: "work" | "general";
         limit?: number;
         include_archived?: boolean;
+        include_candidates?: boolean;
       };
       const maxResults = limit || 10;
 
@@ -182,6 +183,7 @@ export async function handle(
       let ideaResults: Array<{ id: string; title: string; status: string; source: string; link: string | null; created_at: string; content: string; rank: number }> = [];
       let youtubeResults: Array<{ video_id: string; title: string; channel_name: string; relevance_score: number; processed_at: string; content: string; rank: number }> = [];
       let transcriptResults: Array<{ content_hash: string; agent: string; project: string | null; started_at: string | null; content: string; rank: number }> = [];
+      let claimResults: Array<{ id: string; content: string; target_file: string; section: string | null; claim_type: string; domain: string | null; event_date: string | null; status: string; created_at: string; decided_at: string | null; rank: number }> = [];
       try {
         const sm = deps.getSharedStateManager();
         // Escape FTS5 query: preserve quoted phrases, implicit AND for terms
@@ -318,6 +320,32 @@ export async function handle(
           } catch (err) {
             logger.debug({ error: err }, "Transcript FTS search failed (table may not exist)");
           }
+
+          // DB-native knowledge_claims search via external-content FTS (migration 088).
+          // After bridge retirement, approved operational claims live here. Default:
+          // approved only, to preserve the HITL boundary (candidates are pre-review).
+          // Opt-in `include_candidates` for operator/debug surfaces like /memory show.
+          try {
+            const claimStatuses = include_archived
+              ? ["approved", "candidate", "archived", "stale"]
+              : include_candidates
+              ? ["approved", "candidate"]
+              : ["approved"];
+            const placeholders = claimStatuses.map(() => "?").join(",");
+            claimResults = sm.getDb().prepare(`
+              SELECT kc.id, kc.content, kc.target_file, kc.section, kc.claim_type,
+                     kc.domain, kc.event_date, kc.status, kc.created_at, kc.decided_at,
+                     bm25(knowledge_claims_fts) as rank
+              FROM knowledge_claims_fts fts
+              JOIN knowledge_claims kc ON fts.rowid = kc.rowid
+              WHERE knowledge_claims_fts MATCH ?
+                AND kc.status IN (${placeholders})
+              ORDER BY rank
+              LIMIT ?
+            `).all(escapedTerms, ...claimStatuses, maxResults) as typeof claimResults;
+          } catch (err) {
+            logger.debug({ error: err }, "Knowledge claims FTS search failed (table may not exist)");
+          }
         }
       } catch (err) {
         logger.debug({ error: err }, "Session summaries FTS search failed (table may not exist yet)");
@@ -379,6 +407,7 @@ export async function handle(
       const normIdeas = normalizeBM25(ideaResults);
       const normYoutube = normalizeBM25(youtubeResults);
       const normTranscripts = normalizeBM25(transcriptResults);
+      const normClaims = normalizeBM25(claimResults);
 
       // Build unified ranked results across all tables
       type UnifiedResult = { type: string; normalizedRank: number; data: Record<string, unknown> };
@@ -432,6 +461,19 @@ export async function handle(
         unified.push({
           type: "transcript", normalizedRank: r.normalizedRank * 0.7,
           data: { contentHash: r.content_hash, agent: r.agent, project: r.project, startedAt: r.started_at, content: r.content, rank: r.rank },
+        });
+      }
+      for (const r of normClaims) {
+        // Boost approved DB-native claims to 1.1x — they are the post-bridge source
+        // of truth for operational facts. Candidates get 0.9x (in-flight, less certain).
+        const statusMultiplier = r.status === "approved" ? 1.1 : 0.9;
+        unified.push({
+          type: "claim", normalizedRank: r.normalizedRank * statusMultiplier,
+          data: {
+            id: r.id, content: r.content, targetFile: r.target_file, section: r.section,
+            claimType: r.claim_type, domain: r.domain, eventDate: r.event_date,
+            status: r.status, createdAt: r.created_at, decidedAt: r.decided_at, rank: r.rank,
+          },
         });
       }
 
@@ -505,6 +547,12 @@ export async function handle(
           type: "transcript" as const, contentHash: r.content_hash, agent: r.agent,
           project: r.project, startedAt: r.started_at, content: r.content,
           rank: r.rank, normalizedRank: r.normalizedRank,
+        })),
+        claims: normClaims.map((r) => ({
+          type: "claim" as const, id: r.id, content: r.content, targetFile: r.target_file,
+          section: r.section, claimType: r.claim_type, domain: r.domain,
+          eventDate: r.event_date, status: r.status, createdAt: r.created_at,
+          decidedAt: r.decided_at, rank: r.rank, normalizedRank: r.normalizedRank,
         })),
       };
 

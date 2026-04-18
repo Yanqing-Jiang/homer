@@ -73,6 +73,18 @@ const TriageSchema = z.object({
   dimensions: z.array(z.string()),
 });
 
+// Reader-mode idea types (refactor 2026-04-17). Source stays as a separate tag.
+// YouTube is a source, not a type — any type can come from YT / X / Medium.
+const IDEA_TYPES = [
+  "life-lesson",
+  "career-truth",
+  "ai-trend-deepdive",
+  "tool-discovery",
+  "first-principle-reframe",
+  "operator-pattern",
+] as const;
+export type IdeaType = (typeof IDEA_TYPES)[number];
+
 const CandidateSchema = z.object({
   title: z.string().min(5).max(150),
   content: z.string().min(50),
@@ -81,6 +93,16 @@ const CandidateSchema = z.object({
   tags: z.array(z.string()),
   link: z.string().optional().default(""),
   source: z.string(),
+  // Reader-mode fields (optional for back-compat with existing synthesizer prompts;
+  // router + new type prompts will populate them going forward).
+  ideaType: z.enum(IDEA_TYPES).optional(),
+  depth: z.enum(["deep", "light"]).optional(),
+  whyNow: z.string().optional(),
+  questionToCarry: z.string().optional(),
+  readingTimeMinutes: z.number().int().min(1).max(8).optional(),
+  routeSignals: z.array(z.string()).optional().default([]),
+  lang: z.enum(["en", "zh", "mixed"]).optional(),
+  sourcesLang: z.array(z.enum(["en", "zh"])).optional().default([]),
 });
 
 const CritiqueSchema = z.object({
@@ -580,6 +602,31 @@ Return ONLY the JSON object.`;
   }
 }
 
+// Reader-mode hard-lint patterns (refactor 2026-04-17). Reject candidates that
+// drift back to post-draft / brand-building format. The pipeline is 100% reader-mode.
+const READER_MODE_FORBIDDEN_PATTERNS: Array<{ pattern: RegExp; name: string }> = [
+  { pattern: /(^|\n)\s*(?:\*\*)?Hook(?:\*\*)?\s*:/i, name: "Hook: header" },
+  { pattern: /(^|\n)\s*(?:\*\*)?Platform(?:\*\*)?\s*:/i, name: "Platform: header" },
+  { pattern: /(^|\n)\s*(?:\*\*)?CTA(?:\*\*)?\s*:/i, name: "CTA: header" },
+  { pattern: /engagement_score\s*:/i, name: "engagement_score field" },
+  { pattern: /\blinkedin\s+(?:post|hook|thread|angle|draft)\b/i, name: "LinkedIn-post framing" },
+  { pattern: /\bmedium\s+(?:post|article|draft|essay)\s+(?:hook|angle|idea|draft)\b/i, name: "Medium-post framing" },
+  { pattern: /\bnewsletter\s+draft\b/i, name: "newsletter draft" },
+  { pattern: /\bthought\s+leadership\b/i, name: "thought-leadership framing" },
+  { pattern: /\bpersonal\s+brand\b/i, name: "personal-brand framing" },
+  { pattern: /\bin the rapidly evolving landscape\b/i, name: "stock phrase: 'rapidly evolving landscape'" },
+  { pattern: /\bat the end of the day\b/i, name: "stock phrase: 'at the end of the day'" },
+  { pattern: /\bunlock(?:s|ed|ing)?\s+(?:value|growth|potential|leverage)\b/i, name: "stock phrase: 'unlock X'" },
+];
+
+function readerModeHardLint(title: string, content: string): string | null {
+  const haystack = `${title}\n${content}`;
+  for (const { pattern, name } of READER_MODE_FORBIDDEN_PATTERNS) {
+    if (pattern.test(haystack)) return name;
+  }
+  return null;
+}
+
 async function stepCritique(
   db: Database.Database,
   scrape: StoredScrape,
@@ -594,6 +641,24 @@ async function stepCritique(
   const candidate = pipeline?.candidate;
   if (!candidate) {
     logger.warn({ scrapeId: scrape.id }, "Critique step: no candidate found");
+    return false;
+  }
+
+  // Reader-mode hard lint (refactor 2026-04-17): reject candidates that drifted
+  // back to post-draft / LinkedIn-style framing. Saves a Sonnet call on obvious slop.
+  const lintReason = readerModeHardLint(candidate.title, candidate.content);
+  if (lintReason) {
+    updatePipelineStep(db, scrape.id, "critiqued", {
+      passed: false,
+      reason: `hard-lint: ${lintReason}`,
+    });
+    markScrapeTerminal(db, scrape.id, "rejected");
+    const clusterId = pipeline?.cluster?.clusterId;
+    if (clusterId) markClusterSecondariesTerminal(db, clusterId, "rejected");
+    logger.info(
+      { scrapeId: scrape.id, title: candidate.title, reason: lintReason },
+      "Critique rejected (hard-lint)"
+    );
     return false;
   }
 
@@ -894,8 +959,9 @@ export async function runIdeaSynthesizer(db: Database.Database, jobRunId?: numbe
   error?: string;
 }> {
   try {
-    // Exclude medium-trending — those route to content_hooks, not the idea pipeline
-    const unprocessed = getUnprocessedScrapes(db, 48, ["medium-trending"]);
+    // 2026-04-17 refactor: Medium-trending is now routed into ai-trend-deepdive
+    // rather than content_hooks. Capped downstream to 1 Medium-led deep dive per morning.
+    const unprocessed = getUnprocessedScrapes(db, 48, []);
 
     if (unprocessed.length === 0) {
       return { success: true, output: "No unprocessed scrapes to synthesize" };
