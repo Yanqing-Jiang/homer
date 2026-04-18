@@ -164,7 +164,6 @@ export class Scheduler {
     const PIPELINE_TO_JOB: Record<string, string> = {
       reindex: "memory-reindex",
       embeddings: "memory-embeddings",
-      context_bridge: "context-bridge-refresh",
     };
 
     memoryEvents.on("pipeline:dirty", ({ pipeline }: { pipeline: string }) => {

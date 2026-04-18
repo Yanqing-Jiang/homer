@@ -449,8 +449,8 @@ If nothing to promote, use an empty array.`;
       logger.warn({ writeErrors: writeErrors.length }, "Skipping processed mark — write errors occurred, sessions will be retried");
     }
 
-    // Dirty flags for reindex/embeddings/context_bridge/git_commit are set by
-    // canonicalMemory.promoteToFile() — no inline reindex or markContextBridgeDirty needed.
+    // Dirty flags for reindex/embeddings/git_commit are set by
+    // canonicalMemory.promoteToFile() — no inline reindex needed.
 
     const parts: string[] = [];
     if (candidatesCreated > 0) {

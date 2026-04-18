@@ -7,7 +7,7 @@
  * FTS5 indexing.
  *
  * Sessions are immediately searchable via memory_search after this job completes.
- * Sets dirty flags for reindex/embeddings/context_bridge pipelines.
+ * Sets dirty flags for reindex/embeddings pipelines.
  */
 
 import { homedir } from "os";
@@ -66,11 +66,9 @@ export async function runSessionHarvester(
     if (stats.imported > 0) {
       sm.markPipelineDirty("reindex", "session_harvester");
       sm.markPipelineDirty("embeddings", "session_harvester");
-      sm.markPipelineDirty("context_bridge", "session_harvester");
       // Emit events for debounced reactive triggers
       memoryEvents.emitDirty("reindex", "session_harvester");
       memoryEvents.emitDirty("embeddings", "session_harvester");
-      memoryEvents.emitDirty("context_bridge", "session_harvester");
     }
 
     const parts: string[] = [];

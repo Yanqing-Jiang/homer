@@ -85,7 +85,7 @@ export const definitions: ToolDefinition[] = [
 export async function handle(
   name: string,
   args: Record<string, unknown>,
-  deps: ToolDeps
+  _deps: ToolDeps
 ): Promise<ToolResult | null> {
   switch (name) {
     case "plan_create": {
@@ -104,7 +104,6 @@ export async function handle(
         filePath: planPath, title, description: description || null,
         status: status || "planning", currentPhase, phases: parsedPhases, sourceIdeaId: ideaId || null,
       });
-      deps.getSharedStateManager().markContextBridgeDirty("plan_create");
       return { content: [{ type: "text", text: `Created plan: ${title} (${planPath})` }] };
     }
 
@@ -126,7 +125,6 @@ export async function handle(
         phases: parsed.phases, notes: updatedNotes, sourceIdeaId: parsed.sourceIdeaId,
         tags: parsed.tags, createdAt: parsed.createdAt,
       });
-      deps.getSharedStateManager().markContextBridgeDirty("plan_update");
       return { content: [{ type: "text", text: `Updated plan: ${slug}` }] };
     }
 
@@ -155,7 +153,6 @@ export async function handle(
       });
       await mkdir(archiveDir, { recursive: true });
       await rename(planPath, archivePath);
-      deps.getSharedStateManager().markContextBridgeDirty("plan_archive");
       return { content: [{ type: "text", text: `Archived plan: ${slug} → plans/archive/${slug}.md` }] };
     }
 
@@ -179,7 +176,6 @@ export async function handle(
         status: parsed.status, currentPhase: parsed.currentPhase, phases: parsed.phases,
         sourceIdeaId: parsed.sourceIdeaId, tags: parsed.tags, createdAt: parsed.createdAt,
       });
-      deps.getSharedStateManager().markContextBridgeDirty("plan_add_task");
       return { content: [{ type: "text", text: `Added task to ${slug} (phase: ${targetPhase.name}): ${task}` }] };
     }
 
