@@ -68,7 +68,8 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
   { id: "job-hunt-discover", name: "Job Hunt Discover", kind: "internal", handler: "job_hunt_discover", handlerFile: "job-hunt-discover", expectedInSchedule: true },
   { id: "job-hunt-email-monitor", name: "Job Hunt Email Monitor", kind: "internal", handler: "job_hunt_email_monitor", handlerFile: "job-hunt-email-monitor", expectedInSchedule: true },
   { id: "job-hunt-followup", name: "Job Hunt Followup", kind: "internal", handler: "job_hunt_followup", handlerFile: "job-hunt-followup", expectedInSchedule: true },
-  { id: "learning-engine", name: "Learning Engine", kind: "internal", handler: "learning_engine", handlerFile: "learning-engine", expectedInSchedule: true, note: "disabled — will merge into weekly-consolidation (Phase 4)" },
+  { id: "mentor-layer", name: "Mentor Layer", kind: "internal", handler: "mentor_layer", handlerFile: "mentor-layer", expectedInSchedule: true, note: "active-work mentor, Mon/Wed/Fri 08:30" },
+  { id: "career-truth", name: "Career Truth", kind: "internal", handler: "career_truth", handlerFile: "career-truth", expectedInSchedule: true, note: "1 PM Tue/Wed/Thu, shared state with mentor-layer" },
   { id: "link-processor", name: "Link Processor", kind: "internal", handler: "link_processor", handlerFile: "link-processor", expectedInSchedule: true },
   { id: "memory-embeddings", name: "Memory Embeddings", kind: "internal", handler: "memory_embeddings", handlerFile: "memory-embeddings", expectedInSchedule: true, note: "event-triggered; cron is safety net" },
   { id: "memory-reindex", name: "Memory Reindex", kind: "internal", handler: "memory_reindex", handlerFile: "memory-reindex", expectedInSchedule: true, note: "event-triggered; cron is safety net" },
@@ -84,7 +85,6 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
  * These are the sources of taxonomy drift Codex's review flagged.
  */
 const SCHEDULED_WITH_ALIASED_HANDLER_FILE: JobEntry[] = [
-  { id: "context-bridge-refresh", name: "Context Bridge Refresh", kind: "internal", handler: "context_bridge", handlerFile: "context-bridge", expectedInSchedule: true, note: "alias: schedule id is context-bridge-refresh, file is context-bridge" },
   { id: "job-hunt-weekly-report", name: "Job Hunt Weekly Report", kind: "internal", handler: "job_hunt_weekly_report", handlerFile: "job-hunt-report", expectedInSchedule: true, note: "alias: schedule id is job-hunt-weekly-report, file is job-hunt-report" },
   { id: "weekly-memory-cleanup", name: "Weekly Memory Cleanup", kind: "internal", handler: "memory_cleanup", handlerFile: "memory-cleanup", expectedInSchedule: true, note: "alias + disabled — will merge into weekly-memory-maintenance (Phase 4)" },
   { id: "weekly-memory-consolidation", name: "Weekly Memory Consolidation", kind: "internal", handler: "weekly_consolidation", handlerFile: "weekly-consolidation", expectedInSchedule: true, note: "alias: schedule id prefixes 'weekly-memory-'" },

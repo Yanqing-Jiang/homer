@@ -4,14 +4,6 @@ import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
 import { threadEvents } from "../events/thread-events.js";
 import { sessionEvents } from "../events/session-events.js";
-import {
-  ensureContextBridgeStateTable,
-  getContextBridgeState as loadContextBridgeState,
-  markContextBridgeDirty as markContextBridgeDirtyInDb,
-  recordContextBridgeResult as recordContextBridgeResultInDb,
-  recordContextBridgeStart as recordContextBridgeStartInDb,
-  type ContextBridgeState,
-} from "./context-bridge-state.js";
 
 export interface Session {
   id: string;
@@ -232,8 +224,6 @@ export class StateManager {
         ON gemini_accounts(cooldown_until);
     `);
 
-    ensureContextBridgeStateTable(this._db);
-
     logger.debug("State manager initialized");
   }
 
@@ -334,14 +324,6 @@ export class StateManager {
     this._db.close();
   }
 
-  getContextBridgeState(): ContextBridgeState {
-    return loadContextBridgeState(this._db);
-  }
-
-  markContextBridgeDirty(triggerSource: string): void {
-    markContextBridgeDirtyInDb(this._db, triggerSource);
-  }
-
   // ── Pipeline dirty-flag methods ────────────────────────────
 
   markPipelineDirty(pipeline: string, source: string): void {
@@ -366,22 +348,6 @@ export class StateManager {
     this._db.prepare(
       "UPDATE pipeline_dirty SET is_dirty = 0, cleared_at = datetime('now') WHERE pipeline = ?"
     ).run(pipeline);
-  }
-
-  recordContextBridgeStart(triggerSource: string, startedAt?: string): void {
-    recordContextBridgeStartInDb(this._db, triggerSource, startedAt);
-  }
-
-  recordContextBridgeResult(result: {
-    triggerSource: string;
-    sourceHash?: string | null;
-    outputHash?: string | null;
-    dirty: boolean;
-    method?: string | null;
-    error?: string | null;
-    completedAt?: string;
-  }): void {
-    recordContextBridgeResultInDb(this._db, result);
   }
 
   // Executor session methods for Claude --resume
