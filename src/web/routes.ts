@@ -21,6 +21,7 @@ import { registerClaudeHistoryRoutes } from "./api/claude-history.js";
 import { registerProposalRoutes } from "./routes/proposals.js";
 import { registerCommandRoutes } from "./api/commands.js";
 import { registerRunRoutes } from "./api/runs.js";
+import { registerBlobRoutes } from "./api/blobs.js";
 import { registerTradingRoutes } from "./api/trading.js";
 import { registerThreadEventRoutes } from "./api/thread-events.js";
 import { registerWebhookRoutes } from "./api/webhooks.js";
@@ -184,6 +185,9 @@ export function createRoutes(
   if (cliRunManagerRef) {
     registerRunRoutes(server, stateManager, cliRunManagerRef);
   }
+
+  // Register blob download redirect (mints short-lived SAS)
+  registerBlobRoutes(server);
 
   // Register trading API proxy routes
   registerTradingRoutes(server);
