@@ -26,7 +26,15 @@
 	let searchVersion = 0;
 
 	let chatInput = $state('');
-	let messages = $state<Array<{ id?: string; role: 'user' | 'assistant'; content: string; timestamp: Date; attachments?: api.MessageAttachment[] }>>([]);
+	type ChatMessage = {
+		id?: string;
+		role: 'user' | 'assistant';
+		content: string;
+		timestamp: Date;
+		attachments?: api.MessageAttachment[];
+		steps?: Array<api.StepEvent & { startedAt: number; completed: boolean }>;
+	};
+	let messages = $state<ChatMessage[]>([]);
 	let knownMessageIds = $state<Set<string>>(new Set());
 	let sidebarOpen = $state(false);
 	let userMenuOpen = $state(false);
@@ -54,8 +62,59 @@
 		currentAbort = null;
 	}
 
+	async function handleStopRun() {
+		const runIdToCancel = activeRunId;
+		// If we don't know the runId, the backend has nothing to cancel; keep the stream alive
+		// (no local tear-down) — user can try again once onStart sets activeRunId.
+		if (!runIdToCancel) {
+			chatError = 'Cannot cancel yet — run is still starting.';
+			return;
+		}
+
+		let backendAcked = false;
+		try {
+			const res = await api.cancelRun(runIdToCancel);
+			// Treat as "stopped" if the backend actually cancelled OR the run was already terminal
+			backendAcked = res.cancelled === true || runIdToCancel === res.runId;
+		} catch (err) {
+			console.warn('cancelRun failed', err);
+			chatError = 'Stop request failed — backend may still be running. Try again in a moment.';
+			return; // keep the UI stream open so the user can see state catch up
+		}
+
+		// Only tear down the local stream if the backend acknowledged.
+		// If cancelled === false (not ours / already terminal), we still release the SSE reader —
+		// the onStatus handler will flush anything remaining into the message list.
+		if (backendAcked) {
+			try {
+				currentAbort?.abort();
+			} catch (err) {
+				console.warn('stream abort failed', err);
+			}
+		}
+	}
+
 	function applyStreamingStep(step: api.StepEvent) {
 		if (step.type === 'tool_use') {
+			// Dedupe by id so SSE replay on reconnect doesn't produce duplicate rows.
+			if (step.id) {
+				const existing = streamingSteps.find((s) => s.id === step.id && s.type === 'tool_use');
+				if (existing) {
+					// Backfill any new metadata (tool, preview) but keep completion state.
+					streamingSteps = streamingSteps.map((s) =>
+						s.id === step.id && s.type === 'tool_use'
+							? {
+									...s,
+									tool: step.tool ?? s.tool,
+									label: step.label || s.label,
+									labelDone: step.labelDone || s.labelDone,
+									preview: step.preview ?? s.preview,
+								}
+							: s
+					);
+					return;
+				}
+			}
 			streamingSteps = [...streamingSteps, { ...step, startedAt: Date.now(), completed: false }];
 			return;
 		}
@@ -162,6 +221,7 @@
 					data.status === 'failed' ||
 					data.status === 'cancelled'
 				) {
+					const finalSteps = streamingSteps;
 					try {
 						const run = await api.getRun(runId);
 						const output = run.run.output || (run.run.error ?? '');
@@ -170,14 +230,18 @@
 							sessionExpired = true;
 						}
 						if (output) {
-							messages = [...messages, { role: 'assistant', content: output, timestamp: new Date() }];
+							messages = [...messages, { role: 'assistant', content: output, timestamp: new Date(), steps: finalSteps.length > 0 ? finalSteps : undefined }];
 						} else if (data.status === 'cancelled') {
+							const fallback = streamingContent.trim();
+							if (fallback) {
+								messages = [...messages, { role: 'assistant', content: fallback, timestamp: new Date(), steps: finalSteps.length > 0 ? finalSteps : undefined }];
+							}
 							chatError = 'Run cancelled.';
 						}
 					} catch {
 						const fallback = streamingContent.trim();
 						if (fallback) {
-							messages = [...messages, { role: 'assistant', content: fallback, timestamp: new Date() }];
+							messages = [...messages, { role: 'assistant', content: fallback, timestamp: new Date(), steps: finalSteps.length > 0 ? finalSteps : undefined }];
 						}
 					}
 					resetStreamingState();
@@ -960,25 +1024,22 @@
 			if (currentExecutor === 'claude' || currentExecutor === 'chatgpt') {
 				// SSE streaming path with step indicators
 				const stream = api.streamMessage(threadId, executionMessage, {
+					onStart: (data) => {
+						if (isStale()) return;
+						if (data.runId) activeRunId = data.runId;
+					},
 					onDelta: (data) => {
 						if (isStale()) return;
 						streamingContent += data.content;
 					},
 					onStep: (data) => {
 						if (isStale()) return;
-						if (data.type === 'tool_use') {
-							streamingSteps = [...streamingSteps, { ...data, startedAt: Date.now(), completed: false }];
-						} else if (data.type === 'tool_result' && data.id) {
-							streamingSteps = streamingSteps.map(s =>
-								s.id === data.id ? { ...s, completed: true } : s
-							);
-						} else if (data.type === 'thinking') {
-							streamingSteps = [...streamingSteps, { ...data, startedAt: Date.now(), completed: true }];
-						}
+						applyStreamingStep(data);
 					},
 					onComplete: (data) => {
 						if (isStale()) return;
 						const finalContent = streamingContent;
+						const finalSteps = streamingSteps;
 						const expiredPattern = /session expired|session not found/i;
 						if (expiredPattern.test(finalContent)) {
 							sessionExpired = true;
@@ -992,16 +1053,16 @@
 								if (isStale()) return;
 								const msg = thread.messages?.find(m => m.id === completeMsgId);
 								if (msg?.role === 'assistant') {
-									messages = [...messages, { id: msg.id, role: 'assistant', content: msg.content, timestamp: new Date(msg.createdAt) }];
+									messages = [...messages, { id: msg.id, role: 'assistant', content: msg.content, timestamp: new Date(msg.createdAt), steps: finalSteps.length > 0 ? finalSteps : undefined }];
 								} else if (finalContent) {
-									messages = [...messages, { role: 'assistant', content: finalContent, timestamp: new Date() }];
+									messages = [...messages, { role: 'assistant', content: finalContent, timestamp: new Date(), steps: finalSteps.length > 0 ? finalSteps : undefined }];
 								}
 								resetStreamingState();
 								executorMessageCount++;
 							}).catch(() => {
 								if (isStale()) return;
 								if (finalContent) {
-									messages = [...messages, { role: 'assistant', content: finalContent, timestamp: new Date() }];
+									messages = [...messages, { role: 'assistant', content: finalContent, timestamp: new Date(), steps: finalSteps.length > 0 ? finalSteps : undefined }];
 								}
 								resetStreamingState();
 								executorMessageCount++;
@@ -1009,7 +1070,7 @@
 						} else {
 							// No messageId — use streamed content directly
 							if (finalContent) {
-								messages = [...messages, { role: 'assistant', content: finalContent, timestamp: new Date() }];
+								messages = [...messages, { role: 'assistant', content: finalContent, timestamp: new Date(), steps: finalSteps.length > 0 ? finalSteps : undefined }];
 							}
 							resetStreamingState();
 							executorMessageCount++;
@@ -1028,32 +1089,9 @@
 					},
 					onDisconnect: (data) => {
 						if (isStale() || !data.runId) return;
-						// SSE dropped (e.g. Cloudflare tunnel timeout) — fall back to polling
-						streamingContent = streamingContent || 'Reconnecting...';
-						const pollId = data.runId;
-						const pollInterval = setInterval(async () => {
-							try {
-								const run = await api.getRun(pollId);
-								if (run.run.status === 'completed' || run.run.status === 'failed' || run.run.status === 'cancelled') {
-									clearInterval(pollInterval);
-									const output = run.run.output || '';
-									if (output) {
-										messages = [...messages, { role: 'assistant', content: output, timestamp: new Date() }];
-									} else if (run.run.status === 'cancelled') {
-										chatError = 'Run cancelled.';
-									} else if (run.run.status === 'failed') {
-										chatError = run.run.error || 'Run failed.';
-									}
-									resetStreamingState();
-									executorMessageCount++;
-								}
-							} catch {
-								clearInterval(pollInterval);
-								chatError = 'Lost connection and failed to recover run status.';
-								resetStreamingState();
-							}
-						}, 3000);
-						currentAbort = { abort: () => clearInterval(pollInterval) };
+						// SSE dropped (e.g. Cloudflare tunnel timeout) — reconnect to run-event stream.
+						// Replays step events + partial text + terminal status so we keep rich state.
+						startRunEventStream(data.runId, currentExecutor, { preserveState: true });
 					},
 				}, {
 					attachments: currentAttachmentIds.length > 0 ? currentAttachmentIds : undefined,
@@ -1371,6 +1409,7 @@
 						{streamingContent}
 						steps={streamingSteps}
 						activityKey={activeRunId ?? threadId ?? 'chat'}
+						onStop={handleStopRun}
 					/>
 
 					<!-- Chat Input Area -->

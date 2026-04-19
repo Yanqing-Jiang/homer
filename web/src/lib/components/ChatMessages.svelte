@@ -7,18 +7,29 @@
 
 	const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3000';
 
+	type ActivityStep = StepEvent & { startedAt: number; completed: boolean };
+
 	let {
 		messages,
 		isStreaming,
 		streamingContent,
 		steps = [],
-		activityKey = 'chat'
+		activityKey = 'chat',
+		onStop
 	}: {
-		messages: Array<{ id?: string; role: 'user' | 'assistant'; content: string; timestamp: Date; attachments?: MessageAttachment[] }>;
+		messages: Array<{
+			id?: string;
+			role: 'user' | 'assistant';
+			content: string;
+			timestamp: Date;
+			attachments?: MessageAttachment[];
+			steps?: ActivityStep[];
+		}>;
 		isStreaming: boolean;
 		streamingContent: string;
-		steps?: Array<StepEvent & { startedAt: number; completed: boolean }>;
+		steps?: ActivityStep[];
 		activityKey?: string;
+		onStop?: () => void;
 	} = $props();
 
 	function formatFileSize(bytes: number): string {
@@ -92,6 +103,13 @@
 				{/if}
 				<div class="message-content">
 					{#if message.role === 'assistant'}
+						{#if message.steps && message.steps.length > 0}
+							<RunActivityPanel
+								steps={message.steps}
+								isRunning={false}
+								storageKey={`msg:${message.id ?? message.timestamp.getTime()}`}
+							/>
+						{/if}
 						<div class="message-bubble markdown-content" use:highlightAction>
 							{@html renderMarkdown(message.content)}
 						</div>
@@ -126,8 +144,13 @@
 					</svg>
 				</div>
 				<div class="message-content">
-					{#if steps.length > 0}
-						<RunActivityPanel steps={steps} isRunning={isStreaming} storageKey={activityKey} />
+					{#if steps.length > 0 || isStreaming}
+						<RunActivityPanel
+							steps={steps}
+							isRunning={isStreaming}
+							storageKey={activityKey}
+							{onStop}
+						/>
 					{/if}
 					{#if streamingContent}
 						<div class="message-bubble markdown-content" use:highlightAction>

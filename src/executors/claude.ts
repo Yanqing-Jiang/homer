@@ -292,7 +292,13 @@ export async function executeClaudeCommand(
                 } catch { /* don't crash executor */ }
               } else if (block.type === "thinking" && options.onEvent) {
                 try {
-                  options.onEvent({ type: "thinking", label: "Thinking...", labelDone: "Thought" });
+                  const thinkingText = (block.thinking ?? "").trim();
+                  options.onEvent({
+                    type: "thinking",
+                    label: "Thinking...",
+                    labelDone: "Thought",
+                    preview: thinkingText || undefined,
+                  });
                 } catch { /* don't crash executor */ }
               }
             }

@@ -276,6 +276,31 @@ export function registerRunRoutes(
       lastStatus = initial.status;
       sendEvent("status", { runId, status: initial.status, executor: initial.executor });
     }
+
+    // Replay persisted step events so a reconnecting client can rebuild activity
+    // that was emitted while it was disconnected. Client dedupes by tool_use id.
+    try {
+      const persisted = stateManager.getRunEvents(runId);
+      for (const ev of persisted) {
+        if (ev.kind !== "tool_use" && ev.kind !== "tool_result" && ev.kind !== "thinking") continue;
+        let payload: Record<string, unknown> = {};
+        if (ev.payloadJson) {
+          try { payload = JSON.parse(ev.payloadJson) ?? {}; } catch { /* drop corrupted */ }
+        }
+        sendEvent("step", {
+          runId,
+          replayed: true,
+          type: ev.kind,
+          id: typeof payload.toolId === "string" ? payload.toolId : undefined,
+          tool: typeof payload.tool === "string" ? payload.tool : undefined,
+          label: ev.label ?? "",
+          labelDone: ev.labelDone ?? ev.label ?? "",
+          preview: typeof payload.preview === "string" ? payload.preview : undefined,
+        });
+      }
+    } catch (err) {
+      logger.warn({ err, runId }, "Failed to replay persisted run events");
+    }
   });
 
   // Get persisted step events for a run
@@ -288,5 +313,21 @@ export function registerRunRoutes(
     }
     const events = stateManager.getRunEvents(runId);
     return { events };
+  });
+
+  // Cancel a running CLI run
+  server.post("/api/runs/:runId/cancel", async (request: FastifyRequest, reply: FastifyReply) => {
+    const { runId } = request.params as { runId: string };
+    const run = stateManager.getCliRun(runId);
+    if (!run) {
+      reply.status(404);
+      return { error: "Run not found" };
+    }
+    if (["completed", "failed", "cancelled"].includes(run.status)) {
+      return { runId, status: run.status, cancelled: false };
+    }
+    const cancelled = runManager.cancelRun(run.lane, "user cancelled from web");
+    reply.status(cancelled ? 202 : 409);
+    return { runId, cancelled };
   });
 }

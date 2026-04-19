@@ -33,6 +33,23 @@ interface ThreadLock {
 
 const threadLocks = new Map<string, ThreadLock>();
 
+// Leave ~1KB headroom for toolId/tool/keys/overhead within the 4KB payload_json cap.
+const STEP_PREVIEW_MAX_CHARS = 3000;
+
+function buildStepPayload(step: StreamStepEvent): Record<string, unknown> | undefined {
+  const payload: Record<string, unknown> = {};
+  if (step.id) payload.toolId = step.id;
+  if (step.tool) payload.tool = step.tool;
+  if (step.preview) {
+    // Truncate the preview *string* here so the post-stringify slice in stateManager
+    // cannot cut mid-UTF8 escape and invalidate the JSON on replay.
+    payload.preview = step.preview.length > STEP_PREVIEW_MAX_CHARS
+      ? step.preview.slice(0, STEP_PREVIEW_MAX_CHARS) + '…'
+      : step.preview;
+  }
+  return Object.keys(payload).length > 0 ? payload : undefined;
+}
+
 function acquireLock(threadId: string): { acquired: boolean; owner?: string; reqId?: string } {
   const reqId = randomUUID();
   const now = Date.now();
@@ -324,7 +341,7 @@ export function registerStreamingRoutes(
                   kind: stepEvent.type,
                   label: stepEvent.label,
                   labelDone: stepEvent.labelDone,
-                  payload: stepEvent.id ? { toolId: stepEvent.id } : undefined,
+                  payload: buildStepPayload(stepEvent),
                 });
               } catch (e) {
                 logger.warn({ error: e }, "Failed to persist run event");
@@ -349,7 +366,7 @@ export function registerStreamingRoutes(
               kind: step.type,
               label: step.label,
               labelDone: step.labelDone,
-              payload: step.id ? { toolId: step.id } : undefined,
+              payload: buildStepPayload(step),
             });
           } catch (e) {
             logger.warn({ error: e }, "Failed to persist buffered run event");
