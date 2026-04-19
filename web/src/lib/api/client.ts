@@ -1310,13 +1310,20 @@ export async function getRun(runId: string): Promise<{ run: CLIRunRecord }> {
 	return apiFetch<{ run: CLIRunRecord }>(`/api/runs/${encodeURIComponent(runId)}`);
 }
 
+export async function cancelRun(runId: string): Promise<{ runId: string; cancelled: boolean }> {
+	return apiFetch<{ runId: string; cancelled: boolean }>(
+		`/api/runs/${encodeURIComponent(runId)}/cancel`,
+		{ method: 'POST' }
+	);
+}
+
 export function streamRunEvents(
 	runId: string,
 	callbacks: {
 		onStatus?: (data: { runId: string; status: string; executor?: string }) => void;
 		onPartial?: (data: { runId: string; delta: string }) => void;
 		onMessageChunk?: (data: MessageChunkEvent) => void;
-		onStep?: (data: { runId: string; type: string; id?: string; tool?: string; label: string; labelDone: string; preview?: string }) => void;
+		onStep?: (data: StepEvent & { runId?: string }) => void;
 		onHeartbeat?: () => void;
 		onError?: (err: { message: string }) => void;
 	}

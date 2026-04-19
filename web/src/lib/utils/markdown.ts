@@ -49,7 +49,7 @@ const DOMPURIFY_CONFIG = {
 	],
 	ALLOWED_ATTR: [
 		'href', 'src', 'alt', 'class', 'target', 'rel', 'title',
-		'type', 'checked', 'disabled', 'data-language',
+		'type', 'checked', 'disabled', 'data-language', 'data-blob-link', 'download',
 		'style', // For Shiki — sanitized via hook
 		'viewBox', 'fill', 'stroke', 'stroke-width', 'width', 'height',
 		'x', 'y', 'rx', 'ry', 'd'
@@ -70,8 +70,26 @@ DOMPurify.addHook('uponSanitizeAttribute', (_node, data) => {
 	}
 });
 
+// Rewrite private Azure Blob Storage URLs to the daemon's SAS-redirect endpoint
+// so clicking a blob link in the chat actually downloads the file instead of 401-ing.
+// Matches e.g. https://<account>.blob.core.windows.net/<container>/<path> — rewrites
+// the <path> part through /api/blobs/download/:path.
+const BLOB_URL_RE = /^https?:\/\/[a-z0-9]+\.blob\.core\.windows\.net\/[^/?#]+\/([^?#]+)(\?.*)?$/i;
+
 DOMPurify.addHook('afterSanitizeAttributes', (node) => {
 	if (node.tagName === 'A') {
+		const href = node.getAttribute('href');
+		if (href) {
+			const m = BLOB_URL_RE.exec(href);
+			if (m && m[1]) {
+				const blobPath = m[1];
+				node.setAttribute('href', `/api/blobs/download/${blobPath}`);
+				// Same-origin download — no need for target=_blank dance; let browser save dialog open
+				node.setAttribute('download', '');
+				node.setAttribute('data-blob-link', '1');
+				return;
+			}
+		}
 		node.setAttribute('target', '_blank');
 		node.setAttribute('rel', 'noopener noreferrer');
 	}
