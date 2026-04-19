@@ -41,7 +41,16 @@ const PERMANENT_FILES = {
 // SCHEMAS
 // ============================================
 
-const CLAIM_TYPES = ["fact", "decision", "preference", "question", "lesson"] as const;
+const CLAIM_TYPES = [
+  "fact",
+  "decision",
+  "preference",
+  "hypothesis",
+  "insight",
+  "commitment",
+  "question",
+  "lesson",
+] as const;
 
 const PromotionSchema = z.object({
   content: z.string().min(10),
@@ -276,10 +285,13 @@ Each promotion MUST include:
   When in doubt, calibrate down — the cost of a missed fact is one Telegram review next session;
   the cost of a confident wrong fact is corrupted canonical memory.
 
-- "claim_type": one of "fact"|"decision"|"preference"|"question"|"lesson"
+- "claim_type": one of "fact"|"decision"|"preference"|"hypothesis"|"insight"|"commitment"|"question"|"lesson"
   - fact: objective information worth persisting
   - decision: a choice made (outcome can be checked later)
   - preference: expressed preference or style choice
+  - hypothesis: unverified belief to test — can be invalidated by future evidence
+  - insight: derived understanding or pattern recognition (not a raw fact; a synthesis)
+  - commitment: explicit promise to do X by Y (outcome is binary — kept or broken)
   - question: open question worth tracking until answered
   - lesson: learned the hard way — surface proactively next time
 

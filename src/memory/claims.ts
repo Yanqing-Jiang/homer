@@ -16,7 +16,19 @@ import type { CanonicalMemoryService } from "./canonical-service.js";
 
 // ── Types ────────────────────────────────────────────────────
 
-export type ClaimType = "fact" | "decision" | "preference" | "question" | "lesson" | "skill" | "cleanup" | "replace" | "remove";
+export type ClaimType =
+  | "fact"
+  | "decision"
+  | "preference"
+  | "hypothesis"
+  | "insight"
+  | "commitment"
+  | "question"
+  | "lesson"
+  | "skill"
+  | "cleanup"
+  | "replace"
+  | "remove";
 export type ClaimStatus = "candidate" | "applying" | "approved" | "rejected" | "expired" | "stale" | "archived";
 
 // Phase 0.9: TargetFile is derived from the canonical file registry (SSoT).
