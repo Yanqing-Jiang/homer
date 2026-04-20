@@ -290,7 +290,7 @@ Rules:
 - Return ONLY valid JSON, no markdown fences`;
 
   const result = await executeGeminiCLIDirect(prompt, {
-    timeout: 60_000,
+    timeout: 900_000,
   });
 
   if (result.exitCode !== 0) {

@@ -36,7 +36,7 @@ async function pushWithRetry(): Promise<{ ok: true } | { ok: false; error: strin
       }
       execSync("git push origin main", {
         cwd: PROJECT_DIR,
-        timeout: 60_000,
+        timeout: 900_000,
         env: {
           ...process.env,
           GH_TOKEN: ghToken,

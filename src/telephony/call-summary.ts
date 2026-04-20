@@ -104,7 +104,7 @@ ${transcriptText.slice(0, 10000)}`;
 
   try {
     const result = await executeGeminiCLIDirect(prompt, {
-      timeout: 60_000,
+      timeout: 900_000,
     });
     return result.output.trim();
   } catch (error) {

@@ -241,7 +241,7 @@ Respond with ONLY a JSON object:
       {
         cwd: "/tmp",
         model: "opus",
-        timeout: 60_000,
+        timeout: 900_000,
       }
     );
 

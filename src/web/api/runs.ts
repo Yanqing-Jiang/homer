@@ -51,13 +51,13 @@ export function registerRunRoutes(
       const parsed = parseCommand(body.content) ?? null;
 
       if (parsed?.isNewSession) {
-        runManager.cancelRun(lane, "new session");
+        runManager.closeLaneSession(lane, "new session");
         stateManager.clearExecutor(lane);
         stateManager.clearStoredExecutorSessions(lane);
       }
 
       if (parsed?.isExecutorSwitch && parsed.newExecutor) {
-        runManager.cancelRun(lane, "executor switch");
+        runManager.closeLaneSession(lane, "executor switch");
         const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
         stateManager.setCurrentExecutor(lane, parsed.newExecutor, model ?? undefined);
       }
@@ -121,10 +121,9 @@ export function registerRunRoutes(
         return { runId, userMessageId };
       }
 
-      if (runManager.getActiveRun(lane)) {
-        reply.status(409);
-        return { error: "A run is already in progress for this session" };
-      }
+      // Concurrent runs on the same lane are serialized by CLIRunManager's
+      // per-lane chain-queue (new message is injected into the live Claude
+      // process via stdin). No rejection needed.
 
       // Create user message — prefer rich attachments for metadata, fall back to paths
       const attachments = filterAttachmentPaths(body.attachments);
