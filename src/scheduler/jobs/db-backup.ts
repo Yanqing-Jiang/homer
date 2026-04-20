@@ -79,7 +79,7 @@ export async function runDbBackup(): Promise<{
     let integrityResult = "unknown";
     try {
       const checkOutput = execSync(`sqlite3 "${backupFile}" "PRAGMA integrity_check"`, {
-        timeout: 60_000,
+        timeout: 900_000,
         encoding: "utf-8",
       }).trim();
       integrityResult = checkOutput === "ok" ? "ok" : `failed: ${checkOutput.slice(0, 200)}`;
@@ -94,9 +94,9 @@ export async function runDbBackup(): Promise<{
 
     // Compress
     if (useZstd) {
-      execSync(`zstd -f --rm -q "${backupFile}"`, { timeout: 60_000 });
+      execSync(`zstd -f --rm -q "${backupFile}"`, { timeout: 900_000 });
     } else {
-      execSync(`gzip -f "${backupFile}"`, { timeout: 60_000 });
+      execSync(`gzip -f "${backupFile}"`, { timeout: 900_000 });
     }
 
     // SHA256 checksum

@@ -130,9 +130,9 @@ export function registerCommandRoutes(
       const currentState = stateManager.getCurrentExecutor(lane);
       const previousExecutor = currentState?.executor ?? "claude";
 
-      // Cancel any active run for this web session
+      // Cancel any active run and close the pooled Claude session for this lane
       if (runManager) {
-        runManager.cancelRun(lane, "executor switch");
+        runManager.closeLaneSession(lane, "executor switch");
       }
 
       // Build and store conversation context for handoff (if switching to different executor)
@@ -190,7 +190,7 @@ export function registerCommandRoutes(
       const { sessionId } = request.params as { sessionId: string };
 
       if (runManager) {
-        runManager.cancelRun(webLane(sessionId), "executor reset");
+        runManager.closeLaneSession(webLane(sessionId), "executor reset");
       }
 
       const lane = webLane(sessionId);

@@ -18,7 +18,6 @@ export interface MessageAttachment {
 }
 
 const HEARTBEAT_INTERVAL = 30_000; // 30 seconds
-const LOCK_TTL_MS = 32 * 60 * 1000; // 32 minutes (slightly above Claude timeout)
 const FILE_OUTPUT_HINT =
   "If you create files (html, csv, xlsx, docx, etc.), upload them to Azure Blob Storage (homer-data container) using the MCP tools (blob_upload or blob_upload_content). Upload directly to the container root — do NOT use any prefix or subfolder. Always include the blob URL in your response so the user can download it.";
 
@@ -51,16 +50,14 @@ function buildStepPayload(step: StreamStepEvent): Record<string, unknown> | unde
 }
 
 function acquireLock(threadId: string): { acquired: boolean; owner?: string; reqId?: string } {
+  // Locks are presence markers only now — CLIRunManager serializes actual turns
+  // per lane via its chain-queue, so concurrent SSE streams on the same thread
+  // are safe (each gets its own runId). We always take over the lock so a new
+  // request isn't blocked by a stale/abandoned one.
   const reqId = randomUUID();
-  const now = Date.now();
   const existing = threadLocks.get(threadId);
-
-  if (existing && now - existing.heartbeatAt < LOCK_TTL_MS) {
-    return { acquired: false, owner: existing.owner };
-  }
-
-  threadLocks.set(threadId, { owner: reqId, heartbeatAt: now });
-  return { acquired: true, reqId };
+  threadLocks.set(threadId, { owner: reqId, heartbeatAt: Date.now() });
+  return { acquired: true, reqId, owner: existing?.owner };
 }
 
 function releaseLock(threadId: string, reqId: string): void {
@@ -148,28 +145,14 @@ export function registerStreamingRoutes(
       }
 
       const lock = acquireLock(threadId);
-      if (!lock.acquired) {
-        reply.status(409).send({
-          error: "Thread is busy",
-          code: "THREAD_BUSY",
-          message: "Another request is currently processing. Please wait for it to complete.",
-        });
-        return;
-      }
       const lockReqId = lock.reqId!;
       const existingMessageIds = new Set(
         stateManager.listThreadMessages(threadId).map((message) => message.id)
       );
-
-      if (runManager.getActiveRun(lane)) {
-        releaseLock(threadId, lockReqId);
-        reply.status(409).send({
-          error: "A run is already in progress for this session",
-          code: "THREAD_BUSY",
-          message: "Another request is currently processing. Please wait for it to complete.",
-        });
-        return;
-      }
+      // If a run is already active on this lane, CLIRunManager will chain our
+      // run behind it. We surface this to the client via a "queued" event after
+      // the SSE connection opens.
+      const willQueue = runManager.getActiveRun(lane) !== null;
 
       // Resolve attachments: prefer richAttachments (structured), fall back to legacy ID-based resolution
       // Rich attachments are validated: each must resolve to a real file via getUploadPath
@@ -312,6 +295,13 @@ export function registerStreamingRoutes(
       // Buffer step events until runId is known, then flush
       const bufferedSteps: StreamStepEvent[] = [];
       let runIdKnown = false;
+
+      if (willQueue) {
+        sendEvent("queued", {
+          queueDepth: runManager.getQueueDepth(lane) + 1,
+          message: "Waiting for the current turn to finish",
+        });
+      }
 
       try {
         const query = `${FILE_OUTPUT_HINT}\n\n${body.content}`;
