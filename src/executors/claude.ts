@@ -55,7 +55,7 @@ export interface ClaudeExecutorResult extends ExecutorResult {
   claudeSessionId?: string;
 }
 
-interface ContentBlock {
+export interface ContentBlock {
   type: string;
   text?: string;
   thinking?: string;
@@ -76,7 +76,7 @@ export interface StreamStepEvent {
   preview?: string;
 }
 
-interface StreamEvent {
+export interface StreamEvent {
   type: string;
   subtype?: string;
   session_id?: string;
@@ -88,7 +88,7 @@ interface StreamEvent {
   result?: string;
 }
 
-function buildToolLabel(name: string, input?: Record<string, unknown>): { label: string; labelDone: string; preview?: string } {
+export function buildToolLabel(name: string, input?: Record<string, unknown>): { label: string; labelDone: string; preview?: string } {
   // Handle MCP tools: mcp__server__tool → tool
   const shortName = name.includes("__") ? name.split("__").pop()! : name;
 
@@ -124,7 +124,7 @@ function buildToolLabel(name: string, input?: Record<string, unknown>): { label:
   }
 }
 
-function extractTextContent(content: string | ContentBlock[] | undefined): string {
+export function extractTextContent(content: string | ContentBlock[] | undefined): string {
   if (!content) return "";
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {

@@ -4,6 +4,7 @@ import { logger } from "../utils/logger.js";
 import { acquireSlot } from "./concurrency.js";
 import { StateManager, type CLIRunStatus, type ExecutorStateType } from "../state/manager.js";
 import { executeClaudeCommand } from "./claude.js";
+import { executePooledClaudeTurn, closePooledClaudeSession, closeAllPooledClaudeSessions } from "./claude-session-pool.js";
 import { executeOpenCodeCLI } from "./opencode-cli.js";
 import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
@@ -134,6 +135,11 @@ export class CLIRunManager {
   private stepQueues: Map<string, import("./claude.js").StreamStepEvent[]> = new Map();
   /** In-memory phased message chunk queues for streaming non-Claude executors to web SSE */
   private messageChunkQueues: Map<string, RunMessageChunk[]> = new Map();
+  /** Per-lane promise chain — serializes turns so msgs sent while a turn is
+   *  running queue behind it instead of getting rejected. */
+  private laneChains: Map<string, Promise<unknown>> = new Map();
+  /** How many runs are queued (but not yet started) per lane. */
+  private laneQueueDepth: Map<string, number> = new Map();
 
   get activeCount(): number {
     return this.activeRuns.size;
@@ -145,6 +151,11 @@ export class CLIRunManager {
 
   getActiveRun(lane: string): ActiveRun | null {
     return this.activeRuns.get(lane) ?? null;
+  }
+
+  /** Number of runs currently queued behind the active one on this lane. */
+  getQueueDepth(lane: string): number {
+    return this.laneQueueDepth.get(lane) ?? 0;
   }
 
   getPartialOutput(runId: string): string | undefined {
@@ -183,14 +194,56 @@ export class CLIRunManager {
     for (const [lane] of this.activeRuns) {
       if (this.cancelRun(lane, reason)) cancelled++;
     }
+    closeAllPooledClaudeSessions(reason);
     return cancelled;
   }
 
+  /**
+   * Close the pooled Claude session for a lane (used on /new, executor switch,
+   * or when the stored sessionId is cleared). Any in-flight turn is cancelled.
+   */
+  closeLaneSession(lane: string, reason = "closed"): void {
+    this.cancelRun(lane, reason);
+    closePooledClaudeSession(lane, reason);
+  }
+
   async startRun(params: CLIRunStartParams): Promise<{ runId: string; result: Promise<CLIRunResult> }> {
-    if (this.activeRuns.has(params.lane)) {
-      throw new Error("A run is already in progress for this session.");
+    const runId = randomUUID();
+    const prev = this.laneChains.get(params.lane);
+    const isQueued = prev !== undefined;
+    if (isQueued) {
+      this.laneQueueDepth.set(params.lane, (this.laneQueueDepth.get(params.lane) ?? 0) + 1);
+      logger.info(
+        { lane: params.lane, runId, queueDepth: this.laneQueueDepth.get(params.lane) },
+        "CLI run queued behind active run on lane"
+      );
     }
 
+    const resultPromise: Promise<CLIRunResult> = (async () => {
+      if (prev) {
+        try { await prev; } catch { /* previous run failure shouldn't block us */ }
+      }
+      if (isQueued) {
+        const depth = (this.laneQueueDepth.get(params.lane) ?? 1) - 1;
+        if (depth <= 0) this.laneQueueDepth.delete(params.lane);
+        else this.laneQueueDepth.set(params.lane, depth);
+      }
+      return this._executeRun(runId, params);
+    })();
+
+    const chainTail = resultPromise.catch(() => undefined);
+    this.laneChains.set(params.lane, chainTail);
+    // Clear the chain entry only when no later run has queued behind this one.
+    void chainTail.finally(() => {
+      if (this.laneChains.get(params.lane) === chainTail) {
+        this.laneChains.delete(params.lane);
+      }
+    });
+
+    return { runId, result: resultPromise };
+  }
+
+  private async _executeRun(runId: string, params: CLIRunStartParams): Promise<CLIRunResult> {
     let executorState = this.stateManager.getCurrentExecutor(params.lane);
     const executor = params.executor ?? executorState?.executor ?? "claude";
     const model = params.model ?? executorState?.model ?? (
@@ -262,7 +315,6 @@ ${pendingContext.context}
       return contextPromise;
     };
 
-    const runId = randomUUID();
     const startedAt = Date.now();
 
     this.stateManager.createCliRun({
@@ -321,10 +373,41 @@ ${pendingContext.context}
           });
 
           if (executorKind === "claude") {
+            // Use per-lane pooled session so mid-session message injection reuses
+            // one long-lived Claude process (no --resume respawn between turns).
+            // Fallback executors (chain) spawn fresh via executeClaudeCommand.
+            if (executorKind === executor) {
+              const turnStart = Date.now();
+              try {
+                const result = await executePooledClaudeTurn(params.lane, prompt, {
+                  cwd: params.cwd,
+                  model: model ?? undefined,
+                  resumeSessionId: sessionId ?? undefined,
+                  signal: abortController.signal,
+                  onPartial: params.onPartial,
+                  onEvent: params.onEvent,
+                });
+                return {
+                  output: result.output,
+                  exitCode: result.exitCode,
+                  duration: result.duration,
+                  sessionId: result.claudeSessionId ?? null,
+                  error: result.exitCode === 0 ? undefined : result.output,
+                };
+              } catch (err) {
+                return {
+                  output: err instanceof Error ? err.message : "Unknown error",
+                  exitCode: 1,
+                  duration: Date.now() - turnStart,
+                  sessionId: null,
+                  error: err instanceof Error ? err.message : "Unknown error",
+                };
+              }
+            }
             const result = await executeClaudeCommand(prompt, {
               cwd: params.cwd,
-              claudeSessionId: executorKind === executor ? sessionId ?? undefined : undefined,
-              model: executorKind === executor ? model ?? undefined : undefined,
+              claudeSessionId: undefined,
+              model: undefined,
               signal: abortController.signal,
               onPartial: params.onPartial,
               onEvent: params.onEvent,
@@ -640,6 +723,6 @@ ${pendingContext.context}
       }
     })();
 
-    return { runId, result: runPromise };
+    return runPromise;
   }
 }

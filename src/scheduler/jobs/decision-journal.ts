@@ -91,7 +91,7 @@ Return ONLY a JSON array:
 
 Return [] if no significant decisions were made today.`;
 
-    const result = await executeFlashViaOpenCode(prompt, { timeout: 60_000 });
+    const result = await executeFlashViaOpenCode(prompt, { timeout: 900_000 });
 
     if (result.exitCode !== 0) {
       return { success: false, output: "", error: `Flash extraction failed: ${result.output.slice(0, 200)}` };
