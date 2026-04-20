@@ -743,7 +743,7 @@ ${checksStr}`;
           // Handle executor switch in caption
           if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
             const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
-            runManager.cancelRun(lane, "executor switch");
+            runManager.closeLaneSession(lane, "executor switch");
             stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
             addPendingAttachment(lane, filePath);
             await ctx.reply(`Switched to ${parsed.newExecutor}. Attachment saved.`);
@@ -752,7 +752,7 @@ ${checksStr}`;
 
           // Handle /new in caption
           if (parsed.isNewSession) {
-            runManager.cancelRun(lane, "new session");
+            runManager.closeLaneSession(lane, "new session");
             stateManager.clearExecutor(lane);
             stateManager.clearStoredExecutorSessions(lane);
             if (!parsed.query) {
@@ -765,7 +765,7 @@ ${checksStr}`;
           // Handle executor switch with query
           if (isExecutorSwitchWithQuery(parsed) && parsed.newExecutor) {
             const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
-            runManager.cancelRun(lane, "executor switch with query");
+            runManager.closeLaneSession(lane, "executor switch with query");
             stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
           }
 
@@ -879,7 +879,7 @@ ${checksStr}`;
 
         if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
           const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
-          runManager.cancelRun(lane, "executor switch");
+          runManager.closeLaneSession(lane, "executor switch");
           stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
           addPendingAttachment(lane, filePath);
           await ctx.reply(`Switched to ${parsed.newExecutor}. Photo saved.`);
@@ -887,7 +887,7 @@ ${checksStr}`;
         }
 
         if (parsed.isNewSession) {
-          runManager.cancelRun(lane, "new session");
+          runManager.closeLaneSession(lane, "new session");
           stateManager.clearExecutor(lane);
           stateManager.clearStoredExecutorSessions(lane);
           if (!parsed.query) {
@@ -899,7 +899,7 @@ ${checksStr}`;
 
         if (isExecutorSwitchWithQuery(parsed) && parsed.newExecutor) {
           const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
-          runManager.cancelRun(lane, "executor switch with query");
+          runManager.closeLaneSession(lane, "executor switch with query");
           stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
         }
 
@@ -996,7 +996,7 @@ ${checksStr}`;
       if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
         const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
         const lane = telegramLane(ctx.chat.id);
-        runManager.cancelRun(lane, "voice executor switch");
+        runManager.closeLaneSession(lane, "voice executor switch");
         stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
         await ctx.reply(`Switched to ${parsed.newExecutor}`);
         return;
@@ -1124,7 +1124,7 @@ ${checksStr}`;
       const currentState = stateManager.getCurrentExecutor(lane);
       const previousExecutor = currentState?.executor ?? "claude";
 
-      runManager.cancelRun(lane, "executor switch");
+      runManager.closeLaneSession(lane, "executor switch");
 
       // Build and store conversation context for handoff (if switching to different executor)
       let contextCarried = false;
@@ -1159,7 +1159,7 @@ ${checksStr}`;
     // Handle /new command
     if (parsed.isNewSession) {
       // Clear executor state
-      runManager.cancelRun(lane, "new session");
+      runManager.closeLaneSession(lane, "new session");
       stateManager.clearExecutor(lane);
       stateManager.clearStoredExecutorSessions(lane);
 
@@ -1179,7 +1179,7 @@ ${checksStr}`;
       const currentState = stateManager.getCurrentExecutor(lane);
       const previousExecutor = currentState?.executor ?? "claude";
 
-      runManager.cancelRun(lane, "executor switch with query");
+      runManager.closeLaneSession(lane, "executor switch with query");
 
       // Build and store conversation context for handoff (if switching to different executor)
       if (previousExecutor !== parsed.newExecutor) {
@@ -1323,10 +1323,10 @@ async function handleNewExecution(
       model: executorState?.model ?? null,
     });
 
-    // Check BEFORE persisting to avoid orphaned thread messages
+    // Queue behind any in-flight run on this lane (CLIRunManager chains turns
+    // per lane; new message is injected into the same Claude process via stdin).
     if (runManager.getActiveRun(lane)) {
-      await ctx.reply("A run is already in progress for this chat. Please wait.");
-      return;
+      await ctx.reply("queued — will reply after current turn");
     }
 
     let userMessageId: string | null = null;

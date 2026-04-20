@@ -595,7 +595,7 @@ ${latestUserMessage}
   const result = await executeClaudeCommand(prompt, {
     cwd: config.paths.homerRoot,
     model: "sonnet",
-    timeout: 60_000,
+    timeout: 900_000,
   });
 
   if (result.exitCode !== 0) {

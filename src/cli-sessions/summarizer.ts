@@ -68,7 +68,7 @@ Messages: ${session.messageCount}
 ${conversationText}`;
 
   const result = await executeFlashViaOpenCode(prompt, {
-    timeout: 60_000,
+    timeout: 900_000,
     signal,
   });
 

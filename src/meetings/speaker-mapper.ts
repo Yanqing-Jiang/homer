@@ -173,7 +173,7 @@ If you cannot confidently identify a speaker, set name to null and needs_review 
     const result = await executeClaudeCommand(prompt, {
       cwd: "/tmp",
       model: "opus",
-      timeout: 60_000,
+      timeout: 900_000,
     });
 
     if (result.exitCode !== 0 || !result.output || result.output.length < 20) {
