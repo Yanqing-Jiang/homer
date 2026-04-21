@@ -23,6 +23,7 @@ import * as planTools from "./tools/plans.js";
 import * as blobTools from "./tools/blob.js";
 import * as sessionTools from "./tools/sessions.js";
 import * as meetingTools from "./tools/meetings.js";
+import * as callTools from "./tools/calls.js";
 
 // Shared StateManager singleton — better-sqlite3 is synchronous, MCP is single-threaded
 let sharedSM: StateManager | null = null;
@@ -56,7 +57,7 @@ const canonicalMemory = getCanonicalMemoryService(getSharedStateManager(), index
 const deps: ToolDeps = { getSharedStateManager, indexer, getAzureBlob, canonicalMemory };
 
 // All tool modules in dispatch order
-const toolModules = [memoryTools, ideaTools, planTools, blobTools, sessionTools, meetingTools];
+const toolModules = [memoryTools, ideaTools, planTools, blobTools, sessionTools, meetingTools, callTools];
 
 const server = new Server(
   { name: "homer-memory", version: "1.0.0" },

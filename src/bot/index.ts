@@ -1073,9 +1073,9 @@ ${checksStr}`;
       logger.warn({ error }, "YouTube URL handling failed, falling back to normal flow");
     }
 
-    // Check for phone call requests (e.g., "call 2709789240 and introduce yourself")
+    // Check for phone call requests (e.g., "call 2709789240 and tell him dinner's at 5:30")
     try {
-      const wasCallRequest = await handleCallRequest(ctx, text);
+      const wasCallRequest = await handleCallRequest(ctx, text, stateManager);
       if (wasCallRequest) return;
     } catch (error) {
       logger.warn({ error }, "Phone call handling failed, falling back to normal flow");
