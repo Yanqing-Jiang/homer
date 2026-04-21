@@ -77,7 +77,7 @@ function validateElevenLabsSignature(
 
 export function registerWebhookRoutes(
   server: FastifyInstance,
-  _stateManager: StateManager,
+  stateManager: StateManager,
   bot: Bot | null,
   chatId: number
 ): void {
@@ -194,9 +194,35 @@ export function registerWebhookRoutes(
     // Process in background — event file on disk ensures recoverability
     setImmediate(async () => {
       try {
+        const { verifyOutboundCall } = await import("../../telephony/verify-outbound-call.js");
+        const verification = verifyOutboundCall(
+          {
+            conversationId,
+            transcript: webhookData.transcript,
+            terminationReason: webhookData.metadata?.termination_reason,
+            durationSecs: webhookData.metadata?.call_duration_secs,
+          },
+          stateManager,
+        );
+
         const { processCallComplete } = await import("../../telephony/call-summary.js");
         await processCallComplete(conversationId, bot, chatId, webhookData);
-        // Clean up persisted event after successful processing
+
+        if (verification.status === "failed" && bot) {
+          const alert =
+            `⚠️ Outbound call verification failed\n` +
+            `Conversation: \`${conversationId}\`\n` +
+            `Reason: ${verification.reason}\n` +
+            (verification.firstAgentTurn
+              ? `First turn: "${verification.firstAgentTurn.slice(0, 300)}"`
+              : "No substantive agent turn");
+          try {
+            await bot.api.sendMessage(chatId, alert, { parse_mode: "Markdown" });
+          } catch (e) {
+            logger.warn({ e }, "Failed to send verification failure alert");
+          }
+        }
+
         try { unlinkSync(eventFile); } catch { /* best-effort cleanup */ }
       } catch (error) {
         logger.error({ error, conversationId }, "Failed to process call-complete webhook (event persisted for retry)");
