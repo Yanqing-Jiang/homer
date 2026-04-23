@@ -42,6 +42,7 @@ export interface CLIRunResult {
   duration: number;
   executor: CLIExecutor;
   sessionId?: string | null;
+  assistantThreadMessageId?: string | null;
 }
 
 export interface RunMessageChunk {
@@ -631,9 +632,11 @@ ${pendingContext.context}
         const threadContent = cleanedResponse.trim()
           .replace(/<\/?(?:spoken|summary|voice-mode)>/g, "")
           .trim();
+        let assistantThreadMessageId: string | null = null;
         if (params.threadId && threadContent) {
+          assistantThreadMessageId = randomUUID();
           this.stateManager.createThreadMessage({
-            id: randomUUID(),
+            id: assistantThreadMessageId,
             threadId: params.threadId,
             role: "assistant",
             content: threadContent,
@@ -676,6 +679,7 @@ ${pendingContext.context}
           duration,
           executor: executorUsed,
           sessionId: persistedSessionId ?? undefined,
+          assistantThreadMessageId,
         };
       } catch (error) {
         const active = this.activeRuns.get(params.lane);
