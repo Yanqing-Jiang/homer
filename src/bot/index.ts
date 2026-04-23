@@ -1118,6 +1118,38 @@ ${checksStr}`;
       await ctx.reply(`⚠️ ${parsed.deprecationWarning}`);
     }
 
+    // If the user quote-replied to a Homer message, inject the quoted content as
+    // explicit reply context. Earlier handlers (approval.ts reply dispatch for
+    // plan revisions / discussions / instruction requests) already ran and
+    // `return`'d for their matches; we only reach here for generic conversation.
+    const replyMsg = ctx.message.reply_to_message;
+    if (replyMsg && parsed.query && parsed.query.trim()) {
+      const registryRow = stateManager.getTelegramMessage(ctx.chat.id, replyMsg.message_id);
+      const quotedText = registryRow?.messageText
+        ?? ("text" in replyMsg ? replyMsg.text : undefined)
+        ?? ("caption" in replyMsg ? replyMsg.caption : undefined);
+      const fromBot = replyMsg.from?.is_bot === true;
+
+      if (quotedText && (registryRow || fromBot)) {
+        const MAX_QUOTE = 1800;
+        const clipped = quotedText.length > MAX_QUOTE
+          ? quotedText.slice(0, MAX_QUOTE) + "\n…[truncated]"
+          : quotedText;
+        const attrs = [`source="telegram"`, `message_id="${replyMsg.message_id}"`];
+        if (registryRow?.threadId) attrs.push(`thread_id="${registryRow.threadId}"`);
+        if (registryRow?.runId) attrs.push(`run_id="${registryRow.runId}"`);
+        parsed.query = `<replying-to ${attrs.join(" ")}>\n${clipped}\n</replying-to>\n\n${parsed.query}`;
+        logger.info(
+          {
+            telegramMessageId: replyMsg.message_id,
+            registryHit: Boolean(registryRow),
+            threadId: registryRow?.threadId,
+          },
+          "Injected Telegram reply context"
+        );
+      }
+    }
+
     // Handle pure executor switch (no query)
     if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
       const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
@@ -1343,7 +1375,7 @@ async function handleNewExecution(
 
     const finalQuery = memoryContext + (voiceMode ? `${VOICE_MODE_INSTRUCTION}\n\n${parsed.query}` : parsed.query);
 
-    const { result } = await runManager.startRun({
+    const { runId, result } = await runManager.startRun({
       lane,
       query: finalQuery,
       cwd: parsed.cwd,
@@ -1404,6 +1436,8 @@ async function handleNewExecution(
       return runResult.output;
     }
 
+    let sentMessages: Array<{ chatId: number; messageId: number; text: string }> = [];
+
     if (ENABLE_STREAMING && streamingMsg) {
       // Build expandable blockquote with tool steps (if any)
       let stepsHtml: string | undefined;
@@ -1423,9 +1457,27 @@ async function handleNewExecution(
             .trim()
         : runResult.output;
 
-      await editWithResponse(ctx, streamingMsg, finalText, stepsHtml);
+      sentMessages = await editWithResponse(ctx, streamingMsg, finalText, stepsHtml);
     } else {
-      await sendFinalResponse(ctx, runResult.output);
+      sentMessages = await sendFinalResponse(ctx, runResult.output);
+    }
+
+    // Register outgoing message(s) in replyable registry so quote-replies
+    // can resolve back to this turn. Each chunk stores its own visible text
+    // so replies to chunk N inject chunk N's content, not the full reply.
+    for (const sent of sentMessages) {
+      stateManager.recordTelegramMessage({
+        chatId: sent.chatId,
+        telegramMessageId: sent.messageId,
+        lane,
+        role: "assistant",
+        messageKind: "conversation",
+        threadId: thread.id,
+        threadMessageId: runResult.assistantThreadMessageId ?? null,
+        runId,
+        sessionId: session.id,
+        messageText: sent.text,
+      });
     }
   } catch (error) {
     if (draftStream) await draftStream.stop();

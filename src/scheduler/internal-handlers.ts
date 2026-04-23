@@ -886,6 +886,18 @@ async function runHandler(
           result.success ? { notificationIntent: "operational_status" } : {}
         );
       }
+      case "telegram_registry_cleanup": {
+        const { runTelegramRegistryCleanup } = await import("./jobs/telegram-registry-cleanup.js");
+        const result = await runTelegramRegistryCleanup(ctx.stateManager);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
+        );
+      }
       case "weekly_memory_audit": {
         try {
           const { sendWeeklyMemoryAudit } = await import("../bot/handlers/weekly-memory-audit.js");

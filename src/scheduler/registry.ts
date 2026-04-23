@@ -78,6 +78,7 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
   { id: "outcome-tracker", name: "Outcome Tracker", kind: "internal", handler: "outcome_tracker", handlerFile: "outcome-tracker", expectedInSchedule: true },
   { id: "overnight-youtube", name: "Overnight YouTube", kind: "internal", handler: "overnight_youtube", handlerFile: "overnight-youtube", expectedInSchedule: true },
   { id: "session-harvester", name: "Session Harvester", kind: "internal", handler: "session_harvester", handlerFile: "session-harvester", expectedInSchedule: true },
+  { id: "telegram-registry-cleanup", name: "Telegram Registry Cleanup", kind: "internal", handler: "telegram_registry_cleanup", handlerFile: "telegram-registry-cleanup", expectedInSchedule: true, note: "prunes expired rows from telegram_messages replyable registry" },
 ];
 
 /**
