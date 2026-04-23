@@ -222,6 +222,29 @@ export class StateManager {
         ON gemini_accounts(hour_usage_count, day_usage_count, last_used_at);
       CREATE INDEX IF NOT EXISTS idx_gemini_accounts_cooldown
         ON gemini_accounts(cooldown_until);
+
+      -- Telegram replyable message registry (see migration 090).
+      -- Mirrored here because init() runs before runMigrations().
+      CREATE TABLE IF NOT EXISTS telegram_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        telegram_message_id INTEGER NOT NULL,
+        lane TEXT NOT NULL,
+        role TEXT NOT NULL,
+        message_kind TEXT NOT NULL,
+        thread_id TEXT,
+        thread_message_id TEXT,
+        run_id TEXT,
+        session_id TEXT,
+        message_text TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER,
+        UNIQUE(chat_id, telegram_message_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_telegram_messages_lane
+        ON telegram_messages(lane, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_telegram_messages_expiry
+        ON telegram_messages(expires_at);
     `);
 
     logger.debug("State manager initialized");
@@ -2361,6 +2384,90 @@ export class StateManager {
          last_scan_at = datetime('now')`
     ).run(agent, epochMs);
   }
+
+  // --- Telegram replyable message registry (for reply-as-quote context) ---
+
+  recordTelegramMessage(row: {
+    chatId: number;
+    telegramMessageId: number;
+    lane: string;
+    role: "assistant" | "system" | "prompt";
+    messageKind: "conversation";
+    threadId?: string | null;
+    threadMessageId?: string | null;
+    runId?: string | null;
+    sessionId?: string | null;
+    messageText: string;
+    ttlMs?: number;
+  }): void {
+    if (!this._db || !this.isOpen) return;
+    const now = Date.now();
+    const ttl = row.ttlMs ?? 30 * 24 * 60 * 60 * 1000; // 30 days
+    try {
+      this._db.prepare(
+        `INSERT OR REPLACE INTO telegram_messages
+           (chat_id, telegram_message_id, lane, role, message_kind,
+            thread_id, thread_message_id, run_id, session_id,
+            message_text, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        row.chatId,
+        row.telegramMessageId,
+        row.lane,
+        row.role,
+        row.messageKind,
+        row.threadId ?? null,
+        row.threadMessageId ?? null,
+        row.runId ?? null,
+        row.sessionId ?? null,
+        row.messageText,
+        now,
+        now + ttl,
+      );
+    } catch (err) {
+      logger.warn({ err, chatId: row.chatId, telegramMessageId: row.telegramMessageId }, "recordTelegramMessage failed");
+    }
+  }
+
+  getTelegramMessage(chatId: number, telegramMessageId: number): TelegramMessageRecord | null {
+    if (!this._db || !this.isOpen) return null;
+    const row = this._db.prepare(
+      `SELECT chat_id as chatId, telegram_message_id as telegramMessageId, lane,
+              role, message_kind as messageKind, thread_id as threadId,
+              thread_message_id as threadMessageId,
+              run_id as runId, session_id as sessionId,
+              message_text as messageText, created_at as createdAt,
+              expires_at as expiresAt
+         FROM telegram_messages
+         WHERE chat_id = ? AND telegram_message_id = ?`
+    ).get(chatId, telegramMessageId) as TelegramMessageRecord | undefined;
+    if (!row) return null;
+    if (row.expiresAt && row.expiresAt < Date.now()) return null;
+    return row;
+  }
+
+  deleteExpiredTelegramMessages(): number {
+    if (!this._db || !this.isOpen) return 0;
+    const res = this._db.prepare(
+      `DELETE FROM telegram_messages WHERE expires_at IS NOT NULL AND expires_at < ?`
+    ).run(Date.now());
+    return res.changes ?? 0;
+  }
+}
+
+export interface TelegramMessageRecord {
+  chatId: number;
+  telegramMessageId: number;
+  lane: string;
+  role: "assistant" | "system" | "prompt";
+  messageKind: "conversation";
+  threadId: string | null;
+  threadMessageId: string | null;
+  runId: string | null;
+  sessionId: string | null;
+  messageText: string;
+  createdAt: number;
+  expiresAt: number | null;
 }
 
 // Session summary row (from session_summaries table)

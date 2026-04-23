@@ -171,6 +171,12 @@ export interface StreamingMessage {
   sentAt: number;
 }
 
+export interface SentTelegramMessage {
+  chatId: number;
+  messageId: number;
+  text: string;
+}
+
 /**
  * Send a "thinking" indicator message that will be edited with the final response
  */
@@ -198,10 +204,11 @@ export async function editWithResponse(
   streamingMsg: StreamingMessage,
   response: string,
   prefixHtml?: string
-): Promise<void> {
+): Promise<SentTelegramMessage[]> {
   const html = mdToTelegramHtml(response);
   const fullHtml = prefixHtml ? `${prefixHtml}\n\n${html}` : html;
   const chunks = chunkForTelegram(fullHtml);
+  const sent: SentTelegramMessage[] = [];
 
   try {
     // Edit the thinking message with first chunk
@@ -211,42 +218,57 @@ export async function editWithResponse(
       chunks[0] + (chunks.length > 1 ? "\n\n<i>(continued...)</i>" : ""),
       { parse_mode: "HTML" }
     );
+    // Use the actual displayed chunk (minus "continued" marker) as the text
+    // for reply-quote lookup. Storing the full `response` here would mean
+    // replies to chunk 2+ inject chunk 1's body (wrong context).
+    sent.push({ chatId: streamingMsg.chatId, messageId: streamingMsg.messageId, text: chunks[0] ?? response });
 
     // Send remaining chunks as new messages
     for (let i = 1; i < chunks.length; i++) {
       const chunk = chunks[i]!;
       await sleep(100);
-      await ctx.reply(chunk, { parse_mode: "HTML" }).catch(() =>
-        ctx.reply(chunk) // fallback: no formatting
-      );
+      try {
+        const m = await ctx.reply(chunk, { parse_mode: "HTML" });
+        sent.push({ chatId: streamingMsg.chatId, messageId: m.message_id, text: chunk });
+      } catch {
+        const m = await ctx.reply(chunk);
+        sent.push({ chatId: streamingMsg.chatId, messageId: m.message_id, text: chunk });
+      }
     }
   } catch (error) {
     logger.error({ error }, "Failed to edit message with HTML response");
     // Fallback: plain text, no formatting
     try {
-      await ctx.reply(response.slice(0, 4096));
+      const m = await ctx.reply(response.slice(0, 4096));
+      sent.push({ chatId: streamingMsg.chatId, messageId: m.message_id, text: response.slice(0, 4096) });
     } catch (finalErr) {
       logger.error({ error: finalErr }, "All attempts to send response failed");
     }
   }
+  return sent;
 }
 
 /**
  * Send the final response as fresh message(s), with Markdown formatting.
  * Used as fallback when no streaming message exists to edit.
  */
-export async function sendFinalResponse(ctx: Context, response: string): Promise<void> {
+export async function sendFinalResponse(ctx: Context, response: string): Promise<SentTelegramMessage[]> {
   const html = mdToTelegramHtml(response);
   const chunks = chunkForTelegram(html);
+  const sent: SentTelegramMessage[] = [];
+  const chatId = ctx.chat?.id ?? 0;
 
   for (const chunk of chunks) {
     try {
-      await ctx.reply(chunk, { parse_mode: "HTML" });
+      const m = await ctx.reply(chunk, { parse_mode: "HTML" });
+      sent.push({ chatId, messageId: m.message_id, text: chunk });
     } catch {
-      await ctx.reply(chunk); // fallback: no formatting
+      const m = await ctx.reply(chunk); // fallback: no formatting
+      sent.push({ chatId, messageId: m.message_id, text: chunk });
     }
     if (chunks.length > 1) await sleep(100);
   }
+  return sent;
 }
 
 function sleep(ms: number): Promise<void> {
