@@ -161,7 +161,7 @@ Respond with this exact structure:
 
     const result = await executeCodexCLI(proposerPrompt, {
       cwd: PATHS.homerRoot,
-      model: "gpt-5.4",
+      model: "gpt-5.5",
       reasoningEffort: "high",
     });
 
