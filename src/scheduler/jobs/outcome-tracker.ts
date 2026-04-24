@@ -148,7 +148,7 @@ Return JSON: { "outcome": "yes|no|partial|ambiguous", "confidence": 0.0-1.0, "ev
   try {
     const result = await executeCodexCLI(
       prompt + "\n\nReturn ONLY valid JSON, no markdown fences.",
-      { cwd: process.env.HOME ?? "/Users/yj", model: "gpt-5.4", reasoningEffort: "high", timeout: 120_000, signal },
+      { cwd: process.env.HOME ?? "/Users/yj", model: "gpt-5.5", reasoningEffort: "high", timeout: 120_000, signal },
     );
 
     if (result.exitCode === 0 && result.output) {

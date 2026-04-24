@@ -110,7 +110,7 @@ async function executeAgent(
       const result = await executeCodexCLI(fullPrompt, {
         cwd: SWARM_CWD,
         timeout,
-        model: agent.model ?? "gpt-5.4",
+        model: agent.model ?? "gpt-5.5",
         reasoningEffort: "high",
         signal,
       });

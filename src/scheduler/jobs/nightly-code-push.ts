@@ -67,7 +67,7 @@ Output ONLY the commit message. No preamble, no explanation, no markdown fences.
 
     const result = await executeCodexCLI(prompt, {
       cwd: PROJECT_DIR,
-      model: "gpt-5.4",
+      model: "gpt-5.5",
       reasoningEffort: "high",
       timeout: 600_000,
     });
