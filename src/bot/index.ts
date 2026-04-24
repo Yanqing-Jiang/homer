@@ -106,6 +106,18 @@ function consumePendingAttachments(lane: string): string[] {
   return pending;
 }
 
+function resetExecutorSessionForLane(
+  lane: string,
+  stateManager: StateManager,
+  runManager: CLIRunManager,
+  reason = "new session"
+): void {
+  runManager.closeLaneSession(lane, reason);
+  stateManager.clearExecutor(lane);
+  stateManager.clearStoredExecutorSessions(lane);
+  stateManager.clearPendingContext(lane);
+}
+
 export function setScheduler(scheduler: Scheduler): void {
   schedulerRef = scheduler;
   setJobScheduler(scheduler);
@@ -752,9 +764,7 @@ ${checksStr}`;
 
           // Handle /new in caption
           if (parsed.isNewSession) {
-            runManager.closeLaneSession(lane, "new session");
-            stateManager.clearExecutor(lane);
-            stateManager.clearStoredExecutorSessions(lane);
+            resetExecutorSessionForLane(lane, stateManager, runManager);
             if (!parsed.query) {
               addPendingAttachment(lane, filePath);
               await ctx.reply("Fresh session started. Attachment saved.");
@@ -887,9 +897,7 @@ ${checksStr}`;
         }
 
         if (parsed.isNewSession) {
-          runManager.closeLaneSession(lane, "new session");
-          stateManager.clearExecutor(lane);
-          stateManager.clearStoredExecutorSessions(lane);
+          resetExecutorSessionForLane(lane, stateManager, runManager);
           if (!parsed.query) {
             addPendingAttachment(lane, filePath);
             await ctx.reply("Fresh session started. Photo saved.");
@@ -1000,6 +1008,17 @@ ${checksStr}`;
         stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
         await ctx.reply(`Switched to ${parsed.newExecutor}`);
         return;
+      }
+
+      // Handle /new via voice — reset before execution so the fresh run
+      // doesn't inherit pooled session, executor state, or pending context.
+      if (parsed.isNewSession) {
+        const lane = telegramLane(ctx.chat.id);
+        resetExecutorSessionForLane(lane, stateManager, runManager);
+        if (!parsed.query) {
+          await ctx.reply("Fresh session started. Executor reset to Claude.");
+          return;
+        }
       }
 
       if (!parsed.query) {
@@ -1118,6 +1137,19 @@ ${checksStr}`;
       await ctx.reply(`⚠️ ${parsed.deprecationWarning}`);
     }
 
+    // Handle /new BEFORE reply injection — otherwise quote-replying with /new
+    // would smuggle the quoted prior assistant text into the "fresh" session.
+    if (parsed.isNewSession) {
+      resetExecutorSessionForLane(lane, stateManager, runManager);
+      if (parsed.query) {
+        const attachments = consumePendingAttachments(lane);
+        await handleNewExecution(ctx, parsed, stateManager, runManager, false, attachments);
+      } else {
+        await ctx.reply("Fresh session started. Executor reset to Claude.");
+      }
+      return;
+    }
+
     // If the user quote-replied to a Homer message, inject the quoted content as
     // explicit reply context. Earlier handlers (approval.ts reply dispatch for
     // plan revisions / discussions / instruction requests) already ran and
@@ -1185,23 +1217,6 @@ ${checksStr}`;
           `All messages will now use ${parsed.newExecutor} until you switch or use /new.`,
         { parse_mode: "Markdown" }
       );
-      return;
-    }
-
-    // Handle /new command
-    if (parsed.isNewSession) {
-      // Clear executor state
-      runManager.closeLaneSession(lane, "new session");
-      stateManager.clearExecutor(lane);
-      stateManager.clearStoredExecutorSessions(lane);
-
-      // If there's a query with /new, execute it fresh
-      if (parsed.query) {
-        const attachments = consumePendingAttachments(lane);
-        await handleNewExecution(ctx, parsed, stateManager, runManager, false, attachments);
-      } else {
-        await ctx.reply("Fresh session started. Executor reset to Claude.");
-      }
       return;
     }
 

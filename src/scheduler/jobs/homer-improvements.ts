@@ -270,7 +270,7 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
 
     const result = await executeCodexCLI(prompt, {
       cwd: HOMER_DIR,
-      model: "gpt-5.4",
+      model: "gpt-5.5",
       reasoningEffort: "high",
       timeout: 1_200_000, // 20 min
     });

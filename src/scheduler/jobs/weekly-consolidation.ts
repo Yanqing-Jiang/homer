@@ -272,7 +272,7 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
       systemPrompt + "\n\n---\n\n" + fullInput,
       {
         cwd: process.env.HOME ?? "/Users/yj",
-        model: "gpt-5.4",
+        model: "gpt-5.5",
         reasoningEffort: "high",
         timeout: 600_000, // 10 min — large context needs more time
       },
