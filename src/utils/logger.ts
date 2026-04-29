@@ -1,9 +1,10 @@
 import pino from "pino";
 
-export const logger = pino({
-  level: process.env.LOG_LEVEL ?? "info",
+const isMcpStdio = process.env.MCP_STDIO === "1";
+const loggerOptions: pino.LoggerOptions = {
+  level: isMcpStdio ? "silent" : (process.env.LOG_LEVEL ?? "info"),
   transport:
-    process.env.NODE_ENV !== "production"
+    !isMcpStdio && process.env.NODE_ENV !== "production"
       ? {
           target: "pino-pretty",
           options: {
@@ -12,6 +13,10 @@ export const logger = pino({
           },
         }
       : undefined,
-});
+};
+
+export const logger = isMcpStdio
+  ? pino(loggerOptions, pino.destination(2))
+  : pino(loggerOptions);
 
 export type Logger = typeof logger;
