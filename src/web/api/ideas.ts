@@ -14,6 +14,7 @@ import { join } from "path";
 import { recordFeedback } from "../../feedback/events.js";
 import { PATHS } from "../../config/paths.js";
 import { webLane } from "../../utils/lanes.js";
+import { getCurrentFocus } from "../../memory/session-bootstrap.js";
 
 let ideasIndexer: IdeasIndexer | null = null;
 
@@ -368,6 +369,26 @@ export function registerIdeasRoutes(
 
     // System message — hidden from UI but included as anchor context for the model
     const enrichment = idea.enrichment ? JSON.parse(idea.enrichment) : null;
+
+    // Pull current focus from the canonical session-bootstrap projection so paused
+    // projects (MAHORAGA, Career OS automation) never leak into "Who Yanqing Is"
+    // as if they were active. Falls back to a static line if parsing fails.
+    let activeFocusLine = "Wedding planning, external job search, P&G analytics work, Homer automation";
+    let pausedFocusLine = "MAHORAGA quant trading, Homer Career OS automation build-out";
+    try {
+      const focus = await getCurrentFocus();
+      const activeBits = [
+        ...focus.active.map((s) => s.split("—")[0]!.trim()),
+        ...focus.activeProjects,
+      ].filter(Boolean);
+      if (activeBits.length > 0) activeFocusLine = activeBits.slice(0, 8).join(", ");
+      const pausedBits = [
+        ...focus.paused.map((s) => s.split("—")[0]!.trim()),
+        ...focus.pausedProjects,
+      ].filter(Boolean);
+      if (pausedBits.length > 0) pausedFocusLine = pausedBits.slice(0, 6).join(", ");
+    } catch { /* fall back to static defaults above */ }
+
     const systemMessage = `# Idea Exploration — ${idea.id}
 
 You are Homer, helping Yanqing read and think through an idea before jumping to application. Idea ID: \`${idea.id}\`.
@@ -449,7 +470,8 @@ ${!packetContext && idea.context ? `\n### Context\n${idea.context}` : ""}${idea.
 ## Who Yanqing Is
 - Senior Analytics Manager at P&G (Amazon Team), targeting $250K–$350K "Director of Agents" roles
 - Building Homer: a personal AI operating system (Node.js/TypeScript daemon + multi-agent orchestration)
-- Active projects: Shadow Data Pulse (DuckDB analytics), ProfitSphere ($100MM+ chargeback prevention), MAHORAGA (quant trading), Career OS (job automation), PICE (content engine — 2 posts/week)
+- Active focus: ${activeFocusLine}
+- Paused (context only — do not prioritize): ${pausedFocusLine}
 - Content strategy: LinkedIn/Medium thought leadership on multi-agent systems, intent engineering, harness engineering
 - Preferences: direct, actionable, no fluff. Bullet points > paragraphs. Systems thinking > point solutions.
 
