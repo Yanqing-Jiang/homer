@@ -2,18 +2,18 @@ import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
 import { logger } from "../utils/logger.js";
-import { CANONICAL_FILES } from "./registry.js";
+import { PATHS } from "../config/paths.js";
+import { ensureSessionBootstrap } from "./session-bootstrap.js";
 
 /**
- * Core memory files to load at session start
- * Claude reads these to understand who it is and the user's context.
- * Phase 0.9: sourced from canonical file registry; filtered to the subset
- * relevant to session warmup (excludes tools.md which is skill-reference content).
+ * Session bootstrap: a tiny generated file (~1.5 KB) that names current top
+ * priorities and paused items. Replaces broad injection of me.md + work.md +
+ * preferences.md (~22 KB) at session start. The full memory files remain
+ * available on demand via memory_read / memory_search.
+ *
+ * See ~/homer/src/memory/session-bootstrap.ts for the parser/generator.
  */
-const SESSION_WARMUP_KEYS = ["me", "work", "preferences"] as const;
-const MEMORY_FILES = CANONICAL_FILES
-  .filter((e) => (SESSION_WARMUP_KEYS as readonly string[]).includes(e.key))
-  .map((e) => e.path);
+const MEMORY_FILES = [PATHS.sessionBootstrap];
 
 /**
  * Load a single memory file if it exists
@@ -54,25 +54,31 @@ export async function loadProjectContext(cwd: string): Promise<string | null> {
 
 /**
  * Load all bootstrap memory files
- * Called at session start to give Claude context
+ * Called at session start to give Claude context. Best-effort regenerates the
+ * session-bootstrap projection first; on regen failure, falls back to:
+ *   1. the existing session-bootstrap.md (stale but usable)
+ *   2. ~/memory/emergency-bootstrap.md (the documented MCP-down recovery card)
+ *   3. null (caller decides — typically means "no bootstrap context this session")
  */
 export async function loadBootstrapFiles(): Promise<string | null> {
-  const sections: string[] = [];
+  await ensureSessionBootstrap();
 
+  // Tier 1: the generated bootstrap.
   for (const path of MEMORY_FILES) {
     const content = await loadMemoryFile(path);
-    if (content) {
-      const filename = path.split("/").pop() || path;
-      sections.push(`## ${filename}\n${content}`);
-    }
+    if (content) return content;
   }
 
-  if (sections.length === 0) {
-    return null;
+  // Tier 2 fallback: the hand-maintained emergency card. Present whenever the
+  // generator has never run (fresh install) or the generated file was deleted.
+  const emergency = `${PATHS.memory}/emergency-bootstrap.md`;
+  const fallback = await loadMemoryFile(emergency);
+  if (fallback) {
+    logger.warn({ emergency }, "loadBootstrapFiles: session-bootstrap missing; using emergency-bootstrap.md");
+    return fallback;
   }
 
-  const combined = sections.join("\n\n---\n\n");
-  return `# Memory Context\n\n${combined}`;
+  return null;
 }
 
 /**

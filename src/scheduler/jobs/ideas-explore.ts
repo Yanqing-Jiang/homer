@@ -102,13 +102,8 @@ export async function runIdeasExplore(db?: Database.Database): Promise<{
 ## Repos fetched from GitHub (last 7 days, sorted by stars)
 ${rawRepos.slice(0, 20_000)}
 
-## Filter criteria — keep repos related to:
-- Quant trading, algorithmic finance, IBKR integration (MAHORAGA project)
-- Resume optimization, job search automation, career tools (Career OS)
-- Data pipelines, DuckDB, Parquet, analytics dashboards (Work Analytics)
-- Personal AI agents, memory systems, orchestration (Homer)
-- Content creation tools, LinkedIn/Medium automation (Frontend-Slides)
-- General: AI/ML, TypeScript/Python CLI tools, personal automation
+## Filter criteria — keep repos related to Yanqing's CURRENT active focus
+(Use the Active Goals + Active Projects lists below as the authoritative filter. Anything listed under "Paused" is context-only — do NOT prioritize repos for paused projects unless they directly support an active priority.)
 
 ## Yanqing's Active Goals
 ${goals.slice(0, 1500)}

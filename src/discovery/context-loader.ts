@@ -11,6 +11,7 @@
 import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import type { UserContext, DiscoveryEngineConfig } from "./types.js";
+import { getCurrentFocus } from "../memory/session-bootstrap.js";
 
 // ============================================
 // CONTEXT LOADER
@@ -23,9 +24,21 @@ export async function loadUserContext(config: DiscoveryEngineConfig): Promise<Us
     safeReadFile(config.denyHistoryFile),
   ]);
 
+  // Goals come from getCurrentFocus() so the scorer in discovery/scorer.ts:180
+  // ranks recommendations against ACTIVE focus only — paused items (MAHORAGA,
+  // Career OS automation) must not boost recommendations. Falls back to the
+  // legacy raw extractGoals if the focus parser fails (e.g. me.md missing).
+  let goals: string[] = [];
+  try {
+    const focus = await getCurrentFocus();
+    goals = focus.active.map((s) => s.split("—")[0]!.trim()).filter(Boolean);
+  } catch {
+    goals = extractGoals(meContent);
+  }
+
   const context: UserContext = {
     interests: extractInterests(meContent),
-    goals: extractGoals(meContent),
+    goals,
     techStack: extractTechStack(meContent),
     preferences: extractPreferences(meContent, denyContent),
     activeProjects: extractProjects(workContent),
@@ -168,11 +181,14 @@ function extractPreferences(_meContent: string, denyContent: string): UserContex
 function extractProjects(workContent: string): UserContext["activeProjects"] {
   const projects: UserContext["activeProjects"] = [];
 
-  // Extract from Active Projects section
+  // Extract from Active Projects section. Skip any block whose body contains
+  // `**Status:** paused` — those are context-only, not active. (See
+  // ~/homer/src/memory/session-bootstrap.ts for the canonical projection.)
   const projectsMatch = workContent.match(/## Active Projects[\s\S]*?(?=##\s|$)/);
   if (projectsMatch) {
     const sections = projectsMatch[0].split(/###\s+/);
     for (const section of sections.slice(1)) {
+      if (/\*\*Status:\*\*[^\n]*?\bpaused\b/i.test(section)) continue;
       const lines = section.split("\n");
       const name = lines[0]?.trim();
       if (name) {
