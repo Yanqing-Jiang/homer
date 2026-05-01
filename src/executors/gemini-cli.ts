@@ -971,6 +971,9 @@ async function runGeminiProcess(
       HOME: runtimeHome,
       // Skip keychain probe — daemon has no login keychain, causes macOS notifications
       GEMINI_FORCE_FILE_STORAGE: "true",
+      // Gemini CLI 0.40+ workspace-trust check fails for /tmp and other non-trusted cwds
+      // even with -y; this env var bypasses the trust prompt for headless/automated use.
+      GEMINI_CLI_TRUST_WORKSPACE: "true",
     };
     // Remove all API key env vars to force OAuth auth via runtime home credentials
     for (const key of Object.keys(childEnv)) {
