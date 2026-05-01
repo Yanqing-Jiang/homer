@@ -48,3 +48,4 @@ workspaces/
 # Temporary files
 *.tmp
 *.temp
+scratch/
