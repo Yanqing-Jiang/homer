@@ -102,9 +102,11 @@ export interface MemoryEntrySyncResult {
 
 // Phase 0.9: canonical files come from the registry; "extras" are listed
 // after them in preferred audit order but aren't part of the canonical set.
+// session-bootstrap is excluded — it is generated, never hand-edited, and
+// auditing it would create false drift findings against me.md / work.md.
 import { CANONICAL_FILE_KEYS } from "./registry.js";
 const FILES_TO_AUDIT_ORDER = [
-  ...CANONICAL_FILE_KEYS.map((k) => `${k}.md`),
+  ...CANONICAL_FILE_KEYS.filter((k) => k !== "sessionBootstrap").map((k) => `${k}.md`),
   "goals.md",
   "projects.md",
 ];
@@ -118,7 +120,12 @@ export async function listAuditableFiles(memoryDir: string = PATHS.memory): Prom
   const rootFiles = entries
     .filter(e => e.isFile() && e.name.endsWith(".md"))
     .map(e => e.name)
-    .filter(n => !n.startsWith(".") && n !== "MEMORY.md" && n !== "emergency-bootstrap.md");
+    .filter(n =>
+      !n.startsWith(".") &&
+      n !== "MEMORY.md" &&
+      n !== "emergency-bootstrap.md" &&
+      n !== "session-bootstrap.md"
+    );
 
   // Apply preferred order: listed files first, remaining alphabetically
   const ordered: string[] = [];

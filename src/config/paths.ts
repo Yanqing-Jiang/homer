@@ -26,6 +26,7 @@ export const PATHS = {
   patterns: `${mem}/patterns.md`,
   denyHistory: `${mem}/deny-history.md`,
   feedback: `${mem}/feedback.md`,
+  sessionBootstrap: `${mem}/session-bootstrap.md`,
 
   // Memory subdirectories
   ideas: `${mem}/ideas`,

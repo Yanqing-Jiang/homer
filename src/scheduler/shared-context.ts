@@ -12,6 +12,8 @@ import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { StateManager, type SessionSummaryRow } from "../state/manager.js";
 import { PATHS } from "../config/paths.js";
+import { getCurrentFocus } from "../memory/session-bootstrap.js";
+import { logger } from "../utils/logger.js";
 
 // Re-export for backward compatibility (function lives in job-outputs.ts)
 export { getRecentJobOutputs } from "./job-outputs.js";
@@ -177,32 +179,49 @@ ${claudeMd}`);
 }
 
 /**
- * Extract the ## Goals section from me.md (Short-Term + Long-Term).
- * Returns the raw markdown so prompts can reference live goals instead of hardcoded ones.
+ * Render current goals as a curated active-vs-paused summary.
+ *
+ * Routes through getCurrentFocus() so paused items (MAHORAGA, Career OS automation)
+ * can never resurface as "active goals" via raw `## Goals` parsing. See
+ * ~/homer/src/memory/session-bootstrap.ts for the source-of-truth rules.
  */
 export async function extractCurrentGoals(): Promise<string> {
-  const meMd = await readFileIfExists(PATHS.me);
-  if (!meMd) return "(Goals not available — me.md missing)";
-
-  // Find ## Goals and capture everything until the next ## that isn't a sub-heading of Goals
-  const goalsMatch = meMd.match(/## Goals\n([\s\S]*?)(?=\n## (?!#)|\n---|$)/);
-  if (!goalsMatch) return "(No ## Goals section found in me.md)";
-
-  return goalsMatch[1]!.trim();
+  try {
+    const focus = await getCurrentFocus();
+    const lines: string[] = [];
+    if (focus.active.length > 0) {
+      lines.push("### Active");
+      focus.active.slice(0, 6).forEach((g, i) => lines.push(`${i + 1}. ${g}`));
+    }
+    if (focus.paused.length > 0) {
+      lines.push("\n### Paused (do not surface as current goals)");
+      focus.paused.forEach((p) => lines.push(`- ${p}`));
+    }
+    return lines.length > 0 ? lines.join("\n") : "(No goals parsed from me.md)";
+  } catch (err) {
+    return `(Goals unavailable: ${err instanceof Error ? err.message : String(err)})`;
+  }
 }
 
 /**
- * Extract ## Active Projects section from work.md.
- * Returns the raw markdown for project-aware prompts.
+ * Render active work projects (paused entries filtered out).
+ *
+ * Uses getCurrentFocus() so a `**Status:** paused` block in work.md is never
+ * treated as an active project by downstream prompts.
  */
 export async function extractActiveProjects(): Promise<string> {
-  const workMd = await readFileIfExists(PATHS.work);
-  if (!workMd) return "(Active projects not available — work.md missing)";
-
-  const projectsMatch = workMd.match(/## Active Projects\n([\s\S]*?)(?=\n## (?!#)|\n---|$)/);
-  if (!projectsMatch) return "(No ## Active Projects section found in work.md)";
-
-  return projectsMatch[1]!.trim();
+  try {
+    const focus = await getCurrentFocus();
+    if (focus.activeProjects.length === 0) return "(No active projects parsed from work.md)";
+    const lines = focus.activeProjects.map((p) => `- ${p}`);
+    if (focus.pausedProjects.length > 0) {
+      lines.push("", "### Paused (context only)");
+      focus.pausedProjects.forEach((p) => lines.push(`- ${p}`));
+    }
+    return lines.join("\n");
+  } catch (err) {
+    return `(Active projects unavailable: ${err instanceof Error ? err.message : String(err)})`;
+  }
 }
 
 /**
@@ -248,61 +267,38 @@ export async function buildCondensedContext(): Promise<string> {
 }
 
 /**
- * Build goal scoreboard sections dynamically from me.md goals.
- * Returns markdown template sections for each goal found.
+ * Build goal scoreboard sections dynamically from current focus state.
+ *
+ * Reads structured focus via getCurrentFocus() (see ~/homer/src/memory/session-bootstrap.ts)
+ * so the scoreboard reflects ACTIVE goals only — paused items (MAHORAGA, Career OS
+ * automation) are excluded automatically. Falls back to a single HOMER section if
+ * focus parsing fails so the weekly-consolidation job doesn't lose its anchor.
+ *
+ * Output format: one markdown section per active goal with momentum / next-lever
+ * placeholders for the consolidation prompt to fill in.
  */
 export async function buildGoalScoreboard(): Promise<string> {
-  const goals = await extractCurrentGoals();
-  if (goals.startsWith("(")) return goals; // error message
-
-  // Parse numbered goals from Short-Term section
-  const lines = goals.split("\n");
   const goalSections: string[] = [];
 
-  // Also capture Long-Term goals
-  let inShortTerm = false;
-  let inLongTerm = false;
+  try {
+    const focus = await getCurrentFocus();
 
-  for (const line of lines) {
-    if (line.includes("Short-Term")) {
-      inShortTerm = true;
-      inLongTerm = false;
-      continue;
+    for (const item of focus.active) {
+      // Strip trailing detail after em-dash so the scoreboard heading is short.
+      const goalName = item.split("—")[0]!.trim().replace(/:$/, "");
+      if (!goalName) continue;
+      goalSections.push(
+        `**${goalName}**\n` +
+          `- What moved: [specific actions, artifacts, file paths]\n` +
+          `- Momentum: [accelerating / steady / stalled / regressing]\n` +
+          `- Next lever to pull: [most impactful next step]`
+      );
     }
-    if (line.includes("Long-Term")) {
-      inShortTerm = false;
-      inLongTerm = true;
-      continue;
-    }
-
-    if (inShortTerm) {
-      // Match numbered goals like "1. **Side income stream:**..."
-      const goalMatch = line.match(/^\d+\.\s+\*\*(.+?)\*\*/);
-      if (goalMatch) {
-        const goalName = goalMatch[1]!.replace(/:$/, "");
-        goalSections.push(
-          `**${goalName}**\n` +
-            `- What moved: [specific actions, artifacts, file paths]\n` +
-            `- Momentum: [accelerating / steady / stalled / regressing]\n` +
-            `- Next lever to pull: [most impactful next step]`
-        );
-      }
-    }
-
-    if (inLongTerm) {
-      // Match bullet goals like "- Free cash flow..."
-      const bulletMatch = line.match(/^-\s+(.+)/);
-      if (bulletMatch) {
-        goalSections.push(
-          `**${bulletMatch[1]}**\n` +
-            `- What moved: [any progress]\n` +
-            `- Momentum: [accelerating / steady / stalled / regressing]`
-        );
-      }
-    }
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "buildGoalScoreboard: focus parse failed");
   }
 
-  // Always include HOMER as a goal (it's implicit in the system)
+  // Always include HOMER as a goal (it's implicit in the system).
   const hasHomer = goalSections.some((s) => s.toLowerCase().includes("homer"));
   if (!hasHomer) {
     goalSections.push(

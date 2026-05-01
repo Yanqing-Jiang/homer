@@ -580,6 +580,16 @@ If nothing to promote, use an empty array.`;
       logger.debug({ error: err }, "Memory embeddings skipped (post-nightly)");
     }
 
+    // 4. Regenerate session-bootstrap.md projection from current me.md/work.md
+    try {
+      const { generateBootstrap } = await import("../../memory/session-bootstrap.js");
+      const { bytes } = await generateBootstrap();
+      logger.info({ bytes }, "Session bootstrap regenerated (post-nightly)");
+      parts.push("bootstrap regenerated");
+    } catch (err) {
+      logger.warn({ error: err instanceof Error ? err.message : String(err) }, "Session bootstrap regen skipped (post-nightly)");
+    }
+
     const output = parts.length > 0
       ? `${parts.join(", ")} from ${yesterday}`
       : `No new facts from ${yesterday}`;
