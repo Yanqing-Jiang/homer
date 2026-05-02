@@ -1,5 +1,8 @@
 /**
- * Memory tools: search, hybrid_search, generate_embeddings, promote, suggest, read, reindex, context, candidates, replace, remove
+ * Memory tools: search (unified + hybrid), generate_embeddings, promote, suggest, read, reindex, context, candidates, replace, remove
+ *
+ * `memory_hybrid_search` was consolidated into `memory_search` (use mode="hybrid"
+ * + output="flat" for the legacy chunk-only RRF behavior).
  */
 
 import { readFile } from "fs/promises";
@@ -17,7 +20,7 @@ const MEMORY_BASE = PATHS.memory;
 export const definitions: ToolDefinition[] = [
   {
     name: "memory_search",
-    description: "Unified recall across ~/memory/*.md chunks AND operational stores (session summaries, threads, failure takeovers, scrapes, ideas, YouTube, transcripts). Hybrid (vector + BM25) on memory chunks when embeddings exist; BM25 per operational table, fused into one ranked list.",
+    description: "Unified recall across ~/memory/*.md chunks AND operational stores (session summaries, threads, failure takeovers, scrapes, ideas, YouTube, transcripts, knowledge_claims). Default mode='unified' returns partitioned cross-table results. Use mode='hybrid' + output='flat' for chunk-only vector+FTS5 RRF (legacy memory_hybrid_search behavior — better for conceptual queries on durable memory chunks).",
     inputSchema: {
       type: "object",
       properties: {
@@ -25,19 +28,8 @@ export const definitions: ToolDefinition[] = [
         context: { type: "string", enum: ["work", "general"], description: "Filter by context (optional)" },
         limit: { type: "number", description: "Max results to return (default: 10)" },
         include_archived: { type: "boolean", description: "Include archived sessions in search results (default: false). Archived results rank lower." },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "memory_hybrid_search",
-    description: "Semantic + keyword hybrid search across memory. Uses Gemini embeddings for meaning-based matches combined with FTS5 keyword matching via RRF fusion. Better for conceptual queries.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "Search query (natural language works best)" },
-        context: { type: "string", enum: ["work", "general"], description: "Filter by context (optional)" },
-        limit: { type: "number", description: "Max results to return (default: 10)" },
+        mode: { type: "string", enum: ["unified", "hybrid"], description: "unified (default) = cross-table recall, partitioned by source. hybrid = chunk-only vector+FTS5 RRF over ~/memory/*.md and embedded session summaries; equivalent to the deprecated memory_hybrid_search tool." },
+        output: { type: "string", enum: ["partitioned", "flat"], description: "Reserved. mode='unified' always returns partitioned; mode='hybrid' always returns flat. Currently informational only." },
       },
       required: ["query"],
     },
@@ -162,14 +154,57 @@ export async function handle(
 ): Promise<ToolResult | null> {
   switch (name) {
     case "memory_search": {
-      const { query, context, limit, include_archived, include_candidates } = args as {
+      const { query, context, limit, include_archived, include_candidates, mode, output } = args as {
         query: string;
         context?: "work" | "general";
         limit?: number;
         include_archived?: boolean;
         include_candidates?: boolean;
+        mode?: "unified" | "hybrid";
+        output?: "partitioned" | "flat";
       };
       const maxResults = limit || 10;
+
+      // Hybrid-only path: chunk-only RRF, no operational-store fusion.
+      // Preserves backward compatibility with the deprecated memory_hybrid_search
+      // MCP tool. Always returns a flat list (the `output` param is ignored here
+      // since hybrid has no partitions to group).
+      if (mode === "hybrid") {
+        const results = await deps.indexer.hybridSearch(query, maxResults, context);
+        const hybridStats = deps.indexer.getStats();
+        const hybridMetaMap = new Map(hybridStats.fileStats.map(f => [f.filePath, f.indexedAt]));
+        const enrichedResults = results.map(r => ({
+          ...r,
+          source_file: r.filePath,
+          indexed_at: hybridMetaMap.get(r.filePath) ?? null,
+        }));
+        return { content: [{ type: "text", text: JSON.stringify(enrichedResults, null, 2) }] };
+      }
+
+      // `output` is reserved for future flat-mode unified output; today unified
+      // always returns the partitioned shape. Reference the param to satisfy
+      // TS "declared but unused" if strict mode flags it.
+      void output;
+
+      // Proper-noun-ish entities from the query (quoted phrases + capitalized
+      // tokens). Used for entity-aware claim boost in the unified ranker below.
+      // Cheap deterministic pass — no NER. Examples: "Darshan", "MAHORAGA",
+      // "ProfitSphere". Hoisted to case scope so it's reachable both inside
+      // the FTS try-block and in the post-FTS claim normalization loop.
+      const queryEntities: string[] = (() => {
+        const ents: string[] = [];
+        const phraseRegex = /"([^"]+)"/g;
+        let m: RegExpExecArray | null;
+        while ((m = phraseRegex.exec(query)) !== null) {
+          const p = (m[1] ?? "").trim();
+          if (p) ents.push(p.toLowerCase());
+        }
+        for (const t of query.split(/\s+/)) {
+          const c = t.replace(/[^A-Za-z0-9_-]/g, "");
+          if (c.length >= 2 && /^[A-Z]/.test(c)) ents.push(c.toLowerCase());
+        }
+        return Array.from(new Set(ents));
+      })();
 
       const hasEmbeddings = deps.indexer.getEmbeddingStats().totalEmbeddings > 0;
       const memoryResults = hasEmbeddings
@@ -186,6 +221,18 @@ export async function handle(
       let claimResults: Array<{ id: string; content: string; target_file: string; section: string | null; claim_type: string; domain: string | null; event_date: string | null; status: string; created_at: string; decided_at: string | null; rank: number }> = [];
       try {
         const sm = deps.getSharedStateManager();
+        const db = sm.getDb();
+        // Local helper: run an FTS query, swallow "table may not exist" errors,
+        // and return an empty array on failure. Removes ~7 repeated try/catch
+        // blocks below without adding a new file.
+        const runFts = <T>(label: string, sql: string, ...params: unknown[]): T[] => {
+          try {
+            return db.prepare(sql).all(...params) as T[];
+          } catch (err) {
+            logger.debug({ error: err, table: label }, "FTS search failed (table may not exist)");
+            return [];
+          }
+        };
         // Escape FTS5 query: preserve quoted phrases, implicit AND for terms
         const escapedTerms = (() => {
           const tokens: string[] = [];
@@ -211,128 +258,108 @@ export async function handle(
         })();
 
         if (escapedTerms) {
-          if (include_archived) {
-            sessionResults = sm.getDb().prepare(`
-              SELECT s.id, s.title, s.summary, s.project, s.agent, s.started_at,
-                     bm25(session_summaries_fts) + CASE WHEN s.status = 'archived' THEN 1000 ELSE 0 END as rank
-              FROM session_summaries_fts fts
-              JOIN session_summaries s ON fts.rowid = s.rowid
-              WHERE session_summaries_fts MATCH ?
-              ORDER BY rank
-              LIMIT ?
-            `).all(escapedTerms, maxResults) as typeof sessionResults;
-          } else {
-            sessionResults = sm.getDb().prepare(`
-              SELECT s.id, s.title, s.summary, s.project, s.agent, s.started_at,
-                     bm25(session_summaries_fts) as rank
-              FROM session_summaries_fts fts
-              JOIN session_summaries s ON fts.rowid = s.rowid
-              WHERE session_summaries_fts MATCH ?
-                AND s.status = 'active'
-              ORDER BY rank
-              LIMIT ?
-            `).all(escapedTerms, maxResults) as typeof sessionResults;
-          }
+          // Both branches honor the searchable filter. include_archived widens
+          // status (archived rows allowed, demoted by +1000 BM25 penalty) but
+          // does NOT re-admit retrieval-noise sessions (Say-hello, system-prompt
+          // scaffolding, flush/checkpoint), which migration 092 explicitly hid.
+          sessionResults = include_archived
+            ? runFts<typeof sessionResults[number]>("session_summaries", `
+                SELECT s.id, s.title, s.summary, s.project, s.agent, s.started_at,
+                       bm25(session_summaries_fts) + CASE WHEN s.status = 'archived' THEN 1000 ELSE 0 END as rank
+                FROM session_summaries_fts fts
+                JOIN session_summaries s ON fts.rowid = s.rowid
+                WHERE session_summaries_fts MATCH ?
+                  AND COALESCE(s.searchable, 1) = 1
+                ORDER BY rank
+                LIMIT ?
+              `, escapedTerms, maxResults)
+            : runFts<typeof sessionResults[number]>("session_summaries", `
+                SELECT s.id, s.title, s.summary, s.project, s.agent, s.started_at,
+                       bm25(session_summaries_fts) as rank
+                FROM session_summaries_fts fts
+                JOIN session_summaries s ON fts.rowid = s.rowid
+                WHERE session_summaries_fts MATCH ?
+                  AND s.status = 'active'
+                  AND COALESCE(s.searchable, 1) = 1
+                ORDER BY rank
+                LIMIT ?
+              `, escapedTerms, maxResults);
 
-          try {
-            takeoverResults = sm.getDb().prepare(`
-              SELECT t.id, t.job_id, t.diagnosis, t.fix_description, t.decision,
-                     t.retry_success, t.created_at, bm25(failure_takeover_fts) as rank
-              FROM failure_takeover_fts fts
-              JOIN failure_takeover_runs t ON fts.rowid = t.rowid
-              WHERE failure_takeover_fts MATCH ?
-              ORDER BY rank
-              LIMIT ?
-            `).all(escapedTerms, maxResults) as typeof takeoverResults;
-          } catch (err) {
-            logger.debug({ error: err }, "Failure takeover FTS search failed (table may not exist)");
-          }
+          takeoverResults = runFts<typeof takeoverResults[number]>("failure_takeover", `
+            SELECT t.id, t.job_id, t.diagnosis, t.fix_description, t.decision,
+                   t.retry_success, t.created_at, bm25(failure_takeover_fts) as rank
+            FROM failure_takeover_fts fts
+            JOIN failure_takeover_runs t ON fts.rowid = t.rowid
+            WHERE failure_takeover_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+          `, escapedTerms, maxResults);
 
-          try {
-            threadResults = sm.getDb().prepare(`
-              SELECT tm.id, tm.thread_id, tm.role, tm.created_at,
-                     snippet(thread_messages_fts, 0, '>>>', '<<<', '...', 50) as content,
-                     bm25(thread_messages_fts) as rank
-              FROM thread_messages_fts fts
-              JOIN thread_messages tm ON fts.rowid = tm.rowid
-              WHERE thread_messages_fts MATCH ?
-              ORDER BY rank
-              LIMIT ?
-            `).all(escapedTerms, maxResults) as typeof threadResults;
-          } catch (err) {
-            logger.debug({ error: err }, "Thread messages FTS search failed (table may not exist)");
-          }
+          threadResults = runFts<typeof threadResults[number]>("thread_messages", `
+            SELECT tm.id, tm.thread_id, tm.role, tm.created_at,
+                   snippet(thread_messages_fts, 0, '>>>', '<<<', '...', 50) as content,
+                   bm25(thread_messages_fts) as rank
+            FROM thread_messages_fts fts
+            JOIN thread_messages tm ON fts.rowid = tm.rowid
+            WHERE thread_messages_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+          `, escapedTerms, maxResults);
 
-          try {
-            scrapeResults = sm.getDb().prepare(`
-              SELECT s.id, s.source, s.title, s.url, s.scraped_at,
-                     bm25(scrapes_fts) as rank
-              FROM scrapes_fts fts
-              JOIN scrapes s ON fts.rowid = s.rowid
-              WHERE scrapes_fts MATCH ?
-              ORDER BY rank
-              LIMIT ?
-            `).all(escapedTerms, maxResults) as typeof scrapeResults;
-          } catch (err) {
-            logger.debug({ error: err }, "Scrapes FTS search failed (table may not exist)");
-          }
+          scrapeResults = runFts<typeof scrapeResults[number]>("scrapes", `
+            SELECT s.id, s.source, s.title, s.url, s.scraped_at,
+                   bm25(scrapes_fts) as rank
+            FROM scrapes_fts fts
+            JOIN scrapes s ON fts.rowid = s.rowid
+            WHERE scrapes_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+          `, escapedTerms, maxResults);
 
-          try {
-            ideaResults = sm.getDb().prepare(`
-              SELECT i.id, i.title, i.status, i.source, i.link, i.created_at,
-                     snippet(ideas_fts, 1, '>>>', '<<<', '...', 50) as content,
-                     bm25(ideas_fts) as rank
-              FROM ideas_fts fts
-              JOIN ideas i ON fts.rowid = i.rowid
-              WHERE ideas_fts MATCH ?
-              ORDER BY rank
-              LIMIT ?
-            `).all(escapedTerms, maxResults) as typeof ideaResults;
-          } catch (err) {
-            logger.debug({ error: err }, "Ideas FTS search failed (table may not exist)");
-          }
+          ideaResults = runFts<typeof ideaResults[number]>("ideas", `
+            SELECT i.id, i.title, i.status, i.source, i.link, i.created_at,
+                   snippet(ideas_fts, 1, '>>>', '<<<', '...', 50) as content,
+                   bm25(ideas_fts) as rank
+            FROM ideas_fts fts
+            JOIN ideas i ON fts.rowid = i.rowid
+            WHERE ideas_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+          `, escapedTerms, maxResults);
 
-          try {
-            youtubeResults = sm.getDb().prepare(`
-              SELECT y.video_id, y.title, y.channel_name, y.relevance_score, y.processed_at,
-                     snippet(youtube_videos_fts, 1, '>>>', '<<<', '...', 50) as content,
-                     bm25(youtube_videos_fts) as rank
-              FROM youtube_videos_fts fts
-              JOIN youtube_videos y ON fts.rowid = y.rowid
-              WHERE youtube_videos_fts MATCH ?
-              ORDER BY rank
-              LIMIT ?
-            `).all(escapedTerms, maxResults) as typeof youtubeResults;
-          } catch (err) {
-            logger.debug({ error: err }, "YouTube FTS search failed (table may not exist)");
-          }
+          youtubeResults = runFts<typeof youtubeResults[number]>("youtube_videos", `
+            SELECT y.video_id, y.title, y.channel_name, y.relevance_score, y.processed_at,
+                   snippet(youtube_videos_fts, 1, '>>>', '<<<', '...', 50) as content,
+                   bm25(youtube_videos_fts) as rank
+            FROM youtube_videos_fts fts
+            JOIN youtube_videos y ON fts.rowid = y.rowid
+            WHERE youtube_videos_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+          `, escapedTerms, maxResults);
 
-          try {
-            transcriptResults = sm.getDb().prepare(`
-              SELECT content_hash, agent, project, started_at,
-                     snippet(transcript_fts, 0, '>>>', '<<<', '...', 50) as content,
-                     bm25(transcript_fts) as rank
-              FROM transcript_fts
-              WHERE transcript_fts MATCH ?
-              ORDER BY rank
-              LIMIT ?
-            `).all(escapedTerms, maxResults) as typeof transcriptResults;
-          } catch (err) {
-            logger.debug({ error: err }, "Transcript FTS search failed (table may not exist)");
-          }
+          transcriptResults = runFts<typeof transcriptResults[number]>("transcripts", `
+            SELECT content_hash, agent, project, started_at,
+                   snippet(transcript_fts, 0, '>>>', '<<<', '...', 50) as content,
+                   bm25(transcript_fts) as rank
+            FROM transcript_fts
+            WHERE transcript_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+          `, escapedTerms, maxResults);
 
           // DB-native knowledge_claims search via external-content FTS (migration 088).
           // After bridge retirement, approved operational claims live here. Default:
           // approved only, to preserve the HITL boundary (candidates are pre-review).
           // Opt-in `include_candidates` for operator/debug surfaces like /memory show.
-          try {
+          {
             const claimStatuses = include_archived
               ? ["approved", "candidate", "archived", "stale"]
               : include_candidates
               ? ["approved", "candidate"]
               : ["approved"];
             const placeholders = claimStatuses.map(() => "?").join(",");
-            claimResults = sm.getDb().prepare(`
+            claimResults = runFts<typeof claimResults[number]>("knowledge_claims", `
               SELECT kc.id, kc.content, kc.target_file, kc.section, kc.claim_type,
                      kc.domain, kc.event_date, kc.status, kc.created_at, kc.decided_at,
                      bm25(knowledge_claims_fts) as rank
@@ -342,9 +369,7 @@ export async function handle(
                 AND kc.status IN (${placeholders})
               ORDER BY rank
               LIMIT ?
-            `).all(escapedTerms, ...claimStatuses, maxResults) as typeof claimResults;
-          } catch (err) {
-            logger.debug({ error: err }, "Knowledge claims FTS search failed (table may not exist)");
+            `, escapedTerms, ...claimStatuses, maxResults);
           }
         }
       } catch (err) {
@@ -464,11 +489,26 @@ export async function handle(
         });
       }
       for (const r of normClaims) {
-        // Boost approved DB-native claims to 1.1x — they are the post-bridge source
-        // of truth for operational facts. Candidates get 0.9x (in-flight, less certain).
-        const statusMultiplier = r.status === "approved" ? 1.1 : 0.9;
+        // Entity-aware claim boost (replaces flat 1.10× for approved claims).
+        //   approved + query entity hit (content / domain / section / target)  → 1.20×
+        //   approved, no entity hit                                             → 1.02×
+        //   candidate (in-flight, pre-HITL)                                     → 0.90×
+        //   other (stale / archived / expired / rejected)                       → 0.85×
+        // The Darshan-class failure (proper-noun smearing in semantic search)
+        // was rooted in claims being too weakly differentiated from chunks for
+        // entity queries — this boost gives canonical claims a real source prior
+        // when the query carries an identifiable entity, without blanket-promoting
+        // them on conceptual queries where embedding rank should win.
+        const claimHaystack = `${r.content} ${r.domain ?? ""} ${r.section ?? ""} ${r.target_file}`.toLowerCase();
+        const entityHit = queryEntities.length > 0 && queryEntities.some(e => claimHaystack.includes(e));
+        const claimMultiplier =
+          r.status === "approved"
+            ? (entityHit ? 1.20 : 1.02)
+            : r.status === "candidate"
+            ? 0.90
+            : 0.85;
         unified.push({
-          type: "claim", normalizedRank: r.normalizedRank * statusMultiplier,
+          type: "claim", normalizedRank: r.normalizedRank * claimMultiplier,
           data: {
             id: r.id, content: r.content, targetFile: r.target_file, section: r.section,
             claimType: r.claim_type, domain: r.domain, eventDate: r.event_date,
@@ -557,15 +597,6 @@ export async function handle(
       };
 
       return { content: [{ type: "text", text: JSON.stringify(combined, null, 2) }] };
-    }
-
-    case "memory_hybrid_search": {
-      const { query, context, limit } = args as { query: string; context?: "work" | "general"; limit?: number };
-      const results = await deps.indexer.hybridSearch(query, limit || 10, context);
-      const hybridStats = deps.indexer.getStats();
-      const hybridMetaMap = new Map(hybridStats.fileStats.map(f => [f.filePath, f.indexedAt]));
-      const enrichedResults = results.map(r => ({ ...r, source_file: r.filePath, indexed_at: hybridMetaMap.get(r.filePath) ?? null }));
-      return { content: [{ type: "text", text: JSON.stringify(enrichedResults, null, 2) }] };
     }
 
     case "memory_generate_embeddings": {

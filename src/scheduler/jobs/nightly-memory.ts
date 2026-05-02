@@ -1,7 +1,8 @@
 /**
- * Nightly Memory Processing — Claude Opus 1M fact extraction
+ * Nightly Memory Processing — Claude Opus 1M claim extraction
  *
- * Reads unprocessed session_summaries from SQLite, extracts promotable facts
+ * Reads unprocessed session_summaries from SQLite, extracts promotable claims
+ * (facts/decisions/preferences/lessons/insights/commitments/questions/hypotheses)
  * via Claude Opus (1M context), writes to permanent memory, and requires the
  * full core memory set to be loaded before the model runs.
  */
@@ -57,7 +58,9 @@ const PromotionSchema = z.object({
   file: z.enum(MEMORY_FILE_KEYS),
   section: z.string().min(1),
   confidence: z.number().min(0).max(1).default(0.5),
-  claim_type: z.enum(CLAIM_TYPES).default("fact"),
+  // No default — extractor MUST classify claim_type deliberately.
+  // Default-to-"fact" caused 134 facts vs 2 decisions / 0 insights skew.
+  claim_type: z.enum(CLAIM_TYPES),
 });
 
 const PromotionsArraySchema = z.array(PromotionSchema);
@@ -213,11 +216,11 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
 
     const recentActivity = getRecentJobOutputs(stateManager.getDb());
 
-    const unifiedPrompt = `You are a memory processing engine for Yanqing's personal AI assistant. Analyze yesterday's session summaries, cross-reference against permanent memory files, and extract promotable facts.
+    const unifiedPrompt = `You are a memory processing engine for Yanqing's personal AI assistant. Analyze yesterday's session summaries, cross-reference against permanent memory files, and extract promotable claims.
 
-## Extract Promotable Facts (2-5 max)
+## Extract Promotable Claims (2-5 max)
 
-A "promotable fact" is genuinely novel information worth persisting in permanent memory. Quality over quantity — only extract facts that would be missed if not captured now.
+A "promotable claim" is genuinely novel information worth persisting in permanent memory. Quality over quantity — only extract claims that would be missed if not captured now. Each claim MUST be classified into one of the eight claim_type values below — choose deliberately. Default to a more specific type (decision, commitment, lesson, insight) over the generic "fact" whenever the language warrants it.
 
 COVERAGE PRIORITY (extract in this order):
 1. **Work decisions & project status** — outcomes, milestones, blockers, pivots → work.md
@@ -258,7 +261,13 @@ ${sessionInput.length > 80000 ? sessionInput.slice(0, 80000) + "\n\n... (truncat
 ## Output Format
 
 Return ONLY a valid JSON object (no markdown, no preamble):
-{"promotions": [{"content": "fact to promote", "file": "me"|"work"|"preferences"|"tools", "section": "Section Name", "confidence": 0.8, "claim_type": "fact"}]}
+{"promotions": [
+  {"content": "Decided to use ClickHouse over DuckDB for ProfitSphere.", "file": "work", "section": "Decisions", "confidence": 0.96, "claim_type": "decision"},
+  {"content": "Yanqing prefers binary pass/fail scoring over multi-factor weighting.", "file": "preferences", "section": "Decision Logic", "confidence": 0.9, "claim_type": "preference"},
+  {"content": "Lesson: always rebuild native modules after Node upgrades to avoid ABI drift.", "file": "preferences", "section": "System Architecture & Stability", "confidence": 0.92, "claim_type": "lesson"}
+]}
+
+claim_type is REQUIRED on every promotion — there is no default. Use the rubric below.
 
 Each promotion MUST include:
 - "confidence": 0.0-1.0 — meaning is calibrated against this rubric:
