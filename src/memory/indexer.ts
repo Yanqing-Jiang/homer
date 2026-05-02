@@ -62,15 +62,23 @@ export class MemoryIndexer {
         context TEXT NOT NULL
       );
 
-      -- Embeddings table for semantic search (Gemini embedding-001)
+      -- Embeddings table for semantic search (Gemini embedding-001).
+      -- Schema must stay aligned with migrations 084_embedding_versioning.sql
+      -- so a fresh DB bootstrap doesn't silently miss columns that inserts
+      -- (memory/indexer.ts upsertEmbedding) require.
       CREATE TABLE IF NOT EXISTS memory_embeddings (
         file_path TEXT NOT NULL,
         chunk_index INTEGER NOT NULL,
         embedding BLOB NOT NULL,
         dimensions INTEGER NOT NULL DEFAULT 768,
         updated_at INTEGER NOT NULL,
+        model TEXT,
+        embed_version INTEGER NOT NULL DEFAULT 1,
+        content_hash TEXT,
         PRIMARY KEY (file_path, chunk_index)
       );
+      CREATE INDEX IF NOT EXISTS idx_embeddings_updated ON memory_embeddings(updated_at);
+      CREATE INDEX IF NOT EXISTS idx_embeddings_model_version ON memory_embeddings(model, embed_version);
     `);
 
     logger.debug("Memory indexer initialized");
@@ -549,6 +557,7 @@ export class MemoryIndexer {
         LEFT JOIN memory_embeddings e ON e.file_path = 'session:' || s.id AND e.chunk_index = 0
         WHERE e.file_path IS NULL
           AND s.summary IS NOT NULL AND s.summary != ''
+          AND COALESCE(s.searchable, 1) = 1
       `).all() as typeof sessionChunks;
     } catch (err) {
       logger.debug({ error: err }, "session_summaries table may not exist yet");
@@ -646,6 +655,7 @@ export class MemoryIndexer {
           JOIN session_summaries s ON e.file_path = 'session:' || s.id
           WHERE e.file_path LIKE 'session:%'
             AND s.status = 'active'
+            AND COALESCE(s.searchable, 1) = 1
         `).all() as typeof embeddingRows;
       } catch {
         // session_summaries table may not exist
