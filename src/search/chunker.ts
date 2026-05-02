@@ -1,4 +1,13 @@
-import type { ChunkResult } from "./types.js";
+/**
+ * Result of chunking a single document. Self-contained — used to live in
+ * `./types.ts` alongside the deleted Supabase search stack.
+ */
+export interface ChunkResult {
+  content: string;
+  chunkIndex: number;
+  startLine: number;
+  endLine: number;
+}
 
 /**
  * Estimate token count (rough approximation: ~4 chars per token)

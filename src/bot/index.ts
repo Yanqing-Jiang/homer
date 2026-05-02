@@ -28,9 +28,7 @@ import { chunkMessage } from "../utils/chunker.js";
 import { StateManager } from "../state/manager.js";
 import { sendThinkingIndicator, editWithResponse, TelegramDraftStream, sendFinalResponse, TelegramTypingLoop } from "./streaming.js";
 import { loadBootstrapFiles } from "../memory/loader.js";
-import { searchMemory, formatSearchResults } from "../memory/search.js";
-import { hybridSearch, formatHybridResults } from "../search/index.js";
-import type { SearchConfig } from "../search/types.js";
+import { getMemoryIndexer } from "../memory/indexer.js";
 import { transcribeAudio, synthesizeSpeech, truncateForTTS } from "../voice/index.js";
 import type { VoiceConfig, SynthesisOptions } from "../voice/types.js";
 import { InputFile } from "grammy";
@@ -925,40 +923,49 @@ ${checksStr}`;
     }
   });
 
-  // /search
+  // /search — local SQLite-backed hybrid (vector + FTS5) search via MemoryIndexer.
+  // Replaces the legacy Supabase hybrid + grep fallback (deleted with src/search/).
   bot.command("search", async (ctx) => {
     const query = ctx.match?.trim();
     if (!query) {
       await ctx.reply("Usage: /search <query>");
       return;
     }
-    const searchConfig: SearchConfig = {
-      supabaseUrl: config.search.supabaseUrl,
-      supabaseAnonKey: config.search.supabaseAnonKey,
-      openaiApiKey: config.voice.openaiApiKey,
-      embeddingModel: config.search.embeddingModel,
-      chunkSize: config.search.chunkSize,
-      chunkOverlap: config.search.chunkOverlap,
+
+    const formatHits = (
+      hits: Array<{ filePath: string; content: string; score?: number; source?: string }>,
+      q: string
+    ): string => {
+      if (hits.length === 0) return `No results for *${q}*.`;
+      const lines = [`*Search results for* \`${q}\`:`, ""];
+      for (const h of hits.slice(0, 5)) {
+        const file = h.filePath.replace(/^.*\//, "");
+        const snippet = h.content.length > 240 ? h.content.slice(0, 240) + "…" : h.content;
+        const score = typeof h.score === "number" ? ` (${h.score.toFixed(3)})` : "";
+        const src = h.source ? ` [${h.source}]` : "";
+        lines.push(`*${file}*${src}${score}\n${snippet}\n`);
+      }
+      return lines.join("\n");
     };
 
     try {
-      const results = await hybridSearch(query, searchConfig);
-      const formatted = formatHybridResults(results, query);
+      const indexer = getMemoryIndexer();
+      let hits: Array<{ filePath: string; content: string; score?: number; source?: string }>;
+      try {
+        hits = await indexer.hybridSearch(query, 10);
+      } catch (hybridErr) {
+        logger.warn({ error: hybridErr, query }, "Hybrid search failed, falling back to FTS-only");
+        hits = indexer.search(query, 10);
+      }
+      const formatted = formatHits(hits, query);
       try {
         await ctx.reply(formatted, { parse_mode: "Markdown" });
       } catch {
         await ctx.reply(formatted.replace(/[*_`]/g, ""));
       }
     } catch (error) {
-      logger.warn({ error, query }, "Hybrid search failed, using grep");
-      try {
-        const results = await searchMemory(query);
-        const formatted = formatSearchResults(results, query);
-        await ctx.reply(formatted);
-      } catch (grepError) {
-        logger.error({ error: grepError, query }, "Search failed");
-        await ctx.reply(`Search failed: ${error instanceof Error ? error.message : "Unknown"}`);
-      }
+      logger.error({ error, query }, "Search failed");
+      await ctx.reply(`Search failed: ${error instanceof Error ? error.message : "Unknown"}`);
     }
   });
 

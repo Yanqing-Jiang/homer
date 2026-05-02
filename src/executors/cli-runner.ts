@@ -61,7 +61,7 @@ interface ActiveRun {
 }
 
 const MEMORY_HINT =
-  "Use Homer memory MCP tools directly when memory matters. Call memory_context for fresh current context, memory_read for durable files, memory_search or memory_hybrid_search for lookup, memory_suggest for decisions/preferences/lessons, and memory_promote only for simple stable facts.";
+  "Use Homer memory MCP tools directly when memory matters. Call memory_context for fresh current context, memory_read for durable files, memory_search for lookup (use mode='hybrid' for chunk-only semantic recall), memory_suggest for decisions/preferences/lessons, and memory_promote only for simple stable facts.";
 const TELEGRAM_HINT =
   "Keep responses concise and readable on mobile. Short paragraphs, no HTML, no unnecessary formatting. Get to the point.";
 const CHATGPT_BROWSER_HINT =
