@@ -930,11 +930,20 @@ async function runHandler(
         }
 
         // 2. Send ideas for review (previously at 7 AM, now consolidated)
-        try {
-          const ideaCount = await sendBatchIdeasForReview(ctx.bot, ctx.chatId);
-          if (ideaCount > 0) parts.push(`${ideaCount} ideas sent`);
-        } catch (err) {
-          logger.debug({ error: err }, "Ideas review skipped");
+        // Gated to every other day — scrapers keep running daily, but the
+        // 新发现审阅 digest only fires on even-parity days-since-epoch.
+        // Set HOMER_PACKET_REVIEW_FORCE=1 to override (manual trigger / testing).
+        const daysSinceEpoch = Math.floor(Date.now() / 86_400_000);
+        const isPacketReviewDay = daysSinceEpoch % 2 === 0;
+        if (isPacketReviewDay || process.env.HOMER_PACKET_REVIEW_FORCE === "1") {
+          try {
+            const ideaCount = await sendBatchIdeasForReview(ctx.bot, ctx.chatId);
+            if (ideaCount > 0) parts.push(`${ideaCount} ideas sent`);
+          } catch (err) {
+            logger.debug({ error: err }, "Ideas review skipped");
+          }
+        } else {
+          parts.push("packet review skipped (off-day)");
         }
 
         const output = parts.length > 0
