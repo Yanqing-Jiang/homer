@@ -47,6 +47,11 @@ export interface OpenCodeCLIOptions {
   cwd?: string;
   /** OpenCode agent mode: "build" (default) or "plan" */
   agent?: string;
+  /** Homer run identifier — propagated into ProcessRegistry so watchdog/cleanup-scheduler
+   *  can join managed_processes.run_id → cli_runs.id when reaping corpses.
+   *  Critical: cli-runner routes `executorKind === "gemini"` through executeOpenCodeCLI,
+   *  so without this the gemini fallback path is invisible to B3. */
+  runId?: string;
   /** Called with cumulative text as response streams in */
   onPartial?: (text: string) => void;
   // Legacy options accepted for backward compatibility (ignored by OpenCode)
@@ -149,6 +154,7 @@ export async function executeOpenCodeCLI(
     browserOnly = false,
     cwd,
     agent,
+    runId,
   } = options;
 
   // Normalize model name: callers may pass "gemini-3-flash-preview" without provider prefix
@@ -165,6 +171,7 @@ export async function executeOpenCodeCLI(
       signal,
       cwd: cwd || (browserOnly ? "/tmp/homer-scrape" : process.env.HOME || "/Users/yj"),
       role: geminiRole,
+      runId,
     });
     return {
       output: result.output,
@@ -214,6 +221,7 @@ export async function executeOpenCodeCLI(
       timeoutMs: timeout,
       source: "cli-runner",
       detached: true,
+      runId,
     });
 
     // State
