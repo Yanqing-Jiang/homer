@@ -286,6 +286,11 @@ function spawnSession(params: {
     detached: true,
   });
 
+  // NOTE: pooled Claude sessions are long-lived and serve many runs over their lifetime.
+  // We deliberately do NOT attach a static `runId` here — that would bind the registry
+  // record to whichever cli_run happens to start the session, and stay wrong for every
+  // subsequent turn. If per-turn run-context joins become necessary, add an explicit
+  // processRegistry.updateRunContext(pid, runId) at turn start and clear at turn end.
   processRegistry.register(proc, {
     command: "claude",
     type: "executor",

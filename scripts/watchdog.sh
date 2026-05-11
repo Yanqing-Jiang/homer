@@ -946,17 +946,128 @@ run_ai_triage() {
   esac
 }
 
+log_system_stats() {
+  # One-line snapshot of network/FD pressure + cloudflared health each cycle.
+  # Cheap, no killing, no alerting — just visibility in the watchdog log so
+  # post-mortems have data without needing to capture it during the incident.
+  local tw est fd_count cf_starts cf_pid
+  tw=$(/usr/sbin/netstat -an -p tcp 2>/dev/null | /usr/bin/awk '$NF=="TIME_WAIT"{c++} END{print c+0}')
+  est=$(/usr/sbin/netstat -an -p tcp 2>/dev/null | /usr/bin/awk '$NF=="ESTABLISHED"{c++} END{print c+0}')
+  local daemon_pid
+  daemon_pid=$(get_launchd_pid || true)
+  if [[ -n "$daemon_pid" ]]; then
+    fd_count=$(/usr/sbin/lsof -p "$daemon_pid" 2>/dev/null | /usr/bin/wc -l | /usr/bin/tr -d ' ')
+  else
+    fd_count=0
+  fi
+  cf_pid=$(/usr/bin/pgrep -f "cloudflared.*tunnel.*run" 2>/dev/null | /usr/bin/head -1 || true)
+  cf_starts=$(/usr/bin/grep -c "Starting tunnel" "$HOMER_DIR/logs/cloudflared.log" 2>/dev/null || echo 0)
+  log "STATS: tw=${tw} est=${est} daemon_fd=${fd_count} cf_pid=${cf_pid:-none} cf_starts_lifetime=${cf_starts}"
+}
+
 cleanup_stale_cli_runs() {
+  # Reaps cli_runs running > STALE_CLI_RUN_SECONDS (default 30min, aligned
+  # with SessionTimeoutManager's 45min in-memory cap) AND whose linked
+  # managed_process is still alive. Without this, a Codex reconnect-storm
+  # child can survive long after its DB row was marked failed — holding
+  # sockets, reconnecting, and pressuring local-kernel state.
+  #
+  # SAFETY:
+  # - Only fires after has_active_runs() and drain-sentinel gates upstream.
+  # - Allowlist is EXACT basename match (codex/claude/gemini/kimi/opencode);
+  #   substring matching would authorize killing arbitrary processes whose
+  #   command contains those strings.
+  # - SIGTERM with grace, then SIGKILL.
+  # - Phase 3 narrowly settles only run_ids we actually signaled (not every
+  #   stale-window run_id), preserving visibility for non-LLM allowlist skips.
+  # - Requires managed_processes.run_id populated by executor register() (R1).
   if [[ ! -f "$DB_PATH" ]]; then
     return 0
   fi
+
+  local stale_secs="${STALE_CLI_RUN_SECONDS:-1800}"
+  local kill_grace="${STALE_CLI_KILL_GRACE_SECONDS:-5}"
+  local cutoff_ms
+  cutoff_ms=$(( $(/bin/date +%s) * 1000 - stale_secs * 1000 ))
+
+  # Allowlist gate: exact basename match.
+  is_llm_cli() {
+    case "$(/usr/bin/basename "$1" 2>/dev/null)" in
+      claude|codex|gemini|kimi|opencode) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+
+  # Phase 1: SIGTERM stale managed children; record run_ids we actually signaled.
+  local killed=0 skipped=0
+  local -a killed_run_ids=()
+  while IFS=$'\t' read -r run_id pid pgid command; do
+    [[ -z "$pid" || "$pid" == "0" ]] && continue
+    if ! is_llm_cli "$command"; then
+      log "STALE_CLI: skipping non-LLM command run=$run_id pid=$pid command=$command"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if ! /bin/kill -0 "$pid" 2>/dev/null; then
+      continue
+    fi
+    local target="$pid"
+    if [[ "$pgid" =~ ^[0-9]+$ && "$pgid" != "0" ]]; then
+      target="-$pgid"
+    fi
+    log "STALE_CLI: SIGTERM run=$run_id pid=$pid target=$target command=$command"
+    /bin/kill -TERM "$target" 2>/dev/null || true
+    killed=$((killed + 1))
+    killed_run_ids+=("$run_id")
+  done < <(
+    /usr/bin/sqlite3 -separator $'\t' "$DB_PATH" \
+      "SELECT cr.id, COALESCE(mp.pid, 0), COALESCE(mp.pgid, 0), COALESCE(mp.command, '')
+       FROM cli_runs cr
+       LEFT JOIN managed_processes mp ON mp.run_id = cr.id AND mp.settled = 0
+       WHERE cr.status = 'running' AND cr.started_at < $cutoff_ms;" 2>/dev/null || true
+  )
+
+  if (( killed > 0 )); then
+    /bin/sleep "$kill_grace"
+    # Phase 2: SIGKILL survivors among the run_ids we actually signaled.
+    local quoted_ids
+    quoted_ids=$(printf "'%s'," "${killed_run_ids[@]}")
+    quoted_ids="${quoted_ids%,}"
+    while IFS=$'\t' read -r run_id pid pgid command; do
+      [[ -z "$pid" || "$pid" == "0" ]] && continue
+      is_llm_cli "$command" || continue
+      if /bin/kill -0 "$pid" 2>/dev/null; then
+        local target="$pid"
+        if [[ "$pgid" =~ ^[0-9]+$ && "$pgid" != "0" ]]; then
+          target="-$pgid"
+        fi
+        log "STALE_CLI: SIGKILL survivor run=$run_id pid=$pid target=$target"
+        /bin/kill -KILL "$target" 2>/dev/null || true
+      fi
+    done < <(
+      /usr/bin/sqlite3 -separator $'\t' "$DB_PATH" \
+        "SELECT cr.id, COALESCE(mp.pid, 0), COALESCE(mp.pgid, 0), COALESCE(mp.command, '')
+         FROM cli_runs cr
+         LEFT JOIN managed_processes mp ON mp.run_id = cr.id AND mp.settled = 0
+         WHERE cr.id IN ($quoted_ids);" 2>/dev/null || true
+    )
+    # Phase 3: settle managed_processes ONLY for run_ids we actually killed.
+    # (Previous version settled every stale-window run_id, hiding allowlist-skipped
+    # survivors from future cleanup cycles.)
+    /usr/bin/sqlite3 "$DB_PATH" \
+      "UPDATE managed_processes
+         SET settled = 1, settled_at = $(/bin/date +%s%3N)
+       WHERE settled = 0 AND run_id IN ($quoted_ids);" >/dev/null 2>&1 || true
+  fi
+
+  # Phase 4: mark the cli_runs failed regardless (handles the no-child case too).
   local stale_count
   stale_count=$(/usr/bin/sqlite3 "$DB_PATH" \
     "UPDATE cli_runs SET status = 'failed', error = 'watchdog: stale run cleanup'
-     WHERE status = 'running' AND started_at < (CAST(strftime('%s','now','-2 hours') AS INTEGER) * 1000);
+     WHERE status = 'running' AND started_at < $cutoff_ms;
      SELECT changes();" 2>/dev/null || echo 0)
   if [[ "$stale_count" -gt 0 ]] 2>/dev/null; then
-    log "CLEANUP: marked ${stale_count} stale cli_runs as failed"
+    log "CLEANUP: marked ${stale_count} stale cli_runs failed (killed=${killed} skipped=${skipped})"
   fi
 }
 
@@ -1396,6 +1507,8 @@ run_once() {
       check_disk_space || true
       check_memory || true
       check_docker_health || true
+      log_system_stats || true
+      cleanup_stale_cli_runs || true
       exit 0
     fi
 

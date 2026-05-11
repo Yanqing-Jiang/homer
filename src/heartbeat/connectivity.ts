@@ -89,16 +89,29 @@ export class ConnectivityMonitor {
       return { name: "Telegram", healthy: false, error: "Bot not configured", checkedAt };
     }
 
+    // grammy bot.api.getMe() inherits its fetch retry config from the bot's
+    // global apiConfig; without an explicit AbortSignal a transient hiccup at
+    // api.telegram.org can hang past the connectivity check's hourly cadence
+    // and trip a false alarm. Bound it to 8s — well under the alert threshold.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
     try {
-      await this.bot.api.getMe();
+      // Cast: grammy types use the abort-controller polyfill's AbortSignal,
+      // which is structurally compatible with the native one at runtime.
+      await this.bot.api.getMe(controller.signal as unknown as Parameters<typeof this.bot.api.getMe>[0]);
       return { name: "Telegram", healthy: true, latencyMs: Date.now() - startTime, checkedAt };
     } catch (error) {
+      const isAbort = error instanceof Error && error.name === "AbortError";
       return {
         name: "Telegram",
         healthy: false,
-        error: error instanceof Error ? error.message : "Unknown error",
+        error: isAbort
+          ? "getMe timed out after 8s"
+          : (error instanceof Error ? error.message : "Unknown error"),
         checkedAt,
       };
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
