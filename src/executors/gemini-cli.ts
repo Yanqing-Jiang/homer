@@ -106,6 +106,9 @@ export interface GeminiCLIDirectOptions {
   cwd?: string;
   outputFormat?: "text" | "json" | "stream-json";
   role?: "research";
+  /** Homer run identifier — propagated into ProcessRegistry so watchdog/cleanup-scheduler
+   *  can join managed_processes.run_id → cli_runs.id when reaping corpses. */
+  runId?: string;
 }
 
 export interface GeminiCLIDirectResult extends ExecutorResult {
@@ -956,6 +959,7 @@ async function runGeminiProcess(
   signal: AbortSignal | undefined,
   runtimeHome: string,
   outputFormat?: "text" | "json" | "stream-json",
+  runId?: string,
 ): Promise<GeminiProcessResult> {
   return new Promise((resolve) => {
     // Pass prompt via stdin to avoid OS ARG_MAX / yargs parsing failures on large prompts.
@@ -1002,6 +1006,7 @@ async function runGeminiProcess(
       type: "executor",
       timeoutMs,
       source: "scheduler",
+      runId,
     });
 
     let stdout = "";
@@ -1081,6 +1086,7 @@ export async function executeGeminiCLIDirect(
     cwd = "/tmp",
     outputFormat,
     role,
+    runId,
   } = options;
 
   // Enforce 20min floor for all models; Flash gets 15min, Pro gets 20min
@@ -1238,6 +1244,7 @@ export async function executeGeminiCLIDirect(
             signal,
             runtimeHome,
             outputFormat,
+            runId,
           );
           const cleanedOutput = sanitizeGeminiOutput(run.stdout);
           const cleanedErr = sanitizeGeminiOutput(run.stderr);

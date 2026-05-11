@@ -13,6 +13,9 @@ export interface KimiCLIOptions {
   yolo?: boolean;
   workDir?: string;
   signal?: AbortSignal;
+  /** Homer run identifier — propagated into ProcessRegistry so watchdog/cleanup-scheduler
+   *  can join managed_processes.run_id → cli_runs.id when reaping corpses. */
+  runId?: string;
 }
 
 export interface KimiCLIResult extends ExecutorResult {
@@ -40,6 +43,7 @@ export async function executeKimiCLI(
     yolo = true,
     workDir,
     signal,
+    runId,
   } = options;
 
   const resolvedModel = model ?? "moonshot-ai/kimi-k2.5";
@@ -100,6 +104,7 @@ export async function executeKimiCLI(
       timeoutMs: timeout,
       source: "cli-runner",
       detached: true,
+      runId,
     });
 
     let stdout = "";

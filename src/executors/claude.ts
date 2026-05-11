@@ -45,6 +45,9 @@ export interface ClaudeExecutorOptions {
   model?: string; // Model override (e.g., "sonnet", "opus")
   signal?: AbortSignal;
   timeout?: number; // Override default/subagent timeout
+  /** Homer run identifier — propagated into ProcessRegistry so watchdog/cleanup-scheduler
+   *  can join managed_processes.run_id → cli_runs.id when reaping corpses. */
+  runId?: string;
   /** Called with cumulative text as assistant content streams in */
   onPartial?: (text: string) => void;
   /** Called with structured step events (tool_use, tool_result, thinking) */
@@ -141,7 +144,7 @@ export async function executeClaudeCommand(
   options: ClaudeExecutorOptions
 ): Promise<ClaudeExecutorResult> {
   const startTime = Date.now();
-  const { cwd, claudeSessionId, subagent, model, signal } = options;
+  const { cwd, claudeSessionId, subagent, model, signal, runId } = options;
 
   // Use explicit timeout, then subagent-specific, then default
   const timeout = options.timeout
@@ -223,6 +226,7 @@ export async function executeClaudeCommand(
       timeoutMs: timeout,
       source: "cli-runner",
       detached: true,
+      runId,
     });
 
     let stdout = "";
