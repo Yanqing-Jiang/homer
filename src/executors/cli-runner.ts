@@ -410,6 +410,7 @@ ${pendingContext.context}
               claudeSessionId: undefined,
               model: undefined,
               signal: abortController.signal,
+              runId,
               onPartial: params.onPartial,
               onEvent: params.onEvent,
             });
@@ -437,6 +438,7 @@ ${pendingContext.context}
               signal: abortController.signal,
               sandbox: true,
               yolo: true,
+              runId,
               onPartial: params.onPartial,
             });
             return {
@@ -455,6 +457,7 @@ ${pendingContext.context}
               timeout: 1800000,
               signal: abortController.signal,
               sessionId: executorKind === executor ? sessionId ?? undefined : undefined,
+              runId,
               onMessageChunk: params.onMessageChunk
                 ? ({ id, phase, delta }) => {
                     params.onMessageChunk?.({
@@ -484,6 +487,7 @@ ${pendingContext.context}
               yolo: true,
               sandbox: true,
               signal: abortController.signal,
+              runId,
               onPartial: params.onPartial,
             });
             return {
@@ -500,6 +504,7 @@ ${pendingContext.context}
             timeout: 1200000,
             yolo: true,
             workDir: params.cwd,
+            runId,
           });
           return {
             output: result.output,

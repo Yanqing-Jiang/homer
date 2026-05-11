@@ -506,6 +506,8 @@ async function executeClaudeJob(
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let resultContent = "";
+    let streamedTextContent = ""; // accumulated text blocks across all assistant turns
+    let finalResult = ""; // event.type === "result" payload (often just last-turn meta)
     let timedOut = false;
     let settled = false;
 
@@ -542,18 +544,27 @@ async function executeClaudeJob(
 
         // Capture assistant message content (only if string, not array of blocks)
         if (event.type === "assistant" && typeof event.message?.content === "string") {
-          resultContent += event.message.content;
+          streamedTextContent += event.message.content;
         }
 
-        // Capture final result
+        // Capture final result separately. Claude CLI's `result` event contains
+        // only the LAST assistant turn's text — when a job's last turn is a
+        // meta-comment (e.g. "Late Flash completed, no action needed"), this
+        // would otherwise overwrite the real streamed deliverable. Keep both
+        // and let finalize() pick the substantial one.
         if (event.type === "result" && event.result) {
-          resultContent = event.result;
+          finalResult = event.result;
         }
 
         // Emit progress for tool usage (content is in event.message.content for stream-json)
-        const contentBlocks = event.message?.content as Array<{ type: string; name?: string; input?: Record<string, unknown> }> | undefined;
+        const contentBlocks = event.message?.content as Array<{ type: string; name?: string; input?: Record<string, unknown>; text?: string }> | undefined;
         if (event.type === "assistant" && contentBlocks && Array.isArray(contentBlocks)) {
           for (const block of contentBlocks) {
+            // Capture text-block content too — stream-json puts assistant text
+            // here when the message has any tool_use blocks alongside it.
+            if (block.type === "text" && typeof block.text === "string") {
+              streamedTextContent += block.text;
+            }
             if (block.type === "tool_use") {
               const toolName = block.name || "unknown";
 
@@ -611,14 +622,38 @@ async function executeClaudeJob(
 
       const completedAt = new Date();
       const duration = completedAt.getTime() - startedAt.getTime();
-      let output = resultContent.trim() || stdout.trim();
-      const success = !timedOut && !error && exitCode === 0;
+
+      // Prefer the longer of streamed text (full transcript) vs. finalResult
+      // (last-turn only). If finalResult is a tiny meta-comment but streaming
+      // captured a full deliverable, we want the deliverable. Fall back to
+      // legacy resultContent / stdout for non-stream-json executions.
+      const streamed = streamedTextContent.trim();
+      const final = finalResult.trim();
+      const bestStream = streamed.length >= final.length ? streamed : final;
+      let output = bestStream || resultContent.trim() || stdout.trim();
+
+      let success = !timedOut && !error && exitCode === 0;
 
       let errorMessage = error;
       if (timedOut) {
         errorMessage = `Job timed out after ${timeout / 1000}s`;
       } else if (exitCode !== 0 && !error) {
         errorMessage = `Exit code ${exitCode}`;
+      }
+
+      // minOutputLength guard: prevents the "meta-comment as deliverable" silent
+      // failure (e.g. morning-brief sending "Late Flash completed" instead of
+      // the actual brief). Only flips success→failure; never the reverse.
+      if (success && config.minOutputLength && output.length < config.minOutputLength) {
+        success = false;
+        errorMessage =
+          `Output too short (${output.length} chars, expected ≥ ${config.minOutputLength}). ` +
+          `Likely the executor returned a meta-comment instead of the deliverable. ` +
+          `Streamed=${streamed.length} final=${final.length}.`;
+        logger.warn(
+          { jobId: config.id, outputLength: output.length, minOutputLength: config.minOutputLength, streamedLength: streamed.length, finalLength: final.length, outputPreview: output.slice(0, 200) },
+          "Job flagged failed by minOutputLength guard"
+        );
       }
 
       if (stderr.trim()) {

@@ -14,6 +14,9 @@ export interface CodexCLIOptions {
   sessionId?: string;
   model?: string;
   reasoningEffort?: string;
+  /** Homer run identifier — propagated into ProcessRegistry so watchdog/cleanup-scheduler
+   *  can join managed_processes.run_id → cli_runs.id when reaping corpses. */
+  runId?: string;
   /** Called with cumulative text as codex streams tokens */
   onPartial?: (text: string) => void;
   /** Called with phased message chunks so commentary and final answer stay separate */
@@ -106,6 +109,7 @@ export async function executeCodexCLI(
     sessionId,
     model,
     reasoningEffort = "high",
+    runId,
     onPartial,
     onMessageChunk,
     onEvent,
@@ -152,6 +156,7 @@ export async function executeCodexCLI(
       timeoutMs: timeout,
       source: "cli-runner",
       detached: true,
+      runId,
     });
 
     let stdout = "";
