@@ -6,7 +6,7 @@ import { writeInternalTrace } from "../executors/trace-writer.js";
 import { sendBatchIdeasForReview } from "../bot/handlers/approval.js";
 import { presentOvernightSummaries } from "../bot/handlers/overnight.js";
 import { ingestIdeasFromLegacy } from "../ideas/ingest.js";
-import { dedupeIdeasDir } from "../ideas/dedup.js";
+import { dedupeIdeasDir, expireStaleIdeas } from "../ideas/dedup.js";
 import { runSessionSummary } from "./jobs/session-summaries.js";
 import { runWeeklyConsolidation } from "./jobs/weekly-consolidation.js";
 import { runWeeklyMemoryCleanup } from "./jobs/memory-cleanup.js";
@@ -207,7 +207,7 @@ const RETRYABLE_HANDLERS = new Set([
   "weekly_memory_audit", "homer_improvements", "session_summaries", "weekly_consolidation",
   "mentor_layer", "career_truth",
   "memory_cleanup", "content_scraper", "outcome_tracker",
-  "preference_updater", "idea_dedup", "nightly_code_push", "db_backup",
+  "preference_updater", "idea_dedup", "idea_expiry", "nightly_code_push", "db_backup",
   "idea_synthesizer", "idea_deep_linker", "link_processor", "archive_verify", "health_check",
   "harness_auto_improve", "decision_journal",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
@@ -699,6 +699,47 @@ async function runHandler(
           startedAt,
           true,
           output,
+          undefined,
+          { notificationIntent: "operational_status" }
+        );
+      }
+      case "idea_expiry": {
+        const result = expireStaleIdeas(ctx.stateManager.getDb(), 70);
+
+        // High-volume rescue alert: >5 archives in one run gets a Telegram with row IDs.
+        // <=5 is silent — the run log is enough. Honesty contract: cite IDs, not just titles.
+        if (result.archived.length > 5 && ctx.bot && ctx.chatId) {
+          const visible = result.archived.slice(0, 25);
+          const lines = visible
+            .map((idea) => `- ${idea.id}: ${idea.title}`)
+            .join("\n");
+          const overflow = result.archived.length > visible.length
+            ? `\n…and ${result.archived.length - visible.length} more.`
+            : "";
+          const messageText =
+            `Idea auto-expiry archived ${result.archived.length} ideas (>70d untouched).\n` +
+            `Reversible: set status back to draft to revive.\n\n` +
+            `${lines}${overflow}`;
+
+          await routeTelegramNotification({
+            db: ctx.stateManager.getDb(),
+            sourceType: "scheduler_job",
+            sourceId: job.config.id,
+            jobRunId: ctx.jobRunId,
+            intent: "decision_request",
+            title: "Idea auto-expiry review",
+            messageText,
+            deliver: async () => {
+              return ctx.bot!.api.sendMessage(ctx.chatId!, messageText);
+            },
+          });
+        }
+
+        return buildResult(
+          job,
+          startedAt,
+          true,
+          result.output,
           undefined,
           { notificationIntent: "operational_status" }
         );

@@ -1,9 +1,9 @@
 /**
- * Bi-weekly content scraper for Medium and LinkedIn profiles.
+ * Weekly content scraper for Medium and LinkedIn profiles.
  * Scrapes Yanqing's published posts via RSS (Medium) and browser automation (LinkedIn),
  * diffs against existing corpus, tracks engagement metrics, and captures trending content.
  *
- * Schedule: Monday + Thursday 6am (0 6 * * 1,4)
+ * Schedule: Thursday 10pm PT (0 22 * * 4)
  *
  * P0 fixes applied from 5-agent swarm review (2026-02-20):
  * - Medium RSS as primary source (browser fallback moved into Phase 2 parallel block)
