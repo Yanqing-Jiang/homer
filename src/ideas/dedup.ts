@@ -32,7 +32,7 @@ const DENY_HISTORY_FILE = PATHS.denyHistory;
 // One LLM call per run — avoids consuming full job timeout on retries
 const MAX_LLM_CALLS = 1;
 
-type IdeaStatus = "draft" | "review" | "discussion" | "planning" | "execution" | "archived";
+type IdeaStatus = "draft" | "review" | "exploring" | "discussion" | "planning" | "execution" | "archived";
 
 interface Idea {
   id: string;
@@ -501,4 +501,86 @@ export async function dedupeIdeasFile(): Promise<{ merged: number; archived: num
     archived: 0,  // We now delete instead of archive
     blocklistAdded: result.blocklistAdded,
   };
+}
+
+/**
+ * Stale-idea soft-archive.
+ *
+ * Auto-archives `draft|review|exploring` ideas whose `updated_at` is older
+ * than `maxAgeDays` and which are unlinked + unpublished + unclustered.
+ * Reversible: only sets `status='archived'`, `archived_at`, `archive_reason`
+ * — never deletes the row, so `memory_search` can still surface it and the
+ * user can revive via UI/MCP by setting status back to 'draft'.
+ *
+ * Schema requirements: `ideas.archived_at` and `ideas.archive_reason` must
+ * exist (migration 094). Optional guards (`published_url`, `cluster_size`)
+ * are applied if those columns are present.
+ */
+export interface ExpiredIdea {
+  id: string;
+  title: string;
+  updated_at: string | null;
+}
+
+export function expireStaleIdeas(
+  db: Database.Database,
+  maxAgeDays = 70
+): { archived: ExpiredIdea[]; output: string } {
+  const columnRows = db.prepare("PRAGMA table_info(ideas)").all() as Array<{ name: string }>;
+  const columns = new Set(columnRows.map((r) => r.name));
+
+  if (!columns.has("archived_at") || !columns.has("archive_reason")) {
+    throw new Error("ideas.archived_at and ideas.archive_reason are required for expireStaleIdeas (migration 094)");
+  }
+
+  const where: string[] = [
+    "status IN ('draft','review','exploring')",
+    "linked_plan_id IS NULL",
+    `updated_at < datetime('now', '-' || @maxAgeDays || ' days')`,
+  ];
+  if (columns.has("published_url")) {
+    where.push("(published_url IS NULL OR published_url = '')");
+  }
+  if (columns.has("cluster_size")) {
+    where.push("(cluster_size IS NULL OR cluster_size = 1)");
+  }
+
+  return db.transaction(() => {
+    const candidates = db
+      .prepare(`SELECT id, title, updated_at FROM ideas WHERE ${where.join(" AND ")} ORDER BY updated_at`)
+      .all({ maxAgeDays }) as ExpiredIdea[];
+
+    if (candidates.length === 0) {
+      return { archived: [], output: "No stale ideas to archive." };
+    }
+
+    const ids = candidates.map((idea) => idea.id);
+    const placeholders = ids.map(() => "?").join(",");
+
+    db.prepare(`
+      UPDATE ideas
+      SET status = 'archived',
+          archived_at = datetime('now'),
+          archive_reason = 'expired:${maxAgeDays}d',
+          updated_at = datetime('now')
+      WHERE id IN (${placeholders})
+    `).run(...ids);
+
+    // Keep idea_index mirror aligned (best-effort; ignore if table missing or column subset differs)
+    try {
+      db.prepare(`
+        UPDATE idea_index
+        SET status = 'archived',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id IN (${placeholders})
+      `).run(...ids);
+    } catch (err) {
+      logger.warn({ err }, "idea_index mirror update failed (non-fatal)");
+    }
+
+    return {
+      archived: candidates,
+      output: `Archived ${candidates.length} stale idea${candidates.length === 1 ? "" : "s"} older than ${maxAgeDays} days.`,
+    };
+  })();
 }
