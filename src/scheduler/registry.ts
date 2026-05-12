@@ -100,6 +100,7 @@ const SCHEDULED_INLINE_ONLY: JobEntry[] = [
   { id: "daily-ideas-review", name: "Daily Ideas Review", kind: "internal", handler: "ideas_review", expectedInSchedule: true, note: "disabled" },
   { id: "health-check", name: "Health Check", kind: "internal", handler: "health_check", expectedInSchedule: true },
   { id: "idea-dedup", name: "Idea Dedup", kind: "internal", handler: "idea_dedup", expectedInSchedule: true },
+  { id: "idea-expiry", name: "Idea Auto-Expiry", kind: "internal", handler: "idea_expiry", expectedInSchedule: true },
   { id: "idea-ingest", name: "Idea Ingest", kind: "internal", handler: "idea_ingest", expectedInSchedule: true },
   { id: "job-hunt-daily-approval", name: "Job Hunt Daily Approval", kind: "internal", handler: "job_hunt_daily_approval", expectedInSchedule: true, note: "disabled" },
   { id: "job-hunt-stalled-check", name: "Job Hunt Stalled Check", kind: "internal", handler: "job_hunt_stalled_check", expectedInSchedule: true, note: "disabled" },
