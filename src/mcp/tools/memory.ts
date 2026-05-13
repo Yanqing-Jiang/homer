@@ -10,7 +10,6 @@ import { existsSync } from "fs";
 import { PATHS } from "../../config/paths.js";
 import { logger } from "../../utils/logger.js";
 import * as ideaDao from "../../ideas/dao.js";
-import { loadPlansFromDir } from "../../plans/parser.js";
 import { getTopPreferences } from "../../preferences/engine.js";
 import type { ToolResult, ToolDeps, ToolDefinition } from "./types.js";
 import type { CanonicalFileKey } from "../../memory/registry.js";
@@ -724,12 +723,21 @@ export async function handle(
         }
       } catch { /* threads table may not exist */ }
 
-      const plans = loadPlansFromDir();
-      const activePlans = plans.filter(p => p.status === "execution" || p.status === "planning");
-      if (activePlans.length > 0) {
-        sections.push(`\n## Active Plans (${activePlans.length})`);
-        for (const p of activePlans) sections.push(`- ${p.title} (${p.completedTasks}/${p.totalTasks})`);
-      }
+      try {
+        const todos = sm.getDb().prepare(`
+          SELECT title, category, priority, updated_at
+          FROM todo_index
+          WHERE status = 'open'
+          ORDER BY
+            CASE priority WHEN 'P1' THEN 0 WHEN 'P2' THEN 1 ELSE 2 END,
+            datetime(updated_at) DESC
+          LIMIT 10
+        `).all() as Array<{ title: string; category: string; priority: string; updated_at: string }>;
+        if (todos.length > 0) {
+          sections.push(`\n## Active To-Dos (${todos.length})`);
+          for (const t of todos) sections.push(`- [${t.priority}/${t.category}] ${t.title}`);
+        }
+      } catch { /* todo_index may not exist before migration 095 runs */ }
 
       const reviewIdeas = ideaDao.getAllIdeas(sm.getDb(), { status: "review", limit: 3 });
       if (reviewIdeas.length > 0) {
