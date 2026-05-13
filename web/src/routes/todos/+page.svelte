@@ -221,7 +221,32 @@
 		startingChat = true;
 		try {
 			const r = await api.startTodoThread(t.id);
-			goto(`/?session=${r.sessionId}&thread=${r.threadId}`);
+			// Prefill the composer with a blockquoted view of the todo so the user
+			// can edit/append before sending. Cursor lands on the trailing blank line.
+			const lines: string[] = [`> **${t.title}**`];
+			if (t.notes && t.notes.trim().length > 0) {
+				lines.push('>');
+				for (const line of t.notes.split('\n')) {
+					lines.push(`> ${line}`);
+				}
+			}
+			lines.push('', '');
+			const prefill = lines.join('\n');
+
+			// Long notes can blow past safe URL lengths — hand off via sessionStorage
+			// when that risk exists; main page reads it in the same onMount branch.
+			const qs = new URLSearchParams({ session: r.sessionId, thread: r.threadId });
+			if (prefill.length > 1500) {
+				sessionStorage.setItem('resume_session', JSON.stringify({
+					sessionId: r.sessionId,
+					threadId: r.threadId,
+				}));
+				sessionStorage.setItem('pending_prefill', prefill);
+				goto('/');
+			} else {
+				qs.set('prefill', prefill);
+				goto(`/?${qs}`);
+			}
 		} catch (e) {
 			toast.error(e instanceof Error ? e.message : 'Failed to start chat');
 		} finally {
