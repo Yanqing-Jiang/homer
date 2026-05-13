@@ -13,11 +13,11 @@ import { DEFAULT_JOB_TIMEOUT } from "../scheduler/types.js";
 import { registerSessionRoutes } from "./api/sessions.js";
 import { registerStreamingRoutes } from "./api/streaming.js";
 import { registerIdeasRoutes } from "./api/ideas.js";
-import { registerPlansRoutes } from "./api/plans.js";
+import { registerTodosRoutes } from "./api/todos.js";
 import { registerJobsRoutes, setJobsScheduler } from "./api/jobs.js";
 import { registerMeetingsRoutes, setMeetingsManager } from "./api/meetings.js";
 import { registerUploadsRoutes } from "./api/uploads.js";
-import { registerClaudeHistoryRoutes } from "./api/claude-history.js";
+import { registerTranscribeRoutes } from "./api/transcribe.js";
 import { registerProposalRoutes } from "./routes/proposals.js";
 import { registerCommandRoutes } from "./api/commands.js";
 import { registerRunRoutes } from "./api/runs.js";
@@ -160,8 +160,8 @@ export function createRoutes(
   // Register ideas routes
   registerIdeasRoutes(server, stateManager);
 
-  // Register plans routes
-  registerPlansRoutes(server, stateManager);
+  // Register todos routes
+  registerTodosRoutes(server, stateManager);
 
   // Register jobs routes (calendar view, job management)
   registerJobsRoutes(server, stateManager);
@@ -172,8 +172,8 @@ export function createRoutes(
   // Register uploads routes
   registerUploadsRoutes(server);
 
-  // Register Claude Code history routes
-  registerClaudeHistoryRoutes(server);
+  // Register local STT route (/api/transcribe via whisper.cpp + ffmpeg)
+  registerTranscribeRoutes(server);
 
   // Register proposal management routes (discovery -> approval workflow)
   registerProposalRoutes(server, stateManager);

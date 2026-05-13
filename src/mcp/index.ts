@@ -19,7 +19,7 @@ import { getCanonicalMemoryService } from "../memory/canonical-service.js";
 // Tool modules
 import * as memoryTools from "./tools/memory.js";
 import * as ideaTools from "./tools/ideas.js";
-import * as planTools from "./tools/plans.js";
+import * as todoTools from "./tools/todos.js";
 import * as blobTools from "./tools/blob.js";
 import * as sessionTools from "./tools/sessions.js";
 import * as meetingTools from "./tools/meetings.js";
@@ -57,7 +57,7 @@ const canonicalMemory = getCanonicalMemoryService(getSharedStateManager(), index
 const deps: ToolDeps = { getSharedStateManager, indexer, getAzureBlob, canonicalMemory };
 
 // All tool modules in dispatch order
-const toolModules = [memoryTools, ideaTools, planTools, blobTools, sessionTools, meetingTools, callTools];
+const toolModules = [memoryTools, ideaTools, todoTools, blobTools, sessionTools, meetingTools, callTools];
 
 const server = new Server(
   { name: "homer-memory", version: "1.0.0" },

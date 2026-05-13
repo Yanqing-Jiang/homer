@@ -10,9 +10,7 @@ import {
 import * as dao from "../../ideas/dao.js";
 import * as packetDao from "../../ideas/source-packets.js";
 import * as discussionDao from "../../ideas/discussions.js";
-import { join } from "path";
 import { recordFeedback } from "../../feedback/events.js";
-import { PATHS } from "../../config/paths.js";
 import { webLane } from "../../utils/lanes.js";
 import { getCurrentFocus } from "../../memory/session-bootstrap.js";
 
@@ -541,20 +539,21 @@ Ask a question, challenge an assumption, or say "connect this" when you want to 
     };
   });
 
-  // Convert idea to plan
-  interface CreatePlanBody {
-    title: string;
+  // Promote an idea to a To-Do (replaces the legacy /:id/plan route).
+  // Body shape kept compatible with the old plan-promotion call so old clients
+  // can still call this endpoint; phases/tasks collapse into the todo notes body.
+  interface PromoteTodoBody {
+    title?: string;
     description?: string;
-    phases?: Array<{
-      name: string;
-      tasks?: string[];
-    }>;
+    category?: "W" | "L";
+    priority?: "P1" | "P2" | "P3";
+    phases?: Array<{ name: string; tasks?: string[] }>;
     explorationSummary?: string;
   }
 
   server.post("/api/ideas/:id/plan", async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = request.params as { id: string };
-    const body = request.body as CreatePlanBody;
+    const body = (request.body ?? {}) as PromoteTodoBody;
 
     const idea = dao.getIdea(db, id);
     if (!idea) {
@@ -562,67 +561,39 @@ Ask a question, challenge an assumption, or say "connect this" when you want to 
       return { error: "Idea not found" };
     }
 
-    const planTitle = body.title || idea.title;
-    const planDescription = body.description || idea.content;
+    const title = body.title || idea.title;
+    const description = body.description || idea.content || "";
 
-    const slug = planTitle
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "");
-
-    const now = new Date().toISOString().split("T")[0];
-    const PLANS_DIR = PATHS.plans;
-    const planPath = join(PLANS_DIR, `${slug}.md`);
-
-    let planContent = `# ${planTitle}
-
-**Status:** planning
-**Created:** ${now}
-**Updated:** ${now}
-**Source Idea:** ${idea.id}
-`;
-
+    const notesParts: string[] = [];
+    if (description) notesParts.push(description);
     if (body.phases && body.phases.length > 0) {
-      planContent += `**Current Phase:** ${body.phases[0]?.name || "Phase 1"}\n`;
-    }
-
-    planContent += `\n## Description\n\n${planDescription}\n`;
-
-    if (body.phases && body.phases.length > 0) {
-      for (let i = 0; i < body.phases.length; i++) {
-        const phase = body.phases[i];
+      const checklist: string[] = [];
+      for (const phase of body.phases) {
         if (!phase) continue;
-        planContent += `\n## Phase ${i + 1}: ${phase.name}\n\n`;
-        if (phase.tasks && phase.tasks.length > 0) {
-          for (const task of phase.tasks) {
-            planContent += `- [ ] ${task}\n`;
-          }
-        } else {
-          planContent += `- [ ] Define tasks for this phase\n`;
+        checklist.push(`### ${phase.name}`);
+        for (const task of phase.tasks ?? []) {
+          checklist.push(`- [ ] ${task}`);
         }
       }
-    } else {
-      planContent += `\n## Phase 1: Planning\n\n- [ ] Define detailed requirements\n- [ ] Identify resources needed\n`;
-      planContent += `\n## Phase 2: Execution\n\n- [ ] Implement core functionality\n- [ ] Test and validate\n`;
-      planContent += `\n## Phase 3: Review\n\n- [ ] Review outcomes\n- [ ] Document learnings\n`;
+      if (checklist.length > 0) notesParts.push(checklist.join("\n"));
     }
+    const notes = notesParts.join("\n\n");
 
-    const { mkdirSync, existsSync, writeFileSync } = await import("fs");
-    if (!existsSync(PLANS_DIR)) {
-      mkdirSync(PLANS_DIR, { recursive: true });
-    }
-    writeFileSync(planPath, planContent, "utf-8");
-
-    // Append exploration summary
-    if (body.explorationSummary) {
-      dao.appendExplorationNotes(db, idea.id, `**Plan Created:** ${slug}\n\n${body.explorationSummary}`);
-    }
-
-    // Update idea status and link to plan
-    dao.updateIdea(db, idea.id, {
-      status: "planning",
-      linkedPlanId: slug,
+    const { saveTodo } = await import("../../todos/dao.js");
+    const todo = saveTodo(db, {
+      title,
+      notes,
+      category: body.category ?? "W",
+      priority: body.priority ?? "P2",
+      source: "idea",
+      sourceIdeaId: idea.id,
     });
+
+    if (body.explorationSummary && todo) {
+      dao.appendExplorationNotes(db, idea.id, `**Promoted to To-Do:** ${todo.id}\n\n${body.explorationSummary}`);
+    }
+
+    dao.updateIdea(db, idea.id, { status: "planning" });
 
     try {
       recordFeedback(db, {
@@ -631,15 +602,17 @@ Ask a question, challenge an assumption, or say "connect this" when you want to 
         action: "plan_create",
         source: "web_ui",
         delta: 0.2,
-        metadata: { planId: slug },
+        metadata: { todoId: todo?.id },
       });
     } catch { /* best-effort */ }
 
     reply.status(201);
     return {
-      planId: slug,
-      planPath,
-      message: "Plan created successfully",
+      // Legacy fields preserved so old clients keep working.
+      planId: todo?.id,
+      planPath: null,
+      todoId: todo?.id,
+      message: "Idea promoted to To-Do",
     };
   });
 

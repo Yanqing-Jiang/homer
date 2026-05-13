@@ -315,6 +315,73 @@
 		isDeploying = false;
 	}
 
+	/**
+	 * /todo <title> [P1|P2|P3] [W|L]
+	 * Trailing P1/P2/P3 and W/L tokens are extracted; everything else is the title.
+	 * Bypasses the LLM — calls createTodo() directly and renders an inline pill.
+	 */
+	async function handleTodoCommand(args: string) {
+		const raw = args.trim();
+		messages = [
+			...messages,
+			{ role: 'user', content: `/todo ${raw}`.trim(), timestamp: new Date() }
+		];
+
+		if (!raw) {
+			messages = [...messages, {
+				role: 'assistant',
+				content: 'Usage: `/todo <title> [P1|P2|P3] [W|L]`',
+				timestamp: new Date()
+			}];
+			return;
+		}
+
+		// Strip trailing P1/P2/P3 and W/L tokens from the title.
+		let priority: api.TodoPriority = 'P3';
+		let category: api.TodoCategory = 'W';
+		const tokens = raw.split(/\s+/);
+		while (tokens.length > 1) {
+			const last = tokens[tokens.length - 1]?.toUpperCase() ?? '';
+			if (last === 'P1' || last === 'P2' || last === 'P3') {
+				priority = last as api.TodoPriority;
+				tokens.pop();
+			} else if (last === 'W' || last === 'L') {
+				category = last as api.TodoCategory;
+				tokens.pop();
+			} else {
+				break;
+			}
+		}
+		const title = tokens.join(' ').trim();
+		if (!title) {
+			messages = [...messages, {
+				role: 'assistant',
+				content: 'Usage: `/todo <title> [P1|P2|P3] [W|L]`',
+				timestamp: new Date()
+			}];
+			return;
+		}
+
+		try {
+			const { todo } = await api.createTodo({ title, priority, category });
+			const catLabel = todo.category === 'W' ? 'Work' : 'Life';
+			messages = [...messages, {
+				role: 'assistant',
+				content: `✓ Added ${catLabel} ${todo.priority} todo: **${todo.title}** — [open To-Dos](/todos)`,
+				timestamp: new Date()
+			}];
+			toast.success(`Added ${todo.priority} todo`);
+		} catch (e) {
+			const err = e instanceof Error ? e.message : 'Unknown error';
+			messages = [...messages, {
+				role: 'assistant',
+				content: `Failed to create todo: ${err}`,
+				timestamp: new Date()
+			}];
+			toast.error('Failed to create todo');
+		}
+	}
+
 	// Full-page drag-drop state
 	let pageDragCounter = $state(0);
 
@@ -492,9 +559,8 @@
 
 	// Sidebar navigation items
 	const sidebarItems = [
-		{ name: 'Sessions', icon: 'chat', href: '/sessions' },
+		{ name: 'To-Dos', icon: 'clipboard', href: '/todos' },
 		{ name: 'Ideas', icon: 'lightbulb', href: '/ideas' },
-		{ name: 'Plans', icon: 'clipboard', href: '/plans' },
 		{ name: 'Jobs', icon: 'clock', href: '/jobs' },
 		{ name: 'Trading', icon: 'chart', href: '/trading' }
 	];
@@ -519,8 +585,8 @@
 	let pendingContext = $state<{ type: 'session'; data: string } | null>(null);
 	let pendingMessage = $state<string | null>(null);
 
-	// Check for context passed from Ideas or Sessions pages
-	// Read values immediately but defer removal until auth confirms
+	// Check for context passed in via URL params (e.g. from Ideas) or sessionStorage.
+	// Read values immediately but defer removal until auth confirms.
 	onMount(() => {
 		// Check URL params first (preferred), then fallback to sessionStorage
 		const urlParams = new URLSearchParams(window.location.search);
@@ -974,6 +1040,13 @@
 					await handleDeploy();
 					return;
 				}
+
+				// Handle /todo command — client-side intercept, no LLM
+				if (matchedCmd.name === '/todo') {
+					chatInput = '';
+					await handleTodoCommand(queryPart);
+					return;
+				}
 			}
 		}
 
@@ -1311,11 +1384,7 @@
 				<nav class="sidebar-nav">
 					{#each sidebarItems as item}
 						<a href={item.href} class="sidebar-item">
-							{#if item.icon === 'chat'}
-								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
-									<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-								</svg>
-							{:else if item.icon === 'lightbulb'}
+							{#if item.icon === 'lightbulb'}
 								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
 									<path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
 								</svg>
