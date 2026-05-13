@@ -584,6 +584,9 @@
 	// Stored context from sessionStorage (read once, use when auth completes)
 	let pendingContext = $state<{ type: 'session'; data: string } | null>(null);
 	let pendingMessage = $state<string | null>(null);
+	// Prefill: like pendingMessage, but typed into the composer instead of auto-sent.
+	// Used by Todos → "Start chat" so the user can edit the quoted todo before sending.
+	let pendingPrefill = $state<string | null>(null);
 
 	// Check for context passed in via URL params (e.g. from Ideas) or sessionStorage.
 	// Read values immediately but defer removal until auth confirms.
@@ -593,6 +596,7 @@
 		const urlSession = urlParams.get('session');
 		const urlThread = urlParams.get('thread');
 		const urlMessage = urlParams.get('message');
+		const urlPrefill = urlParams.get('prefill');
 
 		if (urlSession) {
 			pendingContext = { type: 'session', data: JSON.stringify({
@@ -601,6 +605,9 @@
 			}) };
 			if (urlMessage) {
 				pendingMessage = urlMessage;
+			}
+			if (urlPrefill) {
+				pendingPrefill = urlPrefill;
 			}
 			// Clean URL params without reload
 			const cleanUrl = window.location.pathname;
@@ -617,6 +624,10 @@
 			if (storedMessage) {
 				pendingMessage = storedMessage;
 			}
+			const storedPrefill = sessionStorage.getItem('pending_prefill');
+			if (storedPrefill) {
+				pendingPrefill = storedPrefill;
+			}
 			contextChecked = true;
 			return;
 		}
@@ -629,11 +640,14 @@
 		if (!auth.loading && auth.isAuthorized && pendingContext) {
 			const ctx = pendingContext;
 			const msgToSend = pendingMessage;
+			const prefillToSet = pendingPrefill;
 			pendingContext = null; // Clear to prevent re-processing
 			pendingMessage = null;
+			pendingPrefill = null;
 
 			sessionStorage.removeItem('resume_session');
 			sessionStorage.removeItem('pending_message');
+			sessionStorage.removeItem('pending_prefill');
 			(async () => {
 				try {
 					const sessionData = JSON.parse(ctx.data);
@@ -656,6 +670,9 @@
 						chatInput = msgToSend;
 						const delay = msgToSend === 'Go' ? 800 + Math.random() * 400 : 50;
 						setTimeout(() => handleSendMessage(), delay);
+					} else if (prefillToSet) {
+						// Prefill the composer but don't send — user edits and sends manually.
+						chatInput = prefillToSet;
 					}
 				} catch (e) {
 					console.error('Failed to restore session:', e);
