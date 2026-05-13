@@ -26,6 +26,7 @@ import { registerWeeklyMemoryAuditHandlers } from "./handlers/weekly-memory-audi
 import { registerCodePushApprovalHandlers } from "./handlers/code-push-approval.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { StateManager } from "../state/manager.js";
+import { saveTodo } from "../todos/dao.js";
 import { sendThinkingIndicator, editWithResponse, TelegramDraftStream, sendFinalResponse, TelegramTypingLoop } from "./streaming.js";
 import { loadBootstrapFiles } from "../memory/loader.js";
 import { getMemoryIndexer } from "../memory/indexer.js";
@@ -381,6 +382,64 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
       await ctx.reply(`✅ Cancelled: "${match.message.slice(0, 50)}..."`);
     } else {
       await ctx.reply(`Failed to cancel: ${idPrefix}`);
+    }
+  });
+
+  // /todo <title> [P1|P2|P3] [W|L]
+  // Trailing P1/P2/P3 and W/L tokens are extracted; everything else is the title.
+  // Defaults: priority=P3, category=W. Writes directly via the todos DAO.
+  bot.command("todo", async (ctx) => {
+    const raw = ctx.match?.trim() || "";
+    if (!raw) {
+      await ctx.reply(
+        "Usage: `/todo <title> [P1|P2|P3] [W|L]`\n\nExample: `/todo Pick up groceries P2 L`",
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    let priority: "P1" | "P2" | "P3" = "P3";
+    let category: "W" | "L" = "W";
+    const tokens = raw.split(/\s+/);
+    while (tokens.length > 1) {
+      const last = tokens[tokens.length - 1]?.toUpperCase() ?? "";
+      if (last === "P1" || last === "P2" || last === "P3") {
+        priority = last;
+        tokens.pop();
+      } else if (last === "W" || last === "L") {
+        category = last;
+        tokens.pop();
+      } else {
+        break;
+      }
+    }
+    const title = tokens.join(" ").trim();
+    if (!title) {
+      await ctx.reply("Title required. Usage: `/todo <title> [P1|P2|P3] [W|L]`", {
+        parse_mode: "Markdown",
+      });
+      return;
+    }
+
+    try {
+      const todo = saveTodo(stateManager.getDb(), {
+        title,
+        priority,
+        category,
+        source: "manual",
+      });
+      if (!todo) {
+        await ctx.reply("Failed to create todo.");
+        return;
+      }
+      const catLabel = todo.category === "W" ? "Work" : "Life";
+      await ctx.reply(
+        `✅ Added ${catLabel} ${todo.priority} todo: *${todo.title}*\nID: \`${todo.id.slice(0, 32)}\``,
+        { parse_mode: "Markdown" }
+      );
+    } catch (e) {
+      logger.error({ error: e, title }, "Telegram /todo failed");
+      await ctx.reply(`Failed to create todo: ${e instanceof Error ? e.message : "Unknown error"}`);
     }
   });
 

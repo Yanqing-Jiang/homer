@@ -40,10 +40,44 @@ jobs:
           VITE_API_BASE: https://owendevstorage.icycoast-7ad83edf.westus2.azurecontainerapps.io
 
       - name: Deploy to Azure Blob Storage
+        env:
+          ACCOUNT: amazonowendevstorage2
+          AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
         run: |
+          set -euo pipefail
+
+          # 1. Upload
           az storage blob upload-batch \
-            --account-name amazonowendevstorage2 \
-            --account-key "${{ secrets.AZURE_STORAGE_KEY }}" \
-            --destination '$web' \
-            --source web/build \
-            --overwrite true
+            --account-name "$ACCOUNT" \
+            --account-key  "$AZURE_STORAGE_KEY" \
+            --destination  '$web' \
+            --source       web/build \
+            --overwrite true \
+            --output none
+
+          # 2. Set Cache-Control on every *.html so the entry point is
+          #    always revalidated (content-hashed assets stay long-cache-safe).
+          for html in $(cd web/build && find . -maxdepth 1 -type f -name '*.html' | sed 's|^\./||'); do
+            az storage blob update \
+              --account-name "$ACCOUNT" \
+              --account-key  "$AZURE_STORAGE_KEY" \
+              --container-name '$web' \
+              --name "$html" \
+              --content-cache "no-cache, must-revalidate" \
+              --output none
+          done
+
+          # 3. Prune blobs no longer in the build (keep staticwebapp.config.json).
+          ( cd web/build && find . -type f | sed 's|^\./||' ) | sort > /tmp/keep.txt
+          az storage blob list --account-name "$ACCOUNT" --container-name '$web' \
+            --account-key "$AZURE_STORAGE_KEY" -o tsv --query '[].name' | sort > /tmp/live.txt
+          comm -23 /tmp/live.txt /tmp/keep.txt | grep -v '^staticwebapp.config.json$' > /tmp/stale.txt || true
+          STALE=$(wc -l < /tmp/stale.txt | tr -d ' ')
+          echo "Pruning $STALE stale blob(s)..."
+          if [ "$STALE" -gt 0 ]; then
+            xargs -I {} -P 16 az storage blob delete \
+              --account-name "$ACCOUNT" \
+              --account-key  "$AZURE_STORAGE_KEY" \
+              --container-name '$web' \
+              --name "{}" --output none < /tmp/stale.txt
+          fi

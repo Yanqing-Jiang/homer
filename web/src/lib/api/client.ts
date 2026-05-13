@@ -544,130 +544,79 @@ export async function createPlanFromIdea(
 }
 
 // ============================================
-// Plans API
+// To-Dos API
 // ============================================
 
-export interface PlanPhase {
-	name: string;
-	status: 'pending' | 'in_progress' | 'completed';
-	tasks: Array<{ text: string; completed: boolean }>;
-}
+export type TodoStatus = 'open' | 'done' | 'archived';
+export type TodoCategory = 'W' | 'L';
+export type TodoPriority = 'P1' | 'P2' | 'P3';
 
-export interface Plan {
+export interface Todo {
 	id: string;
 	title: string;
-	description?: string | null;
-	currentPhase?: string | null;
-	status: string;
-	phases: PlanPhase[];
-	filePath?: string;
-	createdAt?: string;
-	updatedAt?: string;
-	completedTasks?: number;
-	totalTasks?: number;
+	status: TodoStatus;
+	category: TodoCategory;
+	priority: TodoPriority;
+	notes: string;
+	source: string;
+	source_idea_id: string | null;
+	linked_thread_id: string | null;
+	legacy_plan_id: string | null;
+	created_at: string;
+	updated_at: string;
+	completed_at: string | null;
+	archived_at: string | null;
 }
 
-export interface PlanDetail extends Plan {
-	threads?: Thread[];
+export interface TodoSaveInput {
+	id?: string;
+	title?: string;
+	status?: TodoStatus;
+	category?: TodoCategory;
+	priority?: TodoPriority;
+	notes?: string;
+	appendNotes?: string;
+	sourceIdeaId?: string | null;
+	linkedThreadId?: string | null;
 }
 
-// List plans
-export async function listPlans(options?: {
-	status?: string;
+export async function listTodos(options?: {
+	id?: string;
+	status?: TodoStatus | 'all';
+	category?: TodoCategory;
+	priority?: TodoPriority;
 	limit?: number;
-}): Promise<{ plans: Plan[] }> {
+	includeNotes?: boolean;
+}): Promise<{ todos: Todo[] }> {
 	const params = new URLSearchParams();
+	if (options?.id) params.set('id', options.id);
 	if (options?.status) params.set('status', options.status);
+	if (options?.category) params.set('category', options.category);
+	if (options?.priority) params.set('priority', options.priority);
 	if (options?.limit) params.set('limit', String(options.limit));
-
+	if (options?.includeNotes === false) params.set('includeNotes', 'false');
 	const query = params.toString();
-	const result = await apiFetch<{ plans: Plan[] } | undefined>(`/api/plans${query ? `?${query}` : ''}`);
-	return result ?? { plans: [] };
+	const result = await apiFetch<{ todos: Todo[] } | undefined>(`/api/todos${query ? `?${query}` : ''}`);
+	return result ?? { todos: [] };
 }
 
-// Get single plan with full details
-export async function getPlan(id: string): Promise<PlanDetail> {
-	return apiFetch(`/api/plans/${id}`);
+export async function createTodo(input: TodoSaveInput): Promise<{ todo: Todo }> {
+	return apiFetch(`/api/todos`, { method: 'POST', body: JSON.stringify(input) });
 }
 
-// Toggle task completion
-export async function togglePlanTask(
-	planId: string,
-	taskText: string,
-	completed: boolean
-): Promise<Plan> {
-	return apiFetch(`/api/plans/${planId}/task`, {
-		method: 'PATCH',
-		body: JSON.stringify({ taskText, completed })
-	});
+export async function updateTodo(id: string, input: TodoSaveInput): Promise<{ todo: Todo }> {
+	return apiFetch(`/api/todos/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
 }
 
-// Update plan (full edit)
-export async function updatePlan(
-	planId: string,
-	updates: {
-		title?: string;
-		description?: string;
-		status?: string;
-		currentPhase?: string;
-		phases?: PlanPhase[];
-	}
-): Promise<Plan> {
-	return apiFetch(`/api/plans/${planId}`, {
-		method: 'PATCH',
-		body: JSON.stringify(updates)
-	});
+export async function startTodoThread(
+	id: string
+): Promise<{ sessionId: string; threadId: string; todoId: string }> {
+	return apiFetch(`/api/todos/${id}/thread`, { method: 'POST' });
 }
 
-// Create work thread for a plan
-export async function createPlanWorkThread(
-	planId: string
-): Promise<{ sessionId: string; threadId: string; message: string }> {
-	return apiFetch(`/api/plans/${planId}/work`, { method: 'POST' });
-}
-
-// ============================================
-// Claude Code History API
-// ============================================
-
-export interface ClaudeCodeSession {
-	sessionId: string;
-	project: string;
-	projectName: string;
-	startTime: number;
-	endTime: number;
-	formattedStart: string;
-	formattedEnd: string;
-	promptCount: number;
-	firstPrompt: string;
-	lastPrompt: string;
-}
-
-export interface ClaudeCodePrompt {
-	display: string;
-	timestamp: number;
-	formattedTime: string;
-}
-
-export interface ClaudeCodeSessionDetail extends ClaudeCodeSession {
-	prompts: ClaudeCodePrompt[];
-}
-
-// List Claude Code sessions
-export async function listClaudeHistory(options?: {
-	limit?: number;
-}): Promise<{ sessions: ClaudeCodeSession[]; total: number }> {
-	const params = new URLSearchParams();
-	if (options?.limit) params.set('limit', String(options.limit));
-
-	const query = params.toString();
-	const result = await apiFetch<{ sessions: ClaudeCodeSession[]; total: number } | undefined>(`/api/claude-history${query ? `?${query}` : ''}`);
-	return result ?? { sessions: [], total: 0 };
-}
-
-// Get Claude Code session detail
-export async function getClaudeHistorySession(sessionId: string): Promise<ClaudeCodeSessionDetail> {
-	return apiFetch(`/api/claude-history/${sessionId}`);
+// Hard delete — irreversible. The UI must gate this with a confirm popup.
+export async function deleteTodo(id: string): Promise<{ deleted: boolean; id: string }> {
+	return apiFetch(`/api/todos/${id}`, { method: 'DELETE' });
 }
 
 // ============================================
@@ -682,6 +631,34 @@ export interface Upload {
 	size: number;
 	sessionId: string;
 	createdAt: string;
+}
+
+// Transcribe an audio blob via the local whisper.cpp daemon endpoint.
+// No session/auth — purely local, single-user.
+export async function transcribeAudio(
+	blob: Blob,
+	filename = 'recording.webm'
+): Promise<{ text: string; durationMs: number }> {
+	const currentSession = get(session);
+	const formData = new FormData();
+	formData.append('file', blob, filename);
+
+	const response = await fetch(`${API_BASE}/api/transcribe`, {
+		method: 'POST',
+		headers: {
+			...(currentSession?.access_token
+				? { Authorization: `Bearer ${currentSession.access_token}` }
+				: {})
+		},
+		body: formData
+	});
+
+	if (!response.ok) {
+		const error = await response.json().catch(() => ({ error: 'Transcription failed' }));
+		throw new Error(error.error || 'Transcription failed');
+	}
+
+	return (await response.json()) as { text: string; durationMs: number };
 }
 
 // Upload file
