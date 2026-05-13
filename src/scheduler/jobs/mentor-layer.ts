@@ -13,7 +13,7 @@
 
 // @ts-ignore
 import type Database from "better-sqlite3";
-import { readFile, readdir, stat, mkdir, writeFile } from "fs/promises";
+import { readFile, readdir, mkdir, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
 import { executeGeminiAPI } from "../../executors/gemini.js";
@@ -86,7 +86,7 @@ export async function runMentorLayer(
 async function gatherSignals(db: Database.Database): Promise<Signals> {
   const [stalledPlans, recentSessionThemes, currentPriorities, draftOverflow, recentDailyLog] =
     await Promise.all([
-      getStalledPlans(),
+      getStalledTodos(db),
       getRecentSessionThemes(db),
       getCurrentPriorities(),
       getDraftOverflow(db),
@@ -105,29 +105,38 @@ async function gatherSignals(db: Database.Database): Promise<Signals> {
   };
 }
 
-async function getStalledPlans(): Promise<Array<{ name: string; status: string; daysSinceUpdate: number }>> {
-  const dir = PATHS.plans;
-  if (!existsSync(dir)) return [];
-  const entries = await readdir(dir);
-  const now = Date.now();
-  const out: Array<{ name: string; status: string; daysSinceUpdate: number }> = [];
-  for (const entry of entries) {
-    if (!entry.endsWith(".md") || entry.endsWith(".bak")) continue;
-    const full = join(dir, entry);
-    try {
-      const st = await stat(full);
-      if (!st.isFile()) continue;
-      const daysSinceUpdate = Math.floor((now - st.mtimeMs) / 86_400_000);
-      if (daysSinceUpdate < 7) continue; // only surface plans untouched 1+ weeks
-      const head = (await readFile(full, "utf-8")).slice(0, 600);
-      const statusMatch = head.match(/status:\s*([^\n]+)/i);
-      const status = (statusMatch?.[1] ?? "unknown").trim();
-      out.push({ name: entry.replace(/\.md$/, ""), status, daysSinceUpdate });
-    } catch {
-      // skip
-    }
+/**
+ * Stalled W-category todos: P1 untouched ≥3d, P2 untouched ≥7d.
+ * Replaces the old plan-folder scan (file-first Plans feature was retired in
+ * migration 095). The `stalledPlans` signal name is preserved in the prompt
+ * for now — re-label in a later revision if useful.
+ */
+async function getStalledTodos(
+  db: Database.Database,
+): Promise<Array<{ name: string; status: string; daysSinceUpdate: number }>> {
+  try {
+    const rows = db.prepare(`
+      SELECT
+        title AS name,
+        priority AS status,
+        CAST(julianday('now') - julianday(updated_at) AS INTEGER) AS daysSinceUpdate
+      FROM todo_index
+      WHERE status = 'open'
+        AND category = 'W'
+        AND (
+          (priority = 'P1' AND updated_at < datetime('now','-3 days'))
+          OR (priority = 'P2' AND updated_at < datetime('now','-7 days'))
+        )
+      ORDER BY
+        CASE priority WHEN 'P1' THEN 0 ELSE 1 END,
+        datetime(updated_at) ASC
+      LIMIT 6
+    `).all() as Array<{ name: string; status: string; daysSinceUpdate: number }>;
+    return rows;
+  } catch {
+    // todo_index may not yet exist (pre-migration); fall back to empty.
+    return [];
   }
-  return out.sort((a, b) => b.daysSinceUpdate - a.daysSinceUpdate).slice(0, 6);
 }
 
 async function getRecentSessionThemes(db: Database.Database): Promise<string[]> {

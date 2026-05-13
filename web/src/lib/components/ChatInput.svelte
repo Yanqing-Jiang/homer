@@ -1,5 +1,7 @@
 <script lang="ts">
 	import type { CommandDefinition, Upload } from '$lib/api/client';
+	import { transcribeAudio } from '$lib/api/client';
+	import { toast } from '$lib/stores/toasts.svelte';
 	import FileUpload, { type DisplayFile } from './FileUpload.svelte';
 
 	let {
@@ -35,6 +37,96 @@
 	const uploadedDisplayFiles = $derived(
 		displayFiles.filter((file) => file.status === 'done' && file.path)
 	);
+
+	// ── Voice recording ───────────────────────────────────────────────
+	// Tap mic → record → tap stop → POST blob to /api/transcribe → fill textarea.
+	// Mic replaces Send when textarea is empty AND no attachments. Never auto-sends.
+	let isRecording = $state(false);
+	let isTranscribing = $state(false);
+	let mediaRecorder: MediaRecorder | null = null;
+	let recordedChunks: Blob[] = [];
+	let mediaStream: MediaStream | null = null;
+
+	const showMicButton = $derived(
+		!value.trim() && attachedFiles.length === 0 && !isStreaming && !hasUploadingFiles
+	);
+
+	function releaseStream() {
+		if (mediaStream) {
+			mediaStream.getTracks().forEach((t) => t.stop());
+			mediaStream = null;
+		}
+	}
+
+	async function startRecording() {
+		if (isRecording || isTranscribing) return;
+		try {
+			mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+		} catch (e) {
+			toast.error('Microphone permission denied');
+			return;
+		}
+
+		recordedChunks = [];
+		const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+			? 'audio/webm;codecs=opus'
+			: MediaRecorder.isTypeSupported('audio/webm')
+				? 'audio/webm'
+				: '';
+		mediaRecorder = new MediaRecorder(mediaStream, mimeType ? { mimeType } : undefined);
+
+		mediaRecorder.addEventListener('dataavailable', (e) => {
+			if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+		});
+
+		mediaRecorder.addEventListener('stop', async () => {
+			releaseStream();
+			const blob = new Blob(recordedChunks, { type: mimeType || 'audio/webm' });
+			recordedChunks = [];
+			if (blob.size === 0) {
+				isTranscribing = false;
+				return;
+			}
+			try {
+				const { text } = await transcribeAudio(blob);
+				const trimmed = text.trim();
+				if (trimmed) {
+					value = value ? `${value} ${trimmed}` : trimmed;
+					// Resize textarea after content change.
+					queueMicrotask(() => {
+						if (chatInputElement) autoResizeTextarea(chatInputElement);
+						chatInputElement?.focus();
+					});
+				} else {
+					toast.warning('No speech detected');
+				}
+			} catch (err) {
+				toast.error(`Transcription failed: ${err instanceof Error ? err.message : 'unknown'}`);
+			} finally {
+				isTranscribing = false;
+			}
+		});
+
+		mediaRecorder.start();
+		isRecording = true;
+	}
+
+	function stopRecording() {
+		if (!isRecording || !mediaRecorder) return;
+		isRecording = false;
+		isTranscribing = true;
+		try {
+			mediaRecorder.stop();
+		} catch {
+			isTranscribing = false;
+			releaseStream();
+		}
+	}
+
+	function toggleRecording() {
+		if (isRecording) stopRecording();
+		else void startRecording();
+	}
 
 	function formatAttachmentPath(file: DisplayFile): string | null {
 		if (!file.path) return null;
@@ -211,20 +303,46 @@
 					onpaste={handlePaste}
 					rows="1"
 				></textarea>
-				<button
-					class="send-btn"
-					onclick={onSend}
-					disabled={(!value.trim() && attachedFiles.length === 0) || isStreaming || hasUploadingFiles}
-					aria-label="Send"
-				>
-					{#if isStreaming}
-						<span class="spinner-small"></span>
-					{:else}
-						<svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
-							<path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-						</svg>
-					{/if}
-				</button>
+				{#if showMicButton || isRecording || isTranscribing}
+					<button
+						class="send-btn mic-btn"
+						class:recording={isRecording}
+						class:transcribing={isTranscribing}
+						onclick={toggleRecording}
+						disabled={isTranscribing}
+						aria-label={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing' : 'Start voice recording'}
+						title={isRecording ? 'Tap to stop' : isTranscribing ? 'Transcribing…' : 'Voice input (local Whisper)'}
+					>
+						{#if isTranscribing}
+							<span class="spinner-small"></span>
+						{:else if isRecording}
+							<!-- Stop square -->
+							<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+								<rect x="4" y="4" width="16" height="16" rx="2"/>
+							</svg>
+						{:else}
+							<!-- Mic icon -->
+							<svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+								<path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/>
+							</svg>
+						{/if}
+					</button>
+				{:else}
+					<button
+						class="send-btn"
+						onclick={onSend}
+						disabled={(!value.trim() && attachedFiles.length === 0) || isStreaming || hasUploadingFiles}
+						aria-label="Send"
+					>
+						{#if isStreaming}
+							<span class="spinner-small"></span>
+						{:else}
+							<svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+								<path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+							</svg>
+						{/if}
+					</button>
+				{/if}
 			</div>
 		</div>
 	</div>
@@ -467,6 +585,39 @@
 	.send-btn:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+	}
+
+	.mic-btn {
+		background: #f5f5f5;
+		color: #4b5563;
+		border: 1px solid #e0e0e0;
+	}
+
+	.mic-btn:hover:not(:disabled) {
+		background: #e8e8e8;
+		color: #111827;
+	}
+
+	.mic-btn.recording {
+		background: #dc2626;
+		color: white;
+		border-color: #dc2626;
+		animation: mic-pulse 1.4s ease-in-out infinite;
+	}
+
+	.mic-btn.recording:hover {
+		background: #b91c1c;
+	}
+
+	.mic-btn.transcribing {
+		background: #0078d4;
+		color: white;
+		border-color: #0078d4;
+	}
+
+	@keyframes mic-pulse {
+		0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.55); }
+		50%      { box-shadow: 0 0 0 6px rgba(220, 38, 38, 0); }
 	}
 
 	.input-disclaimer {

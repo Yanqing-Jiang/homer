@@ -185,6 +185,11 @@ export const COMMANDS: CommandDefinition[] = [
     category: "utility",
     description: "List recent meetings",
   },
+  {
+    name: "/todo",
+    category: "utility",
+    description: "Quick-add a to-do — /todo <title> [P1|P2|P3] [W|L]",
+  },
 ];
 
 /**

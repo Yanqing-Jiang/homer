@@ -172,13 +172,6 @@
 					{/if}
 				{/each}
 			{/if}
-			<div class="session-dropdown-divider"></div>
-			<a href="/sessions" class="session-dropdown-item view-all">
-				View All Sessions
-				<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
-					<path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/>
-				</svg>
-			</a>
 		</div>
 	{/if}
 </div>
@@ -266,10 +259,6 @@
 	.session-dropdown-item.new-session {
 		color: #0078d4;
 		font-weight: 500;
-	}
-
-	.session-dropdown-item.view-all {
-		color: #0078d4;
 	}
 
 	.session-item-name {

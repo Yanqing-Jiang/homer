@@ -181,7 +181,6 @@ export function loadRecentMdFiles(maxDays = 7, maxTotalChars = 6000, perFileCap 
     join(home, "homer", "output", "opus"),
     join(home, "homer", "output", "kimi"),
     join(home, "homer", "output", "swarm"),
-    PATHS.plans,
   ];
 
   const cutoff = Date.now() - maxDays * 24 * 60 * 60 * 1000;
