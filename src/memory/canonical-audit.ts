@@ -123,7 +123,6 @@ export async function listAuditableFiles(memoryDir: string = PATHS.memory): Prom
     .filter(n =>
       !n.startsWith(".") &&
       n !== "MEMORY.md" &&
-      n !== "emergency-bootstrap.md" &&
       n !== "session-bootstrap.md"
     );
 

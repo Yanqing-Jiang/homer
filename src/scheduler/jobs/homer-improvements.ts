@@ -5,7 +5,6 @@
  * Single-pass — no consolidation step needed.
  *
  * Prompt priority: critical issues/fixes → impactful optimizations → Yanqing's goals.
- * Archived ideas (feedback.md) are injected to avoid repeat suggestions.
  * Output: 1 idea/plan per day. Risk ≤ 7 → executable plan. Risk > 7 → idea file.
  */
 
@@ -22,7 +21,6 @@ import { logger } from "../../utils/logger.js";
 import type Database from "better-sqlite3";
 import { trackImprovement } from "../../outcomes/hooks.js";
 import { storeJobArtifact } from "./artifact-store.js";
-import { PATHS } from "../../config/paths.js";
 
 const HOMER_DIR = "/Users/yj/homer";
 const OUTPUT_DIR = "/Users/yj/homer/output/codex";
@@ -94,24 +92,6 @@ function getRecentFailures(db: Database.Database): string {
   }
 }
 
-/** Extract archived idea titles from feedback.md to avoid repeating them */
-function getArchivedTitles(): string[] {
-  const feedbackPath = PATHS.feedback;
-  if (!existsSync(feedbackPath)) return [];
-  try {
-    const content = readFileSync(feedbackPath, "utf-8");
-    const archived: string[] = [];
-    for (const line of content.split("\n")) {
-      // Match: ### [DATE] Archive - TITLE
-      const m = line.match(/^###\s+\[.+?\]\s+Archive\s+-\s+(.+)/);
-      if (m?.[1]) archived.push(m[1].trim());
-    }
-    return archived;
-  } catch {
-    return [];
-  }
-}
-
 function buildSharedPrompt(params: {
   buildHealth: { passes: boolean; output: string };
   recentFailures: string;
@@ -119,13 +99,12 @@ function buildSharedPrompt(params: {
   fileListing: string;
   schedulerContext: string;
   existingTitles: string[];
-  archivedTitles: string[];
   outputPath: string;
   agentLabel: string;
 }): string {
   const {
     buildHealth, recentFailures, sourceContext, fileListing,
-    schedulerContext, existingTitles, archivedTitles, outputPath, agentLabel,
+    schedulerContext, existingTitles, outputPath, agentLabel,
   } = params;
 
   return `You are ${agentLabel}, analyzing the Homer AI assistant codebase to propose exactly ONE improvement.
@@ -133,8 +112,7 @@ function buildSharedPrompt(params: {
 ## CRITICAL RULES — READ FIRST
 1. DO NOT modify any files in the codebase. This is analysis only.
 2. You MUST write your full analysis and recommendation to: ${outputPath}
-3. Do not suggest anything from the "Already Archived" list below — Yanqing explicitly rejected those.
-4. Suggest exactly 1 improvement. Make it count.
+3. Suggest exactly 1 improvement. Make it count.
 
 ## Priority Order (address the highest-priority issue found)
 1. **Critical issues / build failures** — if the build is broken or a job keeps crashing, fix that first
@@ -151,9 +129,6 @@ ${recentFailures}
 
 ## Yanqing's Current Priorities
 ${schedulerContext.slice(0, 15000)}
-
-## Already Archived (DO NOT suggest these — Yanqing rejected them)
-${archivedTitles.slice(0, 40).map(t => "- " + t).join("\n") || "(none)"}
 
 ## Existing Ideas (avoid duplicates)
 ${existingTitles.slice(0, 50).map(t => "- " + t).join("\n")}
@@ -244,7 +219,6 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
 
     const existingIdeas = loadIdeasFromDir();
     const existingTitles = existingIdeas.map(i => i.title.toLowerCase());
-    const archivedTitles = getArchivedTitles();
 
     let schedulerContext: string;
     try {
@@ -261,7 +235,7 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
 
     const prompt = buildSharedPrompt({
       buildHealth, recentFailures, sourceContext, fileListing,
-      schedulerContext, existingTitles, archivedTitles,
+      schedulerContext, existingTitles,
       outputPath,
       agentLabel: "Codex GPT-5.4 (codebase analysis)",
     });

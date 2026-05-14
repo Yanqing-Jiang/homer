@@ -85,14 +85,6 @@ export const CANONICAL_FILES = [
     note: "Recurring patterns and playbooks extracted from sessions",
   },
   {
-    key: "feedback",
-    label: "Feedback",
-    path: PATHS.feedback,
-    allowedClaimTypes: ["fact", "lesson", "cleanup"],
-    softCharBudget: 6_000,
-    note: "User feedback to the assistant — corrections and confirmations",
-  },
-  {
     key: "sessionBootstrap",
     label: "Session Bootstrap",
     path: PATHS.sessionBootstrap,

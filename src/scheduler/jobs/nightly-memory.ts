@@ -7,7 +7,7 @@
  * full core memory set to be loaded before the model runs.
  */
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { z } from "zod";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { executeClaudeCommand } from "../../executors/claude.js";
@@ -113,68 +113,13 @@ export async function runNightlyMemory(stateManager: StateManager): Promise<{
     const sessions = stateManager.getUnprocessedSessionsBatch(50);
     logger.info({ sessionCount: sessions.length }, "Loaded unprocessed sessions for nightly memory");
 
-    // Read yesterday's explicit feedback to include in analysis
-    let feedbackLog = "";
-    try {
-      const feedbackPath = PATHS.feedback;
-      if (existsSync(feedbackPath)) {
-        const lines = readFileSync(feedbackPath, "utf-8").split("\n");
-        const yesterdayFeedback: string[] = [];
-        const keepLines: string[] = [];
-        let inYesterday = false;
-        let lineDateStr = "";
+    // Explicit-feedback markdown log was removed alongside feedback.md.
+    // Telegram/UI feedback is now read from the feedback_events DB table by
+    // downstream consumers; nightly-memory operates on session_summaries only.
+    const feedbackLog = "";
 
-        const keepThreshold = new Date();
-        keepThreshold.setDate(keepThreshold.getDate() - 3);
-        const y = keepThreshold.getFullYear();
-        const m = String(keepThreshold.getMonth() + 1).padStart(2, "0");
-        const d = String(keepThreshold.getDate()).padStart(2, "0");
-        const keepThresholdStr = `${y}-${m}-${d}`;
-
-        const archiveLines: string[] = [];
-
-        for (const line of lines) {
-          if (line.startsWith("### [")) {
-            lineDateStr = line.substring(5, 15);
-            inYesterday = line.includes(`[${yesterday}`);
-
-            if (inYesterday) yesterdayFeedback.push(line);
-
-            if (lineDateStr >= keepThresholdStr) keepLines.push(line);
-            else archiveLines.push(line);
-          } else if (inYesterday) {
-            yesterdayFeedback.push(line);
-            if (lineDateStr >= keepThresholdStr) keepLines.push(line);
-            else archiveLines.push(line);
-          } else {
-             if (lineDateStr >= keepThresholdStr) keepLines.push(line);
-             else if (lineDateStr) archiveLines.push(line);
-             else keepLines.push(line);
-          }
-        }
-
-        if (yesterdayFeedback.length > 0) {
-          feedbackLog = `\n\n## Explicit User Feedback from Telegram/UI (${yesterday})\n\n` + yesterdayFeedback.join("\n");
-          logger.info({ date: yesterday, feedbackLines: yesterdayFeedback.length }, "Loaded yesterday's explicit feedback");
-        }
-
-        if (archiveLines.length > 0) {
-            writeFileSync(feedbackPath, keepLines.join("\n"), "utf-8");
-            try {
-              if (!existsSync(PATHS.archive)) mkdirSync(PATHS.archive, { recursive: true });
-              appendFileSync(`${PATHS.archive}/feedback-archive.md`, "\n" + archiveLines.join("\n"), "utf-8");
-            } catch (err) {
-              logger.warn({ error: err }, "Failed to write to feedback archive");
-            }
-            logger.info({ archivedLines: archiveLines.length }, "Rotated feedback.md to archive");
-        }
-      }
-    } catch (err) {
-      logger.warn({ error: err }, "Failed to read feedback log");
-    }
-
-    if (sessions.length === 0 && !feedbackLog) {
-      return { success: true, output: "No unprocessed sessions or feedback, skipping" };
+    if (sessions.length === 0) {
+      return { success: true, output: "No unprocessed sessions, skipping" };
     }
 
     const permanentFiles = loadRequiredMemoryFiles();

@@ -18,10 +18,9 @@ import { getCurrentFocus } from "../memory/session-bootstrap.js";
 // ============================================
 
 export async function loadUserContext(config: DiscoveryEngineConfig): Promise<UserContext> {
-  const [meContent, workContent, denyContent] = await Promise.all([
+  const [meContent, workContent] = await Promise.all([
     safeReadFile(`${config.memoryDir}/me.md`),
     safeReadFile(`${config.memoryDir}/work.md`),
-    safeReadFile(config.denyHistoryFile),
   ]);
 
   // Goals come from getCurrentFocus() so the scorer in discovery/scorer.ts:180
@@ -40,11 +39,11 @@ export async function loadUserContext(config: DiscoveryEngineConfig): Promise<Us
     interests: extractInterests(meContent),
     goals,
     techStack: extractTechStack(meContent),
-    preferences: extractPreferences(meContent, denyContent),
+    preferences: extractPreferences(),
     activeProjects: extractProjects(workContent),
     careerFocus: extractCareerFocus(workContent),
     currentFocus: extractCurrentFocus(workContent),
-    blocklist: extractBlocklist(denyContent),
+    blocklist: { repos: [], topics: [], languages: [] },
     seenItems: new Set(),
   };
 
@@ -144,38 +143,14 @@ function extractTechStack(meContent: string): string[] {
   return [...new Set(stack)];
 }
 
-function extractPreferences(_meContent: string, denyContent: string): UserContext["preferences"] {
-  const boost: string[] = [];
-  const deprioritize: string[] = [];
-  const languages: string[] = [];
-
-  // Extract boost patterns from deny-history.md
-  const boostMatch = denyContent.match(/### Positive Signals[\s\S]*?(?=##|$)/);
-  if (boostMatch?.[0]) {
-    const lines = boostMatch[0].split("\n").filter(l => l.trim().startsWith("-"));
-    boost.push(...lines.map(l => l.replace(/^-\s*/, "").trim().toLowerCase()).filter(Boolean));
-  }
-
-  // Extract deprioritize patterns
-  const deprioritizeMatch = denyContent.match(/### Topics to Deprioritize[\s\S]*?(?=##|$)/);
-  if (deprioritizeMatch?.[0]) {
-    const lines = deprioritizeMatch[0].split("\n").filter(l => l.trim().startsWith("-"));
-    deprioritize.push(...lines.map(l => l.replace(/^-\s*/, "").split("(")[0]?.trim().toLowerCase() ?? "").filter(Boolean));
-  }
-
-  // Extract language preferences
-  const langMatch = denyContent.match(/### Languages to Deprioritize[\s\S]*?(?=##|$)/);
-  if (langMatch?.[0]) {
-    const lines = langMatch[0].split("\n").filter(l => l.trim().startsWith("-"));
-    // Extract languages to skip (unused for now but could filter later)
-    lines.map(l => l.replace(/^-\s*/, "").split("(")[0]?.trim().toLowerCase() ?? "");
-    // These are languages to skip, preferred languages are the inverse
-    languages.push("python", "typescript", "rust");
-  } else {
-    languages.push("python", "typescript", "rust");
-  }
-
-  return { boost, deprioritize, languages };
+function extractPreferences(): UserContext["preferences"] {
+  // deny-history.md was the source for boost/deprioritize. With it removed,
+  // we default to the preferred-language list only.
+  return {
+    boost: [],
+    deprioritize: [],
+    languages: ["python", "typescript", "rust"],
+  };
 }
 
 function extractProjects(workContent: string): UserContext["activeProjects"] {
@@ -238,46 +213,6 @@ function extractCurrentFocus(workContent: string): string[] {
   }
 
   return focus;
-}
-
-function extractBlocklist(denyContent: string): UserContext["blocklist"] {
-  const repos: string[] = [];
-  const topics: string[] = [];
-  const languages: string[] = [];
-
-  // Extract blocked repos
-  const reposMatch = denyContent.match(/### Already Tracking[\s\S]*?(?=###|##|$)/);
-  if (reposMatch?.[0]) {
-    const lines = reposMatch[0].split("\n").filter(l => l.trim().startsWith("-"));
-    for (const line of lines) {
-      // Extract repo name from format: "- Name (org/repo)"
-      const repoMatch = line.match(/\(([^)]+)\)/);
-      if (repoMatch?.[1]) {
-        repos.push(repoMatch[1].toLowerCase());
-      }
-      // Also extract the display name
-      const nameMatch = line.match(/-\s*([^(]+)/);
-      if (nameMatch?.[1]) {
-        repos.push(nameMatch[1].trim().toLowerCase());
-      }
-    }
-  }
-
-  // Extract blocked topics
-  const topicsMatch = denyContent.match(/### Topics to Deprioritize[\s\S]*?(?=###|##|$)/);
-  if (topicsMatch?.[0]) {
-    const lines = topicsMatch[0].split("\n").filter(l => l.trim().startsWith("-"));
-    topics.push(...lines.map(l => l.replace(/^-\s*/, "").split("(")[0]?.trim().toLowerCase() ?? "").filter(Boolean));
-  }
-
-  // Extract blocked languages
-  const langsMatch = denyContent.match(/### Languages to Deprioritize[\s\S]*?(?=###|##|$)/);
-  if (langsMatch?.[0]) {
-    const lines = langsMatch[0].split("\n").filter(l => l.trim().startsWith("-"));
-    languages.push(...lines.map(l => l.replace(/^-\s*/, "").split("(")[0]?.trim().toLowerCase() ?? "").filter(Boolean));
-  }
-
-  return { repos, topics, languages };
 }
 
 // ============================================

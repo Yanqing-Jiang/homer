@@ -1,6 +1,6 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { logger } from "../../utils/logger.js";
-import { readFile, writeFile, appendFile } from "fs/promises";
+import { readFile, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import type { StateManager } from "../../state/manager.js";
 import { updatePreferences, type PreferenceSignal } from "../../preferences/engine.js";
@@ -28,8 +28,6 @@ import { escapeHtml } from "../../utils/telegram-format.js";
 import type { SourcePacket } from "../../ideas/source-packets.js";
 
 const IDEAS_FILE = PATHS.ideasMd;
-const FEEDBACK_FILE = PATHS.feedback;
-const DENY_HISTORY_FILE = PATHS.denyHistory;
 
 // Track pending deny reasons (messageId -> pending info)
 interface PendingDeny {
@@ -120,26 +118,6 @@ function rebuildIdeasFile(ideas: ParsedIdea[]): string {
 }
 
 /**
- * Log feedback to feedback.md
- */
-async function logFeedback(action: string, target: string, notes?: string): Promise<void> {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  const hours = String(now.getHours()).padStart(2, "0");
-  const mins = String(now.getMinutes()).padStart(2, "0");
-  const timestamp = `${year}-${month}-${day} ${hours}:${mins}`;
-  
-
-  let entry = `\n### [${timestamp}] ${action.charAt(0).toUpperCase() + action.slice(1)} - ${target}\n`;
-  entry += `Decision: ${action}\n`;
-  if (notes) entry += `Notes: ${notes}\n`;
-
-  await appendFile(FEEDBACK_FILE, entry, "utf-8");
-}
-
-/**
  * Find idea by ID (partial match) — used for legacy ideas.md fallback
  */
 function findIdea(ideas: ParsedIdea[], id: string): ParsedIdea | undefined {
@@ -190,8 +168,6 @@ async function archiveIdea(
     if (idea) {
       dao.updateIdea(db, idea.id, { status: "archived" });
       dao.appendNote(db, idea.id, reason);
-      await logDenyHistory(idea.title, idea.source, reason, idea.link);
-      await logFeedback("archive", idea.title, reason);
       try {
         trackIdeaArchived(db, idea.id, idea.title);
         sendPreferenceSignals(idea, -0.1);
@@ -217,8 +193,6 @@ async function archiveIdea(
   idea.notes = (idea.notes ? idea.notes + "; " : "") + reason;
   await writeFile(IDEAS_FILE, rebuildIdeasFile(ideas), "utf-8");
 
-  await logDenyHistory(idea.title, idea.source, reason, idea.link);
-  await logFeedback("archive", idea.title, reason);
   sendPreferenceSignals(idea, -0.1);
 
   return { success: true, message: `Archived: ${idea.title}`, idea };
@@ -238,7 +212,6 @@ async function addIdeaInstructions(
     const idea = dao.getIdea(db, ideaId);
     if (idea) {
       dao.appendNote(db, idea.id, `User instructions: ${instructions}`);
-      await logFeedback("instruction", idea.title, instructions);
       sendPreferenceSignals(idea, 0.1);
       try {
         recordFeedback(db, {
@@ -280,60 +253,8 @@ async function addIdeaInstructions(
   idea.notes = idea.notes ? `${idea.notes}; ${note}` : note;
 
   await writeFile(IDEAS_FILE, rebuildIdeasFile(ideas), "utf-8");
-  await logFeedback("instruction", idea.title, instructions);
 
   return { success: true, message: `Instructions saved for ${idea.title}`, title: idea.title };
-}
-
-/**
- * Log denial to deny-history.md for preference learning
- */
-async function logDenyHistory(
-  title: string,
-  source: string,
-  reason: string,
-  link?: string
-): Promise<void> {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  // const timestamp = `${year}-${month}-${day} ${hours}:${mins}`;
-  const date = `${year}-${month}-${day}`;
-
-  let entry = `\n### [${date}] ${title}\n`;
-  entry += `- **Source:** ${source}\n`;
-  entry += `- **Reason:** ${reason}\n`;
-  if (link) entry += `- **Link:** ${link}\n`;
-
-  try {
-    await appendFile(DENY_HISTORY_FILE, entry, "utf-8");
-    logger.info({ title, source, reason }, "Logged to deny history");
-  } catch (error) {
-    logger.warn({ error }, "Failed to log deny history");
-  }
-}
-
-/**
- * Get deny history patterns for filtering
- */
-export async function getDenyPatterns(): Promise<string[]> {
-  if (!existsSync(DENY_HISTORY_FILE)) {
-    return [];
-  }
-
-  try {
-    const content = await readFile(DENY_HISTORY_FILE, "utf-8");
-    const reasons: string[] = [];
-    const reasonRegex = /- \*\*Reason:\*\* (.+)$/gm;
-    let match;
-    while ((match = reasonRegex.exec(content)) !== null) {
-      reasons.push(match[1] ?? "");
-    }
-    return reasons.filter(Boolean);
-  } catch {
-    return [];
-  }
 }
 
 /**
@@ -820,7 +741,6 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       }
 
       // Feedback tracking
-      await logFeedback("talk", idea.title);
       sendPreferenceSignals(idea, 0.2);
       try {
         recordFeedback(db, {
@@ -933,7 +853,6 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
       }
 
       // Feedback tracking (was missing for packets)
-      await logFeedback("talk", packet.title ?? packet.id);
       try {
         recordFeedback(db, {
           contentType: "packet",
@@ -1099,7 +1018,6 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
   const timestamp = `${year}-${month}-${day} ${hours}:${mins}`;
             const updated = `${plan}\n\n## User Instructions (${timestamp})\n${instructions}\n`;
             stateManager.savePendingPlan(pending.id, updated);
-            await logFeedback("instruction", `Plan ${pending.id}`, instructions);
             await ctx.reply(
               `✅ <b>Instructions saved</b>\n<b>Plan ID:</b> <code>${escapeHtml(pending.id)}</code>`,
               { parse_mode: "HTML" }
@@ -1719,7 +1637,6 @@ export function registerPlanApprovalHandlers(bot: Bot, stateManager: StateManage
     );
 
     logger.info({ jobId }, "Plan approved by user");
-    await logFeedback("approve", `Plan ${jobId}`);
     try {
       const db = stateManager.getDb();
       recordFeedback(db, {
@@ -1802,7 +1719,6 @@ Output a brief summary of what you changed and whether the build passes.`;
 
     await ctx.reply(`🗑️ Plan rejected and discarded: ${jobId}`);
     logger.info({ jobId }, "Plan rejected by user");
-    await logFeedback("reject", `Plan ${jobId}`);
     try {
       const db = stateManager.getDb();
       recordFeedback(db, {
@@ -1896,7 +1812,6 @@ export function registerPlanApprovalCallbacks(bot: Bot, stateManager: StateManag
 
     await ctx.answerCallbackQuery("Plan approved — executing!");
     logger.info({ jobId }, "Plan approved via inline button");
-    await logFeedback("approve", `Plan ${jobId}`);
     try {
       const db = stateManager.getDb();
       recordFeedback(db, {
@@ -1980,7 +1895,6 @@ Output a brief summary of what you changed and whether the build passes.`;
     );
     await ctx.answerCallbackQuery("Plan rejected");
     logger.info({ jobId }, "Plan rejected via inline button");
-    await logFeedback("reject", `Plan ${jobId}`);
     try {
       const db = stateManager.getDb();
       recordFeedback(db, {

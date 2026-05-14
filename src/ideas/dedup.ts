@@ -15,7 +15,7 @@
  * - Same URL different tags: merge them
  */
 
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from "fs";
+import { readFileSync, existsSync, unlinkSync } from "fs";
 import { logger } from "../utils/logger.js";
 import { executeGeminiCLIDirect, GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 import { loadIdeasFromDir, type ParsedIdea } from "./parser.js";
@@ -25,9 +25,6 @@ import { createFingerprint, fingerprintSimilarity } from "./fingerprint.js";
 import { storeJobArtifact } from "../scheduler/jobs/artifact-store.js";
 // @ts-ignore
 import type Database from "better-sqlite3";
-import { PATHS } from "../config/paths.js";
-
-const DENY_HISTORY_FILE = PATHS.denyHistory;
 
 // One LLM call per run — avoids consuming full job timeout on retries
 const MAX_LLM_CALLS = 1;
@@ -57,7 +54,6 @@ interface DedupResult {
   repoMatches: number;
   semanticMatches: number;
   llmMatches: number;
-  blocklistAdded: string[];
 }
 
 /**
@@ -100,48 +96,6 @@ function selectKeeper(ideas: Idea[]): Idea {
     // Same priority: prefer more content
     return contentScore(cur) > contentScore(best) ? cur : best;
   });
-}
-
-/**
- * Update deny-history.md blocklist with repos that had duplicates
- */
-function updateDenyHistoryBlocklist(repos: string[]): string[] {
-  if (repos.length === 0) return [];
-  if (!existsSync(DENY_HISTORY_FILE)) return [];
-
-  const content = readFileSync(DENY_HISTORY_FILE, "utf-8");
-  const alreadyTrackingHeader = "### Already Tracking (Skip Duplicates)";
-  if (!content.includes(alreadyTrackingHeader)) {
-    return [];
-  }
-
-  const existing = new Set(
-    content
-      .split("\n")
-      .filter((line) => line.startsWith("- "))
-      .map((line) => line.replace(/^- /, "").trim().toLowerCase())
-  );
-
-  const additions = repos
-    .filter((r) => {
-      const repoName = r.split("/")[1] ?? r;
-      return !existing.has(repoName.toLowerCase()) &&
-             !existing.has(r.toLowerCase());
-    })
-    .map((r) => {
-      const repoName = r.split("/")[1] ?? r;
-      return `${repoName} (${r})`;
-    });
-
-  if (additions.length === 0) return [];
-
-  const updated = content.replace(
-    alreadyTrackingHeader,
-    `${alreadyTrackingHeader}\n${additions.map((r) => `- ${r}`).join("\n")}`
-  );
-
-  writeFileSync(DENY_HISTORY_FILE, updated, "utf-8");
-  return additions;
 }
 
 /**
@@ -231,7 +185,7 @@ export async function dedupeIdeasDir(db?: Database.Database, jobRunId?: number):
   if (ideas.length === 0) {
     return {
       deleted: 0, kept: 0, urlMatches: 0, repoMatches: 0,
-      semanticMatches: 0, llmMatches: 0, blocklistAdded: []
+      semanticMatches: 0, llmMatches: 0,
     };
   }
 
@@ -316,8 +270,7 @@ export async function dedupeIdeasDir(db?: Database.Database, jobRunId?: number):
     repoClusters.set(normalizedRepo, list);
   }
 
-  const blocklistRepos: string[] = [];
-  for (const [repo, list] of repoClusters.entries()) {
+  for (const list of repoClusters.values()) {
     if (list.length < 2) continue;
     const primary = list[0]!;
     for (let i = 1; i < list.length; i++) {
@@ -327,7 +280,6 @@ export async function dedupeIdeasDir(db?: Database.Database, jobRunId?: number):
       }
       union(primary.id, list[i]!.id);
     }
-    blocklistRepos.push(repo);
   }
   logger.info({ repoMatches }, "TIER 2: Repo ID matches found");
 
@@ -474,9 +426,6 @@ export async function dedupeIdeasDir(db?: Database.Database, jobRunId?: number):
     }
   }
 
-  // Update blocklist with repos that had duplicates
-  const blocklistAdded = updateDenyHistoryBlocklist(blocklistRepos);
-
   const kept = ideas.length - deleted;
   logger.info({ deleted, kept, urlMatches, repoMatches, semanticMatches, llmMatches },
     "Deduplication complete");
@@ -488,18 +437,16 @@ export async function dedupeIdeasDir(db?: Database.Database, jobRunId?: number):
     repoMatches,
     semanticMatches,
     llmMatches,
-    blocklistAdded
   };
 }
 
 // Legacy export for backwards compatibility
-export async function dedupeIdeasFile(): Promise<{ merged: number; archived: number; blocklistAdded: string[] }> {
+export async function dedupeIdeasFile(): Promise<{ merged: number; archived: number }> {
   // Redirect to new implementation
   const result = await dedupeIdeasDir();
   return {
     merged: result.deleted,
     archived: 0,  // We now delete instead of archive
-    blocklistAdded: result.blocklistAdded,
   };
 }
 

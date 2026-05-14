@@ -171,7 +171,6 @@ export class MemoryIndexer {
       { path: PATHS.preferences, context: "general" },
       { path: PATHS.tools, context: "general" },
       { path: PATHS.patterns, context: "general" },
-      { path: PATHS.denyHistory, context: "general" },
     ];
 
     for (const { path, context } of coreFiles) {

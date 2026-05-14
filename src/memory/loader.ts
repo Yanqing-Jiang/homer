@@ -55,27 +55,16 @@ export async function loadProjectContext(cwd: string): Promise<string | null> {
 /**
  * Load all bootstrap memory files
  * Called at session start to give Claude context. Best-effort regenerates the
- * session-bootstrap projection first; on regen failure, falls back to:
- *   1. the existing session-bootstrap.md (stale but usable)
- *   2. ~/memory/emergency-bootstrap.md (the documented MCP-down recovery card)
- *   3. null (caller decides — typically means "no bootstrap context this session")
+ * session-bootstrap projection first; on regen failure, returns the existing
+ * session-bootstrap.md if present, else null (caller decides — typically means
+ * "no bootstrap context this session").
  */
 export async function loadBootstrapFiles(): Promise<string | null> {
   await ensureSessionBootstrap();
 
-  // Tier 1: the generated bootstrap.
   for (const path of MEMORY_FILES) {
     const content = await loadMemoryFile(path);
     if (content) return content;
-  }
-
-  // Tier 2 fallback: the hand-maintained emergency card. Present whenever the
-  // generator has never run (fresh install) or the generated file was deleted.
-  const emergency = `${PATHS.memory}/emergency-bootstrap.md`;
-  const fallback = await loadMemoryFile(emergency);
-  if (fallback) {
-    logger.warn({ emergency }, "loadBootstrapFiles: session-bootstrap missing; using emergency-bootstrap.md");
-    return fallback;
   }
 
   return null;
