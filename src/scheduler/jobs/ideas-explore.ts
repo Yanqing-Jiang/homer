@@ -1,7 +1,7 @@
 /**
  * Ideas Explore — GitHub Trending Discovery
  *
- * Deterministic fetch via `gh api`, then Claude Sonnet filters for relevance.
+ * Deterministic fetch via `gh api`, then Codex GPT-5.5 filters for relevance.
  * Code fetches data, LLM decides what's relevant.
  *
  * Schedule: 30 0 * * * (daily at 00:30, also triggered by idea-ingest)
@@ -11,7 +11,7 @@ import { execFileSync } from "child_process";
 import { z } from "zod";
 // @ts-ignore
 import type Database from "better-sqlite3";
-import { executeClaudeCommand } from "../../executors/claude.js";
+import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import * as ideaDao from "../../ideas/dao.js";
 import { insertScrape } from "../../scraping/scrape-store.js";
@@ -87,7 +87,7 @@ export async function runIdeasExplore(db?: Database.Database): Promise<{
       return { success: false, output: "", error: "GitHub API returned no results" };
     }
 
-    // Step 2: Sonnet filters for relevance — LLM makes decisions
+    // Step 2: Codex GPT-5.5 filters for relevance — LLM makes decisions
     const filterPrompt = `You are filtering GitHub trending repos for relevance to Yanqing's work.
 
 ## Repos fetched from GitHub (last 7 days, sorted by stars)
@@ -107,14 +107,15 @@ Return ONLY a JSON array of repos worth tracking. For each, add a "relevance" fi
 Format: [{"name": "owner/repo", "url": "https://github.com/...", "description": "...", "stars": 1234, "language": "TypeScript", "relevance": "connects to X because..."}]
 If nothing relevant, return: []`;
 
-    const result = await executeClaudeCommand(filterPrompt, {
+    const result = await executeCodexCLI(filterPrompt, {
       cwd: process.env.HOME ?? "/Users/yj",
-      model: "sonnet",
+      model: "gpt-5.5",
+      reasoningEffort: "medium",
       timeout: 180_000,
     });
 
     if (result.exitCode !== 0 || !result.output) {
-      return { success: false, output: "", error: `Sonnet filter failed: exit ${result.exitCode}` };
+      return { success: false, output: "", error: `Codex GPT-5.5 filter failed: exit ${result.exitCode}` };
     }
 
     let repos: z.infer<typeof ReposArraySchema>;

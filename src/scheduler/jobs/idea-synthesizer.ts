@@ -21,7 +21,7 @@ import { join } from "path";
 import { z } from "zod";
 // @ts-ignore
 import type Database from "better-sqlite3";
-import { executeClaudeCommand } from "../../executors/claude.js";
+import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { redactForLLM } from "../../memory/secret-filter.js";
 import {
@@ -52,7 +52,7 @@ import { registerVersion, writeEvalScore } from "../../harness/manager.js";
 const CLUSTER_SIMILARITY_THRESHOLD = 0.3; // Related (lower than dedup's 0.8)
 const NEAR_DUPLICATE_THRESHOLD = 0.75;    // Near-duplicate scrapes to skip
 const MAX_CLUSTER_SIZE = 3;
-const STEP_TIMEOUT = 120_000; // 2 min per step
+const STEP_TIMEOUT = 180_000; // 3 min per step (Codex CLI cold-start + reasoning is slower than Claude)
 
 // Skill file paths
 const SKILL_SCORE = join(process.env.HOME ?? "/Users/yj", ".claude/skills/idea-score/SKILLS.md");
@@ -448,9 +448,10 @@ Return ONLY a JSON object: { "passed": true|false, "reason": "why", "summary": "
 
   let result;
   try {
-    result = await executeClaudeCommand(redactForLLM(prompt, "idea-synthesizer"), {
+    result = await executeCodexCLI(redactForLLM(prompt, "idea-synthesizer"), {
       cwd: "/tmp",
-      model: "sonnet",
+      model: "gpt-5.5",
+      reasoningEffort: "medium",
       timeout: STEP_TIMEOUT,
     });
   } catch (err) {
@@ -548,9 +549,10 @@ Return ONLY the JSON object.`;
 
   let result;
   try {
-    result = await executeClaudeCommand(redactForLLM(prompt, "idea-synthesizer"), {
+    result = await executeCodexCLI(redactForLLM(prompt, "idea-synthesizer"), {
       cwd: "/tmp",
-      model: "sonnet",
+      model: "gpt-5.5",
+      reasoningEffort: "medium",
       timeout: STEP_TIMEOUT,
     });
   } catch (err) {
@@ -681,9 +683,10 @@ Return ONLY a JSON object: { "passed": true|false, "reason": "main reason", "str
 
   let result;
   try {
-    result = await executeClaudeCommand(redactForLLM(prompt, "idea-synthesizer"), {
+    result = await executeCodexCLI(redactForLLM(prompt, "idea-synthesizer"), {
       cwd: "/tmp",
-      model: "sonnet",
+      model: "gpt-5.5",
+      reasoningEffort: "medium",
       timeout: STEP_TIMEOUT,
     });
   } catch (err) {
@@ -788,9 +791,10 @@ Enrich this idea. Return ONLY the JSON object. Omit optional fields if not appli
 
   let result;
   try {
-    result = await executeClaudeCommand(redactForLLM(prompt, "idea-synthesizer"), {
+    result = await executeCodexCLI(redactForLLM(prompt, "idea-synthesizer"), {
       cwd: "/tmp",
-      model: "sonnet",
+      model: "gpt-5.5",
+      reasoningEffort: "medium",
       timeout: STEP_TIMEOUT,
     });
   } catch (err) {
@@ -1076,7 +1080,7 @@ ${existingTitles.slice(0, 1500)}`;
     if (needsScoring.length > 0) {
       writeStepTrace({
         jobId: "idea-synthesizer", chainId: pipelineChainId, stepName: "score",
-        executor: "claude", model: "sonnet", success: stats.scored > 0 || stats.failed === 0,
+        executor: "codex", model: "gpt-5.5", success: stats.scored > 0 || stats.failed === 0,
         durationMs: Date.now() - stepStart, promptHash: manifestHash,
         scheduledRunId: jobRunId,
       });
@@ -1164,7 +1168,7 @@ ${existingTitles.slice(0, 1500)}`;
     if (needsSynthesis.length > 0) {
       writeStepTrace({
         jobId: "idea-synthesizer", chainId: pipelineChainId, stepName: "synthesize",
-        executor: "claude", model: "sonnet", success: stats.synthesized > 0 || stats.failed === 0,
+        executor: "codex", model: "gpt-5.5", success: stats.synthesized > 0 || stats.failed === 0,
         durationMs: Date.now() - stepStart, promptHash: manifestHash,
         scheduledRunId: jobRunId,
       });
@@ -1214,7 +1218,7 @@ ${existingTitles.slice(0, 1500)}`;
     if (needsCritique.length > 0) {
       writeStepTrace({
         jobId: "idea-synthesizer", chainId: pipelineChainId, stepName: "critique",
-        executor: "claude", model: "sonnet", success: true,
+        executor: "codex", model: "gpt-5.5", success: true,
         durationMs: Date.now() - stepStart, promptHash: manifestHash,
         scheduledRunId: jobRunId,
       });
@@ -1259,7 +1263,7 @@ ${existingTitles.slice(0, 1500)}`;
     if (needsEnrichment.length > 0) {
       writeStepTrace({
         jobId: "idea-synthesizer", chainId: pipelineChainId, stepName: "enrich",
-        executor: "claude", model: "sonnet", success: stats.enriched > 0 || stats.failed === 0,
+        executor: "codex", model: "gpt-5.5", success: stats.enriched > 0 || stats.failed === 0,
         durationMs: Date.now() - stepStart, promptHash: manifestHash,
         scheduledRunId: jobRunId,
       });

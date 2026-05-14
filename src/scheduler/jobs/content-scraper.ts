@@ -25,7 +25,7 @@ import type Database from "better-sqlite3";
 import { fetchLinkedInTimeline, fetchMediumFeed, isRetryableOpenCLIError } from "../../executors/opencli.js";
 import { mapLinkedInTimeline, mapMediumFeed } from "../../executors/opencli-mappers.js";
 import { executeBrowserScrape } from "../../executors/browser-scrape.js";
-import { executeClaudeCommand } from "../../executors/claude.js";
+import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { z } from "zod";
 import {
@@ -666,10 +666,11 @@ async function analyzeAndUpdatePatterns(
   const prompt = buildViralityPrompt(digest);
 
   try {
-    const result = await executeClaudeCommand(prompt, {
+    const result = await executeCodexCLI(prompt, {
       cwd: process.env.HOME ?? "/Users/yj",
-      model: "sonnet",
-      timeout: 120_000,
+      model: "gpt-5.5",
+      reasoningEffort: "medium",
+      timeout: 180_000,
     });
 
     if (result.exitCode !== 0 || !result.output?.trim()) {
