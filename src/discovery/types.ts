@@ -128,7 +128,7 @@ export interface RelevanceScore {
 export interface ScoredDiscoveryItem extends RawDiscoveryItem {
   score: RelevanceScore;
   dedupKey: string;           // Key for deduplication
-  isBlocked: boolean;         // Matches deny-history.md
+  isBlocked: boolean;         // Matches in-memory blocklist (currently always empty)
   blockReason?: string;       // Why blocked
 }
 
@@ -157,7 +157,7 @@ export interface UserContext {
   // Upcoming-section focus extracted from work.md
   currentFocus: string[];
 
-  // From deny-history.md
+  // In-memory blocklist (no longer file-backed; reserved for future use)
   blocklist: {
     repos: string[];          // Specific repos to skip
     topics: string[];         // Topics to deprioritize
@@ -243,7 +243,6 @@ export interface DiscoveryEngineConfig {
   // Paths
   memoryDir: string;
   ideasFile: string;
-  denyHistoryFile: string;
   outputDir: string;
 
   // Timing
@@ -259,7 +258,6 @@ export const DEFAULT_ENGINE_CONFIG: DiscoveryEngineConfig = {
   diversityPenalty: 5,
   memoryDir: `${process.env.HOME}/memory`,
   ideasFile: `${process.env.HOME}/memory/ideas.md`,
-  denyHistoryFile: `${process.env.HOME}/memory/deny-history.md`,
   outputDir: `${process.env.HOME}/homer/discovery`,
   fetchTimeout: 60000,   // 1 minute per source
   scoringTimeout: 120000, // 2 minutes total scoring

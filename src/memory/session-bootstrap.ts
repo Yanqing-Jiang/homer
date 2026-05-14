@@ -200,7 +200,7 @@ export function renderBootstrap(identity: IdentitySnapshot, focus: FocusProjecti
     "## Retrieval Rule",
     "- For current status, plans, recent activity, or pending decisions: call `memory_context` first.",
     "- For project history, narrative, or full preferences: call `memory_read` (file=me|work|preferences|tools) or `memory_search`.",
-    "- If MCP is unavailable: read ~/memory/emergency-bootstrap.md, then ~/memory/me.md / ~/memory/work.md directly.",
+    "- If MCP is unavailable: read ~/memory/me.md / ~/memory/work.md directly.",
     "",
   ];
 
@@ -257,8 +257,8 @@ export async function generateBootstrap(): Promise<{ path: string; bytes: number
 
 /**
  * Best-effort regen called from the loader. Never throws — if generation fails
- * we log and continue (the loader will fall back to the previous file or to
- * emergency-bootstrap.md per the existing loadMemoryFile behavior).
+ * we log and continue (the loader will fall back to the previous file via
+ * the existing loadMemoryFile behavior).
  */
 export async function ensureSessionBootstrap(): Promise<void> {
   try {

@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 // @ts-ignore
 import type Database from "better-sqlite3";
 import { z } from "zod";
@@ -21,7 +21,6 @@ import { fetchAndExtract } from "../scraping/deep-fetch.js";
 import { PATHS } from "../config/paths.js";
 
 const IDEAS_FILE = PATHS.ideasMd;
-const DENY_HISTORY_FILE = PATHS.denyHistory;
 
 interface SyncState {
   id: string;
@@ -35,7 +34,6 @@ interface IngestResult {
   skipped: number;
   enriched: number;
   fromTwitter: number;
-  archivedToDeny: number;
   errors: string[];
 }
 
@@ -460,54 +458,6 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
 // Deep URL fetching removed — handled by synthesizer pipeline (deep-fetch.ts)
 
 // ============================================
-// DENY HISTORY MANAGEMENT
-// ============================================
-
-function addToDenyHistory(idea: ParsedIdea, reason: string): void {
-  if (!existsSync(DENY_HISTORY_FILE)) {
-    logger.warn("deny-history.md not found, skipping");
-    return;
-  }
-
-  const today = new Date().toISOString().slice(0, 10);
-  const entry = `
-### [${today}] ${idea.title}
-- **Source:** ${idea.source}
-- **Link:** ${idea.link || "N/A"}
-- **Reason:** ${reason}
-- **ID:** ${idea.id}
-`;
-
-  // Append to Denied Items section
-  const content = readFileSync(DENY_HISTORY_FILE, "utf-8");
-  if (content.includes("## Denied Items")) {
-    const updated = content.replace(
-      "## Denied Items",
-      `## Denied Items\n${entry}`
-    );
-    writeFileSync(DENY_HISTORY_FILE, updated, "utf-8");
-    logger.info({ id: idea.id, title: idea.title }, "Added to deny history");
-  } else {
-    // Append at end if section not found
-    appendFileSync(DENY_HISTORY_FILE, `\n## Denied Items\n${entry}`);
-  }
-}
-
-function checkAndArchiveToDeny(existingIdeas: ParsedIdea[]): number {
-  let archived = 0;
-
-  for (const idea of existingIdeas) {
-    if (idea.status === "archived" && idea.notes?.toLowerCase().includes("denied")) {
-      // Already archived with denial - add to deny history
-      addToDenyHistory(idea, idea.notes || "User archived/denied");
-      archived++;
-    }
-  }
-
-  return archived;
-}
-
-// ============================================
 // MAIN INGESTION FUNCTION
 // ============================================
 
@@ -517,7 +467,6 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
     skipped: 0,
     enriched: 0,
     fromTwitter: 0,
-    archivedToDeny: 0,
     errors: [],
   };
 
@@ -536,9 +485,6 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
   const existingIdeas = dao.getAllIdeas(db);
   const existingIds = new Set(existingIdeas.map((i) => i.id));
   const existingTitles = new Set(existingIdeas.map((i) => i.title.toLowerCase()));
-
-  // Check for archived ideas that need to go to deny-history
-  result.archivedToDeny = checkAndArchiveToDeny(existingIdeas);
 
   // ========== SOURCE 1: Twitter/X Bookmarks ==========
   try {
@@ -669,7 +615,6 @@ export async function ingestIdeasFromLegacy(db: Database.Database): Promise<Inge
     ingested: result.ingested,
     enriched: result.enriched,
     fromTwitter: result.fromTwitter,
-    archivedToDeny: result.archivedToDeny,
     skipped: result.skipped,
     errors: result.errors.length,
   }, "Idea ingestion complete");

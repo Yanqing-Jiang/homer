@@ -44,13 +44,11 @@ import { formatForPrompt as getPreferenceContext } from "../../preferences/engin
 import { buildCondensedContext } from "../shared-context.js";
 import { logger } from "../../utils/logger.js";
 import { storeJobArtifact } from "./artifact-store.js";
-import { PATHS } from "../../config/paths.js";
 import { deepFetchScrapes } from "../../scraping/deep-fetch.js";
 import { writeStepTrace } from "../../executors/trace-writer.js";
 import { getPromptManifest, getManifestHash, getSourceHash } from "./prompts/idea-synthesizer.js";
 import { registerVersion, writeEvalScore } from "../../harness/manager.js";
 
-const DENY_HISTORY = PATHS.denyHistory;
 const CLUSTER_SIMILARITY_THRESHOLD = 0.3; // Related (lower than dedup's 0.8)
 const NEAR_DUPLICATE_THRESHOLD = 0.75;    // Near-duplicate scrapes to skip
 const MAX_CLUSTER_SIZE = 3;
@@ -983,7 +981,6 @@ export async function runIdeaSynthesizer(db: Database.Database, jobRunId?: numbe
       })(),
     ]);
 
-    const denyHistory = loadFileIfExists(DENY_HISTORY, 3000);
     const existingIdeas = ideaDao.getAllIdeas(db);
     const existingTitles = existingIdeas.slice(0, 100).map(i => i.title).join("\n");
 
@@ -992,9 +989,6 @@ ${condensedContext.slice(0, 4000)}
 
 ### Learned Preferences
 ${preferences || "(no preferences yet)"}
-
-### Deny History (topics to AVOID)
-${denyHistory.slice(0, 2000)}
 
 ### Existing Idea Titles (AVOID duplicates)
 ${existingTitles.slice(0, 1500)}`;

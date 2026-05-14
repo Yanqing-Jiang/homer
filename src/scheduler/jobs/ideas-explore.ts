@@ -8,7 +8,6 @@
  */
 
 import { execFileSync } from "child_process";
-import { readFileSync, existsSync } from "fs";
 import { z } from "zod";
 // @ts-ignore
 import type Database from "better-sqlite3";
@@ -18,9 +17,7 @@ import * as ideaDao from "../../ideas/dao.js";
 import { insertScrape } from "../../scraping/scrape-store.js";
 import { extractCurrentGoals, extractActiveProjects } from "../shared-context.js";
 import { logger } from "../../utils/logger.js";
-import { PATHS } from "../../config/paths.js";
 
-const DENY_HISTORY = PATHS.denyHistory;
 const GH_BIN = "/opt/homebrew/bin/gh";
 
 // ============================================
@@ -37,11 +34,6 @@ const RepoSchema = z.object({
 });
 
 const ReposArraySchema = z.array(RepoSchema);
-
-function loadFileIfExists(path: string): string {
-  if (!existsSync(path)) return "(file not found)";
-  return readFileSync(path, "utf-8");
-}
 
 /**
  * Fetch trending repos from GitHub API deterministically.
@@ -83,7 +75,6 @@ export async function runIdeasExplore(db?: Database.Database): Promise<{
   try {
     const existingIdeas = ideaDao.getAllIdeas(db);
     const existingUrls = new Set(existingIdeas.map((i) => i.link).filter(Boolean));
-    const denyHistory = loadFileIfExists(DENY_HISTORY);
 
     const [goals, projects] = await Promise.all([
       extractCurrentGoals(),
@@ -110,9 +101,6 @@ ${goals.slice(0, 1500)}
 
 ## Yanqing's Active Projects
 ${projects.slice(0, 1000)}
-
-## Deny History (skip these)
-${denyHistory.slice(0, 3000)}
 
 ## Output
 Return ONLY a JSON array of repos worth tracking. For each, add a "relevance" field explaining why it matters.
