@@ -1,12 +1,8 @@
 /**
- * Session & thread tools: session_archive, thread_load, feedback_log, outcome_check, preference_query
+ * Session & thread tools: session_archive, thread_load, outcome_check, preference_query
  */
 
-import { appendFile } from "fs/promises";
-import { PATHS } from "../../config/paths.js";
 import type { ToolResult, ToolDeps, ToolDefinition } from "./types.js";
-
-const FEEDBACK_FILE = PATHS.feedback;
 
 export const definitions: ToolDefinition[] = [
   {
@@ -35,19 +31,6 @@ export const definitions: ToolDefinition[] = [
         limit: { type: "number", description: "Max messages to include (default: 100)" },
       },
       required: ["thread_id"],
-    },
-  },
-  {
-    name: "feedback_log",
-    description: "Log a decision or feedback from the user.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        action: { type: "string", enum: ["approve", "reject", "explore", "comment"], description: "Type of action" },
-        target: { type: "string", description: "What the feedback is about (idea title or plan name)" },
-        notes: { type: "string", description: "Additional notes or context" },
-      },
-      required: ["action", "target"],
     },
   },
   {
@@ -83,17 +66,6 @@ export async function handle(
   deps: ToolDeps
 ): Promise<ToolResult | null> {
   switch (name) {
-    case "feedback_log": {
-      const { action, target, notes } = args as { action: string; target: string; notes?: string };
-      const now = new Date();
-      const timestamp = now.toISOString().slice(0, 16).replace("T", " ");
-      let entry = `\n### [${timestamp}] ${action.charAt(0).toUpperCase() + action.slice(1)} - ${target}\n`;
-      entry += `Decision: ${action}\n`;
-      if (notes) entry += `Notes: ${notes}\n`;
-      await appendFile(FEEDBACK_FILE, entry, "utf-8");
-      return { content: [{ type: "text", text: `Logged feedback: ${action} on "${target}"` }] };
-    }
-
     case "outcome_check": {
       const { source_type, source_id, source_title, check_days } = args as {
         source_type: string; source_id: string; source_title: string; check_days?: number;
