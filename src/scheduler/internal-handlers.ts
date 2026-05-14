@@ -677,7 +677,6 @@ async function runHandler(
           if (result.fromTwitter > 0) parts.push(`${result.fromTwitter} from X`);
           if (result.enriched > 0) parts.push(`${result.enriched} enriched`);
         }
-        if (result.archivedToDeny > 0) parts.push(`${result.archivedToDeny} archived to deny-history`);
         if (result.skipped > 0) parts.push(`${result.skipped} skipped`);
         const output = parts.length > 0 ? parts.join(", ") : "No new ideas found";
         return buildResult(
