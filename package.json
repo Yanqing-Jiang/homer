@@ -40,7 +40,7 @@
     "@mozilla/readability": "^0.6.0",
     "@supabase/supabase-js": "^2.39.0",
     "@types/fs-ext": "^2.0.3",
-    "better-sqlite3": "^11.3.0",
+    "better-sqlite3": "^12.10.0",
     "blessed": "^0.1.81",
     "chokidar": "^5.0.0",
     "chrono-node": "^2.9.0",
@@ -68,5 +68,8 @@
     "tsx": "^4.19.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.2"
+  },
+  "overrides": {
+    "nan": "^2.27.0"
   }
 }
