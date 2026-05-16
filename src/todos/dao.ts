@@ -3,10 +3,15 @@
  *
  * todo_index (SQLite) is the sole source of truth. No filesystem mirror.
  *
- * P1 todos auto-emit an approved `commitment` row in knowledge_claims the
- * first time their priority becomes P1. Dedup key: `source_url = todo:{id}`.
- * Skipped for source='idea' (HITL elsewhere) and source='migration' (retro
- * claims aren't meaningful commitments).
+ * Two knowledge_claims hooks:
+ *  - P1 todos auto-emit an approved `commitment` claim the first time priority
+ *    becomes P1. Dedup key: `source_url = todo:{id}`. Skipped for source='idea'
+ *    (HITL elsewhere) and source='migration' (retro claims aren't meaningful).
+ *  - Todos transitioning open→done with notes ≥ LESSON_MIN_NOTES_LEN chars
+ *    auto-emit an approved `lesson` claim with title + notes as content.
+ *    Dedup key: `source_url = todo:{id}:done`. The lesson flows through
+ *    knowledge_claims_fts automatically and is picked up by the next
+ *    memory_generate_embeddings run for vector recall.
  */
 
 // @ts-ignore
@@ -181,6 +186,7 @@ function createNew(db: Database.Database, input: SaveTodoInput): TodoRow {
   })();
 
   emitCommitmentIfP1(db, row);
+  if (row.status === "done") emitLessonOnDone(db, row);
   return row;
 }
 
@@ -223,6 +229,7 @@ function patchExisting(db: Database.Database, input: SaveTodoInput): TodoRow | n
   );
 
   if (!wasP1 && merged.priority === "P1") emitCommitmentIfP1(db, merged);
+  if (input.status === "done" && existing.status !== "done") emitLessonOnDone(db, merged);
 
   return merged;
 }
@@ -251,6 +258,48 @@ function linkIdea(db: Database.Database, ideaId: string, todoId: string): void {
     db.prepare("UPDATE idea_index SET linked_todo_id = ? WHERE id = ?").run(todoId, ideaId);
   } catch (e) {
     logger.warn({ ideaId, error: e }, "Idea linked_todo_id update failed");
+  }
+}
+
+/** Minimum notes length to qualify a done todo as a lesson worth indexing. */
+const LESSON_MIN_NOTES_LEN = 80;
+/** Cap on lesson content to avoid blob-sized claims. */
+const LESSON_MAX_CONTENT_LEN = 4000;
+
+function emitLessonOnDone(db: Database.Database, row: TodoRow): void {
+  if (row.source === "migration") return;
+  const notes = row.notes.trim();
+  if (notes.length < LESSON_MIN_NOTES_LEN) return;
+
+  try {
+    const sourceUrl = `todo:${row.id}:done`;
+    const existing = db.prepare(`
+      SELECT id FROM knowledge_claims
+      WHERE source_url = ? AND status NOT IN ('rejected','archived','expired')
+      LIMIT 1
+    `).get(sourceUrl) as { id: string } | undefined;
+    if (existing) return;
+
+    const body = `Completed: ${row.title}\n\n${notes}`;
+    const content = body.length > LESSON_MAX_CONTENT_LEN
+      ? body.slice(0, LESSON_MAX_CONTENT_LEN) + "\n\n[…truncated]"
+      : body;
+    const targetFile = row.category === "W" ? "work" : "me";
+    const contentHash = createHash("md5").update(`${content}\n${targetFile}\nLessons`).digest("hex");
+    const id = `claim_${randomBytes(8).toString("hex")}`;
+
+    db.prepare(`
+      INSERT INTO knowledge_claims (
+        id, content, content_hash, target_file, section,
+        claim_type, confidence, status, source_url, origin_channel, created_at
+      ) VALUES (
+        ?, ?, ?, ?, 'Lessons',
+        'lesson', 0.85, 'approved', ?, 'todo', datetime('now')
+      )
+    `).run(id, content, contentHash, targetFile, sourceUrl);
+    logger.info({ todoId: row.id, claimId: id, notesLen: notes.length }, "Auto-emitted done todo lesson claim");
+  } catch (e) {
+    logger.warn({ todoId: row.id, error: e }, "Done todo lesson claim emit failed (non-fatal)");
   }
 }
 
