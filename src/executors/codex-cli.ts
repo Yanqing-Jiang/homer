@@ -94,8 +94,12 @@ function getFileChangeLabel(changes: Array<{ path?: string; kind?: string }>): {
 
 /**
  * Execute Codex CLI with a full prompt.
- * Command: codex exec --json --dangerously-bypass-approvals-and-sandbox <prompt>
- * Resume:  codex exec resume --json --dangerously-bypass-approvals-and-sandbox <sessionId> <prompt>
+ * Command: codex exec --json --dangerously-bypass-approvals-and-sandbox -- <prompt>
+ * Resume:  codex exec resume --json --dangerously-bypass-approvals-and-sandbox <sessionId> -- <prompt>
+ *
+ * The `--` separator is required: prompts that begin with `-` or `--` (e.g. skill
+ * files with YAML front-matter delimiter `---`) are otherwise parsed as flags by
+ * clap and fail with exit code 2 before any LLM call is made.
  */
 export async function executeCodexCLI(
   prompt: string,
@@ -129,10 +133,12 @@ export async function executeCodexCLI(
     if (reasoningEffort)
       args.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
 
+    // `--` ends clap option parsing so prompts starting with `-`/`--`/`---`
+    // (e.g. skill files with YAML front-matter) are treated as positional.
     if (sessionId) {
-      args.push(sessionId, prompt);
+      args.push(sessionId, "--", prompt);
     } else {
-      args.push(prompt);
+      args.push("--", prompt);
     }
 
     const child = spawn("codex", args, {
