@@ -12,33 +12,36 @@
 // @ts-ignore
 import type Database from "better-sqlite3";
 import { updatePreferences, type PreferenceSignal } from "../../preferences/engine.js";
-import { loadIdeasFromDir } from "../../ideas/parser.js";
+import * as ideaDao from "../../ideas/dao.js";
 import { logger } from "../../utils/logger.js";
 
-function extractIdeaSignals(): PreferenceSignal[] {
+function extractIdeaSignals(db: Database.Database): PreferenceSignal[] {
   const signals: PreferenceSignal[] = [];
 
-  // Load ideas and look for recently transitioned ones
+  // Active ideas updated in the last 24h emit positive preference signals.
+  // The DAO returns ParsedIdea but we filter by updated_at via raw query.
   try {
-    const ideas = loadIdeasFromDir();
-    for (const idea of ideas) {
-      // We can't easily detect "last 24h" transitions from file-based ideas,
-      // so we use a heuristic: ideas with notes containing recent dates
-      const tags = idea.tags || [];
-      const source = idea.source || "unknown";
+    const rows = db.prepare(`
+      SELECT id, source, tags, status
+      FROM ideas
+      WHERE status IN ('discussion','planning','execution')
+        AND updated_at > datetime('now', '-24 hours')
+    `).all() as Array<{ id: string; source: string | null; tags: string | null; status: string }>;
 
-      if (idea.status === "discussion" || idea.status === "planning" || idea.status === "execution") {
-        // Positive signal for active ideas
-        for (const tag of tags) {
-          signals.push({ dimension: `topic:${tag}`, delta: 0.05 });
-        }
-        signals.push({ dimension: `source:${source}`, delta: 0.05 });
+    for (const row of rows) {
+      const tags: string[] = row.tags ? JSON.parse(row.tags) : [];
+      const source = row.source || "unknown";
+      for (const tag of tags) {
+        signals.push({ dimension: `topic:${tag}`, delta: 0.05 });
       }
+      signals.push({ dimension: `source:${source}`, delta: 0.05 });
     }
   } catch (err) {
-    logger.debug({ error: err }, "Could not load ideas for preference signals");
+    logger.debug({ error: err }, "Could not extract idea preference signals");
   }
 
+  // ideaDao kept imported for future signal types
+  void ideaDao;
   return signals;
 }
 
@@ -116,7 +119,7 @@ export async function runPreferenceUpdater(
 ): Promise<{ success: boolean; output: string; error?: string }> {
   try {
     const allSignals: PreferenceSignal[] = [
-      ...extractIdeaSignals(),
+      ...extractIdeaSignals(db),
       ...extractSessionSignals(db),
       ...extractOutcomeSignals(db),
       ...extractDenySignals(db),

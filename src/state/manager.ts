@@ -603,25 +603,23 @@ export class StateManager {
     const txn = this._db.transaction(() => {
       const now = new Date().toISOString();
 
-      const runningCheck = this._db.prepare(
-        'SELECT is_running FROM scheduled_job_state WHERE job_id = ?'
-      ).get(jobId) as { is_running: number } | undefined;
+      this._db.prepare(
+        `INSERT OR IGNORE INTO scheduled_job_state (job_id, source_file, is_running, updated_at)
+         VALUES (?, ?, 0, ?)`
+      ).run(jobId, sourceFile, now);
 
-      if (runningCheck && runningCheck.is_running === 1) return null;
+      const lock = this._db.prepare(
+        `UPDATE scheduled_job_state
+         SET source_file = ?, last_run_at = ?, is_running = 1, updated_at = ?
+         WHERE job_id = ? AND is_running = 0`
+      ).run(sourceFile, now, now, jobId);
+
+      if (lock.changes === 0) return null;
 
       const result = this._db.prepare(
         `INSERT INTO scheduled_job_runs (job_id, job_name, source_file, started_at, success)
          VALUES (?, ?, ?, ?, 0)`
       ).run(jobId, jobName, sourceFile, now);
-
-      this._db.prepare(
-        `INSERT INTO scheduled_job_state (job_id, source_file, last_run_at, is_running, updated_at)
-         VALUES (?, ?, ?, 1, ?)
-         ON CONFLICT(job_id) DO UPDATE SET
-           last_run_at = excluded.last_run_at,
-           is_running = 1,
-           updated_at = excluded.updated_at`
-      ).run(jobId, sourceFile, now, now);
 
       return result.lastInsertRowid as number;
     });
@@ -1458,7 +1456,7 @@ export class StateManager {
                created_at as createdAt, updated_at as updatedAt,
                decided_at as decidedAt, decision_feedback as decisionFeedback
         FROM plan_reviews WHERE id = ?
-      `).get(planId) as any;
+      `).get(planId) as NonNullable<ReturnType<StateManager["getPlanReview"]>> | undefined;
       return row ?? null;
     } catch {
       return null;
