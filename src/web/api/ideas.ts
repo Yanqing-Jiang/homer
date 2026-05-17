@@ -1,7 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomUUID } from "crypto";
 import type { StateManager } from "../../state/manager.js";
-import { IdeasIndexer } from "../../ideas/indexer.js";
 import {
   getIdeasPaths,
   isIdeasMigrated,
@@ -13,8 +12,6 @@ import * as discussionDao from "../../ideas/discussions.js";
 import { recordFeedback } from "../../feedback/events.js";
 import { webLane } from "../../utils/lanes.js";
 import { getCurrentFocus } from "../../memory/session-bootstrap.js";
-
-let ideasIndexer: IdeasIndexer | null = null;
 
 interface UpdateIdeaBody {
   status?: string;
@@ -43,13 +40,6 @@ export function registerIdeasRoutes(
   stateManager: StateManager
 ): void {
   const db = stateManager.db;
-
-  // Initialize ideas indexer (backward compat — chokidar watcher kept for now)
-  ideasIndexer = new IdeasIndexer(db);
-  if (isIdeasMigrated()) {
-    ideasIndexer.reindex();
-    ideasIndexer.startWatching();
-  }
 
   // List ideas
   server.get("/api/ideas", async (request: FastifyRequest) => {
@@ -616,14 +606,11 @@ Ask a question, challenge an assumption, or say "connect this" when you want to 
     };
   });
 
-  // Reindex ideas
+  // Reindex endpoint (deprecated — DAO is now the canonical write path; ideas table is source of truth).
+  // Retained as a no-op for clients that still call it; returns current ideas count for sanity.
   server.post("/api/ideas/reindex", async () => {
-    if (!ideasIndexer) {
-      return { error: "Ideas indexer not initialized", indexed: 0 };
-    }
-
-    const indexed = ideasIndexer.reindex();
-    return { indexed, message: "Reindex complete" };
+    const count = dao.getAllIdeas(db).length;
+    return { indexed: count, message: "Reindex is a no-op (DAO already keeps ideas table in sync)" };
   });
 
   // Check migration status
