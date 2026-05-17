@@ -159,7 +159,12 @@ export async function runLinkProcessor(
                 inbox_id: link.id,
                 submitted_by: link.submitted_by,
                 relevance_score: ytResult.pass2?.overallRelevance,
-                pipeline: { step: "pending", source: "youtube_v2_direct" },
+                pipeline: {
+                  version: 2,
+                  step: "pending",
+                  source: "youtube_v2_direct",
+                  attempts: { score: 0, candidate: 0, critique: 0, enrich: 0, synthesize: 0, save: 0 },
+                },
               }),
             });
 

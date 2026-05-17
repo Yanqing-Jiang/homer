@@ -29,7 +29,7 @@ import { MorningPresenter } from "../../overnight/morning-presenter.js";
 import { decodeCallbackData, type OvernightTaskType, type YouTubeSummaryMetadata } from "../../overnight/types.js";
 import type { ApproachLabel } from "../../overnight/types.js";
 import { markSummaryReviewedV2, summaryFileExists, getYouTubeVideoFromDb } from "../../youtube/summarizer.js";
-import { saveIdeaFile, type ParsedIdea } from "../../ideas/parser.js";
+import { type ParsedIdea } from "../../ideas/parser.js";
 import * as dao from "../../ideas/dao.js";
 import { readFileSync } from "fs";
 import {
@@ -955,12 +955,10 @@ async function handleYouTubeSave(ctx: Context, taskId: string): Promise<void> {
 
   try {
     const db = overnightStateManager?.getDb();
-    if (db) {
-      dao.createIdea(db, idea);
-    } else {
-      logger.warn({ ideaId: idea.id }, "handleYouTubeSave: DB unavailable, file-only save (invisible to DB)");
-      saveIdeaFile(idea);
+    if (!db) {
+      throw new Error("handleYouTubeSave invoked before state manager was wired");
     }
+    dao.createIdea(db, idea);
     markSummaryReviewedV2(videoId, db ?? undefined);
     taskStore.updateTaskStatus(taskId, "selected");
     await ctx.editMessageText(`💡 Saved to ideas: ${videoTitle}`);

@@ -51,16 +51,16 @@ async function gatherEvidence(db: Database.Database, check: OutcomeCheck): Promi
   const evidence: string[] = [];
 
   if (check.source_type === "idea") {
-    // Check if idea status changed
     try {
-      const { loadIdeasFromDir } = await import("../../ideas/parser.js");
-      const ideas = loadIdeasFromDir();
-      const idea = ideas.find(i => i.id === check.source_id || i.title === check.source_title);
+      const ideaDao = await import("../../ideas/dao.js");
+      const byId = ideaDao.getIdea(db, check.source_id);
+      const idea = byId
+        ?? ideaDao.getAllIdeas(db).find(i => i.title === check.source_title);
       if (idea) {
         evidence.push(`Idea status: ${idea.status}`);
         if (idea.notes) evidence.push(`Notes: ${idea.notes}`);
       }
-    } catch { /* ideas dir may not exist */ }
+    } catch { /* DAO unavailable — non-fatal */ }
   }
 
   if (check.source_type === "application") {
