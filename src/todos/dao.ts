@@ -255,7 +255,6 @@ function appendIfPresent(base: string, append?: string): string {
 function linkIdea(db: Database.Database, ideaId: string, todoId: string): void {
   try {
     db.prepare("UPDATE ideas SET linked_todo_id = ? WHERE id = ?").run(todoId, ideaId);
-    db.prepare("UPDATE idea_index SET linked_todo_id = ? WHERE id = ?").run(todoId, ideaId);
   } catch (e) {
     logger.warn({ ideaId, error: e }, "Idea linked_todo_id update failed");
   }

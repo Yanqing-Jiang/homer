@@ -7,7 +7,6 @@
  */
 
 // @ts-ignore
-// @ts-ignore
 import type Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
 import { extractVideoId } from "../youtube/utils.js";
@@ -206,16 +205,35 @@ export interface ClusterState {
   memberIds: string[];
 }
 
+export type PipelineAttemptName = "score" | "candidate" | "critique" | "enrich" | "synthesize" | "save";
+
 export interface PipelineState {
   version: number;
   step: PipelineStep;
   score?: { value: number; dimensions: string[]; summary: string };
   cluster?: ClusterState;
   candidate?: { title: string; content: string; tags: string[]; link: string; relevance: string; confidence: number; source: string };
-  critique?: { passed: boolean; novelty: number; goalAlignment: number; feasibility: number; reason: string };
+  critique?: { passed: boolean; reason: string; strengths?: string[]; risks?: string[]; novelty?: number; goalAlignment?: number; feasibility?: number };
   enrichment?: Record<string, unknown>;
-  attempts: { score: number; candidate: number; critique: number; enrich: number; synthesize: number };
+  attempts: Record<PipelineAttemptName, number>;
   completed_at?: string;
+}
+
+const DEFAULT_ATTEMPTS: Record<PipelineAttemptName, number> = {
+  score: 0, candidate: 0, critique: 0, enrich: 0, synthesize: 0, save: 0,
+};
+
+function pipelineWithDefaults(raw: Partial<PipelineState> | undefined): PipelineState {
+  return {
+    version: 2,
+    step: "pending",
+    ...(raw ?? {}),
+    attempts: { ...DEFAULT_ATTEMPTS, ...(raw?.attempts ?? {}) },
+  };
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 }
 
 function getMetadata(db: Database.Database, scrapeId: string): Record<string, unknown> {
@@ -241,13 +259,8 @@ export function updatePipelineStep(
   stepData?: Record<string, unknown>,
 ): void {
   const meta = getMetadata(db, scrapeId);
-  const existing: PipelineState = (meta.pipeline as PipelineState) ?? {
-    version: 2,
-    step: "pending",
-    attempts: { score: 0, candidate: 0, critique: 0, enrich: 0, synthesize: 0 },
-  };
-  // Backfill synthesize counter for pre-clustering scrapes
-  if (existing.attempts.synthesize === undefined) existing.attempts.synthesize = 0;
+  const raw = meta.pipeline as Partial<PipelineState> | undefined;
+  const existing = pipelineWithDefaults(raw);
 
   existing.step = step;
   if (stepData) {
@@ -257,8 +270,37 @@ export function updatePipelineStep(
       : step === "critiqued" ? "critique"
       : step === "enriched" ? "enrichment"
       : undefined;
-    if (stepKey) {
-      (existing as unknown as Record<string, unknown>)[stepKey] = stepData;
+    if (stepKey === "score") {
+      existing.score = {
+        value: Number(stepData.value ?? 0),
+        dimensions: stringArray(stepData.dimensions),
+        summary: String(stepData.summary ?? ""),
+      };
+    } else if (stepKey === "cluster") {
+      existing.cluster = {
+        clusterId: String(stepData.clusterId ?? ""),
+        role: stepData.role === "secondary" ? "secondary" : "primary",
+        memberIds: stringArray(stepData.memberIds),
+      };
+    } else if (stepKey === "candidate") {
+      existing.candidate = {
+        title: String(stepData.title ?? ""),
+        content: String(stepData.content ?? ""),
+        tags: stringArray(stepData.tags),
+        link: String(stepData.link ?? ""),
+        relevance: String(stepData.relevance ?? ""),
+        confidence: Number(stepData.confidence ?? 0),
+        source: String(stepData.source ?? ""),
+      };
+    } else if (stepKey === "critique") {
+      existing.critique = {
+        passed: stepData.passed === true,
+        reason: String(stepData.reason ?? ""),
+        strengths: stringArray(stepData.strengths),
+        risks: stringArray(stepData.risks),
+      };
+    } else if (stepKey === "enrichment") {
+      existing.enrichment = stepData;
     }
   }
 
@@ -270,20 +312,11 @@ export function updatePipelineStep(
 export function incrementPipelineAttempt(
   db: Database.Database,
   scrapeId: string,
-  stepName: "score" | "candidate" | "critique" | "enrich" | "synthesize",
+  stepName: PipelineAttemptName,
 ): number {
   const meta = getMetadata(db, scrapeId);
-  const defaults = {
-    version: 2,
-    step: "pending" as const,
-    attempts: { score: 0, candidate: 0, critique: 0, enrich: 0, synthesize: 0 },
-  };
   const raw = meta.pipeline as Partial<PipelineState> | undefined;
-  const existing: PipelineState = {
-    ...defaults,
-    ...raw,
-    attempts: { ...defaults.attempts, ...(raw?.attempts ?? {}) },
-  };
+  const existing = pipelineWithDefaults(raw);
 
   existing.attempts[stepName] = (existing.attempts[stepName] ?? 0) + 1;
   meta.pipeline = existing;
@@ -297,39 +330,32 @@ export function getScrapesForStep(
   targetStep: PipelineStep,
   hoursWindow = 48,
 ): StoredScrape[] {
-  // Get unprocessed scrapes within the time window
-  const all = getUnprocessedScrapes(db, hoursWindow);
+  const since = hoursWindow
+    ? `AND scraped_at > datetime('now', '-${Math.floor(hoursWindow)} hours')`
+    : "";
+  const validMetadata = "(metadata IS NULL OR json_valid(metadata))";
 
-  // Filter by pipeline state
-  return all.filter((s) => {
-    try {
-      const meta = s.metadata ? JSON.parse(s.metadata) : {};
-      const pipeline =
-        typeof meta.pipeline === "object" && meta.pipeline !== null
-          ? (meta.pipeline as PipelineState)
-          : undefined;
+  const stepWhere: Record<PipelineStep, string> = {
+    pending: `AND (metadata IS NULL OR json_extract(metadata, '$.pipeline.step') IS NULL OR json_extract(metadata, '$.pipeline.step') = 'pending')`,
+    scored: `AND json_extract(metadata, '$.pipeline.step') = 'scored' AND COALESCE(json_extract(metadata, '$.pipeline.score.value'), 0) >= 6`,
+    clustered: `AND json_extract(metadata, '$.pipeline.step') = 'clustered' AND json_extract(metadata, '$.pipeline.cluster.role') = 'primary'`,
+    extracted: `AND json_extract(metadata, '$.pipeline.step') = 'extracted'`,
+    critiqued: `AND json_extract(metadata, '$.pipeline.step') = 'critiqued' AND json_extract(metadata, '$.pipeline.critique.passed') = 1`,
+    enriched: `AND json_extract(metadata, '$.pipeline.step') = 'enriched'`,
+    saved: "AND 0",
+    skipped: "AND 0",
+    rejected: "AND 0",
+  };
 
-      switch (targetStep) {
-        case "pending": // Needs scoring
-          return !pipeline || pipeline.step === "pending";
-        case "scored": // Already scored, needs clustering
-          return pipeline?.step === "scored" && (pipeline.score?.value ?? 0) >= 6;
-        case "clustered": // Clustered primary, needs synthesis/extraction
-          return pipeline?.step === "clustered" && pipeline.cluster?.role === "primary";
-        case "extracted": // Has candidate, needs critique
-          return pipeline?.step === "extracted";
-        case "critiqued": // Critiqued + passed, needs enrichment
-          return pipeline?.step === "critiqued" && pipeline.critique?.passed === true;
-        case "enriched": // Enriched, needs saving
-          return pipeline?.step === "enriched";
-        default:
-          return false;
-      }
-    } catch {
-      logger.warn({ scrapeId: s.id }, "Corrupt metadata in scrape — skipping");
-      return false;
-    }
-  });
+  return db.prepare(`
+    SELECT id, source, url, title, author, raw_content, metadata,
+           scraped_at, processed_at, idea_id, quality_score
+    FROM scrapes
+    WHERE processed_at IS NULL ${since}
+      AND ${validMetadata}
+      ${stepWhere[targetStep]}
+    ORDER BY scraped_at DESC
+  `).all() as StoredScrape[];
 }
 
 const MAX_STEP_RETRIES = 3;
@@ -343,10 +369,23 @@ export function markScrapeTerminal(
   qualityScore?: number,
 ): void {
   const step: PipelineStep = reason === "saved" ? "saved" : reason === "rejected" ? "rejected" : "skipped";
-  updatePipelineStep(db, scrapeId, step);
+  const terminate = db.transaction(() => {
+    const pipeline = getPipelineState(db, scrapeId);
+    updatePipelineStep(db, scrapeId, step);
+    markProcessed(db, scrapeId, ideaId, qualityScore);
 
-  // Now mark as processed
-  markProcessed(db, scrapeId, ideaId, qualityScore);
+    if (pipeline?.cluster?.role === "primary") {
+      for (const member of getClusterMembers(db, pipeline.cluster.clusterId)) {
+        if (member.id === scrapeId || member.processed_at !== null) continue;
+        const memberPipeline = getPipelineState(db, member.id);
+        if (memberPipeline?.cluster?.role === "secondary") {
+          markScrapeTerminal(db, member.id, reason, ideaId, memberPipeline.score?.value);
+        }
+      }
+    }
+  });
+
+  terminate();
   logger.info({ scrapeId, reason, ideaId }, "Scrape reached terminal state");
 }
 
@@ -354,7 +393,7 @@ export function markScrapeTerminal(
 export function isStepExhausted(
   db: Database.Database,
   scrapeId: string,
-  stepName: "score" | "candidate" | "critique" | "enrich" | "synthesize",
+  stepName: PipelineAttemptName,
 ): boolean {
   const pipeline = getPipelineState(db, scrapeId);
   return (pipeline?.attempts?.[stepName] ?? 0) >= MAX_STEP_RETRIES;
@@ -362,40 +401,14 @@ export function isStepExhausted(
 
 /** Get all scrapes belonging to a cluster (by clusterId in metadata). */
 export function getClusterMembers(db: Database.Database, clusterId: string): StoredScrape[] {
-  const all = getUnprocessedScrapes(db, 48);
-  return all.filter((s) => {
-    try {
-      const meta = s.metadata ? JSON.parse(s.metadata) : {};
-      const pipeline =
-        typeof meta.pipeline === "object" && meta.pipeline !== null
-          ? (meta.pipeline as PipelineState)
-          : undefined;
-      return pipeline?.cluster?.clusterId === clusterId;
-    } catch {
-      logger.warn({ scrapeId: s.id }, "Corrupt metadata in scrape — skipping");
-      return false;
-    }
-  });
-}
-
-/** Mark all secondary members of a cluster as terminal. */
-export function markClusterSecondariesTerminal(
-  db: Database.Database,
-  clusterId: string,
-  reason: "saved" | "skipped" | "rejected",
-  ideaId?: string,
-): void {
-  const members = getClusterMembers(db, clusterId);
-  for (const m of members) {
-    const meta = m.metadata ? JSON.parse(m.metadata) : {};
-    const pipeline =
-      typeof meta.pipeline === "object" && meta.pipeline !== null
-        ? (meta.pipeline as PipelineState)
-        : undefined;
-    if (pipeline?.cluster?.role === "secondary") {
-      markScrapeTerminal(db, m.id, reason, ideaId, pipeline.score?.value);
-    }
-  }
+  return db.prepare(`
+    SELECT id, source, url, title, author, raw_content, metadata,
+           scraped_at, processed_at, idea_id, quality_score
+    FROM scrapes
+    WHERE json_valid(metadata)
+      AND json_extract(metadata, '$.pipeline.cluster.clusterId') = ?
+    ORDER BY scraped_at DESC
+  `).all(clusterId) as StoredScrape[];
 }
 
 // ============================================

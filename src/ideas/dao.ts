@@ -216,31 +216,25 @@ export function getAllIdeas(db: Database.Database, filter?: IdeaFilter): ParsedI
 export function createIdea(db: Database.Database, idea: ParsedIdea): ParsedIdea {
   const row = ideaToRow(idea);
 
-  // Atomic: ideas + idea_index in one transaction
-  db.transaction(() => {
-    db.prepare(`
-      INSERT INTO ideas (
-        id, title, status, source, tags, raw_content, link, canonical_url,
-        notes, context, exploration, fingerprint,
-        linked_exploration_thread_id, linked_plan_id,
-        file_path, content_hash, created_at, enrichment, updated_at
-      ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?,
-        ?, ?, ?, ?, datetime('now')
-      )
-    `).run(
-      row.id, row.title, row.status, row.source, row.tags, row.raw_content,
-      row.link, row.canonical_url,
-      row.notes, row.context, row.exploration, row.fingerprint,
-      row.linked_exploration_thread_id, row.linked_plan_id,
-      row.file_path, row.content_hash, row.created_at, row.enrichment,
-    );
-
-    // Sync to idea_index for backward compat (Web UI still uses IdeasIndexer)
-    syncToIdeaIndex(db, row);
-  })();
+  db.prepare(`
+    INSERT INTO ideas (
+      id, title, status, source, tags, raw_content, link, canonical_url,
+      notes, context, exploration, fingerprint,
+      linked_exploration_thread_id, linked_plan_id,
+      file_path, content_hash, created_at, enrichment, updated_at
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?,
+      ?, ?,
+      ?, ?, ?, ?, datetime('now')
+    )
+  `).run(
+    row.id, row.title, row.status, row.source, row.tags, row.raw_content,
+    row.link, row.canonical_url,
+    row.notes, row.context, row.exploration, row.fingerprint,
+    row.linked_exploration_thread_id, row.linked_plan_id,
+    row.file_path, row.content_hash, row.created_at, row.enrichment,
+  );
 
   // Mirror file write is post-commit best-effort
   const saved = { ...idea, filePath: row.file_path ?? undefined, contentHash: row.content_hash ?? undefined };
@@ -276,24 +270,19 @@ export function updateIdea(
 
   const row = ideaToRow(merged);
 
-  // Atomic: ideas + idea_index in one transaction
-  db.transaction(() => {
-    db.prepare(`
-      UPDATE ideas SET
-        title = ?, status = ?, source = ?, tags = ?, raw_content = ?,
-        link = ?, canonical_url = ?, notes = ?, context = ?, exploration = ?,
-        fingerprint = ?, linked_exploration_thread_id = ?, linked_plan_id = ?,
-        file_path = ?, content_hash = ?, enrichment = ?, updated_at = datetime('now')
-      WHERE id = ?
-    `).run(
-      row.title, row.status, row.source, row.tags, row.raw_content,
-      row.link, row.canonical_url, row.notes, row.context, row.exploration,
-      row.fingerprint, row.linked_exploration_thread_id, row.linked_plan_id,
-      row.file_path, row.content_hash, row.enrichment, existing.id,
-    );
-
-    syncToIdeaIndex(db, { ...row, id: existing.id });
-  })();
+  db.prepare(`
+    UPDATE ideas SET
+      title = ?, status = ?, source = ?, tags = ?, raw_content = ?,
+      link = ?, canonical_url = ?, notes = ?, context = ?, exploration = ?,
+      fingerprint = ?, linked_exploration_thread_id = ?, linked_plan_id = ?,
+      file_path = ?, content_hash = ?, enrichment = ?, updated_at = datetime('now')
+    WHERE id = ?
+  `).run(
+    row.title, row.status, row.source, row.tags, row.raw_content,
+    row.link, row.canonical_url, row.notes, row.context, row.exploration,
+    row.fingerprint, row.linked_exploration_thread_id, row.linked_plan_id,
+    row.file_path, row.content_hash, row.enrichment, existing.id,
+  );
 
   // Mirror file write is post-commit best-effort
   const saved = { ...merged, filePath: row.file_path ?? undefined, contentHash: row.content_hash ?? undefined };
@@ -321,10 +310,8 @@ export function appendNote(db: Database.Database, id: string, note: string): Par
     WHERE id = ?
   `).run(newNote, newNote, existing.id);
 
-  // Re-read and sync
   const updated = getIdea(db, existing.id);
   if (updated) {
-    syncToIdeaIndex(db, ideaToRow(updated));
     writeMirrorFile(updated);
   }
   return updated;
@@ -353,13 +340,7 @@ export function deleteIdea(db: Database.Database, id: string): boolean {
   const existing = getIdea(db, id);
   if (!existing) return false;
 
-  // Atomic: ideas + idea_index in one transaction
-  db.transaction(() => {
-    db.prepare("DELETE FROM ideas WHERE id = ?").run(existing.id);
-    try {
-      db.prepare("DELETE FROM idea_index WHERE id = ?").run(existing.id);
-    } catch { /* idea_index may not exist */ }
-  })();
+  db.prepare("DELETE FROM ideas WHERE id = ?").run(existing.id);
 
   // Mirror file delete is post-commit best-effort
   deleteMirrorFile(existing.filePath ?? null);
@@ -411,28 +392,6 @@ export function findByCanonicalUrl(db: Database.Database, url: string): ParsedId
   return row ? rowToIdea(row) : null;
 }
 
-/**
- * Get all ideas as IdeaRow (raw DB format, for callers that need it).
- */
-export function getAllIdeaRows(db: Database.Database, filter?: IdeaFilter): IdeaRow[] {
-  let query = "SELECT * FROM ideas WHERE 1=1";
-  const params: (string | number)[] = [];
-
-  if (filter?.status) {
-    query += " AND status = ?";
-    params.push(filter.status);
-  }
-
-  query += " ORDER BY created_at DESC";
-
-  if (filter?.limit) {
-    query += " LIMIT ?";
-    params.push(filter.limit);
-  }
-
-  return db.prepare(query).all(...params) as IdeaRow[];
-}
-
 // ============================================
 // Homer Tasks CRUD
 // ============================================
@@ -468,31 +427,3 @@ export function getPendingHomerTasks(db: Database.Database): HomerTaskRow[] {
   }
 }
 
-// ============================================
-// Backward compat: sync to idea_index
-// ============================================
-
-function syncToIdeaIndex(db: Database.Database, row: Omit<IdeaRow, "updated_at">): void {
-  try {
-    db.prepare(`
-      INSERT INTO idea_index (id, title, status, source, tags, linked_thread_id, linked_plan_id, file_path, content_hash, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(id) DO UPDATE SET
-        title = excluded.title,
-        status = excluded.status,
-        source = excluded.source,
-        tags = excluded.tags,
-        linked_thread_id = excluded.linked_thread_id,
-        linked_plan_id = excluded.linked_plan_id,
-        file_path = excluded.file_path,
-        content_hash = excluded.content_hash,
-        updated_at = CURRENT_TIMESTAMP
-    `).run(
-      row.id, row.title, row.status, row.source, row.tags,
-      row.linked_exploration_thread_id, row.linked_plan_id,
-      row.file_path, row.content_hash, row.created_at,
-    );
-  } catch {
-    // idea_index table may not exist or have different schema — non-fatal
-  }
-}

@@ -12,6 +12,7 @@
 // @ts-ignore
 import type Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
+import { smartSaveIdea } from "./smart-save.js";
 
 // ============================================
 // Types
@@ -375,8 +376,6 @@ export function promotePacket(
   ].filter(Boolean).join(" | ");
 
   // Use smartSaveIdea for dedup at promotion-time
-  const { smartSaveIdea } = require("./smart-save.js");
-
   const parsed = {
     id: ideaId,
     title: titleText,

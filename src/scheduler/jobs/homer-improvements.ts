@@ -15,7 +15,7 @@ import { z } from "zod";
 import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { buildSchedulerContext } from "../shared-context.js";
-import { loadIdeasFromDir } from "../../ideas/parser.js";
+import * as ideaDao from "../../ideas/dao.js";
 import { logger } from "../../utils/logger.js";
 // @ts-ignore
 import type Database from "better-sqlite3";
@@ -217,7 +217,7 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
       fileListing = "(file listing unavailable)";
     }
 
-    const existingIdeas = loadIdeasFromDir();
+    const existingIdeas = db ? ideaDao.getAllIdeas(db) : [];
     const existingTitles = existingIdeas.map(i => i.title.toLowerCase());
 
     let schedulerContext: string;

@@ -15,10 +15,10 @@
  * - Same URL different tags: merge them
  */
 
-import { readFileSync, existsSync, unlinkSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { logger } from "../utils/logger.js";
 import { executeGeminiCLIDirect, GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
-import { loadIdeasFromDir, type ParsedIdea } from "./parser.js";
+import { type ParsedIdea } from "./parser.js";
 import * as dao from "./dao.js";
 import { canonicalizeUrl, extractRepoId } from "./canonical-url.js";
 import { createFingerprint, fingerprintSimilarity } from "./fingerprint.js";
@@ -176,11 +176,8 @@ If none found: {"groups":[]}`;
  * Main deduplication function for file-based ideas (~/memory/ideas/)
  * Deletes duplicate files, keeping the "best" version of each idea
  */
-export async function dedupeIdeasDir(db?: Database.Database, jobRunId?: number): Promise<DedupResult> {
-  if (!db) {
-    logger.warn("dedupeIdeasDir: DB unavailable, using file-only path (deletions invisible to DB)");
-  }
-  const ideas = db ? dao.getAllIdeas(db) : loadIdeasFromDir();
+export async function dedupeIdeasDir(db: Database.Database, jobRunId?: number): Promise<DedupResult> {
+  const ideas = dao.getAllIdeas(db);
 
   if (ideas.length === 0) {
     return {
@@ -406,7 +403,7 @@ export async function dedupeIdeasDir(db?: Database.Database, jobRunId?: number):
   }
 
   // =========================================
-  // Delete duplicate files
+  // Delete duplicates (DAO cascades to mirror file)
   // =========================================
   let deleted = 0;
   for (const id of idsToDelete) {
@@ -414,11 +411,7 @@ export async function dedupeIdeasDir(db?: Database.Database, jobRunId?: number):
     if (!idea?.filePath) continue;
 
     try {
-      if (db) {
-        dao.deleteIdea(db, id);
-      } else if (existsSync(idea.filePath)) {
-        unlinkSync(idea.filePath);
-      }
+      dao.deleteIdea(db, id);
       logger.info({ id, title: idea.title, filePath: idea.filePath }, "Deleted duplicate");
       deleted++;
     } catch (error) {
@@ -437,16 +430,6 @@ export async function dedupeIdeasDir(db?: Database.Database, jobRunId?: number):
     repoMatches,
     semanticMatches,
     llmMatches,
-  };
-}
-
-// Legacy export for backwards compatibility
-export async function dedupeIdeasFile(): Promise<{ merged: number; archived: number }> {
-  // Redirect to new implementation
-  const result = await dedupeIdeasDir();
-  return {
-    merged: result.deleted,
-    archived: 0,  // We now delete instead of archive
   };
 }
 
@@ -512,18 +495,6 @@ export function expireStaleIdeas(
           updated_at = datetime('now')
       WHERE id IN (${placeholders})
     `).run(...ids);
-
-    // Keep idea_index mirror aligned (best-effort; ignore if table missing or column subset differs)
-    try {
-      db.prepare(`
-        UPDATE idea_index
-        SET status = 'archived',
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id IN (${placeholders})
-      `).run(...ids);
-    } catch (err) {
-      logger.warn({ err }, "idea_index mirror update failed (non-fatal)");
-    }
 
     return {
       archived: candidates,
