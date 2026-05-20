@@ -16,12 +16,12 @@ const GEMINI_CONFIG = {
     pro: "gemini-2.0-pro",
     flashLite: "gemini-2.0-flash-lite-preview-02-05",
     // Future models
-    flash3: GEMINI_CLI_FLASH_MODEL,
+    flash3: "gemini-3.5-flash",
     pro3: "gemini-3-pro-preview",
     pro31: "gemini-3.1-pro-preview",
   },
-  defaultModel: GEMINI_CLI_FLASH_MODEL,
-  fallbackModel: GEMINI_CLI_FLASH_MODEL,
+  defaultModel: "gemini-3.5-flash",
+  fallbackModel: "gemini-3.5-flash",
 } as const;
 
 type GeminiModel = keyof typeof GEMINI_CONFIG.models | string;
@@ -436,7 +436,7 @@ Keep it actionable and concise.`,
 export async function checkGeminiAPIHealth(): Promise<boolean> {
   try {
     const result = await executeGeminiAPI("Respond with the single word: OK", {
-      model: "flash3",  // gemini-3-flash-preview
+      model: "flash3",  // gemini-3.5-flash
       useGrounding: false,
       maxTokens: 50,
     });

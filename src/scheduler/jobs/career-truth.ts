@@ -213,7 +213,7 @@ ${signals.meContext || "(empty)"}
 Pick ONE uncomfortable career truth from the bookmark cluster OR the work-situation signals. Write the card in the 4-block schema. Keep it 100-120 words total.`;
 
   const result = await executeGeminiAPI(userPrompt, {
-    model: "gemini-3-flash-preview" as any,
+    model: "gemini-3.5-flash" as any,
     systemPrompt,
     temperature: 0.5,
     responseMimeType: "application/json",

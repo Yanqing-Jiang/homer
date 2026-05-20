@@ -294,7 +294,7 @@ ${signals.recentDailyLog || "(none)"}
 Pick ONE gap between stated ambition and external output. Write the card. Make The Move specific enough that he could execute it before lunch.`;
 
   const result = await executeGeminiAPI(userPrompt, {
-    model: "gemini-3-flash-preview" as any,
+    model: "gemini-3.5-flash" as any,
     systemPrompt,
     temperature: 0.4,
     responseMimeType: "application/json",
