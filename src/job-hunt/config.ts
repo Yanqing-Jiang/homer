@@ -1,8 +1,9 @@
 /** Shared configuration for job hunt modules. */
 
-import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
-
-export const GEMINI_MODEL = GEMINI_CLI_FLASH_MODEL;
+// Job-hunt calls the Gemini API directly (generativelanguage.googleapis.com), not the CLI.
+// Decoupled from GEMINI_CLI_FLASH_MODEL so the API path can track latest GA while the
+// CLI path stays on whatever the CLI subscription supports.
+export const GEMINI_MODEL = "gemini-3.5-flash";
 export const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
 export function geminiUrl(model = GEMINI_MODEL): string {
