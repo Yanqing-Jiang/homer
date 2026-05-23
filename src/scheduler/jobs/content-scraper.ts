@@ -327,9 +327,10 @@ function buildJsonCorpus(
   },
 ): string {
   const defaultUrl = platform === "medium"
-    ? "https://medium.com/@yanqing_j"
-    : "https://www.linkedin.com/in/jiangyanqing/";
-  const defaultTitle = platform === "medium" ? "Medium Posts - Yanqing Jiang" : "LinkedIn Posts - Yanqing Jiang";
+    ? (process.env.MEDIUM_PROFILE_URL ?? "")
+    : (process.env.LINKEDIN_HANDLE ? `https://www.linkedin.com/in/${process.env.LINKEDIN_HANDLE}/` : "");
+  const ownerName = process.env.OWNER_DISPLAY_NAME ?? "Owner";
+  const defaultTitle = platform === "medium" ? `Medium Posts - ${ownerName}` : `LinkedIn Posts - ${ownerName}`;
 
   const corpus = {
     title: options?.title ?? defaultTitle,

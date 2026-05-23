@@ -1,11 +1,27 @@
 # Dependencies
 node_modules/
 dist/
+build/
 
 # Environment & secrets
 .env
 .env.local
 .env.production
+.env.*.local
+
+# Credentials by filename (defence in depth — never commit these)
+*.pem
+*.key
+*.p12
+*.pfx
+*.der
+*.cer
+*.crt
+*credentials*.json
+*serviceaccount*.json
+*cookies*.json
+google-accounts.json
+.homer-claude-token
 
 # Runtime data
 data/
@@ -20,6 +36,17 @@ output/
 *.csv
 *.pptx
 *.docx
+# Exceptions — the public-facing docs DO ship
+!README.md
+!LICENSE
+!LICENSE.md
+!docs/INSTALL.md
+!docs/CONTRIBUTING.md
+
+# Internal agent / model instructions — never publish
+CLAUDE.md
+GEMINI.md
+AGENTS.md
 
 # Browser profiles
 profiles/
@@ -30,22 +57,47 @@ backups/
 *.bak
 *.backup
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
 *.db.zst
 *.sqlite
 *.sqlite3
+
+# Binary blobs (use codesign-node.sh to regenerate locally)
+bin/node
 
 # OS files
 .DS_Store
 Thumbs.db
 
 # Editor files
+.vscode/*
+!.vscode/extensions.json
+.idea/
 *.swp
 *.swo
 *~
 
-# Test artifacts
+# Local scratch / inspection scripts
+tmp_*.py
+inspect_*.py
+_inspect_*.py
+**/_inspect_*.py
+**/temp_*.py
+tmpclaude-*/
+.traces/
+scratch/
+
+# Test artifacts (tests themselves are not tracked in this public repo)
 coverage/
 .nyc_output/
+__tests__/
+*.test.ts
+*.test.tsx
+*.test.js
+*.spec.ts
+vitest.config.ts
 
 # Overnight workspaces (nested git repos)
 workspaces/
@@ -53,4 +105,6 @@ workspaces/
 # Temporary files
 *.tmp
 *.temp
-scratch/
+
+# Backup of pre-rewrite git directory — local-only
+.git.backup-pre-rewrite/

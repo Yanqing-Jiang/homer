@@ -62,11 +62,13 @@ export async function createWebServer(
     logger.info("CORS enabled for external access");
   }
 
-  // Proxy Supabase auth calls through Homer's domain so supabase.co
-  // never appears in browser network traffic on corporate laptops.
+  // Proxy Supabase auth calls through Homer's domain so the Supabase origin
+  // never appears in browser network traffic on restrictive networks.
+  const SUPABASE_PROXY_BASE = process.env.SUPABASE_URL;
+  if (SUPABASE_PROXY_BASE) {
   await server.register(async (instance) => {
     await instance.register(replyFrom, {
-      base: "https://muyfrblqagucgijljiir.supabase.co",
+      base: SUPABASE_PROXY_BASE,
       http2: false,
       undici: {
         connections: 10,
@@ -79,6 +81,9 @@ export async function createWebServer(
     });
   });
   logger.info("Supabase proxy registered at /supabase/*");
+  } else {
+    logger.warn("SUPABASE_URL not set — Supabase proxy disabled");
+  }
 
   // Add auth hook for API routes when externally exposed
   if (config.web.exposeExternally) {

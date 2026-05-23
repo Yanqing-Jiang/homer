@@ -111,10 +111,11 @@ Do NOT try alternative URLs if the page fails — just return FAILED.`;
 // CONTENT SCRAPER PROMPTS (Medium + LinkedIn)
 // ============================================
 
-const MEDIUM_URL = "https://medium.com/@yanqing_j";
-const LINKEDIN_URL = "https://www.linkedin.com/in/jiangyanqing/recent-activity/all/";
-const LINKEDIN_ALT_URL_1 = "https://www.linkedin.com/in/jiangyanqing/details/recent-activity/posts/";
-const LINKEDIN_ALT_URL_2 = "https://www.linkedin.com/in/jiangyanqing/details/recent-activity/shares/";
+const MEDIUM_URL = process.env.MEDIUM_PROFILE_URL ?? "";
+const LINKEDIN_HANDLE = process.env.LINKEDIN_HANDLE ?? "";
+const LINKEDIN_URL = LINKEDIN_HANDLE ? `https://www.linkedin.com/in/${LINKEDIN_HANDLE}/recent-activity/all/` : "";
+const LINKEDIN_ALT_URL_1 = LINKEDIN_HANDLE ? `https://www.linkedin.com/in/${LINKEDIN_HANDLE}/details/recent-activity/posts/` : "";
+const LINKEDIN_ALT_URL_2 = LINKEDIN_HANDLE ? `https://www.linkedin.com/in/${LINKEDIN_HANDLE}/details/recent-activity/shares/` : "";
 
 export function buildMediumScrapePrompt(): string {
   return `Scrape all published articles from a Medium profile page using agent-browser CLI.
@@ -302,16 +303,18 @@ If page loads but no authored activity is visible, return []`;
 }
 
 export function buildLinkedInPublicFallbackPrompt(maxItems: number = 20): string {
-  return `Find PUBLIC LinkedIn posts authored by Yanqing Jiang using web search (no browser automation).
+  const ownerName = process.env.OWNER_DISPLAY_NAME ?? "the profile owner";
+  const linkedinHandle = process.env.LINKEDIN_HANDLE ?? "";
+  return `Find PUBLIC LinkedIn posts authored by ${ownerName} using web search (no browser automation).
 
 Goal:
 - Recover data when direct LinkedIn scraping returns AUTH_REQUIRED.
 - Return up to ${maxItems} posts from public LinkedIn URLs indexed on the web.
 
 Search strategy (run multiple queries):
-1) site:linkedin.com/posts "Yanqing Jiang"
-2) site:linkedin.com/feed/update "Yanqing Jiang"
-3) site:linkedin.com "jiangyanqing" "linkedin.com/posts"
+1) site:linkedin.com/posts "${ownerName}"
+2) site:linkedin.com/feed/update "${ownerName}"
+3) site:linkedin.com "${linkedinHandle}" "linkedin.com/posts"
 
 For each relevant result, extract:
 - title: First 8-12 words of the post text or snippet
