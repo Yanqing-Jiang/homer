@@ -11,6 +11,7 @@
  */
 
 import { homedir } from "os";
+import { createHash } from "crypto";
 import { CLISessionImporter } from "../../cli-sessions/importer.js";
 import { StateManager } from "../../state/manager.js";
 import { logger } from "../../utils/logger.js";
@@ -71,6 +72,17 @@ export async function runSessionHarvester(
       memoryEvents.emitDirty("embeddings", "session_harvester");
     }
 
+    // Gap B fix: emit a digest of done-with-comment todos so they land in
+    // session_summaries (FTS-searchable). Idempotent via content_hash UNIQUE.
+    // Wrapped to ensure a digest failure does not poison the harvester run.
+    let digestNote = "";
+    try {
+      const n = emitTodoDigest(database);
+      if (n > 0) digestNote = `, todo-digest: ${n}`;
+    } catch (err) {
+      logger.warn({ err }, "Todo digest emit failed (non-fatal)");
+    }
+
     const parts: string[] = [];
     parts.push(`Scanned: ${stats.scanned}`);
     parts.push(`Imported: ${stats.imported}`);
@@ -78,7 +90,7 @@ export async function runSessionHarvester(
     if (stats.skipped > 0) parts.push(`Duplicates: ${stats.skipped}`);
     if (stats.errors > 0) parts.push(`Errors: ${stats.errors}`);
 
-    const output = `Session harvest: ${parts.join(", ")}`;
+    const output = `Session harvest: ${parts.join(", ")}` + digestNote;
     logger.info({ stats }, output);
 
     return { success: true, output };
@@ -89,4 +101,71 @@ export async function runSessionHarvester(
   } finally {
     if (ownSm) sm.close();
   }
+}
+
+/**
+ * Gap B: emit a session_summaries row containing today's done-with-comment todos.
+ * Picks up todos completed since the last digest's snapshotEnd, with notes != ''.
+ * Idempotent via content_hash UNIQUE — re-running with the same set is a no-op.
+ *
+ * Runs from the session-harvester at 00:00 + 12:00 cadence. Searchable via FTS
+ * immediately after insert. Tagged agent='daemon', project='todos' so it does
+ * not pollute user-facing session lists.
+ */
+function emitTodoDigest(db: ReturnType<StateManager["getDb"]>): number {
+  // Look back 12 hours by default — matches the session-harvester cadence so
+  // we get one digest per harvest window and never miss completions.
+  const rows = db.prepare(`
+    SELECT id, title, category, priority, notes, completed_at
+    FROM todo_index
+    WHERE status = 'done'
+      AND completed_at >= datetime('now', '-12 hours')
+      AND COALESCE(notes, '') != ''
+    ORDER BY completed_at DESC
+  `).all() as Array<{
+    id: string; title: string; category: string; priority: string;
+    notes: string; completed_at: string;
+  }>;
+
+  if (rows.length === 0) return 0;
+
+  const lines = rows.map(r => {
+    const noteFirstLine = (r.notes.split(/\r?\n/)[0] ?? "").slice(0, 220);
+    const restCount = r.notes.length > noteFirstLine.length ? ` …(+${r.notes.length - noteFirstLine.length}c)` : "";
+    return `- [${r.category}-${r.priority}] **${r.title}** (done ${r.completed_at})\n  ${noteFirstLine}${restCount}`;
+  });
+  const summary = `Completed todos with comments (last 12h):\n\n${lines.join("\n\n")}`;
+  const contentHash = createHash("sha256").update(summary).digest("hex");
+
+  // Use a stable id per snapshot window so multiple harvester runs in quick
+  // succession (shouldn't happen, but defensive) UPSERT instead of bloat.
+  const snapshotId = `todo_digest_${new Date().toISOString().slice(0, 13).replace(/[-T:]/g, "")}`;
+
+  const result = db.prepare(`
+    INSERT OR IGNORE INTO session_summaries (
+      id, agent, native_session_id, started_at, ended_at,
+      project, title, message_count, summary, content_hash,
+      created_at, status, processed_for_promotion, searchable
+    ) VALUES (
+      @id, 'daemon', @id, @started_at, @ended_at,
+      'todos', @title, @message_count, @summary, @content_hash,
+      CURRENT_TIMESTAMP, 'active', 0, 1
+    )
+  `).run({
+    id: snapshotId,
+    started_at: new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString(),
+    ended_at: new Date().toISOString(),
+    title: `Todo digest ${new Date().toISOString().slice(0, 10)} (${rows.length} done)`,
+    message_count: rows.length,
+    summary,
+    content_hash: contentHash,
+  });
+
+  if (result.changes > 0) {
+    logger.info({ digestId: snapshotId, todoCount: rows.length }, "Emitted todo digest into session_summaries");
+  } else {
+    logger.debug({ digestId: snapshotId }, "Todo digest already present (content_hash dedup)");
+  }
+
+  return result.changes > 0 ? rows.length : 0;
 }
