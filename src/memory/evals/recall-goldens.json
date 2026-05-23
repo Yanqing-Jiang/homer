@@ -1,38 +1,38 @@
 [
   {
-    "id": "amc-wipes-segmentation",
-    "query": "AMC wipes segmentation",
+    "id": "project-alpha-segmentation",
+    "query": "Project Alpha segmentation analysis",
     "context": "work",
     "expectedFile": "work.md",
     "minScore": 0.6,
-    "shouldContainAny": ["AMC", "wipes"],
-    "notes": "Active project — must be retrievable from work.md."
+    "shouldContainAny": ["Project Alpha", "segmentation"],
+    "notes": "Sample work-context goal — must be retrievable from work.md."
   },
   {
-    "id": "profitsphere-chargeback-gap",
-    "query": "ProfitSphere chargeback mismatch",
+    "id": "finance-gap-analysis",
+    "query": "Finance pipeline mismatch",
     "context": "work",
     "expectedFile": "work.md",
     "minScore": 0.55,
-    "shouldContainAny": ["ProfitSphere", "chargeback", "$1.55M", "7.54%"],
-    "notes": "Headline finding from the chargeback pipeline."
+    "shouldContainAny": ["finance", "pipeline", "mismatch"],
+    "notes": "Sample headline finding — exercises numeric + concept retrieval."
   },
   {
-    "id": "mahoraga-paper-trading",
-    "query": "MAHORAGA paper trading IBKR",
+    "id": "trading-bot-setup",
+    "query": "Paper trading broker integration",
     "context": "work",
     "expectedFile": "work.md",
     "minScore": 0.55,
-    "shouldContainAny": ["MAHORAGA", "IBKR"],
-    "notes": "Trading bot setup."
+    "shouldContainAny": ["paper trading", "broker"],
+    "notes": "Sample side-project setup."
   },
   {
     "id": "career-positioning-narrative",
-    "query": "Director of Agents career narrative",
+    "query": "Career narrative for senior agent role",
     "context": "work",
     "expectedFile": "me.md",
     "minScore": 0.5,
-    "shouldContainAny": ["Director of Agents", "$250", "$350"],
+    "shouldContainAny": ["career", "narrative"],
     "notes": "Career framing — should surface from me.md goals."
   },
   {
