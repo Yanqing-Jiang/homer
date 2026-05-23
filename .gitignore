@@ -24,10 +24,15 @@ output/
 # Browser profiles
 profiles/
 
-# Backups
+# Backups & databases — NEVER push to GitHub (binary, large, sensitive)
+backups/
 *.backup.*
 *.bak
 *.backup
+*.db
+*.db.zst
+*.sqlite
+*.sqlite3
 
 # OS files
 .DS_Store
