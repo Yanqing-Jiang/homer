@@ -14,13 +14,8 @@
     "migrate": "tsx scripts/run-migrations.ts",
     "migrate:ideas": "tsx scripts/migrate-ideas.ts",
     "migrate:plans": "tsx scripts/migrate-plans.ts",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:router": "tsx scripts/test-router.ts",
-    "test:swarm": "npx tsx --test src/executors/__tests__/parse-swarm-json.test.ts",
-    "eval:memory": "tsx src/memory/evals/run.ts",
     "memory:generate-bootstrap": "tsx src/memory/session-bootstrap.ts",
-    "app:build": "bash scripts/build-homer-app.sh /Users/yj/Applications/Homer.app",
+    "app:build": "bash scripts/build-homer-app.sh \"${HOME}/Applications/Homer.app\"",
     "app:service:status": "bash scripts/manage-app-service.sh status",
     "app:service:register": "bash scripts/manage-app-service.sh register",
     "app:service:unregister": "bash scripts/manage-app-service.sh unregister",
@@ -68,8 +63,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.5.0",
     "tsx": "^4.22.3",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.2"
+    "typescript": "^5.9.3"
   },
   "overrides": {
     "nan": "^2.27.0"
