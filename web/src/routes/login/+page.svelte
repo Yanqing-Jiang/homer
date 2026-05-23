@@ -8,8 +8,8 @@
 	let signingIn = $state(false);
 	let error = $state('');
 
-	// Super user email that triggers Google OAuth
-	const SUPER_USER_EMAIL = 'jiangyanqing90@gmail.com';
+	// Super user email that triggers Google OAuth — configure via env at build time
+	const SUPER_USER_EMAIL = (import.meta.env.VITE_SUPER_USER_EMAIL as string | undefined) ?? '';
 
 	onMount(() => {
 		const unsubscribe = user.subscribe((u) => {

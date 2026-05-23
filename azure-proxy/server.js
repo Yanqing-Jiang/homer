@@ -2,16 +2,18 @@
  * Homer Azure Proxy
  *
  * This proxy runs on Azure Container Apps and routes requests to the
- * Cloudflare tunnel endpoints, hiding personal domains from corporate networks.
+ * Cloudflare tunnel endpoints, hiding the origin domain from restrictive networks.
  *
  * Routes:
- *   /api/*      -> homer.jiangyanqing.com/api/*           (Homer API)
- *   /supabase/* -> muyfrblqagucgijljiir.supabase.co/*     (Supabase auth)
+ *   /api/*      -> $HOMER_API_URL/api/*    (Homer API)
+ *   /supabase/* -> $SUPABASE_URL/*         (Supabase auth)
  *
  * Why this exists:
- *   - Corporate firewall only sees Azure domains (*.azurecontainerapps.io)
- *   - Personal domain (jiangyanqing.com) is called FROM Azure, not from work laptop
- *   - All traffic appears as Azure-to-Azure to corporate DPI
+ *   - The proxy fronts only Azure domains (*.azurecontainerapps.io)
+ *   - The origin domain is called FROM Azure, never directly from the client
+ *   - All client traffic appears as Azure-to-Azure
+ *
+ * Configure HOMER_API_URL and SUPABASE_URL via environment variables.
  */
 
 import express from 'express';
@@ -21,9 +23,13 @@ import cors from 'cors';
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// Target URLs - configure via environment variables for flexibility
-const HOMER_API_URL = process.env.HOMER_API_URL || 'https://homer.jiangyanqing.com';
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://muyfrblqagucgijljiir.supabase.co';
+// Target URLs — REQUIRED. No defaults so a misconfigured deploy fails loud.
+const HOMER_API_URL = process.env.HOMER_API_URL;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+if (!HOMER_API_URL || !SUPABASE_URL) {
+  console.error('FATAL: HOMER_API_URL and SUPABASE_URL must be set.');
+  process.exit(1);
+}
 
 // Enable CORS for Azure Static Web Apps and Blob Storage
 app.use(cors({
