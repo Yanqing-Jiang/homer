@@ -10,7 +10,6 @@ import type Database from "better-sqlite3";
 import { Bot, InlineKeyboard } from "grammy";
 import { routeTelegramNotification } from "../../notifications/telegram-router.js";
 import { logger } from "../../utils/logger.js";
-import { config } from "../../config/index.js";
 import type { StateManager } from "../../state/manager.js";
 
 // =============================================================================
@@ -128,30 +127,23 @@ export function formatRejectionConfirmation(proposal: Proposal, reason?: string)
   return msg;
 }
 
-/**
- * Format details link message
- */
-export function formatDetailsLink(proposal: Proposal, webUrl: string): string {
-  const escape = (text: string): string =>
-    text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, "\\$&");
-
-  return `❓ *Details: ${escape(proposal.title)}*\n\n[Open in Web UI](${webUrl})\n\n_Use the planning Q&A to refine this proposal\\._`;
-}
-
 // =============================================================================
 // Inline Keyboard Builder
 // =============================================================================
 
 /**
- * Create inline keyboard for proposal approval
+ * Create inline keyboard for proposal approval.
+ *
+ * The "Details" button was removed when the web UI moved to a separate repo.
+ * A backward-compat callback handler below still responds to older messages
+ * that were sent with the button — it shows a "moved" alert.
  */
 export function createProposalKeyboard(proposalId: string): InlineKeyboard {
   return new InlineKeyboard()
     .text("✅ Approve", `proposal:approve:${proposalId}`)
     .text("⏸️ Snooze", `proposal:snooze:${proposalId}`)
     .row()
-    .text("❌ Reject", `proposal:reject:${proposalId}`)
-    .text("❓ Details", `proposal:details:${proposalId}`);
+    .text("❌ Reject", `proposal:reject:${proposalId}`);
 }
 
 /**
@@ -309,15 +301,9 @@ export async function handleRejectionCallback(
   }
 }
 
-/**
- * Generate web link for proposal details/planning
- */
-export function generateWebLink(proposalId: string): string {
-  const baseUrl = config.web?.baseUrl || "http://localhost:3000";
-  // Include auth token for secure access
-  const token = generateProposalToken(proposalId);
-  return `${baseUrl}/proposals/${proposalId}?token=${token}`;
-}
+// generateWebLink + generateProposalToken removed when web UI was split out.
+// Backward-compat handling for older Telegram messages lives in the
+// `proposal:details:*` callback below (shows a "moved" alert).
 
 // =============================================================================
 // Integration with Proposal Lifecycle
@@ -422,17 +408,6 @@ async function logDenyHistory(
     // Table might not exist yet
     logger.debug({ proposalId }, "Could not log to deny_history table");
   }
-}
-
-/**
- * Generate secure token for web access
- */
-function generateProposalToken(proposalId: string): string {
-  // Simple HMAC-style token for now
-  const secret = config.web?.secret || "homer-default-secret";
-  const data = `${proposalId}:${Math.floor(Date.now() / 3600000)}`; // Hour-based
-  const crypto = require("crypto");
-  return crypto.createHmac("sha256", secret).update(data).digest("hex").slice(0, 16);
 }
 
 // =============================================================================
@@ -706,33 +681,15 @@ export function registerProposalCallbacks(bot: Bot, stateManager: StateManager):
     await ctx.answerCallbackQuery(result.success ? "Rejected" : "Failed");
   });
 
-  // Details button
+  // Details button (legacy) — web UI was moved to a separate private repo,
+  // so the link target no longer exists in this daemon. Older Telegram
+  // messages still carry the button; answer them with a brief alert so the
+  // user gets feedback instead of a silent failure.
   bot.callbackQuery(/^proposal:details:(.+)$/, async (ctx) => {
-    const proposalId = ctx.match?.[1];
-    if (!proposalId) {
-      await ctx.answerCallbackQuery("Invalid request");
-      return;
-    }
-
-    const proposal = await getProposal(proposalId, stateManager);
-    if (!proposal) {
-      await ctx.editMessageText(`❌ Proposal not found: ${proposalId}`);
-      await ctx.answerCallbackQuery();
-      return;
-    }
-
-    const webUrl = generateWebLink(proposalId);
-
-    // Keep original message but add details link
-    await ctx.editMessageText(
-      formatProposalMessage(proposal) + `\n\n[🔗 Open Details](${webUrl})`,
-      {
-        parse_mode: "MarkdownV2",
-        reply_markup: createProposalKeyboard(proposalId),
-      }
-    );
-
-    await ctx.answerCallbackQuery("Opening details...");
+    await ctx.answerCallbackQuery({
+      text: "Details view moved to private homer-web repo.",
+      show_alert: true,
+    });
   });
 
   // Approve all button
