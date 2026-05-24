@@ -71,13 +71,17 @@ async function handleExternalSms(
     return;
   }
 
+  // Compute shortSid first — it's the cache key the reply/clear handlers in
+  // src/bot/handlers/sms-reply.ts use (they only ever see the truncated SID
+  // because the callback data has a 64-byte Telegram limit). Storing under
+  // the full SID would orphan every entry. (Audit caught this 2026-05-23.)
+  const shortSid = sms.messageSid.slice(0, 20);
+
   // Store context for reply handler
-  pendingSmsContext.set(sms.messageSid, sms);
-  setTimeout(() => pendingSmsContext.delete(sms.messageSid), SMS_CONTEXT_TTL_MS);
+  pendingSmsContext.set(shortSid, sms);
+  setTimeout(() => pendingSmsContext.delete(shortSid), SMS_CONTEXT_TTL_MS);
 
   const mediaNote = sms.numMedia > 0 ? `\n(${sms.numMedia} attachment${sms.numMedia > 1 ? "s" : ""})` : "";
-  // Truncate SID for callback data (Telegram 64-byte limit)
-  const shortSid = sms.messageSid.slice(0, 20);
 
   try {
     const { InlineKeyboard } = await import("grammy");
