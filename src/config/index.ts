@@ -40,19 +40,14 @@ const configSchema = z.object({
     homerRoot: z.string().default(runtimePaths.homerRoot),
     archive: z.string().default(runtimePaths.archiveDir),
   }),
-  web: z.object({
+  telephony: z.object({
     enabled: z.boolean().default(true),
     port: z.number().int().positive().default(3000),
-    // When true, bind to 0.0.0.0 and require auth for /api routes
-    // When false, bind to 127.0.0.1 (localhost only, no auth)
-    exposeExternally: z.boolean().default(false),
-    allowedEmail: z.string().email().optional(),
-    baseUrl: z.string().default("http://localhost:3000"),
-    secret: z.string().default("homer-default-secret"),
-  }),
-  auth: z.object({
-    supabaseUrl: z.string().default(""),
-    supabaseJwtSecret: z.string().default(""),
+    // Bind to 127.0.0.1 by default — Cloudflare Tunnel (or equivalent) fronts the
+    // public surface. Set TELEPHONY_HOST=0.0.0.0 only for direct LAN ingress.
+    host: z.string().default("127.0.0.1"),
+    // Public origin used for Twilio signature validation (must match Twilio console).
+    publicUrl: z.string().default("http://127.0.0.1:3000"),
   }),
   tui: z.object({
     refreshMs: z.number().int().positive().default(1000),
@@ -69,8 +64,6 @@ const configSchema = z.object({
     elevenLabsWebhookSecret: z.string().default(""),
   }),
   search: z.object({
-    supabaseUrl: z.string().default(""),
-    supabaseAnonKey: z.string().default(""),
     embeddingModel: z.string().default("text-embedding-3-small"),
     chunkSize: z.number().int().positive().default(512),
     chunkOverlap: z.number().int().nonnegative().default(50),
@@ -109,17 +102,15 @@ function loadConfig(): Config {
       homerRoot: process.env.HOMER_ROOT ?? runtimePaths.homerRoot,
       archive: process.env.ARCHIVE_PATH ?? runtimePaths.archiveDir,
     },
-    web: {
-      enabled: process.env.WEB_ENABLED !== "false",
-      port: parseInt(process.env.WEB_PORT ?? "3000", 10),
-      exposeExternally: process.env.WEB_EXPOSE_EXTERNALLY === "true",
-      allowedEmail: process.env.WEB_ALLOWED_EMAIL,
-      baseUrl: process.env.WEB_BASE_URL ?? "http://localhost:3000",
-      secret: process.env.WEB_SECRET ?? "homer-default-secret",
-    },
-    auth: {
-      supabaseUrl: process.env.SUPABASE_URL ?? "",
-      supabaseJwtSecret: process.env.SUPABASE_JWT_SECRET ?? "",
+    telephony: {
+      enabled: process.env.TELEPHONY_ENABLED !== "false",
+      port: parseInt(process.env.TELEPHONY_PORT ?? "3000", 10),
+      host: process.env.TELEPHONY_HOST ?? "127.0.0.1",
+      // Backward-compatible alias: HOMER_API_URL → TELEPHONY_PUBLIC_URL.
+      publicUrl:
+        process.env.TELEPHONY_PUBLIC_URL ??
+        process.env.HOMER_API_URL ??
+        "http://127.0.0.1:3000",
     },
     tui: {
       refreshMs: parseInt(process.env.TUI_REFRESH_MS ?? "1000", 10),
@@ -136,8 +127,6 @@ function loadConfig(): Config {
       elevenLabsWebhookSecret: process.env.ELEVENLABS_WEBHOOK_SECRET ?? "",
     },
     search: {
-      supabaseUrl: process.env.SUPABASE_URL ?? "",
-      supabaseAnonKey: process.env.SUPABASE_ANON_KEY ?? "",
       embeddingModel: process.env.EMBEDDING_MODEL ?? "text-embedding-3-small",
       chunkSize: parseInt(process.env.CHUNK_SIZE ?? "512", 10),
       chunkOverlap: parseInt(process.env.CHUNK_OVERLAP ?? "50", 10),

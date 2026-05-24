@@ -92,14 +92,6 @@ function getSqliteTableCount(): number {
   }
 }
 
-function getWebRoutes(): string[] {
-  const dir = join(HOMER_DIR, "web/src/routes");
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir, { withFileTypes: true })
-    .filter(e => e.isDirectory())
-    .map(e => e.name);
-}
-
 function getFileListing(): string {
   try {
     return execSync(`find ${HOMER_DIR}/src -maxdepth 2 -name '*.ts' | sort`, {
@@ -135,7 +127,6 @@ export async function runArchitectureUpdater(): Promise<{
     const scheduledJobs = countScheduledJobs(scheduleContent);
     const internalHandlers = countInternalHandlers(handlersContent);
     const sqliteTables = getSqliteTableCount();
-    const webRoutes = getWebRoutes();
     const keyFilesContext = gatherKeyFiles();
     const fileListing = getFileListing();
 
@@ -159,7 +150,6 @@ export async function runArchitectureUpdater(): Promise<{
 - Scheduled jobs (enabled): ${scheduledJobs}
 - Internal handlers: ${internalHandlers}
 - Src directories (${srcDirs.length}): ${srcDirs.join(", ")}
-- Web UI routes: ${webRoutes.join(", ")}
 
 ## CURRENT architecture.md
 \`\`\`markdown

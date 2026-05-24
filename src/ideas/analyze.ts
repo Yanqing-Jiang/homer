@@ -31,11 +31,12 @@ function normalizeList(values?: string[]): string {
 }
 
 export function buildIdeaReviewContext(idea: AnalysisIdea): string {
-  const apiUrl = idea.apiUrl?.trim() || `${config.web.baseUrl}/api/ideas/${encodeURIComponent(idea.id)}`;
+  // apiUrl is optional in headless mode (no web UI); only emit the line when set.
+  const apiUrl = idea.apiUrl?.trim();
 
   return [
     "## Direct Idea References",
-    `- Idea API: ${apiUrl}`,
+    ...(apiUrl ? [`- Idea API: ${apiUrl}`] : []),
     `- Local file: ${normalizeOptional(idea.filePath)}`,
     `- Source URL: ${normalizeOptional(idea.link)}`,
     `- Linked exploration thread: ${normalizeOptional(idea.linkedExplorationThreadId)}`,

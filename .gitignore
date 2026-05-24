@@ -28,8 +28,14 @@ data/
 logs/
 uploads/
 night_mode/
-config/
 output/
+
+# config/ — specific sensitive subdirs only. The rest of config/ (notably
+# config/com.homer.daemon.plist.template) DOES ship so the installer works
+# on a fresh clone. Real secrets live in .env, never in tracked config files.
+config/auth/
+config/codesign/
+config/.DS_Store
 
 # Documentation & non-code files (user rule: no docs in nightly push)
 *.md
@@ -42,6 +48,7 @@ output/
 !LICENSE.md
 !docs/INSTALL.md
 !docs/CONTRIBUTING.md
+!docs/telephony.md
 
 # Internal agent / model instructions — never publish
 CLAUDE.md
