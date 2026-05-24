@@ -45,10 +45,9 @@
     <string>/Users/yj/.local/bin/claude</string>
     <key>CODEX_BIN</key>
     <string>/opt/homebrew/bin/codex</string>
-    <key>TELEGRAM_BOT_TOKEN</key>
-    <string>REDACTED_TELEGRAM_BOT_TOKEN</string>
-    <key>TELEGRAM_CHAT_ID</key>
-    <string>REDACTED_TELEGRAM_CHAT_ID</string>
+    <!-- Secrets (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) are loaded by
+         scripts/watchdog.sh from ~/homer/.env at runtime. Do NOT put them
+         in this plist — it is committed to git. -->
     <key>DOCKER_COMPOSE_DIR</key>
     <string>/Users/yj/ai-portfolio</string>
   </dict>

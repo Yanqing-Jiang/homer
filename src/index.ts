@@ -1,3 +1,9 @@
+// Load .env BEFORE installing fatal handlers — fatal-handlers reads secrets
+// (Twilio creds, owner phone) at module-init time, and the launchd plist no
+// longer carries those secrets. Without this line, a fresh-install daemon would
+// have no env on first import.
+import "dotenv/config";
+
 // Install fatal handlers FIRST - before any other imports that might throw
 import { installFatalHandlers, registerShutdownTask } from "./fatal-handlers.js";
 installFatalHandlers();
@@ -11,12 +17,10 @@ import { StateManager } from "./state/manager.js";
 import { config } from "./config/index.js";
 import { QueueManager } from "./queue/manager.js";
 import { QueueWorker } from "./queue/worker.js";
-import { createWebServer, startWebServer, stopWebServer } from "./web/server.js";
-import { setWebMeetingsManager, setWebBot, setWebCLIRunManager } from "./web/routes.js";
+import { createTelephonyServer, startTelephonyServer, stopTelephonyServer } from "./telephony/server.js";
 import { MeetingManager } from "./meetings/index.js";
 import { Scheduler } from "./scheduler/index.js";
 import { getMemoryIndexer, closeMemoryIndexer } from "./memory/indexer.js";
-import { executeClaudeCommand } from "./executors/claude.js";
 import { initializeGeminiCLIAccountManager, closeGeminiCLIAccountManager } from "./executors/gemini-cli.js";
 import { CLIRunManager } from "./executors/cli-runner.js";
 import { runMigrations } from "./state/migrations/index.js";
@@ -160,8 +164,6 @@ async function main(): Promise<void> {
 
   // Create the bot
   const bot = createBot(stateManager, cliRunManager);
-  setWebBot(bot); // Enable bot health checks in web routes
-  setWebCLIRunManager(cliRunManager);
 
   // Initialize meeting manager
   const voiceConfigForMeetings: VoiceConfig = {
@@ -176,7 +178,6 @@ async function main(): Promise<void> {
   });
   await meetingManager.initialize();
   setMeetingManager(meetingManager);
-  setWebMeetingsManager(meetingManager);
   logger.info("Meeting manager initialized");
 
   // Reminder checker cron is now in scheduler as "reminder-check"
@@ -206,37 +207,16 @@ async function main(): Promise<void> {
   const queueWorker = new QueueWorker(queueManager, stateManager, bot);
   queueWorker.start();
 
-  // Start web server if enabled (pass scheduler for dashboard)
-  let webServer: FastifyInstance | null = null;
-  if (config.web.enabled) {
-    // Voice configuration for web voice chat (using ElevenLabs for both STT and TTS)
-    const voiceConfig: VoiceConfig = {
-      elevenLabsApiKey: config.voice.elevenLabsApiKey,
-      elevenLabsVoiceId: config.voice.elevenLabsVoiceId,
-      elevenLabsModel: config.voice.elevenLabsModel,
-    };
-
-    // Voice message processor - integrates with Claude
-    const processVoiceMessage = async (
-      text: string,
-      conversationId?: string
-    ): Promise<{ response: string; conversationId?: string }> => {
-      const result = await executeClaudeCommand(text, {
-        cwd: runtimePaths.homeDir,
-        claudeSessionId: conversationId,
-      });
-
-      return {
-        response: result.output,
-        conversationId: result.claudeSessionId,
-      };
-    };
-
-    webServer = await createWebServer(stateManager, queueManager, scheduler, {
-      voiceConfig: config.voice.enabled ? voiceConfig : undefined,
-      processVoiceMessage: config.voice.enabled ? processVoiceMessage : undefined,
+  // Start telephony webhook server (Twilio SMS + ElevenLabs call-complete + /health).
+  // Replaces the old Fastify web server after the web UI moved to a separate repo.
+  let telephonyServer: FastifyInstance | null = null;
+  if (config.telephony.enabled) {
+    telephonyServer = await createTelephonyServer({
+      stateManager,
+      bot,
+      chatId: config.telegram.allowedChatId,
     });
-    await startWebServer(webServer);
+    await startTelephonyServer(telephonyServer);
   }
 
   // Graceful shutdown — two-phase approach:
@@ -271,10 +251,10 @@ async function main(): Promise<void> {
     timeoutManager.stop();
   });
   registerShutdownTask(async () => {
-    logger.info("Phase 1: Stopping bot and web server...");
+    logger.info("Phase 1: Stopping bot and telephony server...");
     await bot.stop();
-    if (webServer) {
-      await stopWebServer(webServer);
+    if (telephonyServer) {
+      await stopTelephonyServer(telephonyServer);
     }
   });
 

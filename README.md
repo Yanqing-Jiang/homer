@@ -2,29 +2,30 @@
 
 **Hybrid Orchestration for Multi-model Execution and Routing.**
 
-Homer is a personal AI assistant daemon — a 24/7 process that turns Claude Code, Codex, Gemini, and Kimi into a single addressable agent with persistent memory, scheduled jobs, multi-channel input (Telegram, web, voice, MCP), and an opinionated retrieval system. It is the personal automation harness of a single user, published as reference for anyone building similar systems.
+Homer is a personal AI assistant daemon — a 24/7 process that turns Claude Code, Codex, Gemini, and Kimi into a single addressable agent with persistent memory, scheduled jobs, multi-channel input (Telegram, telephony, MCP), and an opinionated retrieval system. It is the personal automation harness of a single user, published as reference for anyone building similar systems.
 
-> ⚠️ **This is a personal repository, not a product.** It runs on one Mac mini against one human's memory, calendar, inbox, and tools. Many scripts and launchd plists reference absolute paths like `/Users/yj/...` — substitute your own `$HOME` if you intend to actually install it. The patterns are reusable; the configuration is not.
+> ⚠️ **This is a personal repository, not a product.** It runs on one Mac mini against one human's memory, calendar, inbox, and tools. Many scripts under `scripts/macos/` and `scripts/backfill-*.ts` reference absolute paths like `/Users/yj/...` — substitute your own `$HOME` if you intend to actually install it. The patterns are reusable; the configuration is not. The headless installer (`scripts/install-daemon.sh` + `config/com.homer.daemon.plist.template`) **is** portable and works on any user account.
+
+The web UI lives in a separate private repository; this repo ships only the headless daemon plus the telephony webhook server.
 
 ## What it does
 
-- Runs as a launchd daemon on macOS with a single-instance flock and crash-safe restart.
-- Exposes the same agent through four entry points — Telegram bot (Grammy), local web UI (Fastify + SvelteKit), public web UI (Cloudflare Tunnel + Access JWT), and MCP server for Claude Code.
-- Schedules cron jobs (idea exploration, morning brief, memory rollup, learning engine, planning checkups) with hot-reloadable `schedule.json` files.
+- Runs as a launchd daemon on macOS (`gui/$(id -u)/com.homer.daemon`) with a single-instance flock and crash-safe restart.
+- Exposes the agent through three entry points — Telegram bot (Grammy), telephony webhooks (Twilio SMS + ElevenLabs Conversational AI), and an MCP stdio server for Claude Code.
+- Schedules cron jobs (idea exploration, morning brief, memory rollup, planning checkups) with hot-reloadable `schedule.json` files.
 - Stores all operational claims (facts, decisions, lessons, commitments) in a SQLite + FTS5 + vector knowledge store with a 2-tier memory model (canonical DB + live `~/memory/*.md`).
 - Routes deep reasoning to Codex CLI, web-search research to Gemini (`agy-rotate`), long-context to Kimi, and everything else to Claude.
 - Captures links from chat, processes them nightly through model-appropriate extractors (yt-dlp, Mozilla Readability, paywall bypass), and feeds them into an idea → plan → execution pipeline.
 
 ## Stack
 
-- **Runtime:** Node.js 22, TypeScript (ESM), Fastify, Grammy, `better-sqlite3`, Zod
+- **Runtime:** Node.js 20+, TypeScript (ESM), Fastify (telephony only), Grammy, `better-sqlite3`, Zod
 - **State:** Local SQLite (`homer.db`) with FTS5 and a vector chunk store; optional Azure Cosmos for cross-device sync
 - **Storage:** Azure Blob for media; macOS Keychain for OAuth
 - **LLMs:** Anthropic SDK, OpenAI SDK, Google Generative AI; CLI wrappers around `claude`, `codex`, `agy`, `kimi`
 - **Browser:** Playwright for SPA scraping and job-application flows
 - **MCP:** `@modelcontextprotocol/sdk` stdio server registering memory, blob, idea, plan, and todo tools
-- **Web UI:** SvelteKit 2, Svelte 5, Tailwind v4 (in [`web/`](web/) — its own `package.json`)
-- **Public access:** Cloudflare Tunnel + Cloudflare Access JWT, fronted by an Express proxy on Azure Container Apps (in [`azure-proxy/`](azure-proxy/))
+- **Telephony:** ElevenLabs Conversational AI + Twilio phone number, fronted by Cloudflare Tunnel (see [`docs/telephony.md`](docs/telephony.md))
 
 ## Repository layout
 
@@ -39,53 +40,78 @@ src/
 ├── memory/          # 2-tier memory: claims DB + markdown surface
 ├── scheduler/       # Cron jobs with hot reload
 ├── scraping/        # yt-dlp, Readability, opencli browser bridge
-└── state/           # SQLite migrations + StateManager singleton
-azure-proxy/         # Cloudflare-fronted relay for the public web UI
-web/                 # SvelteKit static UI (deployed to Azure Static Web Apps)
+├── state/           # SQLite migrations + StateManager singleton
+└── telephony/       # Twilio SMS + ElevenLabs webhook server (the only HTTP surface)
+config/              # com.homer.daemon.plist.template (rendered at install time)
+docs/                # telephony.md (architecture diagram + setup)
 scripts/             # Build, install, deploy, backup, migration scripts
 ```
 
-## Quick start
+## Install
 
-> Realistically, this is not a "clone and run" project — it expects a specific personal directory layout (`~/memory/`, `~/homer/data/`, `~/.claude/`) and external services (Telegram bot, Cloudflare Tunnel, Azure, Claude Code CLI). Treat the steps below as the minimum to compile and explore the code.
+### Prerequisites
+
+- macOS (the daemon is launchd-based)
+- Node.js 20+ (`brew install node`)
+- Xcode Command Line Tools — `xcode-select --install` (needed for native deps `better-sqlite3` and `fs-ext`)
+- A Telegram bot token from [@BotFather](https://t.me/BotFather) and your numeric chat ID from [@userinfobot](https://t.me/userinfobot)
+- Optional for telephony: [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) (`cloudflared`), a Twilio phone number, and an ElevenLabs Conversational AI agent — see [`docs/telephony.md`](docs/telephony.md)
+
+### Steps
 
 ```bash
-git clone https://github.com/Yanqing-Jiang/homer.git
-cd homer
+git clone https://github.com/Yanqing-Jiang/homer.git ~/homer
+cd ~/homer
 
-cp .env.example .env          # fill in credentials you actually want to use
-npm install
-npm run build
-npm run typecheck             # must pass clean
+cp .env.example .env          # then edit — TELEGRAM_BOT_TOKEN + ALLOWED_CHAT_ID are required
+npm install                   # rebuilds better-sqlite3 + fs-ext; takes ~1 min
+npm run build                 # tsc compile
+npm run typecheck             # sanity check
 
-npm run dev                   # runs the daemon under tsx
-npm run mcp                   # runs only the MCP stdio server
-npm run tui                   # runs the blessed-based TUI dashboard
+# Install as launchd user agent (auto-starts at login, restarts on crash)
+bash scripts/install-daemon.sh
+
+# Or run interactively to test before installing the daemon
+npm run dev
 ```
 
-The launchd plist at `config/com.homer.daemon.plist` shows how it runs in production. Install it with `npm run app:service:register`; tear it down with `npm run app:service:unregister`. Both assume `${HOME}/Applications/Homer.app` exists — build it with `npm run app:build` first.
+`install-daemon.sh` generates `~/Library/LaunchAgents/com.homer.daemon.plist` from `config/com.homer.daemon.plist.template`, substituting `$HOME`, `$(id -un)`, `$(id -gn)`, and `$(command -v node)` — so it works on any user account. Secrets are loaded by the daemon from `.env` via dotenv; never put them in the plist.
 
-### Web UI
+### Other entry points
 
 ```bash
-cd web
-npm install
-npm run dev            # SvelteKit dev server, talks to the daemon on localhost:3000
-npm run build          # static build → web/build/
+npm run mcp                   # MCP stdio server (for Claude Code)
+npm run tui                   # blessed-based TUI dashboard
+npm run restart               # bash scripts/kickstart-daemon.sh
+```
+
+### Verify
+
+```bash
+curl -fsS http://127.0.0.1:3000/health
+# {"status":"healthy","service":"homer-telephony","time":"..."}
+```
+
+If you've set up a public tunnel (`TELEPHONY_PUBLIC_URL` in `.env`):
+```bash
+curl -fsS $TELEPHONY_PUBLIC_URL/health
 ```
 
 ## Environment
 
-The full list is in [`.env.example`](.env.example). The credentials you actually need depend on which surfaces you enable — at minimum, Homer wants a Telegram bot token and chat-ID whitelist, an Anthropic key (or a Claude Code CLI already authed), and a writable `~/memory/` directory.
+The full list is in [`.env.example`](.env.example). The credentials you actually need depend on which surfaces you enable.
 
-| Variable | Purpose |
-|---|---|
-| `TELEGRAM_BOT_TOKEN`, `ALLOWED_CHAT_ID` | Telegram bot + single-user allowlist |
-| `OPENAI_API_KEY` / `MOONSHOT_API_KEY` / `GEMINI_API_KEY` | Optional model providers (CLIs preferred for most routing) |
-| `AZURE_STORAGE_CONNECTION_STRING` | Blob storage for media |
-| `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_JWT_SECRET` | Optional auth + sync layer |
-| `HOMER_API_URL` | Required for `azure-proxy/` — origin URL of your tunnel |
-| `WEB_EXPOSE_EXTERNALLY` | Whether Fastify binds to `0.0.0.0` for Cloudflare Tunnel |
+| Variable | Purpose | Required |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN`, `ALLOWED_CHAT_ID` | Telegram bot + single-user allowlist | yes |
+| `OPENAI_API_KEY` / `MOONSHOT_API_KEY` / `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` | Model providers (CLI wrappers preferred for most routing) | one of |
+| `AZURE_STORAGE_CONNECTION_STRING` | Blob storage for media | for media tools |
+| `TELEPHONY_PUBLIC_URL` | Public origin Twilio uses for signature validation (e.g. `https://homer.your-domain.com`) | for telephony |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` | Twilio SMS + outbound calls | for telephony |
+| `ELEVEN_LABS_API_KEY`, `ELEVENLABS_AGENT_ID`, `ELEVENLABS_PHONE_NUMBER_ID`, `ELEVENLABS_WEBHOOK_SECRET` | ElevenLabs ConvAI + post-call webhooks | for telephony |
+| `OWNER_PHONE`, `HOMER_PHONE` | E.164 phone numbers for owner-direction routing | for telephony |
+
+`HOMER_API_URL` is accepted as a backward-compatible alias for `TELEPHONY_PUBLIC_URL`.
 
 ## Memory model
 
@@ -122,9 +148,18 @@ Registered against Claude Code over stdio:
 | `0 */2 * * *` | `ideas-explore` | Pull from bookmarks, GitHub, RSS |
 | `0 9 * * *` | `planning-reminder` | Surface stalled plans and pending decisions |
 
+## Telephony
+
+Homer's only public HTTP surface. Two webhook routes plus `/health`, all behind a Cloudflare Tunnel:
+
+- `POST /webhooks/elevenlabs/call-complete` — HMAC-SHA256 signed, persists transcript to disk before 200, processes summary in background
+- `POST /webhooks/twilio/sms` — HMAC-SHA1 signed, replies with empty TwiML, forwards SMS to Telegram
+
+Architecture diagram, env-var table, Cloudflare/Twilio/ElevenLabs setup, signature-validation curl recipes, and troubleshooting are in [`docs/telephony.md`](docs/telephony.md).
+
 ## A note on tests
 
-Test files (`*.test.ts`, `__tests__/`) are intentionally not shipped in this public repo. They depended on the author's personal memory fixtures and aren't useful to outside readers. The vitest config has been removed; `npm test` is a no-op.
+Test files (`*.test.ts`, `__tests__/`) are intentionally not shipped in this public repo. They depended on the author's personal memory fixtures and aren't useful to outside readers. `npm test` is a no-op.
 
 ## Status
 

@@ -22,7 +22,9 @@ APP_SUPPORT_DIR="${HOME}/Library/Application Support/Homer"
 TRIGGER_FILE="${APP_SUPPORT_DIR}/kickstart.request"
 DRAIN_SENTINEL="${APP_SUPPORT_DIR}/daemon.draining"
 FORCE_RESTART_FILE="${APP_SUPPORT_DIR}/force-restart"
-DB_PATH="${HOME}/homer/data/homer.db"
+# Resolve repo root from script location so clones outside ~/homer work.
+HOMER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DB_PATH="${HOMER_DB_PATH:-$HOMER_DIR/data/homer.db}"
 LOG_DIR="${HOME}/Library/Logs/homer"
 LOG_FILE="${LOG_DIR}/kickstart.log"
 

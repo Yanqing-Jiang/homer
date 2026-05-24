@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Homer launchd plist TEMPLATE.
+
+  Do NOT install this file directly. scripts/install-daemon.sh substitutes the
+  placeholders below with paths/user values derived from the running environment
+  and writes the result to ~/Library/LaunchAgents/com.homer.daemon.plist.
+
+  Secrets (TELEGRAM_BOT_TOKEN, API keys, etc.) are loaded from .env at runtime via
+  dotenv — NEVER put secrets in this template. This file is committed to git.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.homer.daemon</string>
+
+  <key>AssociatedBundleIdentifiers</key>
+  <string>ai.yj.homer</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOMER_APP_BIN__</string>
+    <string>__NODE_BIN__</string>
+    <string>__HOMER_DIR__/dist/index.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__HOMER_DIR__</string>
+
+  <key>UserName</key>
+  <string>__HOMER_USER__</string>
+  <key>GroupName</key>
+  <string>__HOMER_GROUP__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NODE_ENV</key>
+    <string>production</string>
+    <key>HOME</key>
+    <string>__HOMER_HOME__</string>
+    <key>HOMER_HOME</key>
+    <string>__HOMER_HOME__</string>
+    <key>HOMER_ROOT</key>
+    <string>__HOMER_DIR__</string>
+    <key>HOMER_DATA_PATH</key>
+    <string>__HOMER_DIR__/data</string>
+    <key>DATABASE_PATH</key>
+    <string>__HOMER_DIR__/data/homer.db</string>
+    <key>LOGS_PATH</key>
+    <string>__HOMER_DIR__/logs</string>
+    <key>MEMORY_PATH</key>
+    <string>__HOMER_HOME__/memory</string>
+    <key>CLAUDE_DIR</key>
+    <string>__HOMER_HOME__/.claude</string>
+    <key>BROWSER_PROFILES_PATH</key>
+    <string>__HOMER_DIR__/profiles</string>
+    <key>PATH</key>
+    <string>__HOMER_PATH__</string>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+    <key>LC_ALL</key>
+    <string>en_US.UTF-8</string>
+    <key>HOMER_LOG_DIR</key>
+    <string>__HOMER_HOME__/Library/Logs/homer</string>
+  </dict>
+
+  <!-- KeepAlive: restart only on non-zero exit, wait for network -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+    <key>NetworkState</key>
+    <true/>
+  </dict>
+
+  <key>ExitTimeOut</key>
+  <integer>360</integer>
+
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <!-- Raise FD ceiling above launchd default (soft 256) so reconnect-storming
+       CLI children can't cap the daemon. Hard cap stays below macOS
+       kern.maxfilesperproc. -->
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>8192</integer>
+  </dict>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__HOMER_DIR__/logs/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOMER_DIR__/logs/stderr.log</string>
+</dict>
+</plist>

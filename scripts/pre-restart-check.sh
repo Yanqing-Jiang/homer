@@ -11,7 +11,9 @@
 set -u
 
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:3000/health}"
-DB_PATH="${HOME}/homer/data/homer.db"
+# Resolve repo root from script location so this works regardless of clone path.
+HOMER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DB_PATH="${HOMER_DB_PATH:-$HOMER_DIR/data/homer.db}"
 MAX_WAIT="${MAX_WAIT:-300}"  # Max 5 minutes wait for drain
 
 # Check for active CLI runs via SQLite (more reliable than health endpoint)

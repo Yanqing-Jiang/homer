@@ -1,131 +1,190 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
-# HOMER Daemon Installation Script
-# Installs HOMER as a system LaunchDaemon for true 24/7 operation
+# Homer daemon installer.
+#
+# Generates ~/Library/LaunchAgents/com.homer.daemon.plist from
+# config/com.homer.daemon.plist.template (substituting paths/user from the
+# running environment) and loads it via launchctl. Secrets are NOT injected
+# into the plist — Homer loads .env at startup via dotenv.
 #
 # Usage:
-#   sudo ./install-daemon.sh          # Install as system daemon (recommended)
-#   ./install-daemon.sh --agent       # Install as user agent (legacy)
+#   bash scripts/install-daemon.sh                # install / refresh user agent (default)
+#   bash scripts/install-daemon.sh --system       # install as system LaunchDaemon (requires sudo)
+#
+# Portable: derives every path from $HOME, id -un/id -gn, and command -v node.
 #
 
 set -euo pipefail
 
+# --- Resolve repo root from script location (works for any clone path) ------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOMER_DIR="/Users/yj/homer"
-PLIST_SRC="$HOMER_DIR/config/com.homer.daemon.plist"
+HOMER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# --- Derive user/host environment -------------------------------------------
+HOMER_USER="$(id -un)"
+HOMER_GROUP="$(id -gn)"
+HOMER_HOME="$HOME"
+NODE_BIN="$(command -v node || true)"
+HOMER_PATH="${PATH:-/usr/local/bin:/usr/bin:/bin}"
+
+# Optional app wrapper (Homer.app bundle so launchd can attribute the
+# background item). Defaults to ~/Applications/Homer.app/Contents/MacOS/Homer
+# but degrades gracefully to the raw node binary if not built.
+HOMER_APP_BIN="${HOMER_APP_BIN:-$HOMER_HOME/Applications/Homer.app/Contents/MacOS/Homer}"
+
+TEMPLATE_SRC="$HOMER_DIR/config/com.homer.daemon.plist.template"
 LOGS_DIR="$HOMER_DIR/logs"
-APP_WRAPPER_DST="/Users/yj/Applications/Homer.app"
 
 # Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
-echo "=== HOMER Daemon Installer ==="
+INSTALL_MODE="agent"
+for arg in "$@"; do
+  case "$arg" in
+    --system) INSTALL_MODE="system" ;;
+    --agent)  INSTALL_MODE="agent" ;;
+    -h|--help)
+      cat <<USAGE
+Usage: $0 [--agent | --system]
+
+  --agent     Install as user LaunchAgent (default; stops on logout).
+  --system    Install as system LaunchDaemon (24/7; requires sudo).
+USAGE
+      exit 0 ;;
+  esac
+done
+
+echo "=== Homer Daemon Installer ==="
+echo "  Repo:      $HOMER_DIR"
+echo "  User:      $HOMER_USER ($HOMER_GROUP)"
+echo "  Home:      $HOMER_HOME"
+echo "  Node:      ${NODE_BIN:-(not found in PATH!)}"
+echo "  Mode:      $INSTALL_MODE"
 echo ""
 
-# Create logs directory
+# --- Pre-flight checks ------------------------------------------------------
+if [ -z "$NODE_BIN" ]; then
+  echo -e "${RED}Error:${NC} node not found in PATH. Install Node 20+ and retry."
+  exit 1
+fi
+if [ ! -f "$TEMPLATE_SRC" ]; then
+  echo -e "${RED}Error:${NC} plist template not found at $TEMPLATE_SRC"
+  exit 1
+fi
+if [ ! -f "$HOMER_DIR/dist/index.js" ]; then
+  echo -e "${YELLOW}Warning:${NC} $HOMER_DIR/dist/index.js missing — run 'npm run build' first."
+fi
+if [ ! -f "$HOMER_DIR/.env" ]; then
+  echo -e "${YELLOW}Warning:${NC} $HOMER_DIR/.env missing — Homer will start with empty secrets."
+  echo "         Copy .env.example to .env and fill in credentials."
+fi
+
 mkdir -p "$LOGS_DIR"
 
-# Build the native app wrapper so launchd can attribute the background item to Homer.
-if [ "$EUID" -eq 0 ]; then
-    su - yj -c "bash '$HOMER_DIR/scripts/build-homer-app.sh' '$APP_WRAPPER_DST'"
-else
-    bash "$HOMER_DIR/scripts/build-homer-app.sh" "$APP_WRAPPER_DST"
+# --- Optional: build the Homer.app wrapper if available ---------------------
+if [ ! -x "$HOMER_APP_BIN" ] && [ -x "$HOMER_DIR/scripts/build-homer-app.sh" ]; then
+  echo "Building Homer.app wrapper at $HOMER_APP_BIN..."
+  bash "$HOMER_DIR/scripts/build-homer-app.sh" "$(dirname "$(dirname "$HOMER_APP_BIN")")" || \
+    echo -e "${YELLOW}  app wrapper build failed — continuing with raw node binary${NC}"
+fi
+# If the wrapper still isn't there, use node directly so the plist still works.
+if [ ! -x "$HOMER_APP_BIN" ]; then
+  echo -e "${YELLOW}Note:${NC} no Homer.app wrapper — using $NODE_BIN as ProgramArguments[0]."
+  HOMER_APP_BIN="$NODE_BIN"
 fi
 
-# Check for --agent flag
-if [[ "${1:-}" == "--agent" ]]; then
-    echo -e "${YELLOW}Installing as user LaunchAgent (legacy mode)${NC}"
-    echo "Note: LaunchAgents stop when you log out."
-    echo ""
+# --- Generate plist from template -------------------------------------------
+GENERATED_PLIST="$(mktemp -t homer-plist-XXXXXX).plist"
+trap 'rm -f "$GENERATED_PLIST"' EXIT
 
-    LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
+# sed-based substitution (portable across macOS BSD sed and GNU sed)
+sed \
+  -e "s|__HOMER_DIR__|$HOMER_DIR|g" \
+  -e "s|__HOMER_USER__|$HOMER_USER|g" \
+  -e "s|__HOMER_GROUP__|$HOMER_GROUP|g" \
+  -e "s|__HOMER_HOME__|$HOMER_HOME|g" \
+  -e "s|__NODE_BIN__|$NODE_BIN|g" \
+  -e "s|__HOMER_APP_BIN__|$HOMER_APP_BIN|g" \
+  -e "s|__HOMER_PATH__|$HOMER_PATH|g" \
+  "$TEMPLATE_SRC" > "$GENERATED_PLIST"
 
-    # Stop existing
-    launchctl bootout gui/$(id -u)/com.homer.daemon 2>/dev/null || true
-    sleep 2
-
-    # Copy and load
-    cp "$PLIST_SRC" "$LAUNCH_AGENTS_DIR/"
-    launchctl bootstrap gui/$(id -u) "$LAUNCH_AGENTS_DIR/com.homer.daemon.plist"
-
-    echo -e "${GREEN}✓ LaunchAgent installed${NC}"
-    echo ""
-    echo "Commands:"
-    echo "  Restart: launchctl kickstart -k gui/\$(id -u)/com.homer.daemon"
-    echo "  Stop:    launchctl bootout gui/\$(id -u)/com.homer.daemon"
-    echo "  Logs:    tail -f $LOGS_DIR/stdout.log"
-    exit 0
+# Sanity check: no placeholder left behind
+if grep -q '__[A-Z_]*__' "$GENERATED_PLIST"; then
+  echo -e "${RED}Error:${NC} plist still has unresolved placeholders:"
+  grep '__[A-Z_]*__' "$GENERATED_PLIST"
+  exit 1
+fi
+# Sanity check: no /Users/yj leakage (catches templates copied from a private fork)
+if grep -q '/Users/yj' "$GENERATED_PLIST"; then
+  echo -e "${RED}Error:${NC} generated plist contains hardcoded /Users/yj — template likely needs fixing:"
+  grep -n '/Users/yj' "$GENERATED_PLIST"
+  exit 1
 fi
 
-# System daemon installation (requires sudo)
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}Error: System daemon installation requires sudo${NC}"
-    echo ""
-    echo "Usage:"
-    echo "  sudo $0              # Install as system daemon (24/7)"
-    echo "  $0 --agent           # Install as user agent (stops on logout)"
+# --- Install (agent or system) ----------------------------------------------
+if [ "$INSTALL_MODE" = "system" ]; then
+  if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}Error:${NC} --system requires sudo."
+    echo "  Run: sudo $0 --system"
     exit 1
-fi
+  fi
+  PLIST_DST="/Library/LaunchDaemons/com.homer.daemon.plist"
+  LAUNCHD_TARGET="system/com.homer.daemon"
 
-echo -e "${GREEN}Installing as system LaunchDaemon (24/7 operation)${NC}"
-echo ""
+  echo "[1/4] Unloading existing daemon (if any)..."
+  launchctl bootout "$LAUNCHD_TARGET" 2>/dev/null || true
+  pkill -f "$HOMER_DIR/dist/index.js" 2>/dev/null || true
+  sleep 2
 
-LAUNCH_DAEMONS_DIR="/Library/LaunchDaemons"
-PLIST_DST="$LAUNCH_DAEMONS_DIR/com.homer.daemon.plist"
+  echo "[2/4] Installing plist to $PLIST_DST..."
+  cp "$GENERATED_PLIST" "$PLIST_DST"
+  chown root:wheel "$PLIST_DST"
+  chmod 644 "$PLIST_DST"
+  chown -R "$HOMER_USER:$HOMER_GROUP" "$LOGS_DIR"
 
-# 1. Stop and unload the old LaunchAgent (if loaded)
-echo "[1/6] Unloading existing LaunchAgent..."
-su - yj -c "launchctl bootout gui/\$(id -u) /Users/yj/Library/LaunchAgents/com.homer.daemon.plist 2>/dev/null" || true
-
-# 2. Unload existing LaunchDaemon (if any)
-echo "[2/6] Unloading existing LaunchDaemon..."
-launchctl bootout system/com.homer.daemon 2>/dev/null || true
-
-# 3. Kill any running Homer processes
-echo "[3/6] Stopping running Homer processes..."
-pkill -f "homer/dist/index.js" 2>/dev/null || true
-sleep 2
-
-# 4. Install the LaunchDaemon plist
-echo "[4/6] Installing LaunchDaemon plist..."
-cp "$PLIST_SRC" "$PLIST_DST"
-chown root:wheel "$PLIST_DST"
-chmod 644 "$PLIST_DST"
-
-# 5. Ensure logs dir is writable
-chown -R yj:staff "$LOGS_DIR"
-
-# 6. Load and start the daemon
-echo "[5/6] Loading and starting daemon..."
-launchctl bootstrap system "$PLIST_DST"
-launchctl enable system/com.homer.daemon
-
-echo "[6/6] Verifying..."
-sleep 3
-
-# Check health
-if curl -s --max-time 10 http://localhost:3000/health > /dev/null 2>&1; then
-    echo ""
-    echo -e "${GREEN}✓ HOMER is running and healthy!${NC}"
+  echo "[3/4] Loading daemon..."
+  launchctl bootstrap system "$PLIST_DST"
+  launchctl enable "$LAUNCHD_TARGET"
 else
-    echo ""
-    echo -e "${YELLOW}⚠ HOMER may still be starting. Check logs:${NC}"
-    echo "  tail -f $LOGS_DIR/stdout.log"
+  PLIST_DST="$HOMER_HOME/Library/LaunchAgents/com.homer.daemon.plist"
+  LAUNCHD_TARGET="gui/$(id -u)/com.homer.daemon"
+  mkdir -p "$(dirname "$PLIST_DST")"
+
+  echo "[1/4] Unloading existing agent (if any)..."
+  launchctl bootout "$LAUNCHD_TARGET" 2>/dev/null || true
+  sleep 2
+
+  echo "[2/4] Installing plist to $PLIST_DST..."
+  cp "$GENERATED_PLIST" "$PLIST_DST"
+
+  echo "[3/4] Loading agent..."
+  launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
 fi
 
-# Show status
+echo "[4/4] Verifying..."
+sleep 3
+if curl -s --max-time 10 http://127.0.0.1:3000/health > /dev/null 2>&1; then
+  echo -e "${GREEN}✓ Homer is running and healthy.${NC}"
+else
+  echo -e "${YELLOW}⚠ Homer may still be starting. Check logs:${NC}"
+  echo "    tail -f $LOGS_DIR/stdout.log"
+fi
+
 echo ""
 echo "=== Status ==="
-launchctl print system/com.homer.daemon 2>/dev/null | grep -E "state|pid|last exit" || true
+launchctl print "$LAUNCHD_TARGET" 2>/dev/null | grep -E "state|pid|last exit" || true
 
 echo ""
 echo "=== Commands ==="
-echo "  Restart: sudo launchctl kickstart -k system/com.homer.daemon"
-echo "  Stop:    sudo launchctl bootout system/com.homer.daemon"
-echo "  Status:  sudo launchctl print system/com.homer.daemon"
+if [ "$INSTALL_MODE" = "system" ]; then
+  echo "  Restart: sudo launchctl kickstart -k $LAUNCHD_TARGET"
+  echo "  Stop:    sudo launchctl bootout $LAUNCHD_TARGET"
+  echo "  Status:  sudo launchctl print $LAUNCHD_TARGET"
+else
+  echo "  Restart: launchctl kickstart -k $LAUNCHD_TARGET"
+  echo "  Stop:    launchctl bootout $LAUNCHD_TARGET"
+  echo "  Status:  launchctl print $LAUNCHD_TARGET"
+fi
 echo "  Logs:    tail -f $LOGS_DIR/stdout.log"
 echo ""
-echo -e "${GREEN}✓ Installation complete${NC}"
+echo -e "${GREEN}✓ Installation complete.${NC}"
