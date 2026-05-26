@@ -6,7 +6,7 @@
  */
 
 import { readFile } from "fs/promises";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { PATHS } from "../../config/paths.js";
 import { logger } from "../../utils/logger.js";
 import * as ideaDao from "../../ideas/dao.js";
@@ -15,6 +15,79 @@ import type { ToolResult, ToolDeps, ToolDefinition } from "./types.js";
 import type { CanonicalFileKey } from "../../memory/registry.js";
 
 const MEMORY_BASE = PATHS.memory;
+
+// memory_read pagination: cap raw payload so a single read can't dominate the
+// agent's context window. Bytes, not lines (simpler than counting newlines on
+// markdown). Default tuned to ~6K tokens; ceiling at ~25K tokens.
+const MEMORY_READ_DEFAULT_BYTES = 25 * 1024;
+const MEMORY_READ_MAX_BYTES = 100 * 1024;
+
+function sliceMemoryPayload(
+  body: string,
+  offset?: number,
+  limit?: number
+): { text: string; truncated: boolean; nextOffset: number | null; totalBytes: number } {
+  const buf = Buffer.from(body, "utf-8");
+  const total = buf.byteLength;
+  const start = Math.max(0, Math.floor(offset ?? 0));
+  const requested = Math.max(1, Math.floor(limit ?? MEMORY_READ_DEFAULT_BYTES));
+  const capped = Math.min(requested, MEMORY_READ_MAX_BYTES);
+  const end = Math.min(total, start + capped);
+  const slice = buf.subarray(start, end).toString("utf-8");
+  const truncated = end < total;
+  return {
+    text: slice,
+    truncated,
+    nextOffset: truncated ? end : null,
+    totalBytes: total,
+  };
+}
+
+// Preflight occurrence check for memory_replace / memory_remove. Counts
+// substring matches in the target file and returns line numbers for each.
+// Bails early at maxLines hits (we only need to distinguish 0/1/many for
+// uniqueness, but a few line numbers help the agent disambiguate when many).
+function countOccurrencesInFile(
+  filePath: string,
+  needle: string,
+  maxLines = 10
+): { count: number; lineNumbers: number[]; missing: boolean } {
+  if (!existsSync(filePath)) return { count: 0, lineNumbers: [], missing: true };
+  if (needle.length === 0) return { count: 0, lineNumbers: [], missing: false };
+  const content = readFileSync(filePath, "utf-8");
+  // Count substring occurrences (overlapping matches collapse to indexOf walk).
+  let count = 0;
+  let idx = content.indexOf(needle);
+  const positions: number[] = [];
+  while (idx !== -1) {
+    count++;
+    positions.push(idx);
+    idx = content.indexOf(needle, idx + needle.length);
+  }
+  if (count === 0) return { count: 0, lineNumbers: [], missing: false };
+  // Map first N positions back to 1-indexed line numbers (cheap newline scan).
+  const lineNumbers: number[] = [];
+  for (const pos of positions.slice(0, maxLines)) {
+    let line = 1;
+    for (let i = 0; i < pos; i++) if (content.charCodeAt(i) === 10) line++;
+    lineNumbers.push(line);
+  }
+  return { count, lineNumbers, missing: false };
+}
+
+function withPaginationFooter(
+  body: string,
+  offset: number | undefined,
+  limit: number | undefined,
+  label: string
+): string {
+  const sliced = sliceMemoryPayload(body, offset, limit);
+  if (!sliced.truncated && (offset ?? 0) === 0) return sliced.text;
+  const footer = sliced.truncated
+    ? `\n\n---\n[memory_read: showing bytes ${offset ?? 0}-${(sliced.nextOffset ?? 0) - 1} of ${sliced.totalBytes} for ${label}. Pass offset=${sliced.nextOffset} to read more.]`
+    : `\n\n---\n[memory_read: showing bytes ${offset ?? 0}-${sliced.totalBytes - 1} of ${sliced.totalBytes} for ${label}. End of file.]`;
+  return sliced.text + footer;
+}
 
 export const definitions: ToolDefinition[] = [
   {
@@ -53,13 +126,15 @@ export const definitions: ToolDefinition[] = [
   },
   {
     name: "memory_read",
-    description: "Read a memory file or today's daily log. Use source='archive' to read the full raw daily log from SQLite (before it was stripped to summary-only).",
+    description: "Read a memory file or today's daily log. Use source='archive' to read the full raw daily log from SQLite (before it was stripped to summary-only). Large responses are capped (default 25 KB, max 100 KB) — when truncated, the response includes a next_offset marker; pass it back as `offset` to paginate.",
     inputSchema: {
       type: "object",
       properties: {
         file: { type: "string", enum: ["me", "work", "preferences", "tools", "daily"], description: "File to read (daily = today's log)" },
         date: { type: "string", description: "For daily: specific date YYYY-MM-DD (default: today)" },
         source: { type: "string", enum: ["file", "archive"], description: "For daily: 'file' reads .md (default), 'archive' reads full raw content from SQLite" },
+        offset: { type: "number", description: "Byte offset to start reading from (default: 0). Use the next_offset from a previous truncated response to paginate." },
+        limit: { type: "number", description: "Max bytes to return (default: 25600, max: 102400). Hard ceiling prevents single read from dominating context window." },
       },
       required: ["file"],
     },
@@ -630,14 +705,17 @@ export async function handle(
     }
 
     case "memory_read": {
-      const { file, date, source } = args as { file: string; date?: string; source?: "file" | "archive" };
+      const { file, date, source, offset, limit } = args as {
+        file: string; date?: string; source?: "file" | "archive"; offset?: number; limit?: number;
+      };
 
       if (file === "daily" && source === "archive") {
         const dateStr = date ?? new Date().toISOString().slice(0, 10);
         const sm = deps.getSharedStateManager();
         const archive = sm.getDailyLogArchive(dateStr);
         if (!archive) return { content: [{ type: "text", text: `No archive found for ${dateStr}` }] };
-        return { content: [{ type: "text", text: archive.rawContent }] };
+        const out = withPaginationFooter(archive.rawContent, offset, limit, `daily archive ${dateStr}`);
+        return { content: [{ type: "text", text: out }] };
       }
 
       if (file === "daily") {
@@ -657,7 +735,9 @@ export async function handle(
               const time = s.started_at?.slice(11, 16) || "??:??";
               return `[${time}] [${s.agent}] ${s.title}\n${s.summary}`;
             }).join("\n\n");
-            return { content: [{ type: "text", text: `# ${dateStr} (from session_summaries)\n\n${formatted}` }] };
+            const body = `# ${dateStr} (from session_summaries)\n\n${formatted}`;
+            const out = withPaginationFooter(body, offset, limit, `daily ${dateStr}`);
+            return { content: [{ type: "text", text: out }] };
           }
         } catch {
           // fall through to legacy
@@ -666,7 +746,8 @@ export async function handle(
         const dailyPath = `${PATHS.daily}/${dateStr}.md`;
         if (existsSync(dailyPath)) {
           const rawDaily = await readFile(dailyPath, "utf-8");
-          return { content: [{ type: "text", text: rawDaily }] };
+          const out = withPaginationFooter(rawDaily, offset, limit, `daily ${dateStr}`);
+          return { content: [{ type: "text", text: out }] };
         }
         return { content: [{ type: "text", text: `No daily data for ${dateStr}` }] };
       }
@@ -674,7 +755,8 @@ export async function handle(
       const filePath = `${MEMORY_BASE}/${file}.md`;
       if (!existsSync(filePath)) return { content: [{ type: "text", text: `File not found: ${file}.md` }] };
       const content = await readFile(filePath, "utf-8");
-      return { content: [{ type: "text", text: content }] };
+      const out = withPaginationFooter(content, offset, limit, `${file}.md`);
+      return { content: [{ type: "text", text: out }] };
     }
 
     case "memory_reindex": {
@@ -704,6 +786,33 @@ export async function handle(
           sections.push(`- [${d}] ${s.project || "~"}: ${(s.title || "untitled").slice(0, 50)}`);
         }
       }
+
+      // Recent Memory — last 5 approved knowledge claims by decided_at.
+      // Surfaces what Homer just learned so an agent doesn't ask things we
+      // already know. Filtered to durable knowledge types (excludes
+      // operational replace/remove/cleanup claims).
+      try {
+        const recentClaims = sm.getDb().prepare(`
+          SELECT content, claim_type, target_file, decided_at
+          FROM knowledge_claims
+          WHERE status = 'approved'
+            AND claim_type IN ('fact','decision','preference','hypothesis','insight','commitment','question','lesson','skill')
+            AND decided_at IS NOT NULL
+          ORDER BY decided_at DESC
+          LIMIT 5
+        `).all() as Array<{ content: string; claim_type: string; target_file: string; decided_at: string }>;
+
+        if (recentClaims.length > 0) {
+          sections.push("\n## Recent Memory");
+          for (const c of recentClaims) {
+            const d = c.decided_at.slice(5, 10);
+            // Trim long claim bodies — context, not full body. Agent can
+            // memory_read or memory_search for the full text if needed.
+            const snippet = c.content.replace(/\s+/g, " ").slice(0, 140);
+            sections.push(`- [${d}] [${c.claim_type}→${c.target_file}] ${snippet}`);
+          }
+        }
+      } catch { /* knowledge_claims may not exist before migration 069 */ }
 
       try {
         const recentThreads = sm.getDb().prepare(`
@@ -838,6 +947,22 @@ export async function handle(
       const { file: replFile, old_text, new_text, reason } = args as {
         file: string; old_text: string; new_text: string; reason?: string;
       };
+      // Preflight: refuse early if old_text doesn't match exactly once. The
+      // canonical writer enforces uniqueness at apply time, but bouncing here
+      // keeps junk out of the HITL queue and gives the agent immediate, actionable
+      // feedback (line numbers for ambiguous matches). Run BEFORE touching the
+      // state manager so a refusal short-circuits without DB work.
+      const replPath = `${MEMORY_BASE}/${replFile}.md`;
+      const replCheck = countOccurrencesInFile(replPath, old_text);
+      if (replCheck.missing) {
+        return { content: [{ type: "text", text: `Refused: ${replFile}.md does not exist.` }] };
+      }
+      if (replCheck.count === 0) {
+        return { content: [{ type: "text", text: `Refused: no match for old_text in ${replFile}.md. Read the file first to find the exact substring.` }] };
+      }
+      if (replCheck.count > 1) {
+        return { content: [{ type: "text", text: `Refused: old_text matches ${replCheck.count} places in ${replFile}.md (lines ${replCheck.lineNumbers.join(", ")}). Add surrounding context to old_text to make it unique.` }] };
+      }
       const replSm = deps.getSharedStateManager();
       try {
         const { insertCandidate } = await import("../../memory/claims.js");
@@ -875,6 +1000,20 @@ export async function handle(
       const { file: rmFile, text: rmText, reason: rmReason } = args as {
         file: string; text: string; reason?: string;
       };
+      // Preflight: same uniqueness check as memory_replace — remove has the
+      // same ambiguity problem (deleting one of N identical matches is rarely
+      // what the agent intended). Run BEFORE touching the state manager.
+      const rmPath = `${MEMORY_BASE}/${rmFile}.md`;
+      const rmCheck = countOccurrencesInFile(rmPath, rmText);
+      if (rmCheck.missing) {
+        return { content: [{ type: "text", text: `Refused: ${rmFile}.md does not exist.` }] };
+      }
+      if (rmCheck.count === 0) {
+        return { content: [{ type: "text", text: `Refused: no match for text in ${rmFile}.md. Read the file first to find the exact substring.` }] };
+      }
+      if (rmCheck.count > 1) {
+        return { content: [{ type: "text", text: `Refused: text matches ${rmCheck.count} places in ${rmFile}.md (lines ${rmCheck.lineNumbers.join(", ")}). Add surrounding context to make it unique.` }] };
+      }
       const rmSm = deps.getSharedStateManager();
       try {
         const { insertCandidate } = await import("../../memory/claims.js");

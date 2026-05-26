@@ -203,6 +203,10 @@ ${permanentContext}
 
 ${sessionInput.length > 80000 ? sessionInput.slice(0, 80000) + "\n\n... (truncated) ..." : sessionInput}
 
+## Date Discipline
+
+Always use absolute dates (YYYY-MM-DD) in claim content. Never use relative time references like "yesterday," "last week," "recently," or "this month." Resolve every relative date to its absolute form before writing the claim — these facts must remain readable months from now.
+
 ## Output Format
 
 Return ONLY a valid JSON object (no markdown, no preamble):

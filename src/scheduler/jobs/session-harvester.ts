@@ -105,24 +105,34 @@ export async function runSessionHarvester(
 
 /**
  * Gap B: emit a session_summaries row containing today's done-with-comment todos.
- * Picks up todos completed since the last digest's snapshotEnd, with notes != ''.
+ * Picks up todos completed since the last watermark, with notes != ''.
  * Idempotent via content_hash UNIQUE — re-running with the same set is a no-op.
  *
  * Runs from the session-harvester at 00:00 + 12:00 cadence. Searchable via FTS
  * immediately after insert. Tagged agent='daemon', project='todos' so it does
  * not pollute user-facing session lists.
+ *
+ * Watermark (todo_digest_watermark, singleton row id=1) replaces the previous
+ * 12-hour sliding window, which dropped completions whenever a run was >12h
+ * late. First run with no watermark backfills 30 days.
  */
 function emitTodoDigest(db: ReturnType<StateManager["getDb"]>): number {
-  // Look back 12 hours by default — matches the session-harvester cadence so
-  // we get one digest per harvest window and never miss completions.
+  const watermarkRow = db.prepare(
+    "SELECT last_completed_at FROM todo_digest_watermark WHERE id = 1"
+  ).get() as { last_completed_at: string } | undefined;
+
+  // First run: backfill 30 days. Subsequent runs: strictly newer than watermark.
+  const since = watermarkRow?.last_completed_at
+    ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().replace("T", " ").slice(0, 19);
+
   const rows = db.prepare(`
     SELECT id, title, category, priority, notes, completed_at
     FROM todo_index
     WHERE status = 'done'
-      AND completed_at >= datetime('now', '-12 hours')
+      AND completed_at > @since
       AND COALESCE(notes, '') != ''
     ORDER BY completed_at DESC
-  `).all() as Array<{
+  `).all({ since }) as Array<{
     id: string; title: string; category: string; priority: string;
     notes: string; completed_at: string;
   }>;
@@ -134,7 +144,7 @@ function emitTodoDigest(db: ReturnType<StateManager["getDb"]>): number {
     const restCount = r.notes.length > noteFirstLine.length ? ` …(+${r.notes.length - noteFirstLine.length}c)` : "";
     return `- [${r.category}-${r.priority}] **${r.title}** (done ${r.completed_at})\n  ${noteFirstLine}${restCount}`;
   });
-  const summary = `Completed todos with comments (last 12h):\n\n${lines.join("\n\n")}`;
+  const summary = `Completed todos with comments (since ${since}):\n\n${lines.join("\n\n")}`;
   const contentHash = createHash("sha256").update(summary).digest("hex");
 
   // Use a stable id per snapshot window so multiple harvester runs in quick
@@ -166,6 +176,17 @@ function emitTodoDigest(db: ReturnType<StateManager["getDb"]>): number {
   } else {
     logger.debug({ digestId: snapshotId }, "Todo digest already present (content_hash dedup)");
   }
+
+  // Advance watermark to the newest completion we just bundled. Done even on
+  // content_hash dedup — those rows are already promoted, no reason to re-scan.
+  const newWatermark = rows[0]!.completed_at; // rows ORDER BY completed_at DESC
+  db.prepare(`
+    INSERT INTO todo_digest_watermark (id, last_completed_at, updated_at)
+    VALUES (1, @wm, datetime('now'))
+    ON CONFLICT(id) DO UPDATE SET
+      last_completed_at = excluded.last_completed_at,
+      updated_at = excluded.updated_at
+  `).run({ wm: newWatermark });
 
   return result.changes > 0 ? rows.length : 0;
 }

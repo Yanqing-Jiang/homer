@@ -118,6 +118,10 @@ Scan the permanent memory files for claims that are:
 
 Be HIGH-CONFIDENCE only. Better to catch 3 genuinely stale facts than flag 15 maybes. Only flag things you're confident are outdated based on the sessions you just read.
 
+## Date Discipline (applies to all promotions and lint suggestions)
+
+Always use absolute dates (YYYY-MM-DD) in promotion content. Never use relative time references like "yesterday," "last week," "recently," or "this month." Resolve every relative date to its absolute form — weekly promotions become durable claims and these must stay readable months from now.
+
 Output format — you MUST use this exact structure:
 
 <weekly_summary>
@@ -191,11 +195,30 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
   const dailyLogs: string[] = [];
   let totalSize = 0;
   let logsFound = 0;
+  // Recent approved knowledge claims from the same window. Context only —
+  // weekly used to be blind to its own claim-layer output, which let
+  // duplicate or contradicting claims persist across runs.
+  let recentClaims: Array<{ content: string; claim_type: string; target_file: string; decided_at: string }> = [];
 
   let sessionSm: StateManager | null = null;
   try {
     sessionSm = stateManager ?? new StateManager(DB_PATH);
     const sessions = sessionSm.getRecentSessions(daysBack, { activeOnly: true });
+
+    try {
+      recentClaims = sessionSm.getDb().prepare(`
+        SELECT content, claim_type, target_file, decided_at
+        FROM knowledge_claims
+        WHERE status = 'approved'
+          AND claim_type IN ('fact','decision','preference','hypothesis','insight','commitment','question','lesson','skill')
+          AND decided_at IS NOT NULL
+          AND decided_at > datetime('now', ?)
+        ORDER BY decided_at DESC
+        LIMIT 50
+      `).all(`-${daysBack} days`) as Array<{ content: string; claim_type: string; target_file: string; decided_at: string }>;
+    } catch (claimErr) {
+      logger.warn({ error: claimErr }, "Failed to load recent approved claims for weekly input (table may not exist)");
+    }
 
     // Group sessions by date
     const byDate = new Map<string, SessionSummaryRow[]>();
@@ -253,9 +276,22 @@ export async function runWeeklyConsolidation(daysBack = 7, stateManager?: StateM
   const dailySection = dailyLogs.join("\n\n---\n\n");
   const permanentSection = permanentContext.join("\n\n---\n\n");
 
+  // Recent Approved Claims block — context only. Tells the model what claims
+  // landed in the DB during this window so it can avoid re-promoting the same
+  // facts and can notice contradictions implicitly. NOT a contradiction engine:
+  // no parsing, no scoring, no special prompt language flagging inconsistencies.
+  const claimsBlock = recentClaims.length > 0
+    ? recentClaims.map(c => {
+        const d = c.decided_at.slice(0, 10);
+        const snippet = c.content.replace(/\s+/g, " ").slice(0, 240);
+        return `- [${d}] [${c.claim_type} → ${c.target_file}] ${snippet}`;
+      }).join("\n")
+    : "(none in window)";
+
   let fullInput = `${consolidationPrompt}\n\n` +
     `# Week: ${startDate} to ${endDate} (${logsFound} daily logs)\n\n` +
     `## Current Permanent Memory (DO NOT duplicate what's already here)\n\n${permanentSection}\n\n` +
+    `---\n\n## Recent Approved Claims (last ${daysBack} days, context only — already in DB)\n\n${claimsBlock}\n\n` +
     `---\n\n## Daily Logs (summaries where available, raw where not)\n\n${dailySection}`;
 
   // Truncate if needed (keep most recent days)
