@@ -212,6 +212,7 @@ const RETRYABLE_HANDLERS = new Set([
   "harness_auto_improve", "decision_journal",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
   "candidate_expiry",
+  "cosmos_sync",
 ]);
 
 const TRANSIENT_PATTERNS = [
@@ -937,6 +938,23 @@ async function runHandler(
           result.error,
           result.success ? { notificationIntent: "operational_status" } : {}
         );
+      }
+      case "cosmos_sync": {
+        try {
+          const { runCosmosSync } = await import("../scripts/sync-to-cosmos.js");
+          const summary = await runCosmosSync({ mode: "reconcile", deviceId: "home-mac", dryRun: false });
+          const output =
+            `cosmos sync: claims ${summary.claims_synced}/${summary.claims_scanned}, ` +
+            `entries ${summary.entries_synced}/${summary.entries_scanned}, ` +
+            `sessions ${summary.sessions_synced}/${summary.sessions_scanned}, ` +
+            `skipped ${summary.skipped_unchanged}, ` +
+            `emb reused=${summary.embeddings_reused} gen=${summary.embeddings_generated}, ` +
+            `429s=${summary.cosmos_429s} gemFail=${summary.gemini_failures}, ` +
+            `${summary.elapsed_ms}ms`;
+          return buildResult(job, startedAt, true, output, undefined, { notificationIntent: "operational_status" });
+        } catch (e: any) {
+          return buildResult(job, startedAt, false, "", String(e?.message ?? e), {});
+        }
       }
       case "weekly_memory_audit": {
         try {

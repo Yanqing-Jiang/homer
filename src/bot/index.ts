@@ -1614,6 +1614,14 @@ export async function startBot(bot: Bot): Promise<void> {
   await bot.start({
     onStart: (botInfo) => {
       logger.info({ username: botInfo.username }, "Bot started");
+      // Startup ping — replaces watchdog escalation alerts. Non-circular: bot
+      // is alive by the time this fires, so delivery succeeds.
+      const chatId = process.env.ALLOWED_CHAT_ID ?? process.env.TELEGRAM_CHAT_ID;
+      if (chatId) {
+        bot.api
+          .sendMessage(chatId, `🟢 Homer restarted at ${new Date().toISOString()}`)
+          .catch((err) => logger.warn({ error: err }, "Startup ping failed"));
+      }
     },
   });
 }
