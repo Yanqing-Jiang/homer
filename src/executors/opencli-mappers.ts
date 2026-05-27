@@ -5,7 +5,7 @@
  * that Homer's existing pipelines expect, preserving data contracts.
  */
 
-import type { OpenCLIBookmark, OpenCLILinkedInPost, OpenCLIMediumPost, OpenCLIArticle } from "./opencli.js";
+import type { OpenCLIBookmark, OpenCLILinkedInPost, OpenCLIMediumPost, OpenCLIArticle } from "./agent-browser-scrape.js";
 
 // ============================================
 // URL EXTRACTION (shared)
@@ -86,7 +86,7 @@ export function mapOpenCLIArticleToText(article: OpenCLIArticle): string {
 // Flatten an opencli `twitter thread` response into one text block:
 // root + same-author follow-ups as the spine, plus notable (≥5 likes) other replies.
 export function mapOpenCLIThreadToText(
-  thread: import("./opencli.js").OpenCLIThreadTweet[],
+  thread: import("./agent-browser-scrape.js").OpenCLIThreadTweet[],
   rootAuthor: string,
 ): string {
   if (!thread || thread.length === 0) return "";

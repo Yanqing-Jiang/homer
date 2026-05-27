@@ -70,6 +70,7 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
   { id: "job-hunt-followup", name: "Job Hunt Followup", kind: "internal", handler: "job_hunt_followup", handlerFile: "job-hunt-followup", expectedInSchedule: true },
   { id: "mentor-layer", name: "Mentor Layer", kind: "internal", handler: "mentor_layer", handlerFile: "mentor-layer", expectedInSchedule: true, note: "active-work mentor, Mon/Wed/Fri 08:30" },
   { id: "career-truth", name: "Career Truth", kind: "internal", handler: "career_truth", handlerFile: "career-truth", expectedInSchedule: true, note: "1 PM Tue/Wed/Thu, shared state with mentor-layer" },
+  { id: "cosmos-sync", name: "Cosmos Memory Sync", kind: "internal", handler: "cosmos_sync", expectedInSchedule: true, note: "fingerprint-based dedup push of SQLite memory to Cosmos at 00:15 PT. No handlerFile — imports from scripts/sync-to-cosmos.ts." },
   { id: "link-processor", name: "Link Processor", kind: "internal", handler: "link_processor", handlerFile: "link-processor", expectedInSchedule: true },
   { id: "memory-embeddings", name: "Memory Embeddings", kind: "internal", handler: "memory_embeddings", handlerFile: "memory-embeddings", expectedInSchedule: true, note: "event-triggered; cron is safety net" },
   { id: "memory-reindex", name: "Memory Reindex", kind: "internal", handler: "memory_reindex", handlerFile: "memory-reindex", expectedInSchedule: true, note: "event-triggered; cron is safety net" },

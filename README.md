@@ -39,7 +39,7 @@ src/
 ├── mcp/             # MCP stdio server (memory, blobs, ideas, plans, todos)
 ├── memory/          # 2-tier memory: claims DB + markdown surface
 ├── scheduler/       # Cron jobs with hot reload
-├── scraping/        # yt-dlp, Readability, opencli browser bridge
+├── scraping/        # yt-dlp, Readability, agent-browser (CDP) helpers
 ├── state/           # SQLite migrations + StateManager singleton
 └── telephony/       # Twilio SMS + ElevenLabs webhook server (the only HTTP surface)
 config/              # com.homer.daemon.plist.template (rendered at install time)

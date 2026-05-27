@@ -2,8 +2,8 @@
  * Backfill: re-hydrate x-bookmark scrapes that never got thread expansion or
  * deep-link article fetch. Walks `scrapes` where source='x-bookmark' and
  * raw_content length < MIN_HYDRATED, calls:
- *   1. opencli twitter thread <id>  (primary)
- *   2. opencli twitter article <id> (fallback for X Articles)
+ *   1. agent-browser CDP scrape — twitter thread (primary)
+ *   2. agent-browser CDP scrape — twitter article (fallback for X Articles)
  *   3. deep-fetch external URLs found in thread text (when original was link-only)
  *
  * Run (dry-run, no writes):  npx tsx src/scripts/backfill-bookmark-hydration.ts --dry
@@ -17,7 +17,7 @@ import { PATHS } from "../config/paths.js";
 import {
   fetchTwitterThread,
   fetchTwitterArticle,
-} from "../executors/opencli.js";
+} from "../executors/agent-browser-scrape.js";
 import {
   mapOpenCLIThreadToText,
   mapOpenCLIArticleToText,
@@ -181,7 +181,7 @@ async function main() {
       console.log(`ERROR: ${(err as Error).message}`);
       errored++;
     }
-    // Gentle pacing to avoid hammering opencli/browser
+    // Gentle pacing to avoid hammering the CDP browser session
     await new Promise(r => setTimeout(r, 500));
   }
 
