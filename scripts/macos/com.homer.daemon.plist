@@ -53,19 +53,16 @@
     <string>/Users/yj/Library/Logs/homer</string>
   </dict>
 
+  <!-- KeepAlive: always restart after any exit. ThrottleInterval bounds crash loops.
+       To stop the daemon for maintenance, use `launchctl bootout`, not `kill`. -->
   <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-    <key>NetworkState</key>
-    <true/>
-  </dict>
+  <true/>
 
   <key>ExitTimeOut</key>
   <integer>360</integer>
 
   <key>ThrottleInterval</key>
-  <integer>30</integer>
+  <integer>60</integer>
 
   <key>ProcessType</key>
   <string>Background</string>

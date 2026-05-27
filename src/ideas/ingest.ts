@@ -5,7 +5,7 @@ import { z } from "zod";
 import { parseIdeasMd, type ParsedIdea } from "./parser.js";
 import * as dao from "./dao.js";
 import { logger } from "../utils/logger.js";
-import { fetchTwitterBookmarks, fetchTwitterArticle, isRetryableOpenCLIError } from "../executors/opencli.js";
+import { fetchTwitterBookmarks, fetchTwitterArticle, isRetryableOpenCLIError } from "../executors/agent-browser-scrape.js";
 import { mapOpenCLIBookmarks, mapOpenCLIArticleToText } from "../executors/opencli-mappers.js";
 import { executeBrowserScrape } from "../executors/browser-scrape.js";
 import {
@@ -244,23 +244,24 @@ function ensureIdeaId(idea: ParsedIdea): void {
 
 /**
  * Run bookmark extraction with a given target count.
- * Primary: opencli (zero cost, ~2s). Fallback: executeBrowserScrape on infra errors.
+ * Primary: agent-browser CDP scrape (zero cost, ~10-20s for full scroll).
+ * Fallback: executeBrowserScrape (LLM-mediated) on infra errors.
  */
 async function runBookmarkExtraction(maxItems: number): Promise<TwitterBookmark[]> {
-  // Try opencli first
+  // Try direct CDP scrape first
   const cliResult = await fetchTwitterBookmarks(maxItems);
   if (cliResult.exitCode === 0 && cliResult.data && cliResult.data.length > 0) {
     const mapped = mapOpenCLIBookmarks(cliResult.data);
-    logger.info({ count: mapped.length, source: "opencli", duration: cliResult.duration }, "Bookmark extraction via opencli");
+    logger.info({ count: mapped.length, source: "agent-browser", duration: cliResult.duration }, "Bookmark extraction via agent-browser");
     if (mapped.length > 0) return mapped;
   }
 
-  // Fallback to browser scrape only on infra errors (extension down, timeout)
+  // Fallback to LLM-mediated browser scrape only on infra errors (CDP down, timeout)
   if (cliResult.exitCode !== 0 && !isRetryableOpenCLIError(cliResult.exitCode)) {
-    throw new Error(`opencli bookmarks failed (exit ${cliResult.exitCode}): ${cliResult.error}`);
+    throw new Error(`agent-browser bookmarks failed (exit ${cliResult.exitCode}): ${cliResult.error}`);
   }
 
-  logger.info({ opencliExit: cliResult.exitCode, error: cliResult.error }, "opencli unavailable, falling back to browser scrape");
+  logger.info({ scrapeExit: cliResult.exitCode, error: cliResult.error }, "agent-browser unavailable, falling back to LLM browser scrape");
   await ensureCDP({ headed: true }).catch(() => {});
   const result = await executeBrowserScrape(
     buildBookmarkScrapePrompt(maxItems), "", { timeout: 600_000 },
@@ -280,20 +281,20 @@ async function runBookmarkExtraction(maxItems: number): Promise<TwitterBookmark[
 
 /**
  * Read a single tweet/thread to get full text content.
- * Primary: opencli twitter article (zero cost, ~3s). Fallback: executeBrowserScrape.
+ * Primary: agent-browser CDP scrape (zero cost, ~3-6s). Fallback: executeBrowserScrape.
  */
 async function readTweetThread(tweetUrl: string): Promise<string | null> {
   // Extract tweet ID from URL
   const idMatch = tweetUrl.match(/status\/(\d+)/);
   if (!idMatch) return null;
 
-  // Try opencli first
+  // Try direct CDP scrape first
   try {
     const cliResult = await fetchTwitterArticle(idMatch[1]!);
     if (cliResult.exitCode === 0 && cliResult.data) {
       const text = mapOpenCLIArticleToText(cliResult.data);
       if (text.length > 0) {
-        logger.debug({ tweetId: idMatch[1], chars: text.length, source: "opencli" }, "Thread read via opencli");
+        logger.debug({ tweetId: idMatch[1], chars: text.length, source: "agent-browser" }, "Thread read via agent-browser");
         return text;
       }
     }
@@ -314,7 +315,7 @@ async function readTweetThread(tweetUrl: string): Promise<string | null> {
 }
 
 async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
-  logger.info("Scraping Twitter/X bookmarks via opencli (browser fallback on infra errors)");
+  logger.info("Scraping Twitter/X bookmarks via agent-browser CDP (LLM browser fallback on infra errors)");
 
   try {
     let bookmarks: TwitterBookmark[] = [];
@@ -362,7 +363,7 @@ async function scrapeTwitterBookmarks(): Promise<ParsedIdea[]> {
         : null;
       if (fullText && !isLinkOnly) threadReadsUsed++;
 
-      // Fix: when opencli truncated bookmark text to a t.co self-link,
+      // Fix: when the bookmark scrape truncated bookmark text to a t.co self-link,
       // the original enrichBookmark() finds no external URLs. Re-extract
       // from the full thread text and deep-fetch any article URLs found.
       if (fullText && fullText.length > bookmark.text.length && !enriched.deepContent) {

@@ -1,13 +1,14 @@
 /**
  * Twitter Bookmarks Adapter
  *
- * Primary: opencli (zero cost, ~2s). Fallback: executeBrowserScrape on infra errors.
+ * Primary: agent-browser CDP scrape (zero cost, ~5-20s for bookmark scroll).
+ * Fallback: executeBrowserScrape (LLM-mediated) on infra errors.
  */
 
 import type { SourceConfig, RawDiscoveryItem } from "../types.js";
 import { BaseAdapter } from "./base.js";
-import { fetchTwitterBookmarks, fetchTwitterArticle, isOpenCLIHealthy, isRetryableOpenCLIError } from "../../executors/opencli.js";
-import type { OpenCLIArticle } from "../../executors/opencli.js";
+import { fetchTwitterBookmarks, fetchTwitterArticle, isOpenCLIHealthy, isRetryableOpenCLIError } from "../../executors/agent-browser-scrape.js";
+import type { OpenCLIArticle } from "../../executors/agent-browser-scrape.js";
 import { mapBookmarkToDiscoveryItem } from "../../executors/opencli-mappers.js";
 import { executeBrowserScrape } from "../../executors/browser-scrape.js";
 import {
@@ -52,7 +53,7 @@ export class TwitterAdapter extends BaseAdapter {
   async fetch(config: SourceConfig): Promise<RawDiscoveryItem[]> {
     const maxItems = Math.min(config.maxItems || 10, 10);
 
-    // Try opencli first
+    // Try direct CDP scrape first
     const cliResult = await fetchTwitterBookmarks(maxItems);
     if (cliResult.exitCode === 0 && cliResult.data && cliResult.data.length > 0) {
       const items = cliResult.data.map(b => {
@@ -72,7 +73,7 @@ export class TwitterAdapter extends BaseAdapter {
 
     // Fallback to browser scrape on infra errors
     if (cliResult.exitCode !== 0 && !isRetryableOpenCLIError(cliResult.exitCode)) {
-      throw new Error(`opencli bookmarks failed (exit ${cliResult.exitCode}): ${cliResult.error}`);
+      throw new Error(`agent-browser bookmark scrape failed (exit ${cliResult.exitCode}): ${cliResult.error}`);
     }
 
     const result = await executeBrowserScrape(
@@ -108,7 +109,7 @@ export class TwitterAdapter extends BaseAdapter {
 
   /**
    * Enrich bookmarks that are URL-only or contain t.co links by fetching
-   * the full article content via `opencli twitter article`.
+   * the full article content via agent-browser CDP scrape.
    */
   private async enrichWithDeepLinks(items: RawDiscoveryItem[]): Promise<RawDiscoveryItem[]> {
     const TCO_RE = /https?:\/\/t\.co\/\S+/;
@@ -128,7 +129,8 @@ export class TwitterAdapter extends BaseAdapter {
 
     if (enrichable.length === 0) return items;
 
-    // Fetch articles in batches to avoid hammering opencli
+    // Fetch articles in batches — note: agent-browser serializes all calls behind one
+    // CDP socket, so MAX_CONCURRENT here just controls Promise.allSettled batching, not real parallelism.
     const articleMap = new Map<string, OpenCLIArticle>();
     for (let i = 0; i < enrichable.length; i += MAX_CONCURRENT) {
       const batch = enrichable.slice(i, i + MAX_CONCURRENT);

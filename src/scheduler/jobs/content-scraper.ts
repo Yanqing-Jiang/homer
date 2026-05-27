@@ -22,7 +22,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { createHash } from "crypto";
 // @ts-ignore
 import type Database from "better-sqlite3";
-import { fetchLinkedInTimeline, fetchMediumFeed, isRetryableOpenCLIError } from "../../executors/opencli.js";
+import { fetchLinkedInTimeline, fetchMediumFeed, isRetryableOpenCLIError } from "../../executors/agent-browser-scrape.js";
 import { mapLinkedInTimeline, mapMediumFeed } from "../../executors/opencli-mappers.js";
 import { executeBrowserScrape } from "../../executors/browser-scrape.js";
 import { executeCodexCLI } from "../../executors/codex-cli.js";
@@ -798,19 +798,19 @@ export async function runContentScraper(db: Database.Database): Promise<{
     logger.info({ count: rssPostsRaw.length }, "Medium RSS complete");
 
     // Phase 2: sequential — Medium For You + LinkedIn + optional Medium browser fallback
-    // Primary: opencli (~2s, free). Fallback: executeBrowserScrape on infra errors.
+    // Primary: agent-browser CDP scrape (~2-8s, free). Fallback: executeBrowserScrape (LLM-mediated) on infra errors.
 
     // Medium browser fallback (only if RSS was empty)
     let mediumFallbackResult: PromiseSettledResult<Awaited<ReturnType<typeof executeBrowserScrape>> | null>;
     if (rssPostsRaw.length > 0) {
       mediumFallbackResult = { status: "fulfilled", value: null };
     } else {
-      logger.info("Medium RSS empty — trying opencli medium feed, then browser fallback");
+      logger.info("Medium RSS empty — trying agent-browser medium feed, then LLM browser fallback");
       try {
         const cliResult = await fetchMediumFeed(10);
         if (cliResult.exitCode === 0 && cliResult.data && cliResult.data.length > 0) {
-          // opencli succeeded but returns discovery-only data (no content). Treat as "no full posts".
-          logger.info({ count: cliResult.data.length }, "Medium RSS fallback: opencli found articles (discovery only)");
+          // agent-browser scrape succeeded but returns discovery-only data (no content). Treat as "no full posts".
+          logger.info({ count: cliResult.data.length }, "Medium RSS fallback: agent-browser found articles (discovery only)");
           mediumFallbackResult = { status: "fulfilled", value: null };
         } else if (isRetryableOpenCLIError(cliResult.exitCode)) {
           const val = await executeBrowserScrape(buildMediumScrapePrompt(), "", { timeout: 120_000 });
@@ -823,18 +823,18 @@ export async function runContentScraper(db: Database.Database): Promise<{
       }
     }
 
-    // Medium For You: opencli primary → browser fallback
+    // Medium For You: agent-browser CDP primary → LLM browser fallback
     let mediumTrendingResult: PromiseSettledResult<{ exitCode: number; output: string; duration: number }>;
     try {
-      logger.info("Starting Medium For You scrape via opencli");
+      logger.info("Starting Medium For You scrape via agent-browser");
       const cliResult = await fetchMediumFeed(5);
       if (cliResult.exitCode === 0 && cliResult.data && cliResult.data.length > 0) {
         const mapped = mapMediumFeed(cliResult.data);
         // Serialize as JSON so downstream parseScrapedJSON can consume it
         mediumTrendingResult = { status: "fulfilled", value: { exitCode: 0, output: JSON.stringify(mapped), duration: cliResult.duration } };
-        logger.info({ count: mapped.length, source: "opencli", duration: cliResult.duration }, "Medium For You via opencli");
+        logger.info({ count: mapped.length, source: "agent-browser", duration: cliResult.duration }, "Medium For You via agent-browser");
       } else if (isRetryableOpenCLIError(cliResult.exitCode)) {
-        logger.info({ opencliExit: cliResult.exitCode }, "opencli unavailable, falling back to browser for Medium For You");
+        logger.info({ scrapeExit: cliResult.exitCode }, "agent-browser unavailable, falling back to LLM browser for Medium For You");
         await ensureCDP({ headed: true }).catch(() => {});
         const val = await executeBrowserScrape(buildMediumForYouScrapePrompt(5), "", { timeout: 600_000 });
         mediumTrendingResult = { status: "fulfilled", value: { exitCode: val.exitCode, output: val.output ?? "", duration: val.duration } };
@@ -845,17 +845,18 @@ export async function runContentScraper(db: Database.Database): Promise<{
       mediumTrendingResult = { status: "rejected", reason: err };
     }
 
-    // LinkedIn: opencli primary → browser fallback
+    // LinkedIn: agent-browser-scrape wrapper (delegates to LLM-mediated browser scrape internally
+    // since LinkedIn feed posts don't render reliably in the CDP debug profile).
     let linkedinResult: PromiseSettledResult<{ exitCode: number; output: string; duration: number }>;
     try {
-      logger.info("Starting LinkedIn scrape via opencli");
+      logger.info("Starting LinkedIn scrape via agent-browser wrapper");
       const cliResult = await fetchLinkedInTimeline(10);
       if (cliResult.exitCode === 0 && cliResult.data && cliResult.data.length > 0) {
         const mapped = mapLinkedInTimeline(cliResult.data);
         linkedinResult = { status: "fulfilled", value: { exitCode: 0, output: JSON.stringify(mapped), duration: cliResult.duration } };
-        logger.info({ count: mapped.length, source: "opencli", duration: cliResult.duration }, "LinkedIn via opencli");
+        logger.info({ count: mapped.length, source: "agent-browser/linkedin-wrapper", duration: cliResult.duration }, "LinkedIn via agent-browser wrapper");
       } else if (isRetryableOpenCLIError(cliResult.exitCode)) {
-        logger.info({ opencliExit: cliResult.exitCode }, "opencli unavailable, falling back to browser for LinkedIn");
+        logger.info({ scrapeExit: cliResult.exitCode }, "LinkedIn wrapper failed retryably, falling back to direct LLM browser scrape");
         await ensureCDP({ headed: true }).catch(() => {});
         const val = await executeBrowserScrape(buildLinkedInTopPostPrompt(), "", { timeout: 600_000 });
         linkedinResult = { status: "fulfilled", value: { exitCode: val.exitCode, output: val.output ?? "", duration: val.duration } };
