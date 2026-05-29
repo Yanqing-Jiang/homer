@@ -9,7 +9,7 @@ export const SONNET_MODEL = "claude-sonnet-4-6";
 export const SONNET_COPILOT_MODEL = "github-copilot/claude-sonnet-4.6";
 
 /** Latest Opus for direct Anthropic API calls */
-export const OPUS_MODEL = "claude-opus-4-7";
+export const OPUS_MODEL = "claude-opus-4-8";
 
 /** Latest Opus via GitHub Copilot / OpenCode CLI */
-export const OPUS_COPILOT_MODEL = "github-copilot/claude-opus-4.7";
+export const OPUS_COPILOT_MODEL = "github-copilot/claude-opus-4.8";
