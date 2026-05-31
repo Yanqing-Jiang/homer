@@ -79,11 +79,12 @@ export class SessionTimeoutManager {
     const now = Date.now();
 
     for (const record of active) {
-      // timeoutMs: 0 means "no timeout" (e.g. long-lived Chrome sessions)
+      // timeoutMs: 0 means "no timeout — lives until explicit cleanup" (e.g. the
+      // long-lived CDP Chrome). Exempt entirely; otherwise the per-type backstop
+      // below (utility = a few minutes) would kill a healthy long-lived session.
+      if (record.timeoutMs === 0) continue;
       const backstopTimeout = TYPE_TIMEOUTS[record.type] ?? TYPE_TIMEOUTS.executor;
-      const effectiveTimeout = record.timeoutMs > 0
-        ? Math.min(record.timeoutMs, backstopTimeout)
-        : backstopTimeout;
+      const effectiveTimeout = Math.min(record.timeoutMs, backstopTimeout);
       // If triage extended the process, skip until extension expires
       if (record.extendedUntil && now < record.extendedUntil) continue;
 
