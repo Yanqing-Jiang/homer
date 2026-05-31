@@ -17,7 +17,8 @@
  */
 
 import { execFile } from "child_process";
-import { readFileSync } from "fs";
+import { readFileSync, rmSync } from "fs";
+import { homedir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { ensureCDP } from "../scraping/chrome-launcher.js";
@@ -250,10 +251,20 @@ function parseAgentBrowserJson(stdout: string): unknown {
 // CDP + BACKEND READINESS
 // ============================================
 
+const AGENT_BROWSER_SOCKET = join(homedir(), ".agent-browser", "default.sock");
 let connectedOnce = false;
 async function ensureBackendReady(): Promise<{ ok: true } | { ok: false; status: ScrapeStatus; error: string }> {
   try {
-    await ensureCDP({ headed: true });
+    const handle = await ensureCDP({ headed: true });
+    // A non-zero pid means a FRESH Chrome was launched — any persisted
+    // agent-browser socket now points at a dead backend. Force a reconnect and
+    // drop the stale socket so `connect` re-handshakes against the new browser.
+    // Done regardless of connectedOnce so a stale on-disk socket left by a prior
+    // process is also cleared on the first launch of this one.
+    if (handle.pid !== 0) {
+      connectedOnce = false;
+      try { rmSync(AGENT_BROWSER_SOCKET, { force: true }); } catch { /* best effort */ }
+    }
   } catch (err) {
     return { ok: false, status: "cdp_unavailable", error: err instanceof Error ? err.message : String(err) };
   }
