@@ -15,6 +15,7 @@ import { join } from "path";
 import { processRegistry } from "./registry.js";
 import type { ProcessRecord } from "./registry.js";
 import { logger } from "../utils/logger.js";
+import { teardownIdleSession, getLastCdpUseAt } from "../scraping/chrome-launcher.js";
 // @ts-ignore
 import type Database from "better-sqlite3";
 
@@ -39,6 +40,12 @@ const ORPHAN_PATTERNS = [
 const CDP_PORT = 9222;
 const CDP_PROFILE_PREFIX = "/tmp/chrome-cdp-profile-";
 const CDP_PROFILE_MIN_AGE_MS = 30 * 60 * 1000; // grace period before sweeping a /tmp profile dir
+// Idle-teardown of the long-lived CDP Chrome (it is spared by every other path by
+// design). Gated on a long idle window — scrapes are seconds-long, so a 2h-idle
+// instance has nothing mid-flight — AND a tab-count floor so a healthy reused
+// single-tab session is left warm; only an actual tab pile-up triggers teardown.
+const CDP_IDLE_TEARDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours
+const CDP_MAX_IDLE_TABS = 3;
 
 /** True only for a real Homer CDP Chrome process (has both the Chrome binary and our temp profile). */
 function isCdpChromeCmdline(cmdline: string): boolean {
@@ -109,6 +116,9 @@ export class CleanupScheduler {
 
       // C: Disk sweep of leaked CDP profile directories
       this.sweepCdpProfileDirs();
+
+      // D: Tear down the long-lived CDP Chrome if it is idle with piled-up tabs.
+      await this.maybeTeardownIdleCdp(actions);
 
       scanned = actions.length;
       killed = actions.filter((a) => a.action === "killed").length;
@@ -338,6 +348,51 @@ export class CleanupScheduler {
   }
 
   /**
+   * D: Tear down the long-lived CDP scraping Chrome when it is idle AND its tabs
+   * have piled up. The live :9222 listener is spared by every other path (by
+   * design, so an in-flight scrape is never killed); this is the one sanctioned
+   * reaper. The checks here are a cheap pre-filter — the AUTHORITATIVE idle
+   * re-check happens inside teardownIdleSession under the CDP op lock, which also
+   * closes the race with a scrape that starts after this pre-filter passes.
+   */
+  private async maybeTeardownIdleCdp(actions: CleanupAction[]): Promise<void> {
+    try {
+      // Need trusted process/listener state and an actual Homer-owned live
+      // listener (liveProfileDirs is only populated for cmdline-verified CDP
+      // Chromes — a non-Homer listener on :9222 never lands here).
+      if (!this.cdp.trusted) return;
+      if (this.cdp.liveProfileDirs.size === 0) return;
+
+      const idleMs = Date.now() - getLastCdpUseAt();
+      if (idleMs < CDP_IDLE_TEARDOWN_MS) return;
+
+      const tabs = await countCdpPages(CDP_PORT);
+      if (tabs <= CDP_MAX_IDLE_TABS) return;
+
+      const pid = [...this.cdp.listenerPids][0] ?? 0;
+      const idleMin = Math.round(idleMs / 60000);
+
+      if (!this.enforce) {
+        logger.warn({ pid, tabs, idleMin }, "MONITOR: Would tear down idle CDP Chrome");
+        actions.push({ pid, command: "chrome-cdp", action: "spared", reason: `monitor-only: idle ${idleMin}min, ${tabs} tabs` });
+        return;
+      }
+
+      const outcome = await teardownIdleSession(CDP_IDLE_TEARDOWN_MS, CDP_PORT);
+      if (outcome === "torn-down") {
+        logger.info({ pid, tabs, idleMin }, "Tore down idle CDP Chrome with tab pile-up");
+        actions.push({ pid, command: "chrome-cdp", action: "killed", reason: `idle ${idleMin}min, ${tabs} tabs` });
+      } else {
+        // "busy" (a scrape stamped lastCdpUseAt before we got the lock) or
+        // "absent" (already gone) — both benign, just record it.
+        actions.push({ pid, command: "chrome-cdp", action: "spared", reason: `idle teardown skipped: ${outcome}` });
+      }
+    } catch (err) {
+      logger.debug({ error: err }, "Idle CDP teardown check failed");
+    }
+  }
+
+  /**
    * 6-layer safety check for registry processes.
    */
   private handleProcess(record: ProcessRecord, reason: string): CleanupAction {
@@ -504,6 +559,25 @@ export class CleanupScheduler {
     } catch {
       // Best effort
     }
+  }
+}
+
+/**
+ * Count open page targets on the CDP port via its /json endpoint. Returns 0 on
+ * any error (unreachable, non-OK, bad JSON, timeout) — fail-closed, so a probe
+ * failure can never authorize a teardown.
+ */
+async function countCdpPages(port: number): Promise<number> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2000);
+    const resp = await fetch(`http://localhost:${port}/json`, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!resp.ok) return 0;
+    const list = (await resp.json()) as Array<{ type?: string }>;
+    return Array.isArray(list) ? list.filter((t) => t.type === "page").length : 0;
+  } catch {
+    return 0;
   }
 }
 
