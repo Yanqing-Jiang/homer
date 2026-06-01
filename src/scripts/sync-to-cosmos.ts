@@ -49,7 +49,7 @@ const EMBED_DIM = 768;
 const SYNC_VERSION = 1;
 
 // --- Types ---
-export type SyncMode = "migrate" | "reconcile" | "push";
+export type SyncMode = "migrate" | "reconcile" | "push" | "pull";
 export type DeviceId = "home-mac" | "work-laptop" | (string & {});
 
 export interface SyncOptions {
@@ -292,6 +292,9 @@ interface RemoteSummary {
   m_archived_at?: string | null;
   m_is_active?: number | null;
   m_searchable?: number | null;
+  // Full Cosmos docs (passed by runCosmosPull) carry lifecycle under metadata.*
+  // rather than the m_* aliases that loadRemoteSummaries projects.
+  metadata?: any;
 }
 
 function remoteFingerprintFromSummary(s: RemoteSummary): string {
@@ -300,11 +303,11 @@ function remoteFingerprintFromSummary(s: RemoteSummary): string {
   if (s.sync_fingerprint) return s.sync_fingerprint;
   // Legacy migration docs predate sync_fingerprint AND store lifecycle fields only
   // under metadata.*, not at top level. Prefer top-level (new schema), fall back to
-  // metadata-projected fields (legacy schema).
-  const status = s.status ?? s.m_status ?? null;
-  const archived_at = s.archived_at ?? s.m_archived_at ?? null;
-  const is_active = s.is_active ?? s.m_is_active ?? null;
-  const searchable = s.searchable ?? s.m_searchable ?? null;
+  // the m_* projection (loadRemoteSummaries) and then raw metadata.* (full pull docs).
+  const status = s.status ?? s.m_status ?? s.metadata?.status ?? null;
+  const archived_at = s.archived_at ?? s.m_archived_at ?? s.metadata?.archived_at ?? null;
+  const is_active = s.is_active ?? s.m_is_active ?? s.metadata?.is_active ?? null;
+  const searchable = s.searchable ?? s.m_searchable ?? s.metadata?.searchable ?? null;
   if (s.source_type === "claim") return fp(SYNC_VERSION, "claim", s.content_hash, status, archived_at);
   if (s.source_type === "entry") return fp(SYNC_VERSION, "entry", s.content_hash, is_active);
   if (s.source_type === "session_summary") return fp(SYNC_VERSION, "session", s.content_hash, status, archived_at, searchable);
@@ -443,13 +446,20 @@ async function insertSeedDoc(deviceId: DeviceId, dryRun: boolean): Promise<void>
 
 // --- Public entrypoint ---
 export async function runCosmosSync(opts: SyncOptions): Promise<SyncSummary> {
+  if ((opts.mode as string) === "pull") throw new Error("runCosmosSync does not handle 'pull' — use runCosmosPull()");
   const startedAt = new Date();
   const dryRun = !!opts.dryRun;
   metrics = { cosmos_429s: 0, gemini_failures: 0, embeddings_reused: 0, embeddings_generated: 0 };
 
-  const claims = getDb().prepare("SELECT * FROM knowledge_claims").all() as any[];
-  const entries = getDb().prepare("SELECT * FROM memory_entries").all() as any[];
-  const sessions = getDb().prepare("SELECT * FROM session_summaries").all() as any[];
+  // Only push locally-authored rows. Rows with origin_device set were imported FROM
+  // Cosmos by runCosmosPull and must NOT be re-published under this device's IDs —
+  // that would duplicate/corrupt the source device's corpus. `IS NULL` covers all
+  // pre-098 and natively-authored rows; `= deviceId` is a defensive allowance for a
+  // device's own rows should they ever be tagged.
+  const nativeWhere = "WHERE origin_device IS NULL OR origin_device = ?";
+  const claims = getDb().prepare(`SELECT * FROM knowledge_claims ${nativeWhere}`).all(opts.deviceId) as any[];
+  const entries = getDb().prepare(`SELECT * FROM memory_entries ${nativeWhere}`).all(opts.deviceId) as any[];
+  const sessions = getDb().prepare(`SELECT * FROM session_summaries ${nativeWhere}`).all(opts.deviceId) as any[];
 
   const allowRemoteReuse = opts.mode === "reconcile" || opts.mode === "push";
   let remote: Map<string, RemoteSummary> | null = null;
@@ -500,17 +510,343 @@ export async function runCosmosSync(opts: SyncOptions): Promise<SyncSummary> {
   };
 }
 
+// ===========================================================================
+// PULL: Cosmos -> local SQLite (reverse of runCosmosSync).
+//
+// Harvests memory authored on OTHER devices (device_id != localDeviceId) into
+// the local DB so local retrieval (FTS + session vector search) surfaces it.
+// v1 scope: claims + sessions (memory_entries is not in any local search path,
+// so importing it would be dead weight — deferred). Imported rows are tagged
+// origin_device = <source device> so the push (runCosmosSync) excludes them.
+//
+// Idempotent: re-runnable via fingerprint comparison against existing local
+// rows. Never writes to Cosmos. One bad foreign doc never aborts the run
+// (per-row try/catch, no table-wide transaction).
+// ===========================================================================
+
+export interface PullOptions {
+  localDeviceId: DeviceId;
+  sourceDeviceIds?: DeviceId[]; // default: every device that isn't localDeviceId
+  dryRun?: boolean;
+  json?: boolean;
+}
+
+export interface PullSummary {
+  localDeviceId: DeviceId;
+  sourceDeviceIds: DeviceId[] | "all-foreign";
+  dryRun: boolean;
+  claims_scanned: number;
+  claims_upserted: number;
+  sessions_scanned: number;
+  sessions_upserted: number;
+  embeddings_written: number;
+  skipped_unchanged: number;
+  skipped_invalid: number;
+  skipped_duplicate_hash: number;
+  skipped_origin_conflict: number;
+  errors: number;
+  cosmos_429s: number;
+  elapsed_ms: number;
+  started_at: string;
+  finished_at: string;
+}
+
+const CLAIM_TYPES = new Set([
+  "fact", "decision", "preference", "hypothesis", "insight", "commitment",
+  "question", "lesson", "skill", "cleanup", "replace", "remove",
+]);
+const CLAIM_STATUSES = new Set(["candidate", "applying", "approved", "rejected", "expired", "stale", "archived"]);
+const SESSION_AGENTS = new Set(["codex", "gemini", "kimi", "claude", "opencode", "daemon", "telegram", "web"]);
+const SESSION_STATUSES = new Set(["active", "archived"]);
+// Lifecycle whitelist — don't import the other device's terminal/noise rows.
+const CLAIM_PULL_STATUSES = new Set(["approved", "candidate", "stale"]);
+
+// Inverse of parseEmbedding: number[] -> little-endian Float32 BLOB.
+function embeddingToBlob(values: unknown): Buffer | null {
+  if (!Array.isArray(values) || values.length < EMBED_DIM) return null;
+  const f32 = Float32Array.from(values.slice(0, EMBED_DIM).map(Number));
+  if (!f32.every(Number.isFinite)) return null;
+  return Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength);
+}
+
+// Inverse of docId: derive a namespaced local PK from a Cosmos doc.
+// Prefixed foreign ids (work-laptop:claim:123) are reused verbatim; legacy
+// home-mac bare ids are normalized to deviceId:source:rawId so a symmetric
+// pull on another machine cannot collide with that machine's native ids.
+function localImportId(doc: { id: string; device_id: string; source_type: string }): string {
+  if (doc.id.includes(":")) return doc.id;
+  const src = doc.source_type === "session_summary" ? "session" : doc.source_type;
+  const raw = doc.id.replace(/^entry_/, "").replace(/^session_/, "");
+  return `${doc.device_id}:${src}:${raw}`;
+}
+
+function toInt(v: unknown, dflt = 0): number {
+  if (v === true) return 1;
+  if (v === false) return 0;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : dflt;
+}
+
+// Schemaless-safe scalar coercion for better-sqlite3 named bindings (which reject
+// `undefined` and booleans, and where binding NaN is version-dependent).
+function str(v: unknown): string | null {
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+function num(v: unknown, dflt: number | null = null): number | null {
+  if (typeof v === "boolean") return dflt;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : dflt;
+}
+
+// A valid foreign provenance: a non-empty string that isn't this device. Required
+// so imported rows always carry a non-null origin_device — otherwise the push
+// filter (origin_device IS NULL) would re-publish them as local. (BLOCKER #1)
+function validForeignDevice(deviceId: unknown, localDeviceId: DeviceId): deviceId is string {
+  return typeof deviceId === "string" && deviceId.length > 0 && deviceId !== localDeviceId;
+}
+
+async function queryForeignDocs(
+  sourceType: "claim" | "session_summary",
+  localDeviceId: DeviceId,
+  sourceDeviceIds: DeviceId[] | undefined,
+): Promise<any[]> {
+  // Partition key is /source_type, so scoping the query to one source_type is a
+  // single-partition read; device_id is a within-partition filter.
+  const params: any[] = [{ name: "@local", value: localDeviceId }];
+  // Defence-in-depth: only pull docs whose device_id is a real, non-empty,
+  // foreign string. The row loop validates again (validForeignDevice).
+  let where = "IS_DEFINED(c.device_id) AND IS_STRING(c.device_id) AND c.device_id != '' AND c.device_id != @local";
+  if (sourceDeviceIds && sourceDeviceIds.length) {
+    where += " AND ARRAY_CONTAINS(@sources, c.device_id)";
+    params.push({ name: "@sources", value: sourceDeviceIds });
+  }
+  const out: any[] = [];
+  const iter = getContainer().items.query(
+    { query: `SELECT * FROM c WHERE ${where}`, parameters: params },
+    { partitionKey: sourceType, maxItemCount: 1000 } as any,
+  );
+  let retries = 0;
+  while (iter.hasMoreResults()) {
+    try {
+      const { resources } = await iter.fetchNext();
+      for (const r of resources) out.push(r);
+      retries = 0;
+    } catch (e: any) {
+      if (e?.code === 429 && retries < 8) {
+        metrics.cosmos_429s++; retries++;
+        await sleep(Math.min((e.retryAfterInMs ?? 1000) * retries, 30000));
+        continue;
+      }
+      throw e;
+    }
+  }
+  return out;
+}
+
+export async function runCosmosPull(opts: PullOptions): Promise<PullSummary> {
+  const startedAt = new Date();
+  const dryRun = !!opts.dryRun;
+  metrics = { cosmos_429s: 0, gemini_failures: 0, embeddings_reused: 0, embeddings_generated: 0 };
+
+  const sum = {
+    claims_scanned: 0, claims_upserted: 0,
+    sessions_scanned: 0, sessions_upserted: 0,
+    embeddings_written: 0, skipped_unchanged: 0,
+    skipped_invalid: 0, skipped_duplicate_hash: 0,
+    skipped_origin_conflict: 0, errors: 0,
+  };
+
+  // Writable handle — getDb() is opened readonly for the push.
+  const wdb = new Database(`${homedir()}/homer/data/homer.db`);
+  wdb.pragma("busy_timeout = 5000");
+
+  try {
+    // ---- Claims ----
+    const claimById = wdb.prepare("SELECT * FROM knowledge_claims WHERE id = ?");
+    const claimInsert = wdb.prepare(`
+      INSERT INTO knowledge_claims
+        (id, content, content_hash, target_file, section, claim_type, confidence, status,
+         session_id, source_url, created_at, updated_at, origin_channel, domain, canonical_path,
+         event_date, user_explicit, base_priority, promote_score, utility_score, retrieval_weight,
+         cluster_key, archived_at, archived_reason, origin_device)
+      VALUES
+        (@id, @content, @content_hash, @target_file, @section, @claim_type, @confidence, @status,
+         @session_id, @source_url, @created_at, @updated_at, @origin_channel, @domain, @canonical_path,
+         @event_date, @user_explicit, @base_priority, @promote_score, @utility_score, @retrieval_weight,
+         @cluster_key, @archived_at, @archived_reason, @origin_device)`);
+    const claimUpdate = wdb.prepare(`
+      UPDATE knowledge_claims SET
+        content=@content, content_hash=@content_hash, target_file=@target_file, section=@section,
+        claim_type=@claim_type, confidence=@confidence, status=@status, session_id=@session_id,
+        source_url=@source_url, updated_at=@updated_at, origin_channel=@origin_channel, domain=@domain,
+        canonical_path=@canonical_path, event_date=@event_date, user_explicit=@user_explicit,
+        base_priority=@base_priority, promote_score=@promote_score, utility_score=@utility_score,
+        retrieval_weight=@retrieval_weight, cluster_key=@cluster_key, archived_at=@archived_at,
+        archived_reason=@archived_reason
+      WHERE id=@id AND origin_device=@origin_device`);
+
+    const claimDocs = await queryForeignDocs("claim", opts.localDeviceId, opts.sourceDeviceIds);
+    for (const doc of claimDocs) {
+      sum.claims_scanned++;
+      try {
+        const m = doc.metadata ?? {};
+        const status = doc.status ?? m.status;
+        if (!validForeignDevice(doc.device_id, opts.localDeviceId)) { sum.skipped_invalid++; continue; }
+        if (!CLAIM_PULL_STATUSES.has(status)) { sum.skipped_invalid++; continue; }
+        if (!CLAIM_TYPES.has(m.claim_type) || !CLAIM_STATUSES.has(status)) { sum.skipped_invalid++; continue; }
+        if (!str(doc.content) || !str(doc.content_hash) || !str(m.target_file)) { sum.skipped_invalid++; continue; }
+
+        const localId = localImportId(doc);
+        const existing = claimById.get(localId) as any | undefined;
+        const remoteFp = doc.sync_fingerprint ?? remoteFingerprintFromSummary(doc);
+        if (existing) {
+          if (claimFingerprint(existing) === remoteFp) { sum.skipped_unchanged++; continue; }
+        }
+        const row = {
+          id: localId, content: doc.content, content_hash: doc.content_hash,
+          target_file: m.target_file, section: str(m.section), claim_type: m.claim_type,
+          confidence: num(m.confidence), status,
+          session_id: str(m.session_id), source_url: str(m.source_url),
+          created_at: str(doc.created_at) ?? new Date().toISOString(), // NOT NULL column
+          updated_at: str(doc.updated_at) ?? str(doc.created_at),
+          origin_channel: str(m.origin_channel), domain: str(m.domain), canonical_path: str(m.canonical_path),
+          event_date: str(m.event_date), user_explicit: toInt(m.user_explicit),
+          base_priority: num(m.base_priority, 1.0), promote_score: num(m.promote_score),
+          utility_score: num(m.utility_score), retrieval_weight: num(m.retrieval_weight, 1.0),
+          cluster_key: str(m.cluster_key), archived_at: str(doc.archived_at) ?? str(m.archived_at),
+          archived_reason: str(m.archived_reason), origin_device: doc.device_id,
+        };
+        if (!dryRun) {
+          if (existing) {
+            // Guarded UPDATE: zero changes means an id collision with a row of a
+            // different origin (e.g. a native NULL-origin row). Don't count as upsert.
+            const info = claimUpdate.run(row);
+            if (info.changes !== 1) { sum.skipped_origin_conflict++; continue; }
+          } else {
+            claimInsert.run(row);
+          }
+        }
+        sum.claims_upserted++;
+      } catch (e: any) {
+        sum.errors++;
+      }
+    }
+
+    // ---- Sessions ----
+    const sessById = wdb.prepare("SELECT * FROM session_summaries WHERE id = ?");
+    // Find a DIFFERENT row holding this content_hash (UNIQUE column) — guards both
+    // insert and update against a UNIQUE collision throw.
+    const sessByHashExcl = wdb.prepare("SELECT id FROM session_summaries WHERE content_hash = ? AND id != ?");
+    const embDelete = wdb.prepare("DELETE FROM memory_embeddings WHERE file_path = ?");
+    const sessInsert = wdb.prepare(`
+      INSERT INTO session_summaries
+        (id, agent, native_session_id, started_at, ended_at, model, project, title, message_count,
+         summary, raw_excerpt, is_sub_agent, content_hash, created_at, status, archive_reason,
+         archived_at, processed_for_promotion, searchable, origin_device)
+      VALUES
+        (@id, @agent, @native_session_id, @started_at, @ended_at, @model, @project, @title, @message_count,
+         @summary, @raw_excerpt, @is_sub_agent, @content_hash, @created_at, @status, @archive_reason,
+         @archived_at, @processed_for_promotion, @searchable, @origin_device)`);
+    const sessUpdate = wdb.prepare(`
+      UPDATE session_summaries SET
+        agent=@agent, native_session_id=@native_session_id, started_at=@started_at, ended_at=@ended_at,
+        model=@model, project=@project, title=@title, message_count=@message_count, summary=@summary,
+        is_sub_agent=@is_sub_agent, content_hash=@content_hash, status=@status, archive_reason=@archive_reason,
+        archived_at=@archived_at, searchable=@searchable
+      WHERE id=@id AND origin_device=@origin_device`);
+    const embUpsert = wdb.prepare(`
+      INSERT OR REPLACE INTO memory_embeddings
+        (file_path, chunk_index, embedding, dimensions, model, embed_version, content_hash, updated_at)
+      VALUES (@file_path, 0, @embedding, 768, 'gemini-embedding-001', 1, @content_hash, @updated_at)`);
+
+    const sessDocs = await queryForeignDocs("session_summary", opts.localDeviceId, opts.sourceDeviceIds);
+    for (const doc of sessDocs) {
+      sum.sessions_scanned++;
+      try {
+        const m = doc.metadata ?? {};
+        const status = doc.status ?? m.status ?? "active";
+        const searchable = toInt(doc.searchable ?? m.searchable, 1);
+        if (!validForeignDevice(doc.device_id, opts.localDeviceId)) { sum.skipped_invalid++; continue; }
+        if (status !== "active" || searchable !== 1) { sum.skipped_invalid++; continue; }
+        if (!SESSION_AGENTS.has(m.agent) || !SESSION_STATUSES.has(status)) { sum.skipped_invalid++; continue; }
+        if (!str(doc.content_hash)) { sum.skipped_invalid++; continue; }
+        const summary = str(doc.content) ?? str(m.title) ?? "(empty session)";
+
+        const localId = localImportId(doc);
+        const existing = sessById.get(localId) as any | undefined;
+        const remoteFp = doc.sync_fingerprint ?? remoteFingerprintFromSummary(doc);
+        if (existing) {
+          if (sessionFingerprint(existing) === remoteFp) { sum.skipped_unchanged++; continue; }
+        }
+        // content_hash is UNIQUE: if a DIFFERENT local row already holds it, both
+        // insert and update would throw — skip (genuine cross-id duplicate).
+        const dup = sessByHashExcl.get(doc.content_hash, localId) as { id: string } | undefined;
+        if (dup) { sum.skipped_duplicate_hash++; continue; }
+
+        const row = {
+          id: localId, agent: m.agent, native_session_id: str(m.native_session_id),
+          started_at: str(m.started_at), ended_at: str(m.ended_at), model: str(m.model),
+          project: str(m.project), title: str(m.title), message_count: toInt(m.message_count),
+          summary, raw_excerpt: null, is_sub_agent: toInt(m.is_sub_agent),
+          content_hash: doc.content_hash, created_at: str(doc.created_at) ?? new Date().toISOString(),
+          status, archive_reason: str(m.archive_reason), archived_at: str(doc.archived_at) ?? str(m.archived_at),
+          processed_for_promotion: 1, // already promoted on its origin device — don't re-promote here
+          searchable, origin_device: doc.device_id,
+        };
+        const blob = embeddingToBlob(doc.embedding);
+        if (!dryRun) {
+          if (existing) {
+            const info = sessUpdate.run(row);
+            if (info.changes !== 1) { sum.skipped_origin_conflict++; continue; }
+          } else {
+            sessInsert.run(row);
+          }
+          if (blob) {
+            embUpsert.run({ file_path: `session:${localId}`, embedding: blob, content_hash: doc.content_hash, updated_at: Date.now() });
+            sum.embeddings_written++;
+          } else if (existing && existing.content_hash !== doc.content_hash) {
+            // Content changed but no valid remote embedding — drop the now-stale
+            // vector so the background embedding job regenerates it. Only when the
+            // content_hash actually drifted; a metadata-only update keeps its vector.
+            embDelete.run(`session:${localId}`);
+          }
+        } else if (blob) {
+          sum.embeddings_written++;
+        }
+        sum.sessions_upserted++;
+      } catch (e: any) {
+        sum.errors++;
+      }
+    }
+  } finally {
+    wdb.close();
+  }
+
+  const finishedAt = new Date();
+  return {
+    localDeviceId: opts.localDeviceId,
+    sourceDeviceIds: opts.sourceDeviceIds ?? "all-foreign",
+    dryRun,
+    ...sum,
+    cosmos_429s: metrics.cosmos_429s,
+    elapsed_ms: finishedAt.getTime() - startedAt.getTime(),
+    started_at: startedAt.toISOString(),
+    finished_at: finishedAt.toISOString(),
+  };
+}
+
 // --- CLI ---
-function parseArgs(argv: string[]): SyncOptions {
-  const opts: Partial<SyncOptions> & { json?: boolean } = {};
+function parseArgs(argv: string[]): SyncOptions & { sourceDeviceIds?: DeviceId[] } {
+  const opts: Partial<SyncOptions> & { json?: boolean; sourceDeviceIds?: DeviceId[] } = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--mode") { opts.mode = argv[++i] as SyncMode; }
     else if (a === "--device-id") { opts.deviceId = argv[++i] as DeviceId; }
+    else if (a === "--source-device") { opts.sourceDeviceIds = (argv[++i] ?? "").split(",").map((s) => s.trim()).filter(Boolean) as DeviceId[]; }
     else if (a === "--dry-run") { opts.dryRun = true; }
     else if (a === "--json") { opts.json = true; }
     else if (a === "--help" || a === "-h") {
-      console.log("Usage: sync-to-cosmos --mode migrate|reconcile|push --device-id <id> [--dry-run] [--json]");
+      console.log("Usage: sync-to-cosmos --mode migrate|reconcile|push|pull --device-id <id> [--source-device a,b] [--dry-run] [--json]");
       process.exit(0);
     } else {
       throw new Error(`Unknown arg: ${a}`);
@@ -518,12 +854,33 @@ function parseArgs(argv: string[]): SyncOptions {
   }
   if (!opts.mode) throw new Error("--mode required");
   if (!opts.deviceId) throw new Error("--device-id required");
-  if (!["migrate", "reconcile", "push"].includes(opts.mode)) throw new Error(`Invalid mode: ${opts.mode}`);
-  return opts as SyncOptions;
+  if (!["migrate", "reconcile", "push", "pull"].includes(opts.mode)) throw new Error(`Invalid mode: ${opts.mode}`);
+  return opts as SyncOptions & { sourceDeviceIds?: DeviceId[] };
 }
 
 async function cliMain(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
+
+  if (opts.mode === "pull") {
+    const summary = await runCosmosPull({
+      localDeviceId: opts.deviceId,
+      sourceDeviceIds: opts.sourceDeviceIds,
+      dryRun: opts.dryRun,
+    });
+    if (opts.json) {
+      console.log(JSON.stringify(summary, null, 2));
+    } else {
+      console.log(`=== Cosmos pull (device=${opts.deviceId}${opts.dryRun ? ", DRY-RUN" : ""}) ===`);
+      console.log(`  claims:    ${summary.claims_upserted}/${summary.claims_scanned} upserted`);
+      console.log(`  sessions:  ${summary.sessions_upserted}/${summary.sessions_scanned} upserted`);
+      console.log(`  embeddings: ${summary.embeddings_written} written`);
+      console.log(`  skipped:   unchanged=${summary.skipped_unchanged}, invalid=${summary.skipped_invalid}, hashDup=${summary.skipped_duplicate_hash}, originConflict=${summary.skipped_origin_conflict}, errors=${summary.errors}`);
+      console.log(`  retries:   cosmos_429=${summary.cosmos_429s}`);
+      console.log(`  elapsed:   ${summary.elapsed_ms} ms`);
+    }
+    return;
+  }
+
   const summary = await runCosmosSync(opts);
   if (opts.json) {
     console.log(JSON.stringify(summary, null, 2));

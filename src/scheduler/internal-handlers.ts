@@ -21,7 +21,6 @@ import {
   sendChunkedTelegramMessage,
 } from "../notifications/telegram-router.js";
 import type { NotificationIntent } from "../notifications/types.js";
-import { readFileSync, existsSync } from "fs";
 import { createHash } from "crypto";
 import { execFile } from "child_process";
 import { getConnectivityMonitor } from "../heartbeat/index.js";
@@ -356,20 +355,8 @@ async function runHealthCheck(
   }
 
   // Credential checks
-  try {
-    const gmailTokenPath = "/Users/yj/job-hunt/gmail/token.json";
-    if (existsSync(gmailTokenPath)) {
-      const tokenData = JSON.parse(readFileSync(gmailTokenPath, "utf-8"));
-      if (!tokenData.refresh_token) {
-        issues.push("🟡 Gmail: missing refresh_token");
-      }
-    } else {
-      issues.push("🔴 Gmail: token file not found");
-    }
-  } catch {
-    issues.push("🔴 Gmail: failed to read token");
-  }
-
+  // (Gmail credential check removed — job-hunt was archived/disabled and its
+  // token path /Users/yj/job-hunt/gmail/token.json no longer exists.)
   const ghToken = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
   if (!ghToken) {
     issues.push("🟡 GitHub: GH_TOKEN not set");
@@ -940,21 +927,40 @@ async function runHandler(
         );
       }
       case "cosmos_sync": {
+        // One nightly job, two phases: push local memory UP to Cosmos, then pull
+        // other devices' memory DOWN into the local DB. Each phase is isolated so a
+        // pull failure still reports a successful push (and vice versa).
+        const { runCosmosSync, runCosmosPull } = await import("../scripts/sync-to-cosmos.js");
+        const dev = "home-mac";
+        let pushOut = "", pullOut = "", ok = true;
         try {
-          const { runCosmosSync } = await import("../scripts/sync-to-cosmos.js");
-          const summary = await runCosmosSync({ mode: "reconcile", deviceId: "home-mac", dryRun: false });
-          const output =
-            `cosmos sync: claims ${summary.claims_synced}/${summary.claims_scanned}, ` +
-            `entries ${summary.entries_synced}/${summary.entries_scanned}, ` +
-            `sessions ${summary.sessions_synced}/${summary.sessions_scanned}, ` +
-            `skipped ${summary.skipped_unchanged}, ` +
-            `emb reused=${summary.embeddings_reused} gen=${summary.embeddings_generated}, ` +
-            `429s=${summary.cosmos_429s} gemFail=${summary.gemini_failures}, ` +
-            `${summary.elapsed_ms}ms`;
-          return buildResult(job, startedAt, true, output, undefined, { notificationIntent: "operational_status" });
+          const s = await runCosmosSync({ mode: "reconcile", deviceId: dev, dryRun: false });
+          pushOut =
+            `push: claims ${s.claims_synced}/${s.claims_scanned}, ` +
+            `entries ${s.entries_synced}/${s.entries_scanned}, ` +
+            `sessions ${s.sessions_synced}/${s.sessions_scanned}, skipped ${s.skipped_unchanged}, ` +
+            `emb reused=${s.embeddings_reused} gen=${s.embeddings_generated}, ` +
+            `429s=${s.cosmos_429s} gemFail=${s.gemini_failures}`;
         } catch (e: any) {
-          return buildResult(job, startedAt, false, "", String(e?.message ?? e), {});
+          ok = false;
+          pushOut = `push FAILED: ${String(e?.message ?? e)}`;
         }
+        try {
+          const p = await runCosmosPull({ localDeviceId: dev, dryRun: false });
+          pullOut =
+            `pull: claims +${p.claims_upserted}/${p.claims_scanned}, ` +
+            `sessions +${p.sessions_upserted}/${p.sessions_scanned}, emb ${p.embeddings_written}, ` +
+            `unchanged ${p.skipped_unchanged}, invalid ${p.skipped_invalid}, ` +
+            `hashDup ${p.skipped_duplicate_hash}, originConflict ${p.skipped_origin_conflict}, errors ${p.errors}`;
+          // Row-level errors / origin conflicts don't throw, but the job must not
+          // report green while silently dropping foreign memory.
+          if (p.errors > 0 || p.skipped_origin_conflict > 0) ok = false;
+        } catch (e: any) {
+          ok = false;
+          pullOut = `pull FAILED: ${String(e?.message ?? e)}`;
+        }
+        const output = `${pushOut} | ${pullOut}`;
+        return buildResult(job, startedAt, ok, output, ok ? undefined : output, { notificationIntent: "operational_status" });
       }
       case "weekly_memory_audit": {
         try {
