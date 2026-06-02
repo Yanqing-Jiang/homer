@@ -404,9 +404,17 @@ async function runHealthCheck(
     if (activeProcesses.length > 5) {
       issues.push(`🟡 Process count high: ${activeProcesses.length} active processes`);
     }
+    // chrome-cdp is the long-lived scraping browser; its lifecycle is owned by
+    // cleanup-scheduler's idle-teardown reaper (which spares in-flight scrapes by
+    // design), so the health monitor must not second-guess it. Also honor
+    // extendedUntil, which triage sets to grant a process more time.
+    const SELF_MANAGED_COMMANDS = new Set(["chrome-cdp"]);
     for (const proc of activeProcesses) {
+      if (proc.settled) continue;
+      if (SELF_MANAGED_COMMANDS.has(proc.command)) continue;
+      if (proc.extendedUntil && now < proc.extendedUntil) continue;
       const ageMs = now - proc.spawnedAt;
-      if (ageMs > 30 * 60 * 1000 && !proc.settled) {
+      if (ageMs > 30 * 60 * 1000) {
         const ageMin = Math.round(ageMs / 60000);
         issues.push(`🟡 Long process: PID ${proc.pid} (${proc.command.slice(0, 50)}) running ${ageMin}m`);
       }
