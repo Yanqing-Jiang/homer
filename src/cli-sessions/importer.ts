@@ -13,6 +13,7 @@ import {
   scanThreadSessions,
 } from "./parsers.js";
 import { statSync } from "fs";
+import { createHash } from "crypto";
 import { summarizeSession, generateTitle, buildRawExcerpt, getLogDate } from "./summarizer.js";
 
 export type AgentType = "codex" | "gemini" | "claude" | "opencode" | "telegram" | "web" | "all";
@@ -421,6 +422,10 @@ export class CLISessionImporter {
       }
 
       const messagesJson = JSON.stringify(fullMessages);
+      // transcript_hash = byte-exact content address of the stored transcript body.
+      // Distinct from content_hash (the truncated summary fingerprint) — this is the
+      // identity used as the Cosmos document id for conflict-free cross-device sync.
+      const transcriptHash = createHash("sha256").update(messagesJson).digest("hex");
       let sourceMtimeMs: number | undefined;
       try {
         if (session.nativeFilePath && !session.nativeFilePath.startsWith("thread:")) {
@@ -432,8 +437,8 @@ export class CLISessionImporter {
         `INSERT INTO session_transcripts (
           content_hash, agent, session_id, messages_json, native_file_path,
           source_mtime_ms, model, project, started_at, ended_at,
-          message_count, uncompressed_size
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          message_count, uncompressed_size, transcript_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(content_hash) DO NOTHING`
       ).run(
         session.contentHash,
@@ -447,7 +452,8 @@ export class CLISessionImporter {
         session.startedAt ?? null,
         session.endedAt ?? null,
         fullMessages.length,
-        Buffer.byteLength(messagesJson, "utf-8")
+        Buffer.byteLength(messagesJson, "utf-8"),
+        transcriptHash
       );
 
       logger.debug(

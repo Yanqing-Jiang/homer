@@ -47,6 +47,10 @@ const BATCH_SIZE = 50;
 const BATCH_DELAY_MS = 1000;
 const EMBED_DIM = 768;
 const SYNC_VERSION = 1;
+// Cosmos hard-caps an item at 2 MB (UTF-8 JSON). Guard transcript bodies well under
+// it; oversized ones are skipped + logged rather than thrown at upsert time. Today's
+// largest transcript is ~309 KB, so this only bites if a single session balloons.
+const MAX_DOC_BYTES = 1_500_000;
 
 // --- Types ---
 export type SyncMode = "migrate" | "reconcile" | "push" | "pull";
@@ -69,6 +73,9 @@ export interface SyncSummary {
   entries_synced: number;
   sessions_scanned: number;
   sessions_synced: number;
+  transcripts_scanned: number;
+  transcripts_synced: number;
+  transcripts_skipped_too_large: number;
   skipped_unchanged: number;
   embeddings_reused: number;
   embeddings_generated: number;
@@ -275,6 +282,33 @@ function buildSessionDoc(row: any, deviceId: DeviceId, embedding: number[]): any
   };
 }
 
+// --- Transcript doc builder (Cosmos id = transcript_hash) ---
+// Deliberately separate from buildSessionDoc: transcripts are IMMUTABLE archive
+// blobs with NO embedding and NO summary lifecycle (status/searchable/fingerprint).
+// id = transcript_hash makes the same transcript dedup globally inside the
+// /source_type = "session_transcript" partition and merge conflict-free on pull.
+function buildTranscriptDoc(row: any, deviceId: DeviceId): any {
+  return {
+    id: row.transcript_hash,
+    source_type: "session_transcript",
+    transcript_hash: row.transcript_hash,
+    content_hash: row.content_hash, // link back to the session_summary fingerprint
+    device_id: deviceId,
+    agent: row.agent,
+    native_session_id: row.session_id,
+    model: row.model,
+    project: row.project,
+    started_at: row.started_at,
+    ended_at: row.ended_at,
+    message_count: row.message_count,
+    uncompressed_size: row.uncompressed_size,
+    messages_json: row.messages_json,
+    sync_version: SYNC_VERSION,
+    created_at: row.created_at,
+    updated_at: row.created_at,
+  };
+}
+
 // --- Remote-fingerprint helpers (reconcile only) ---
 interface RemoteSummary {
   id: string;
@@ -423,6 +457,60 @@ async function syncTable<TRow>(
   return { scanned, synced, skipped };
 }
 
+// --- Transcript push (reconcile-all, no cursor) ---
+// Transcripts are immutable + tiny in count, so we scan EVERY locally-authored row
+// and upsert by id=transcript_hash. Cosmos upsert is idempotent, so re-running is
+// free; there is deliberately NO imported_at cursor and NO per-row `synced` flag —
+// both would add a stale-state surface that buys nothing at this scale.
+async function pushTranscripts(
+  deviceId: DeviceId,
+  dryRun: boolean,
+): Promise<{ scanned: number; synced: number; skippedTooLarge: number }> {
+  let scanned = 0, synced = 0, skippedTooLarge = 0;
+  // Preflight: locally-authored rows with NULL transcript_hash mean the migration-099
+  // backfill hasn't been run on this device. They'd be silently skipped below — warn
+  // loudly so a partial sync can't pass unnoticed. Fix: node dist/scripts/backfill-transcript-hash.js
+  const unhashed = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM session_transcripts
+       WHERE (origin_device IS NULL OR origin_device = ?) AND transcript_hash IS NULL`
+    )
+    .get(deviceId) as { n: number };
+  if (unhashed.n > 0) {
+    console.warn(`⚠️  ${unhashed.n} local transcript(s) have NULL transcript_hash and will NOT sync — run: node dist/scripts/backfill-transcript-hash.js`);
+  }
+  // Only push locally-authored rows (mirror the nativeWhere filter for summaries).
+  // transcript_hash NULL means the backfill hasn't run for that row yet — skip it.
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM session_transcripts
+       WHERE (origin_device IS NULL OR origin_device = ?)
+         AND transcript_hash IS NOT NULL`
+    )
+    .all(deviceId) as any[];
+
+  let batchPushed = 0;
+  for (const row of rows) {
+    scanned++;
+    const doc = buildTranscriptDoc(row, deviceId);
+    const bytes = Buffer.byteLength(JSON.stringify(doc), "utf-8");
+    if (bytes > MAX_DOC_BYTES) {
+      skippedTooLarge++;
+      console.warn(`⚠️  transcript ${row.transcript_hash?.slice(0, 12)} is ${bytes} bytes (> ${MAX_DOC_BYTES}) — skipping (Cosmos 2MB limit)`);
+      continue;
+    }
+    if (dryRun) { synced++; continue; }
+    await upsertWithRetry(doc);
+    synced++;
+    batchPushed++;
+    if (batchPushed >= BATCH_SIZE) {
+      batchPushed = 0;
+      await sleep(BATCH_DELAY_MS);
+    }
+  }
+  return { scanned, synced, skippedTooLarge };
+}
+
 // --- Seed doc (migrate mode only — prevents empty-index hang on diskANN) ---
 async function insertSeedDoc(deviceId: DeviceId, dryRun: boolean): Promise<void> {
   if (dryRun) return;
@@ -491,6 +579,9 @@ export async function runCosmosSync(opts: SyncOptions): Promise<SyncSummary> {
     buildSessionDoc,
   );
 
+  // Transcripts: separate reconcile-all pass, no embeddings, no fingerprint reuse.
+  const t = await pushTranscripts(opts.deviceId, dryRun);
+
   const finishedAt = new Date();
   return {
     mode: opts.mode,
@@ -499,6 +590,8 @@ export async function runCosmosSync(opts: SyncOptions): Promise<SyncSummary> {
     claims_scanned: c.scanned, claims_synced: c.synced,
     entries_scanned: e.scanned, entries_synced: e.synced,
     sessions_scanned: s.scanned, sessions_synced: s.synced,
+    transcripts_scanned: t.scanned, transcripts_synced: t.synced,
+    transcripts_skipped_too_large: t.skippedTooLarge,
     skipped_unchanged: c.skipped + e.skipped + s.skipped,
     embeddings_reused: metrics.embeddings_reused,
     embeddings_generated: metrics.embeddings_generated,
@@ -539,6 +632,9 @@ export interface PullSummary {
   claims_upserted: number;
   sessions_scanned: number;
   sessions_upserted: number;
+  transcripts_scanned: number;
+  transcripts_upserted: number;
+  transcripts_skipped: number;
   embeddings_written: number;
   skipped_unchanged: number;
   skipped_invalid: number;
@@ -606,7 +702,7 @@ function validForeignDevice(deviceId: unknown, localDeviceId: DeviceId): deviceI
 }
 
 async function queryForeignDocs(
-  sourceType: "claim" | "session_summary",
+  sourceType: "claim" | "session_summary" | "session_transcript",
   localDeviceId: DeviceId,
   sourceDeviceIds: DeviceId[] | undefined,
 ): Promise<any[]> {
@@ -651,6 +747,7 @@ export async function runCosmosPull(opts: PullOptions): Promise<PullSummary> {
   const sum = {
     claims_scanned: 0, claims_upserted: 0,
     sessions_scanned: 0, sessions_upserted: 0,
+    transcripts_scanned: 0, transcripts_upserted: 0, transcripts_skipped: 0,
     embeddings_written: 0, skipped_unchanged: 0,
     skipped_invalid: 0, skipped_duplicate_hash: 0,
     skipped_origin_conflict: 0, errors: 0,
@@ -818,6 +915,63 @@ export async function runCosmosPull(opts: PullOptions): Promise<PullSummary> {
         sum.errors++;
       }
     }
+
+    // ---- Transcripts ----
+    // Conflict-free union: transcripts are immutable, so a foreign doc is either
+    // already present locally (by content_hash PK) or new. INSERT OR IGNORE keyed
+    // on the existing content_hash PK never overwrites a local row and never throws
+    // on collision. No fingerprint compare, no embeddings, no lifecycle — distinct
+    // from the session_summary path above (kept separate on purpose).
+    const transcriptInsert = wdb.prepare(`
+      INSERT OR IGNORE INTO session_transcripts
+        (content_hash, agent, session_id, messages_json, native_file_path,
+         source_mtime_ms, model, project, started_at, ended_at,
+         message_count, uncompressed_size, transcript_hash, origin_device)
+      VALUES
+        (@content_hash, @agent, @session_id, @messages_json, NULL,
+         NULL, @model, @project, @started_at, @ended_at,
+         @message_count, @uncompressed_size, @transcript_hash, @origin_device)`);
+    // content_hash PK already present locally => INSERT OR IGNORE is a no-op. Check up
+    // front so dry-run accounting matches the real run (count it as a duplicate skip,
+    // not a phantom upsert).
+    const transcriptExists = wdb.prepare("SELECT 1 FROM session_transcripts WHERE content_hash = ?");
+
+    const transcriptDocs = await queryForeignDocs("session_transcript", opts.localDeviceId, opts.sourceDeviceIds);
+    for (const doc of transcriptDocs) {
+      sum.transcripts_scanned++;
+      try {
+        if (!validForeignDevice(doc.device_id, opts.localDeviceId)) { sum.skipped_invalid++; continue; }
+        if (!str(doc.content_hash) || !str(doc.transcript_hash) || !str(doc.messages_json) || !SESSION_AGENTS.has(doc.agent)) {
+          sum.skipped_invalid++; continue;
+        }
+        // Defence-in-depth: a doc that exceeds the size guard should never have been
+        // pushed, but if one slipped through, don't let it bloat the local DB.
+        if (Buffer.byteLength(doc.messages_json, "utf-8") > MAX_DOC_BYTES) { sum.transcripts_skipped++; continue; }
+        if (transcriptExists.get(doc.content_hash)) { sum.skipped_duplicate_hash++; continue; }
+
+        const row = {
+          content_hash: doc.content_hash,
+          agent: doc.agent,
+          session_id: str(doc.native_session_id) ?? doc.content_hash,
+          messages_json: doc.messages_json,
+          model: str(doc.model),
+          project: str(doc.project),
+          started_at: str(doc.started_at),
+          ended_at: str(doc.ended_at),
+          message_count: toInt(doc.message_count),
+          uncompressed_size: toInt(doc.uncompressed_size, Buffer.byteLength(doc.messages_json, "utf-8")),
+          transcript_hash: doc.transcript_hash,
+          origin_device: doc.device_id,
+        };
+        if (!dryRun) {
+          const info = transcriptInsert.run(row);
+          if (info.changes !== 1) { sum.skipped_duplicate_hash++; continue; }
+        }
+        sum.transcripts_upserted++;
+      } catch (e: any) {
+        sum.errors++;
+      }
+    }
   } finally {
     wdb.close();
   }
@@ -873,6 +1027,7 @@ async function cliMain(): Promise<void> {
       console.log(`=== Cosmos pull (device=${opts.deviceId}${opts.dryRun ? ", DRY-RUN" : ""}) ===`);
       console.log(`  claims:    ${summary.claims_upserted}/${summary.claims_scanned} upserted`);
       console.log(`  sessions:  ${summary.sessions_upserted}/${summary.sessions_scanned} upserted`);
+      console.log(`  transcripts: ${summary.transcripts_upserted}/${summary.transcripts_scanned} upserted (skipped ${summary.transcripts_skipped})`);
       console.log(`  embeddings: ${summary.embeddings_written} written`);
       console.log(`  skipped:   unchanged=${summary.skipped_unchanged}, invalid=${summary.skipped_invalid}, hashDup=${summary.skipped_duplicate_hash}, originConflict=${summary.skipped_origin_conflict}, errors=${summary.errors}`);
       console.log(`  retries:   cosmos_429=${summary.cosmos_429s}`);
@@ -889,6 +1044,7 @@ async function cliMain(): Promise<void> {
     console.log(`  claims:    ${summary.claims_synced}/${summary.claims_scanned} synced`);
     console.log(`  entries:   ${summary.entries_synced}/${summary.entries_scanned} synced`);
     console.log(`  sessions:  ${summary.sessions_synced}/${summary.sessions_scanned} synced`);
+    console.log(`  transcripts: ${summary.transcripts_synced}/${summary.transcripts_scanned} synced (too-large ${summary.transcripts_skipped_too_large})`);
     console.log(`  skipped:   ${summary.skipped_unchanged}`);
     console.log(`  embeddings: ${summary.embeddings_reused} reused, ${summary.embeddings_generated} generated`);
     console.log(`  retries:   cosmos_429=${summary.cosmos_429s}, gemini_fail=${summary.gemini_failures}`);
