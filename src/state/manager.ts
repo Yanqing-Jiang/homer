@@ -1977,42 +1977,10 @@ export class StateManager {
     return row !== undefined;
   }
 
-  insertSessionTranscript(transcript: {
-    contentHash: string;
-    agent: string;
-    sessionId: string;
-    messagesJson: string;
-    nativeFilePath?: string;
-    sourceMtimeMs?: number;
-    model?: string;
-    project?: string;
-    startedAt?: string;
-    endedAt?: string;
-    messageCount: number;
-  }): void {
-    const uncompressedSize = Buffer.byteLength(transcript.messagesJson, "utf-8");
-    this._db.prepare(
-      `INSERT INTO session_transcripts (
-        content_hash, agent, session_id, messages_json, native_file_path,
-        source_mtime_ms, model, project, started_at, ended_at,
-        message_count, uncompressed_size
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(content_hash) DO NOTHING`
-    ).run(
-      transcript.contentHash,
-      transcript.agent,
-      transcript.sessionId,
-      transcript.messagesJson,
-      transcript.nativeFilePath ?? null,
-      transcript.sourceMtimeMs ?? null,
-      transcript.model ?? null,
-      transcript.project ?? null,
-      transcript.startedAt ?? null,
-      transcript.endedAt ?? null,
-      transcript.messageCount,
-      uncompressedSize
-    );
-  }
+  // NOTE: transcript rows are created exclusively by CLISessionImporter.storeFullTranscript()
+  // (src/cli-sessions/importer.ts), which computes the transcript_hash needed for Cosmos
+  // sync. A dormant insertSessionTranscript() helper was removed here to keep one correct
+  // write path — any new transcript insert MUST go through the importer (or set transcript_hash).
 
   getSessionTranscript(contentHash: string): SessionTranscript | null {
     const row = this._db.prepare(
