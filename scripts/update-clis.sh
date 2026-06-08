@@ -29,9 +29,9 @@ echo "[kimi] Updating..."
 brew upgrade kimi-cli 2>&1 | tail -3
 echo "[kimi] $(kimi --version 2>/dev/null)"
 
-# Gemini CLI — npm global
-echo "[gemini] Updating..."
-npm install -g @google/gemini-cli@latest 2>&1 | tail -3
-echo "[gemini] $(gemini --version 2>/dev/null)"
+# Antigravity CLI (agy) — replaces retired Gemini CLI.
+# Standalone Mach-O binary at ~/.local/bin/agy; no package-manager auto-update.
+# Update manually by replacing the binary; this just reports the installed version.
+echo "[agy] $(/Users/yj/.local/bin/agy --version 2>/dev/null) (Antigravity CLI — manual update)"
 
 echo "=== Done ==="

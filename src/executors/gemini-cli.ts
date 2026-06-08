@@ -15,7 +15,7 @@
  *
  * What this file no longer owns (moved to agy-rotate):
  *   - Per-account HOME swapping and OAuth file shuffling
- *   - SQLite `gemini_accounts` bookkeeping (gemini_accounts table is now legacy data)
+ *   - SQLite account bookkeeping (the old gemini_accounts table has been removed)
  *   - Cooldown timers, rate-limit / auth / runtime classification
  *   - Concurrency semaphore + inter-spawn stagger
  *
@@ -274,73 +274,4 @@ export async function executeGeminiProResearch(
     model: GEMINI_CLI_PRO_MODEL,
     role: options.role ?? "research",
   });
-}
-
-// ---------------------------------------------------------------------------
-// Deprecated account-manager API — preserved as no-ops for caller compatibility.
-//
-// The pre-2026-05 executor exported a full GeminiAccountManager class and
-// lifecycle hooks (called from src/index.ts on daemon startup/shutdown).
-// Account rotation now lives entirely in /Users/yj/bin/agy-rotate, so these
-// become no-ops. Kept exported so callers still compile under strict TS mode
-// without requiring edits to src/index.ts or executors/index.ts.
-
-export interface GeminiAccountManagerOptions {
-  rateLimitCooldownMs?: number;
-  authFailureCooldownMs?: number;
-  runtimeFailureCooldownMs?: number;
-  disableAfterFailures?: number;
-  disabledRecheckMs?: number;
-  lockAcquireTimeoutMs?: number;
-  syncIntervalMs?: number;
-  maxConcurrentPerAccount?: number;
-  minInterSpawnMs?: number;
-}
-
-export class GeminiAccountManager {
-  constructor(_db?: unknown, _options: GeminiAccountManagerOptions = {}) {
-    // No state. Rotation lives in agy-rotate now.
-  }
-
-  async syncAccountsFromDisk(_force = false): Promise<void> {
-    /* no-op */
-  }
-
-  getAccountCount(): number {
-    return 0;
-  }
-
-  selectBestAccount(_now: number): {
-    account: null;
-    waitMs: number;
-    reason: "no_accounts";
-  } {
-    return { account: null, waitMs: 0, reason: "no_accounts" };
-  }
-}
-
-export function initGeminiAccounts(_db: unknown): void {
-  /* no-op — agy-rotate owns rotation state */
-}
-
-let _accountManagerSingleton: GeminiAccountManager | null = null;
-
-export function initializeGeminiCLIAccountManager(
-  _db: unknown,
-  _options: GeminiAccountManagerOptions = {},
-): GeminiAccountManager {
-  logger.info(
-    "Gemini account manager is a no-op shim; agy-rotate handles rotation (see /Users/yj/bin/agy-rotate)",
-  );
-  _accountManagerSingleton = new GeminiAccountManager(_db, _options);
-  return _accountManagerSingleton;
-}
-
-export function closeGeminiCLIAccountManager(): void {
-  _accountManagerSingleton = null;
-}
-
-export async function rotateGeminiAccount(): Promise<string | null> {
-  // agy-rotate picks an account itself per call; there's nothing to pre-select.
-  return null;
 }

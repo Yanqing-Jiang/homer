@@ -33,8 +33,6 @@ export {
   executeGeminiCLIDirect,
   executeGeminiFlashResearch,
   executeGeminiProResearch,
-  initializeGeminiCLIAccountManager,
-  closeGeminiCLIAccountManager,
   GEMINI_CLI_FLASH_MODEL,
   GEMINI_CLI_PRO_MODEL,
   type GeminiCLIDirectOptions,
