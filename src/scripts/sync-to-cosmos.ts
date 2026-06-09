@@ -832,19 +832,25 @@ export async function runCosmosPull(opts: PullOptions): Promise<PullSummary> {
       try {
         const m = doc.metadata ?? {};
         const status = doc.status ?? m.status;
-        // --- Structural identity: a malformed doc that can NEVER be a valid local
-        // claim (missing routing data, unknown type/status). These are producer
-        // contract violations and DO fail the job (skipped_invalid).
+        // --- Provenance + content are required of ANY foreign claim doc. Their
+        // absence is a genuine producer bug -> skipped_invalid (alerts).
         if (!validForeignDevice(doc.device_id, opts.localDeviceId)) { sum.skipped_invalid++; continue; }
-        if (!str(doc.content) || !str(doc.content_hash) || !str(m.target_file)) { sum.skipped_invalid++; continue; }
-        if (!CLAIM_TYPES.has(m.claim_type) || !CLAIM_STATUSES.has(status)) { sum.skipped_invalid++; continue; }
+        if (!str(doc.content) || !str(doc.content_hash)) { sum.skipped_invalid++; continue; }
 
         const localId = localImportId(doc);
         const existing = claimById.get(localId) as any | undefined;
-        // --- Lifecycle policy (NOT a malformed-doc signal): a NEW import is only
-        // admitted in an active state; an EXISTING same-origin row also accepts
-        // terminal states so remote rejection/expiry/archival propagates locally.
+        // --- Lifecycle policy (EXPECTED exclusion, NOT malformed): a foreign claim
+        // in a non-importable status — notably pending_review HITL suggestions from
+        // another device's memory_suggest — is deliberately NOT pulled (HITL-over-
+        // Cosmos is out of scope). Classify as skipped_filtered so the nightly job
+        // stays green instead of alerting on a perfectly valid pending suggestion.
+        // An EXISTING same-origin row skips this so remote terminal-state changes
+        // (reject/expire/archive) still propagate below.
         if (!existing && !CLAIM_PULL_STATUSES.has(status)) { sum.skipped_filtered++; continue; }
+        // --- From here we intend to write a canonical local claim, so enforce the
+        // full contract. A claim that reaches this point yet lacks routing data or
+        // carries an unknown type/status IS a producer bug -> skipped_invalid.
+        if (!CLAIM_TYPES.has(m.claim_type) || !CLAIM_STATUSES.has(status) || !str(m.target_file)) { sum.skipped_invalid++; continue; }
         // Same-origin guard, checked BEFORE any write so dry-run and real-run agree.
         if (existing && existing.origin_device !== doc.device_id) { sum.skipped_origin_conflict++; continue; }
         const remoteFp = remoteFingerprintFromSummary(doc);
