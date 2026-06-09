@@ -35,6 +35,21 @@ export const definitions: ToolDefinition[] = [
         priority:        { type: "string", enum: ["P1", "P2", "P3"], description: "P1 urgent, P2 soon, P3 later (default)." },
         notes:           { type: "string", description: "Full notes body (replaces existing). Use appendNotes to append." },
         appendNotes:     { type: "string", description: "Append this to the existing notes with a blank line in front." },
+        checklist:       {
+          type: "array",
+          description:
+            "Full subtask checklist (replaces existing). Read current items via todo_list, mutate, then save the whole array. " +
+            "On patch: if you omit `status` and all items are done, the todo auto-completes; unchecking on a done todo reopens it.",
+          items: {
+            type: "object",
+            properties: {
+              id:   { type: "string", description: "Item id (omit on new items; one is generated)." },
+              text: { type: "string", description: "Subtask text (required, non-empty)." },
+              done: { type: "boolean", description: "Whether the subtask is checked off." },
+            },
+            required: ["text", "done"],
+          },
+        },
         sourceIdeaId:    { type: "string", description: "If this todo was promoted from an idea, the idea id." },
         linkedThreadId:  { type: "string", description: "Existing thread id to link." },
       },
@@ -101,6 +116,7 @@ export async function handle(
         priority: t.priority,
         updated_at: t.updated_at,
         notes: filter.includeNotes !== false ? t.notes : undefined,
+        checklist: t.checklist,
       }));
       return { content: [{ type: "text", text: JSON.stringify(summary, null, 2) }] };
     }
