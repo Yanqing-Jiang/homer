@@ -19,6 +19,8 @@ import type Database from "better-sqlite3";
 import { createHash, randomBytes } from "crypto";
 import { logger } from "../utils/logger.js";
 
+export interface ChecklistItem { id: string; text: string; done: boolean }
+
 export interface TodoRow {
   id: string;
   title: string;
@@ -26,6 +28,7 @@ export interface TodoRow {
   category: "W" | "L";
   priority: "P1" | "P2" | "P3";
   notes: string;
+  checklist: ChecklistItem[];
   source: "manual" | "web" | "mcp" | "idea" | "migration";
   source_idea_id: string | null;
   linked_thread_id: string | null;
@@ -53,6 +56,7 @@ export interface SaveTodoInput {
   category?: "W" | "L";
   priority?: "P1" | "P2" | "P3";
   notes?: string;
+  checklist?: ChecklistItem[];
   /** Convenience: appended to notes verbatim with a blank line in front. */
   appendNotes?: string;
   source?: TodoRow["source"];
@@ -93,11 +97,11 @@ function nowIso(): string {
 // ─── Reads ───────────────────────────────────────────────────────
 
 export function getTodo(db: Database.Database, id: string): TodoRow | null {
-  let row = db.prepare("SELECT * FROM todo_index WHERE id = ?").get(id) as TodoRow | undefined;
+  let row = db.prepare("SELECT * FROM todo_index WHERE id = ?").get(id) as any;
   if (!row) {
-    row = db.prepare("SELECT * FROM todo_index WHERE id LIKE ? LIMIT 1").get(`${id}%`) as TodoRow | undefined;
+    row = db.prepare("SELECT * FROM todo_index WHERE id LIKE ? LIMIT 1").get(`${id}%`) as any;
   }
-  return row ?? null;
+  return row ? mapRow(row) : null;
 }
 
 export function listTodos(db: Database.Database, filter: TodoFilter = {}): TodoRow[] {
@@ -116,6 +120,7 @@ export function listTodos(db: Database.Database, filter: TodoFilter = {}): TodoR
   const sql = `
     SELECT id, title, status, category, priority,
            ${includeNotes ? "notes" : "'' AS notes"},
+           checklist,
            source, source_idea_id, linked_thread_id, legacy_plan_id,
            created_at, updated_at, completed_at, archived_at
     FROM todo_index
@@ -127,7 +132,7 @@ export function listTodos(db: Database.Database, filter: TodoFilter = {}): TodoR
       datetime(updated_at) DESC
     LIMIT ?
   `;
-  return db.prepare(sql).all(status, status, cat, cat, prio, prio, limit) as TodoRow[];
+  return (db.prepare(sql).all(status, status, cat, cat, prio, prio, limit) as any[]).map(mapRow);
 }
 
 // ─── Writes ──────────────────────────────────────────────────────
@@ -142,11 +147,12 @@ export function saveTodo(db: Database.Database, input: SaveTodoInput): TodoRow |
 
 function createNew(db: Database.Database, input: SaveTodoInput): TodoRow {
   if (!input.title || input.title.trim().length === 0) {
-    throw new Error("title required when creating a todo");
+    throw new TodoValidationError("title required when creating a todo");
   }
   const now = nowIso();
   const id = generateTodoId(input.title);
   const notes = appendIfPresent(input.notes ?? "", input.appendNotes);
+  const checklist = validateChecklist(input.checklist ?? []);
 
   const row: TodoRow = {
     id,
@@ -155,6 +161,7 @@ function createNew(db: Database.Database, input: SaveTodoInput): TodoRow {
     category: input.category ?? "W",
     priority: input.priority ?? "P3",
     notes,
+    checklist,
     source: input.source ?? "manual",
     source_idea_id: input.sourceIdeaId ?? null,
     linked_thread_id: input.linkedThreadId ?? null,
@@ -168,16 +175,16 @@ function createNew(db: Database.Database, input: SaveTodoInput): TodoRow {
   db.transaction(() => {
     db.prepare(`
       INSERT INTO todo_index (
-        id, title, status, category, priority, notes,
+        id, title, status, category, priority, notes, checklist,
         source, source_idea_id, linked_thread_id, legacy_plan_id,
         created_at, updated_at, completed_at, archived_at
       ) VALUES (
-        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?,
         ?, ?, ?, ?
       )
     `).run(
-      row.id, row.title, row.status, row.category, row.priority, row.notes,
+      row.id, row.title, row.status, row.category, row.priority, row.notes, JSON.stringify(row.checklist),
       row.source, row.source_idea_id, row.linked_thread_id, row.legacy_plan_id,
       row.created_at, row.updated_at, row.completed_at, row.archived_at,
     );
@@ -191,47 +198,68 @@ function createNew(db: Database.Database, input: SaveTodoInput): TodoRow {
 }
 
 function patchExisting(db: Database.Database, input: SaveTodoInput): TodoRow | null {
-  const existing = getTodo(db, input.id!);
-  if (!existing) return null;
-  const wasP1 = existing.priority === "P1";
-  const now = nowIso();
+  const finalChecklistProvided = input.checklist !== undefined;
+  const validatedChecklist = finalChecklistProvided ? validateChecklist(input.checklist) : null;
 
-  const merged: TodoRow = {
-    ...existing,
-    title: input.title?.trim() ?? existing.title,
-    category: input.category ?? existing.category,
-    priority: input.priority ?? existing.priority,
-    status: input.status ?? existing.status,
-    notes: appendIfPresent(input.notes ?? existing.notes, input.appendNotes),
-    source_idea_id: input.sourceIdeaId !== undefined ? input.sourceIdeaId : existing.source_idea_id,
-    linked_thread_id: input.linkedThreadId !== undefined ? input.linkedThreadId : existing.linked_thread_id,
-    updated_at: now,
-  };
+  return db.transaction((): TodoRow | null => {
+    const existing = getTodo(db, input.id!);
+    if (!existing) return null;
+    const wasP1 = existing.priority === "P1";
+    const now = nowIso();
+    const explicitStatus = input.status !== undefined;
 
-  // Status-transition timestamps.
-  if (input.status === "done" && existing.status !== "done") merged.completed_at = now;
-  else if (input.status && input.status !== "done") merged.completed_at = null;
+    const checklist = validatedChecklist ?? existing.checklist;
 
-  if (input.status === "archived" && existing.status !== "archived") merged.archived_at = now;
-  else if (input.status && input.status !== "archived") merged.archived_at = null;
+    // Resolve status: explicit wins; else checklist auto-rule (patches only, non-archived).
+    let status = input.status ?? existing.status;
+    if (!explicitStatus && finalChecklistProvided && existing.status !== "archived") {
+      const total = checklist.length;
+      const doneCount = checklist.filter((i) => i.done).length;
+      if (total > 0 && doneCount === total && existing.status === "open") status = "done";
+      else if (doneCount < total && existing.status === "done") status = "open";
+    }
 
-  db.prepare(`
-    UPDATE todo_index SET
-      title = ?, status = ?, category = ?, priority = ?, notes = ?,
-      source_idea_id = ?, linked_thread_id = ?,
-      updated_at = ?, completed_at = ?, archived_at = ?
-    WHERE id = ?
-  `).run(
-    merged.title, merged.status, merged.category, merged.priority, merged.notes,
-    merged.source_idea_id, merged.linked_thread_id,
-    merged.updated_at, merged.completed_at, merged.archived_at,
-    existing.id,
-  );
+    const transitionedToDone = existing.status !== "done" && status === "done";
+    const autoCompleted = transitionedToDone && !explicitStatus; // checklist-driven
+    let notes = appendIfPresent(input.notes ?? existing.notes, input.appendNotes);
+    if (autoCompleted) {
+      notes = appendIfPresent(notes, `## Completed ${now.slice(0, 10)}\nAuto-completed: all checklist items done.`);
+    }
 
-  if (!wasP1 && merged.priority === "P1") emitCommitmentIfP1(db, merged);
-  if (input.status === "done" && existing.status !== "done") emitLessonOnDone(db, merged);
+    const merged: TodoRow = {
+      ...existing,
+      title: input.title?.trim() ?? existing.title,
+      category: input.category ?? existing.category,
+      priority: input.priority ?? existing.priority,
+      status,
+      notes,
+      checklist,
+      source_idea_id: input.sourceIdeaId !== undefined ? input.sourceIdeaId : existing.source_idea_id,
+      linked_thread_id: input.linkedThreadId !== undefined ? input.linkedThreadId : existing.linked_thread_id,
+      updated_at: now,
+    };
+    // Timestamps from FINAL status transition.
+    if (transitionedToDone) merged.completed_at = now;
+    else if (status !== "done") merged.completed_at = null;
+    if (status === "archived" && existing.status !== "archived") merged.archived_at = now;
+    else if (status !== "archived") merged.archived_at = null;
 
-  return merged;
+    db.prepare(`
+      UPDATE todo_index SET
+        title = ?, status = ?, category = ?, priority = ?, notes = ?, checklist = ?,
+        source_idea_id = ?, linked_thread_id = ?,
+        updated_at = ?, completed_at = ?, archived_at = ?
+      WHERE id = ?
+    `).run(
+      merged.title, merged.status, merged.category, merged.priority, merged.notes, JSON.stringify(merged.checklist),
+      merged.source_idea_id, merged.linked_thread_id,
+      merged.updated_at, merged.completed_at, merged.archived_at, existing.id,
+    );
+
+    if (!wasP1 && merged.priority === "P1") emitCommitmentIfP1(db, merged);
+    if (transitionedToDone) emitLessonOnDone(db, merged); // covers explicit AND auto
+    return merged;
+  })();
 }
 
 /**
@@ -251,6 +279,67 @@ function appendIfPresent(base: string, append?: string): string {
   const trimmedBase = base.replace(/\s+$/, "");
   return trimmedBase.length > 0 ? `${trimmedBase}\n\n${append}` : append;
 }
+
+// ─── Checklist helpers ───────────────────────────────────────────
+
+/** Thrown on invalid client input (bad checklist, missing title). Callers map this to HTTP 400 / MCP tool error; anything else is a real 500. */
+export class TodoValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TodoValidationError";
+  }
+}
+
+const CHECKLIST_MAX_ITEMS = 100;
+const CHECKLIST_MAX_TEXT = 500;
+function genItemId(): string { return "ck_" + randomBytes(4).toString("hex"); }
+
+// READ path — lenient, never throws. Normalizes shape, drops structurally-broken
+// items, and guarantees unique ids (regenerating on collision) so keyed Svelte
+// lists never mis-associate rows. Arrays and JSON strings share one normalizer;
+// non-array / malformed JSON falls back to [].
+function parseChecklist(raw: unknown): ChecklistItem[] {
+  if (raw == null || raw === "") return [];
+  let arr: unknown;
+  if (Array.isArray(raw)) {
+    arr = raw;
+  } else {
+    try { arr = JSON.parse(String(raw)); }
+    catch (err) { logger.warn({ err }, "todo checklist: malformed JSON in DB"); return []; }
+  }
+  if (!Array.isArray(arr)) { logger.warn({ raw }, "todo checklist: stored value not an array"); return []; }
+  const seen = new Set<string>();
+  const out: ChecklistItem[] = [];
+  for (const it of arr as any[]) {
+    if (!it || typeof it.text !== "string") { logger.warn({ it }, "todo checklist: dropping malformed item"); continue; }
+    let id = typeof it.id === "string" && it.id ? it.id : genItemId();
+    if (seen.has(id)) id = genItemId();
+    seen.add(id);
+    out.push({ id, text: it.text, done: it.done === true });
+  }
+  return out;
+}
+
+// WRITE path — strict, THROWS TodoValidationError on bad input. No silent coercion:
+// `done` must be a real boolean and ids must be unique.
+function validateChecklist(input: unknown): ChecklistItem[] {
+  if (!Array.isArray(input)) throw new TodoValidationError("checklist: must be an array");
+  if (input.length > CHECKLIST_MAX_ITEMS) throw new TodoValidationError(`checklist: too many items (max ${CHECKLIST_MAX_ITEMS})`);
+  const seen = new Set<string>();
+  return input.map((it: any, i: number) => {
+    if (!it || typeof it !== "object") throw new TodoValidationError(`checklist: item ${i} is not an object`);
+    const text = typeof it.text === "string" ? it.text.trim() : "";
+    if (!text) throw new TodoValidationError(`checklist: item ${i} has empty text`);
+    if (text.length > CHECKLIST_MAX_TEXT) throw new TodoValidationError(`checklist: item ${i} text exceeds ${CHECKLIST_MAX_TEXT}`);
+    if (it.done !== undefined && typeof it.done !== "boolean") throw new TodoValidationError(`checklist: item ${i} done must be a boolean`);
+    const id = typeof it.id === "string" && it.id ? it.id : genItemId();
+    if (seen.has(id)) throw new TodoValidationError(`checklist: duplicate id ${id}`);
+    seen.add(id);
+    return { id, text, done: it.done === true };
+  });
+}
+
+function mapRow(raw: any): TodoRow { return { ...raw, checklist: parseChecklist(raw.checklist) }; }
 
 function linkIdea(db: Database.Database, ideaId: string, todoId: string): void {
   try {
