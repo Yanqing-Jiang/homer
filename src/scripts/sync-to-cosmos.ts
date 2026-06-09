@@ -315,6 +315,7 @@ interface RemoteSummary {
   source_type: string;
   content_hash?: string | null;
   sync_fingerprint?: string | null;
+  sync_version?: number | null;
   device_id?: string | null;
   // New schema (top-level mirrors written by sync-to-cosmos.ts going forward)
   status?: string | null;
@@ -333,8 +334,12 @@ interface RemoteSummary {
 
 function remoteFingerprintFromSummary(s: RemoteSummary): string {
   // Mirror the local fingerprint shape from whatever fields the remote has.
-  // For docs written by sync-to-cosmos.ts, s.sync_fingerprint is the authoritative answer.
-  if (s.sync_fingerprint) return s.sync_fingerprint;
+  // Only trust a precomputed sync_fingerprint when it was written by THIS protocol
+  // version — a foreign device on a newer schema (e.g. v2) may compute the
+  // fingerprint over different fields, which would otherwise make every nightly
+  // pull "see a change" and re-upsert the same unchanged rows forever. For any
+  // other version, recompute from the normalized lifecycle fields below.
+  if (s.sync_version === SYNC_VERSION && s.sync_fingerprint) return s.sync_fingerprint;
   // Legacy migration docs predate sync_fingerprint AND store lifecycle fields only
   // under metadata.*, not at top level. Prefer top-level (new schema), fall back to
   // the m_* projection (loadRemoteSummaries) and then raw metadata.* (full pull docs).
@@ -344,13 +349,19 @@ function remoteFingerprintFromSummary(s: RemoteSummary): string {
   const searchable = s.searchable ?? s.m_searchable ?? s.metadata?.searchable ?? null;
   if (s.source_type === "claim") return fp(SYNC_VERSION, "claim", s.content_hash, status, archived_at);
   if (s.source_type === "entry") return fp(SYNC_VERSION, "entry", s.content_hash, is_active);
-  if (s.source_type === "session_summary") return fp(SYNC_VERSION, "session", s.content_hash, status, archived_at, searchable);
+  if (s.source_type === "session_summary") {
+    // Canonicalize EXACTLY as the pull loop does before it stores the row, so the
+    // local fingerprint (computed from the stored SQLite row) compares equal on the
+    // next pull. Without this, a doc with an omitted status / omitted-or-boolean
+    // searchable would never match its own stored row → perpetual re-upsert.
+    return fp(SYNC_VERSION, "session", s.content_hash, status ?? "active", archived_at, toInt(searchable, 1));
+  }
   return "";
 }
 
 async function loadRemoteSummaries(deviceId: DeviceId): Promise<Map<string, RemoteSummary>> {
   const map = new Map<string, RemoteSummary>();
-  const q = `SELECT c.id, c.source_type, c.content_hash, c.sync_fingerprint, c.device_id,
+  const q = `SELECT c.id, c.source_type, c.content_hash, c.sync_fingerprint, c.sync_version, c.device_id,
                     c.status, c.archived_at, c.is_active, c.searchable,
                     c.metadata.status AS m_status, c.metadata.archived_at AS m_archived_at,
                     c.metadata.is_active AS m_is_active, c.metadata.searchable AS m_searchable
@@ -372,8 +383,12 @@ async function pointReadEmbedding(id: string, partitionKey: string): Promise<num
   try {
     const { resource } = await getContainer().item(id, partitionKey).read<any>();
     if (resource?.embedding && Array.isArray(resource.embedding)) return resource.embedding;
-  } catch {
-    // 404 etc. — fall through.
+  } catch (e: any) {
+    // A genuine 404 (doc/embedding absent) is the only "no embedding" signal.
+    // Auth/throttle/network errors must NOT be silently swallowed — doing so
+    // triggers a needless Gemini regenerate and hides a Cosmos outage. Rethrow.
+    if (e?.code === 404 || e?.statusCode === 404) return null;
+    throw e;
   }
   return null;
 }
@@ -637,6 +652,7 @@ export interface PullSummary {
   transcripts_skipped: number;
   embeddings_written: number;
   skipped_unchanged: number;
+  skipped_filtered: number;
   skipped_invalid: number;
   skipped_duplicate_hash: number;
   skipped_origin_conflict: number;
@@ -652,10 +668,38 @@ const CLAIM_TYPES = new Set([
   "question", "lesson", "skill", "cleanup", "replace", "remove",
 ]);
 const CLAIM_STATUSES = new Set(["candidate", "applying", "approved", "rejected", "expired", "stale", "archived"]);
-const SESSION_AGENTS = new Set(["codex", "gemini", "kimi", "claude", "opencode", "daemon", "telegram", "web"]);
-const SESSION_STATUSES = new Set(["active", "archived"]);
-// Lifecycle whitelist — don't import the other device's terminal/noise rows.
+// Sessions are no longer gated by a closed agent allowlist: foreign devices
+// author sessions under their own agent/provider taxonomy (e.g. "build",
+// "github-copilot") and a fixed enum silently rejected all of them. Provenance
+// (validForeignDevice / origin_device) is the real safety boundary; agent is
+// just descriptive metadata now. See pulledSessionAgent + migration 100.
+const SESSION_LIFECYCLE_STATUSES = new Set(["active", "archived"]);
+// New-import lifecycle whitelist — a NEW foreign row is only admitted in one of
+// these active states. Existing same-origin rows also accept terminal states so
+// remote archival/rejection propagates locally (see runCosmosPull).
 const CLAIM_PULL_STATUSES = new Set(["approved", "candidate", "stale"]);
+
+// Canonical executor identity for a pulled session. v2 docs carry the real
+// provider under metadata.provider; v1/home-mac docs only have metadata.agent.
+// Returns null when nothing usable is present (structural-invalid).
+function pulledSessionAgent(doc: any): string | null {
+  const m = doc?.metadata ?? {};
+  return str(m.provider) ?? str(m.agent) ?? str(doc?.agent);
+}
+
+// Sentinel so an origin-guard miss inside a write transaction rolls the row back
+// AND is classified as a conflict (not a generic error) by the caller.
+class OriginConflict extends Error {}
+
+// Bounded, content-free diagnostics for a per-row pull failure. "errors=1" alone
+// is undebuggable; never log claim/session content (PII + log bloat).
+function logPullError(sourceType: string, doc: any, e: unknown): void {
+  const msg = e instanceof Error ? e.message : String(e);
+  console.warn(
+    `⚠️  pull ${sourceType} failed`,
+    JSON.stringify({ id: doc?.id ?? null, device: doc?.device_id ?? null, error: msg.slice(0, 200) }),
+  );
+}
 
 // Inverse of parseEmbedding: number[] -> little-endian Float32 BLOB.
 function embeddingToBlob(values: unknown): Buffer | null {
@@ -748,7 +792,7 @@ export async function runCosmosPull(opts: PullOptions): Promise<PullSummary> {
     claims_scanned: 0, claims_upserted: 0,
     sessions_scanned: 0, sessions_upserted: 0,
     transcripts_scanned: 0, transcripts_upserted: 0, transcripts_skipped: 0,
-    embeddings_written: 0, skipped_unchanged: 0,
+    embeddings_written: 0, skipped_unchanged: 0, skipped_filtered: 0,
     skipped_invalid: 0, skipped_duplicate_hash: 0,
     skipped_origin_conflict: 0, errors: 0,
   };
@@ -788,17 +832,23 @@ export async function runCosmosPull(opts: PullOptions): Promise<PullSummary> {
       try {
         const m = doc.metadata ?? {};
         const status = doc.status ?? m.status;
+        // --- Structural identity: a malformed doc that can NEVER be a valid local
+        // claim (missing routing data, unknown type/status). These are producer
+        // contract violations and DO fail the job (skipped_invalid).
         if (!validForeignDevice(doc.device_id, opts.localDeviceId)) { sum.skipped_invalid++; continue; }
-        if (!CLAIM_PULL_STATUSES.has(status)) { sum.skipped_invalid++; continue; }
-        if (!CLAIM_TYPES.has(m.claim_type) || !CLAIM_STATUSES.has(status)) { sum.skipped_invalid++; continue; }
         if (!str(doc.content) || !str(doc.content_hash) || !str(m.target_file)) { sum.skipped_invalid++; continue; }
+        if (!CLAIM_TYPES.has(m.claim_type) || !CLAIM_STATUSES.has(status)) { sum.skipped_invalid++; continue; }
 
         const localId = localImportId(doc);
         const existing = claimById.get(localId) as any | undefined;
-        const remoteFp = doc.sync_fingerprint ?? remoteFingerprintFromSummary(doc);
-        if (existing) {
-          if (claimFingerprint(existing) === remoteFp) { sum.skipped_unchanged++; continue; }
-        }
+        // --- Lifecycle policy (NOT a malformed-doc signal): a NEW import is only
+        // admitted in an active state; an EXISTING same-origin row also accepts
+        // terminal states so remote rejection/expiry/archival propagates locally.
+        if (!existing && !CLAIM_PULL_STATUSES.has(status)) { sum.skipped_filtered++; continue; }
+        // Same-origin guard, checked BEFORE any write so dry-run and real-run agree.
+        if (existing && existing.origin_device !== doc.device_id) { sum.skipped_origin_conflict++; continue; }
+        const remoteFp = remoteFingerprintFromSummary(doc);
+        if (existing && claimFingerprint(existing) === remoteFp) { sum.skipped_unchanged++; continue; }
         const row = {
           id: localId, content: doc.content, content_hash: doc.content_hash,
           target_file: m.target_file, section: str(m.section), claim_type: m.claim_type,
@@ -815,8 +865,8 @@ export async function runCosmosPull(opts: PullOptions): Promise<PullSummary> {
         };
         if (!dryRun) {
           if (existing) {
-            // Guarded UPDATE: zero changes means an id collision with a row of a
-            // different origin (e.g. a native NULL-origin row). Don't count as upsert.
+            // Origin already verified above; the WHERE origin_device guard is
+            // belt-and-suspenders against a concurrent write.
             const info = claimUpdate.run(row);
             if (info.changes !== 1) { sum.skipped_origin_conflict++; continue; }
           } else {
@@ -826,6 +876,7 @@ export async function runCosmosPull(opts: PullOptions): Promise<PullSummary> {
         sum.claims_upserted++;
       } catch (e: any) {
         sum.errors++;
+        logPullError("claim", doc, e);
       }
     }
 
@@ -861,27 +912,31 @@ export async function runCosmosPull(opts: PullOptions): Promise<PullSummary> {
       sum.sessions_scanned++;
       try {
         const m = doc.metadata ?? {};
+        const agent = pulledSessionAgent(doc);
         const status = doc.status ?? m.status ?? "active";
         const searchable = toInt(doc.searchable ?? m.searchable, 1);
+        // --- Structural identity (malformed -> fail the job via skipped_invalid).
         if (!validForeignDevice(doc.device_id, opts.localDeviceId)) { sum.skipped_invalid++; continue; }
-        if (status !== "active" || searchable !== 1) { sum.skipped_invalid++; continue; }
-        if (!SESSION_AGENTS.has(m.agent) || !SESSION_STATUSES.has(status)) { sum.skipped_invalid++; continue; }
-        if (!str(doc.content_hash)) { sum.skipped_invalid++; continue; }
-        const summary = str(doc.content) ?? str(m.title) ?? "(empty session)";
+        if (!agent || !str(doc.content_hash)) { sum.skipped_invalid++; continue; }
+        if (!SESSION_LIFECYCLE_STATUSES.has(status)) { sum.skipped_invalid++; continue; }
 
         const localId = localImportId(doc);
         const existing = sessById.get(localId) as any | undefined;
-        const remoteFp = doc.sync_fingerprint ?? remoteFingerprintFromSummary(doc);
-        if (existing) {
-          if (sessionFingerprint(existing) === remoteFp) { sum.skipped_unchanged++; continue; }
-        }
+        // --- Lifecycle policy: a NEW import must be active+searchable; an existing
+        // same-origin row also accepts archived/non-searchable so remote lifecycle
+        // changes propagate. Not a malformed-doc signal -> skipped_filtered.
+        if (!existing && (status !== "active" || searchable !== 1)) { sum.skipped_filtered++; continue; }
+        if (existing && existing.origin_device !== doc.device_id) { sum.skipped_origin_conflict++; continue; }
+        const remoteFp = remoteFingerprintFromSummary(doc);
+        if (existing && sessionFingerprint(existing) === remoteFp) { sum.skipped_unchanged++; continue; }
         // content_hash is UNIQUE: if a DIFFERENT local row already holds it, both
         // insert and update would throw — skip (genuine cross-id duplicate).
         const dup = sessByHashExcl.get(doc.content_hash, localId) as { id: string } | undefined;
         if (dup) { sum.skipped_duplicate_hash++; continue; }
 
+        const summary = str(doc.content) ?? str(m.title) ?? "(empty session)";
         const row = {
-          id: localId, agent: m.agent, native_session_id: str(m.native_session_id),
+          id: localId, agent, native_session_id: str(m.native_session_id),
           started_at: str(m.started_at), ended_at: str(m.ended_at), model: str(m.model),
           project: str(m.project), title: str(m.title), message_count: toInt(m.message_count),
           summary, raw_excerpt: null, is_sub_agent: toInt(m.is_sub_agent),
@@ -892,27 +947,42 @@ export async function runCosmosPull(opts: PullOptions): Promise<PullSummary> {
         };
         const blob = embeddingToBlob(doc.embedding);
         if (!dryRun) {
-          if (existing) {
-            const info = sessUpdate.run(row);
-            if (info.changes !== 1) { sum.skipped_origin_conflict++; continue; }
-          } else {
-            sessInsert.run(row);
+          // Summary write + embedding write must be atomic: a half-applied row
+          // (summary saved, embedding lost) reads as "unchanged" on the next pull
+          // and never self-repairs. One better-sqlite3 transaction => all-or-nothing.
+          const writeRow = wdb.transaction(() => {
+            if (existing) {
+              const info = sessUpdate.run(row);
+              // Origin verified above; a 0-row update here means a concurrent
+              // origin change — abort the whole row (rolls back) rather than
+              // leaving a summary without its embedding.
+              if (info.changes !== 1) throw new OriginConflict();
+            } else {
+              sessInsert.run(row);
+            }
+            if (blob) {
+              embUpsert.run({ file_path: `session:${localId}`, embedding: blob, content_hash: doc.content_hash, updated_at: Date.now() });
+            } else if (existing && existing.content_hash !== doc.content_hash) {
+              // Content changed but no valid remote embedding — drop the now-stale
+              // vector so the background embedding job regenerates it. Only when the
+              // content_hash actually drifted; a metadata-only update keeps its vector.
+              embDelete.run(`session:${localId}`);
+            }
+          });
+          try {
+            writeRow();
+          } catch (e: any) {
+            if (e instanceof OriginConflict) { sum.skipped_origin_conflict++; continue; }
+            throw e;
           }
-          if (blob) {
-            embUpsert.run({ file_path: `session:${localId}`, embedding: blob, content_hash: doc.content_hash, updated_at: Date.now() });
-            sum.embeddings_written++;
-          } else if (existing && existing.content_hash !== doc.content_hash) {
-            // Content changed but no valid remote embedding — drop the now-stale
-            // vector so the background embedding job regenerates it. Only when the
-            // content_hash actually drifted; a metadata-only update keeps its vector.
-            embDelete.run(`session:${localId}`);
-          }
+          if (blob) sum.embeddings_written++;
         } else if (blob) {
           sum.embeddings_written++;
         }
         sum.sessions_upserted++;
       } catch (e: any) {
         sum.errors++;
+        logPullError("session", doc, e);
       }
     }
 
@@ -941,7 +1011,9 @@ export async function runCosmosPull(opts: PullOptions): Promise<PullSummary> {
       sum.transcripts_scanned++;
       try {
         if (!validForeignDevice(doc.device_id, opts.localDeviceId)) { sum.skipped_invalid++; continue; }
-        if (!str(doc.content_hash) || !str(doc.transcript_hash) || !str(doc.messages_json) || !SESSION_AGENTS.has(doc.agent)) {
+        // Structural identity only — agent is descriptive metadata, not a gate
+        // (foreign transcripts use their own agent taxonomy; see migration 100).
+        if (!str(doc.content_hash) || !str(doc.transcript_hash) || !str(doc.messages_json) || !str(doc.agent)) {
           sum.skipped_invalid++; continue;
         }
         // Defence-in-depth: a doc that exceeds the size guard should never have been
@@ -970,6 +1042,7 @@ export async function runCosmosPull(opts: PullOptions): Promise<PullSummary> {
         sum.transcripts_upserted++;
       } catch (e: any) {
         sum.errors++;
+        logPullError("transcript", doc, e);
       }
     }
   } finally {
@@ -1029,7 +1102,7 @@ async function cliMain(): Promise<void> {
       console.log(`  sessions:  ${summary.sessions_upserted}/${summary.sessions_scanned} upserted`);
       console.log(`  transcripts: ${summary.transcripts_upserted}/${summary.transcripts_scanned} upserted (skipped ${summary.transcripts_skipped})`);
       console.log(`  embeddings: ${summary.embeddings_written} written`);
-      console.log(`  skipped:   unchanged=${summary.skipped_unchanged}, invalid=${summary.skipped_invalid}, hashDup=${summary.skipped_duplicate_hash}, originConflict=${summary.skipped_origin_conflict}, errors=${summary.errors}`);
+      console.log(`  skipped:   unchanged=${summary.skipped_unchanged}, filtered=${summary.skipped_filtered}, invalid=${summary.skipped_invalid}, hashDup=${summary.skipped_duplicate_hash}, originConflict=${summary.skipped_origin_conflict}, errors=${summary.errors}`);
       console.log(`  retries:   cosmos_429=${summary.cosmos_429s}`);
       console.log(`  elapsed:   ${summary.elapsed_ms} ms`);
     }
