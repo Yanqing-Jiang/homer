@@ -958,17 +958,19 @@ async function runHandler(
           pullOut =
             `pull: claims +${p.claims_upserted}/${p.claims_scanned}, ` +
             `sessions +${p.sessions_upserted}/${p.sessions_scanned}, emb ${p.embeddings_written}, ` +
-            `unchanged ${p.skipped_unchanged}, invalid ${p.skipped_invalid}, ` +
+            `unchanged ${p.skipped_unchanged}, filtered ${p.skipped_filtered}, invalid ${p.skipped_invalid}, ` +
             `hashDup ${p.skipped_duplicate_hash}, originConflict ${p.skipped_origin_conflict}, errors ${p.errors}`;
-          // Row-level errors / origin conflicts don't throw, but the job must not
-          // report green while silently dropping foreign memory.
-          if (p.errors > 0 || p.skipped_origin_conflict > 0) ok = false;
+          // Row-level errors don't throw, but the job must not report green while
+          // silently dropping foreign memory. skipped_invalid = malformed producer
+          // docs (a contract violation worth alerting on); skipped_filtered =
+          // expected policy exclusions (terminal lifecycle), which do NOT fail.
+          if (p.errors > 0 || p.skipped_origin_conflict > 0 || p.skipped_invalid > 0) ok = false;
         } catch (e: any) {
           ok = false;
           pullOut = `pull FAILED: ${String(e?.message ?? e)}`;
         }
         const output = `${pushOut} | ${pullOut}`;
-        return buildResult(job, startedAt, ok, output, ok ? undefined : output, { notificationIntent: "operational_status" });
+        return buildResult(job, startedAt, ok, output, ok ? undefined : output, { notificationIntent: ok ? "operational_status" : "failure_alert" });
       }
       case "weekly_memory_audit": {
         try {
