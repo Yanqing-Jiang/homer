@@ -1,5 +1,5 @@
 import type { ParsedSession } from "./parsers.js";
-import { executeFlashViaOpenCode } from "../executors/gemini.js";
+import { executeFlashViaAgy } from "../executors/gemini.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -67,7 +67,7 @@ Messages: ${session.messageCount}
 
 ${conversationText}`;
 
-  const result = await executeFlashViaOpenCode(prompt, {
+  const result = await executeFlashViaAgy(prompt, {
     timeout: 900_000,
     signal,
   });

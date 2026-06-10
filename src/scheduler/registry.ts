@@ -130,9 +130,7 @@ const SCHEDULED_CLI_JOBS: JobEntry[] = [
  */
 const UNSCHEDULED_HANDLER_FILES: JobEntry[] = [
   { id: "architecture-updater", name: "Architecture Updater", kind: "event", handler: "architecture_updater", handlerFile: "architecture-updater", expectedInSchedule: false, note: "event-triggered by commits/diffs" },
-  { id: "decision-journal", name: "Decision Journal", kind: "event", handler: "decision_journal", handlerFile: "decision-journal", expectedInSchedule: false, note: "event-triggered from session-summaries" },
   { id: "preference-updater", name: "Preference Updater", kind: "event", handler: "preference_updater", handlerFile: "preference-updater", expectedInSchedule: false, note: "event-triggered from nightly-memory" },
-  { id: "session-summaries", name: "Session Summaries", kind: "event", handler: "session_summaries", handlerFile: "session-summaries", expectedInSchedule: false, note: "event-triggered from session-harvester" },
   { id: "artifact-store", name: "Artifact Store (helper)", kind: "helper", handlerFile: "artifact-store", expectedInSchedule: false, note: "helper module, NOT a job — retire from portfolio vocabulary in Phase 4" },
 ];
 

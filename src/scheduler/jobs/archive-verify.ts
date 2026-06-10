@@ -8,9 +8,8 @@
  * 4. Backup file exists on disk + checksum matches
  * 5. Job artifacts exist for recent synthesizer/improvements runs
  *
- * Note: Daily log archive gap check removed 2026-03-31 — session-summaries
- * (the only writer to daily_log_archive) was disabled in the 2026-02-24
- * pipeline refactor. Table retained for historical reads by weekly-consolidation.
+ * Note: Daily log archive gap check was removed in the 2026-02-24 pipeline
+ * refactor. The table remains for historical reads by weekly-consolidation.
  *
  * Sends Telegram notification only on failures.
  * Schedule: 30 4 * * 0 (Sunday 4:30am, after weekly-cleanup)

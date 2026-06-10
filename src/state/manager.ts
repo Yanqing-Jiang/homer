@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { randomUUID, createHash } from "crypto";
-import { config } from "../config/index.js";
+import { mkdirSync } from "fs";
+import { dirname } from "path";
 import { logger } from "../utils/logger.js";
 import { threadEvents } from "../events/thread-events.js";
 import { sessionEvents } from "../events/session-events.js";
@@ -26,8 +27,11 @@ export class StateManager {
   private ttlMs: number;
 
   constructor(dbPath: string) {
+    mkdirSync(dirname(dbPath), { recursive: true });
     this._db = new Database(dbPath);
-    this.ttlMs = config.session.ttlHours * 60 * 60 * 1000;
+    const configuredTtl = Number.parseInt(process.env.SESSION_TTL_HOURS ?? "8", 10);
+    const ttlHours = Number.isFinite(configuredTtl) && configuredTtl > 0 ? configuredTtl : 8;
+    this.ttlMs = ttlHours * 60 * 60 * 1000;
     this.init();
   }
 

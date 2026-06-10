@@ -19,7 +19,7 @@ The web UI lives in a separate private repository; this repo ships only the head
 
 ## Stack
 
-- **Runtime:** Node.js 20+, TypeScript (ESM), Fastify (telephony only), Grammy, `better-sqlite3`, Zod
+- **Runtime:** Node.js 24+, TypeScript (ESM), Fastify (telephony only), Grammy, `better-sqlite3`, Zod
 - **State:** Local SQLite (`homer.db`) with FTS5 and a vector chunk store; optional Azure Cosmos for cross-device sync
 - **Storage:** Azure Blob for media; macOS Keychain for OAuth
 - **LLMs:** Anthropic SDK, OpenAI SDK, Google Generative AI; CLI wrappers around `claude`, `codex`, `agy`, `kimi`
@@ -52,7 +52,7 @@ scripts/             # Build, install, deploy, backup, migration scripts
 ### Prerequisites
 
 - macOS (the daemon is launchd-based)
-- Node.js 20+ (`brew install node`)
+- Node.js 24+ (`brew install node`)
 - Xcode Command Line Tools — `xcode-select --install` (needed for native deps `better-sqlite3` and `fs-ext`)
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) and your numeric chat ID from [@userinfobot](https://t.me/userinfobot)
 - Optional for telephony: [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) (`cloudflared`), a Twilio phone number, and an ElevenLabs Conversational AI agent — see [`docs/telephony.md`](docs/telephony.md)
@@ -159,7 +159,7 @@ Architecture diagram, env-var table, Cloudflare/Twilio/ElevenLabs setup, signatu
 
 ## A note on tests
 
-Test files (`*.test.ts`, `__tests__/`) are intentionally not shipped in this public repo. They depended on the author's personal memory fixtures and aren't useful to outside readers. `npm test` is a no-op.
+Personal fixture tests are not shipped in this public repo. `npm test` runs the public typecheck and production build checks.
 
 ## Status
 

@@ -1,10 +1,8 @@
 /**
  * Gemini CLI Executor — agy-rotate backend
  *
- * As of 2026-05-20, Homer's Gemini executor delegates ALL account rotation,
- * cooldown bookkeeping, keychain swap, and retry logic to `/Users/yj/bin/agy-rotate`
- * (a Python wrapper around Antigravity CLI). Native `gemini` CLI is deprecated
- * (EOL June 18, 2026) and is no longer invoked from this process.
+ * Homer prefers the optional `agy-rotate` multi-account wrapper when installed
+ * and otherwise invokes Antigravity CLI (`agy`) directly.
  *
  * What this file owns:
  *   - Spawn `agy-rotate` with the right flags
@@ -19,25 +17,25 @@
  *   - Cooldown timers, rate-limit / auth / runtime classification
  *   - Concurrency semaphore + inter-spawn stagger
  *
- * Model selection: Antigravity CLI has no `-m` flag. The model is set ONCE in
- * `~/.gemini/antigravity-cli/settings.json` and applies to every call. The legacy
- * `GEMINI_CLI_PRO_MODEL` callers still type-check, but at runtime the call uses
- * whatever settings.json has (currently Gemini 3.5 Flash (High)). The `model`
- * field of the result records the caller's *requested* model, not the backend's.
+ * Antigravity CLI supports per-call model selection through `--model`.
  */
 
 import { spawn } from "child_process";
+import { existsSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
 import { processRegistry } from "../process/registry.js";
 
-const AGY_ROTATE_BIN = "/Users/yj/bin/agy-rotate";
-
-// Kept exported for downstream caller compatibility. Both constants are passed
-// through as the `model` field of the result for telemetry; agy ignores them.
 export const GEMINI_CLI_FLASH_MODEL = "gemini-3-flash-preview";
 export const GEMINI_CLI_PRO_MODEL = "gemini-3.1-pro-preview";
 export const PRO_TOKEN_SOFT_LIMIT = 800_000;
+
+const AGY_MODEL_ALIASES: Record<string, string> = {
+  [GEMINI_CLI_FLASH_MODEL]: "Gemini 3.5 Flash (High)",
+  [GEMINI_CLI_PRO_MODEL]: "Gemini 3.1 Pro (High)",
+};
 
 // Marker line agy-rotate writes to stderr when invoked with --emit-account.
 // Anchored to start-of-line to avoid matching content in agy's own response.
@@ -47,7 +45,7 @@ const ACCOUNT_MARKER_RE = /^\[agy-rotate\] selected: (\S+)$/m;
 const DEFAULT_LOCK_TIMEOUT_MS = 1_200_000;
 
 export interface GeminiCLIDirectOptions {
-  /** Caller-requested model. Recorded in result.model for telemetry; agy ignores it. */
+  /** Caller-requested model. Legacy model IDs are mapped to Antigravity names. */
   model?: string;
   /** Inner per-call timeout (ms). Outer kill budget = timeout + lock-wait + grace. */
   timeout?: number;
@@ -90,12 +88,34 @@ function parseAccountEmail(stderr: string): string | undefined {
   return stderr.match(ACCOUNT_MARKER_RE)?.[1];
 }
 
+function resolveAgyModel(model: string): string {
+  const normalized = model.replace(/^(google|google-aistudio)\//, "");
+  return AGY_MODEL_ALIASES[normalized] ?? model;
+}
+
+function resolveAgyBackend(): { command: string; usesRotation: boolean } {
+  const configuredWrapper = process.env.AGY_ROTATE_BIN?.trim();
+  if (configuredWrapper) {
+    return { command: configuredWrapper, usesRotation: true };
+  }
+
+  const defaultWrapper = join(homedir(), "bin", "agy-rotate");
+  if (existsSync(defaultWrapper)) {
+    return { command: defaultWrapper, usesRotation: true };
+  }
+
+  return {
+    command: process.env.AGY_BIN?.trim() || "agy",
+    usesRotation: false,
+  };
+}
+
 /** On success: stdout. On failure: stdout || stderr || exit-code message. */
-function buildOutput(stdout: string, stderr: string, exitCode: number): string {
+function buildOutput(stdout: string, stderr: string, exitCode: number, command: string): string {
   const cleanOut = sanitizeGeminiOutput(stdout);
   if (exitCode === 0) return cleanOut;
   const cleanErr = stripAgyControlLines(stderr);
-  return cleanOut || cleanErr || `agy-rotate exited with code ${exitCode}`;
+  return cleanOut || cleanErr || `${command} exited with code ${exitCode}`;
 }
 
 /** Token estimator preserved for downstream callers (e.g. Pro soft-limit gating). */
@@ -119,16 +139,19 @@ export async function executeGeminiCLIDirect(
   } = options;
 
   const startTime = Date.now();
+  const backend = resolveAgyBackend();
+  const agyModel = resolveAgyModel(model);
   const lockTimeoutMs = Number(
     process.env.AGY_ROTATE_LOCK_TIMEOUT_MS ?? DEFAULT_LOCK_TIMEOUT_MS,
   );
   // Outer kill budget: caller's per-call timeout + worst-case lock wait + 30s grace.
-  const outerTimeoutMs = timeout + lockTimeoutMs + 30_000;
+  const outerTimeoutMs = timeout + (backend.usesRotation ? lockTimeoutMs : 0) + 30_000;
 
   logger.debug(
     {
       requestedModel: model,
-      backendModelPolicy: "agy-settings-json",
+      agyModel,
+      backend: backend.usesRotation ? "agy-rotate" : "agy",
       promptLength: prompt.length,
       timeoutMs: timeout,
       runId,
@@ -137,19 +160,33 @@ export async function executeGeminiCLIDirect(
   );
 
   return new Promise<GeminiCLIDirectResult>((resolve) => {
-    const args = [
-      "--dangerously-skip-permissions",
-      "--emit-account",
-      "--prompt-stdin",
-    ];
+    const args = backend.usesRotation
+      ? [
+          "--dangerously-skip-permissions",
+          "--emit-account",
+          "--model",
+          agyModel,
+          "--prompt-stdin",
+        ]
+      : [
+          "--dangerously-skip-permissions",
+          "--model",
+          agyModel,
+          "-p",
+          "-",
+        ];
 
-    const child = spawn(AGY_ROTATE_BIN, args, {
+    const child = spawn(backend.command, args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd,
       env: {
         ...process.env,
-        AGY_ROTATE_TIMEOUT_S: String(Math.ceil(timeout / 1000)),
-        AGY_ROTATE_LOCK_TIMEOUT_S: String(Math.ceil(lockTimeoutMs / 1000)),
+        ...(backend.usesRotation
+          ? {
+              AGY_ROTATE_TIMEOUT_S: String(Math.ceil(timeout / 1000)),
+              AGY_ROTATE_LOCK_TIMEOUT_S: String(Math.ceil(lockTimeoutMs / 1000)),
+            }
+          : {}),
       },
       // Put wrapper in its own process group so we can group-kill the nested
       // `agy` child on timeout/abort/shutdown instead of orphaning it.
@@ -157,7 +194,7 @@ export async function executeGeminiCLIDirect(
     });
 
     processRegistry.register(child, {
-      command: "agy-rotate",
+      command: backend.command,
       type: "executor",
       timeoutMs: outerTimeoutMs,
       source: "scheduler",
@@ -224,7 +261,7 @@ export async function executeGeminiCLIDirect(
     child.on("close", (code) => {
       const exitCode = code ?? (aborted ? 130 : timedOut ? 4 : 1);
       finish({
-        output: buildOutput(stdout, stderr, exitCode),
+        output: buildOutput(stdout, stderr, exitCode, backend.command),
         exitCode,
         duration: Date.now() - startTime,
         executor: "gemini-cli",
@@ -235,7 +272,7 @@ export async function executeGeminiCLIDirect(
 
     child.on("error", (err) => {
       finish({
-        output: `Error spawning agy-rotate: ${err.message}`,
+        output: `Error spawning ${backend.command}: ${err.message}`,
         exitCode: 1,
         duration: Date.now() - startTime,
         executor: "gemini-cli",
@@ -263,12 +300,6 @@ export async function executeGeminiProResearch(
   prompt: string,
   options: ScheduledGeminiResearchOptions = {},
 ): Promise<GeminiCLIDirectResult> {
-  // Note: agy has no -m flag — actual backend is whatever settings.json has,
-  // currently Flash. The `model` field of the result still reads Pro for
-  // telemetry continuity with the caller's intent.
-  logger.debug(
-    "executeGeminiProResearch: backend is agy-settings-json (currently Flash); model field preserved for telemetry",
-  );
   return executeGeminiCLIDirect(prompt, {
     ...options,
     model: GEMINI_CLI_PRO_MODEL,
