@@ -22,7 +22,6 @@ function isMemoryJob(job: RegisteredJob): boolean {
   return (
     id.includes("memory") ||
     id.includes("daily-log") ||
-    id.includes("session-summaries") ||
     query.includes("/nightly-memory") ||
     query.includes("memory/daily")
   );

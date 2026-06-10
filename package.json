@@ -4,8 +4,13 @@
   "description": "Hybrid Orchestration for Multi-model Execution and Routing",
   "type": "module",
   "main": "dist/index.js",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "build": "npx tsc && cp src/state/migrations/*.sql dist/state/migrations/ && mkdir -p dist/executors/scrape-scripts && cp src/executors/scrape-scripts/*.js dist/executors/scrape-scripts/ && echo \"{\\\"sha\\\": \\\"$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')\\\", \\\"time\\\": \\\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\\\"}\" > dist/.build-version",
+    "check": "npm run typecheck && npm run build",
+    "test": "npm run check",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "tui": "tsx src/tui/index.ts",
@@ -29,7 +34,7 @@
     "@azure/identity": "^4.13.1",
     "@azure/storage-blob": "^12.26.0",
     "@google/generative-ai": "^0.24.1",
-    "@modelcontextprotocol/sdk": "^1.25.3",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@mozilla/readability": "^0.6.0",
     "@types/fs-ext": "^2.0.3",
     "better-sqlite3": "^12.10.0",
@@ -38,22 +43,21 @@
     "chrono-node": "^2.9.0",
     "croner": "^10.0.1",
     "dotenv": "^16.4.5",
-    "fastify": "^4.28.0",
+    "fastify": "^5.8.5",
     "fs-ext": "^2.1.1",
     "grammy": "^1.21.1",
     "linkedom": "^0.18.12",
     "openai": "^4.24.0",
-    "pidlock": "^0.1.0",
     "pino": "^9.4.0",
     "pino-pretty": "^11.2.2",
     "playwright": "^1.40.0",
-    "yaml": "^2.8.2",
+    "yaml": "^2.9.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/blessed": "^0.1.25",
-    "@types/node": "^22.5.0",
+    "@types/node": "^24.0.0",
     "tsx": "^4.22.3",
     "typescript": "^5.9.3"
   },

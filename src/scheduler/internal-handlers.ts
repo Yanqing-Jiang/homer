@@ -7,7 +7,6 @@ import { sendBatchIdeasForReview } from "../bot/handlers/approval.js";
 import { presentOvernightSummaries } from "../bot/handlers/overnight.js";
 import { ingestIdeasFromLegacy } from "../ideas/ingest.js";
 import { dedupeIdeasDir, expireStaleIdeas } from "../ideas/dedup.js";
-import { runSessionSummary } from "./jobs/session-summaries.js";
 import { runWeeklyConsolidation } from "./jobs/weekly-consolidation.js";
 import { runWeeklyMemoryCleanup } from "./jobs/memory-cleanup.js";
 import { runMigrations } from "../state/migrations/index.js";
@@ -203,12 +202,12 @@ async function sendHealthMessage(
 // Handlers safe to retry (idempotent, no user-facing side effects)
 const RETRYABLE_HANDLERS = new Set([
   "ideas_explore", "nightly_memory", "session_harvester", "memory_embeddings", "memory_reindex", "morning_review",
-  "weekly_memory_audit", "homer_improvements", "session_summaries", "weekly_consolidation",
+  "weekly_memory_audit", "homer_improvements", "weekly_consolidation",
   "mentor_layer", "career_truth",
   "memory_cleanup", "content_scraper", "outcome_tracker",
   "preference_updater", "idea_dedup", "idea_expiry", "nightly_code_push", "db_backup",
   "idea_synthesizer", "idea_deep_linker", "link_processor", "archive_verify", "health_check",
-  "harness_auto_improve", "decision_journal",
+  "harness_auto_improve",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
   "candidate_expiry",
   "cosmos_sync",
@@ -570,7 +569,7 @@ async function runHealthLLMTriage(
   issues: string[],
   _ctx: InternalJobContext
 ): Promise<HealthTriageResult | null> {
-  const claudeBin = process.env.CLAUDE_BIN || "/Users/yj/.local/bin/claude";
+  const claudeBin = process.env.CLAUDE_BIN || "claude";
   const prompt = `Homer health check found these issues:
 
 ${issues.join("\n")}
@@ -739,17 +738,6 @@ async function runHandler(
           { notificationIntent: "operational_status" }
         );
       }
-      case "session_summaries": {
-        const result = await runSessionSummary(undefined, ctx.stateManager);
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          result.success ? { notificationIntent: "operational_status" } : {}
-        );
-      }
       case "weekly_consolidation": {
         const result = await runWeeklyConsolidation();
 
@@ -872,18 +860,6 @@ async function runHandler(
           result.output,
           result.error,
           result.success ? { notificationIntent: "user_info" } : {}
-        );
-      }
-      case "decision_journal": {
-        const { runDecisionJournal } = await import("./jobs/decision-journal.js");
-        const result = await runDecisionJournal(ctx.stateManager.getDb(), ctx.jobRunId, ctx.signal);
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          result.success ? { notificationIntent: "operational_status" } : {}
         );
       }
       case "session_harvester": {

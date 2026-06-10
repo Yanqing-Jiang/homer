@@ -5,7 +5,7 @@
  * preferences, recent activity) and assembles it into a system prompt that
  * lets any scheduler job "know Yanqing" — not follow frozen instructions.
  *
- * Used by session-summaries, weekly-consolidation, and memory-cleanup.
+ * Used by weekly-consolidation and memory-cleanup.
  */
 
 import { readFile } from "fs/promises";

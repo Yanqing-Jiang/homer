@@ -15,6 +15,7 @@ import { StateManager } from "../state/manager.js";
 import { PATHS } from "../config/paths.js";
 import type { ToolDeps } from "./tools/types.js";
 import { getCanonicalMemoryService } from "../memory/canonical-service.js";
+import { runMigrations } from "../state/migrations/index.js";
 
 // Tool modules
 import * as memoryTools from "./tools/memory.js";
@@ -30,6 +31,7 @@ let sharedSM: StateManager | null = null;
 function getSharedStateManager(): StateManager {
   if (!sharedSM) {
     sharedSM = new StateManager(PATHS.db);
+    runMigrations(sharedSM.getDb());
   }
   return sharedSM;
 }
@@ -47,11 +49,13 @@ async function getAzureBlob() {
   return azureBlobModule;
 }
 
-// Initialize indexer
-const indexer = getMemoryIndexer();
+// Initialize state before the indexer so a fresh install creates the DB parent
+// directory and schema before any MCP tool is advertised.
+const stateManager = getSharedStateManager();
+const indexer = getMemoryIndexer(PATHS.db);
 
 // Canonical memory service
-const canonicalMemory = getCanonicalMemoryService(getSharedStateManager(), indexer);
+const canonicalMemory = getCanonicalMemoryService(stateManager, indexer);
 
 // Shared dependencies for all tool modules
 const deps: ToolDeps = { getSharedStateManager, indexer, getAzureBlob, canonicalMemory };

@@ -60,8 +60,6 @@ export interface OpenCodeCLIOptions {
   sandbox?: boolean;
   includeDirectories?: string[];
   accountId?: number;
-  /** Skip flash→Gemini CLI routing and use OpenCode directly */
-  forceOpenCode?: boolean;
 }
 
 export interface OpenCodeCLIResult extends ExecutorResult {
@@ -627,4 +625,3 @@ export function getAccountStatus(): Array<{
 export function resetAccountCooldowns(): void {
   logger.info("OpenCode CLI manages account rotation internally - no cooldowns to reset");
 }
-

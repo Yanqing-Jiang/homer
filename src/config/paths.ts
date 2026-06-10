@@ -1,18 +1,19 @@
 /**
- * Centralized path constants derived from config.
+ * Centralized path constants derived from the runtime environment.
  *
  * Import PATHS anywhere instead of hardcoding "/Users/yj/memory/..." etc.
- * All paths resolve from config.paths.memory / claudeDir / homerData,
- * which themselves fall back to env vars or sensible defaults.
+ * These paths intentionally do not import the daemon config because library
+ * entry points such as the MCP server do not require Telegram credentials.
  */
 
-import { config } from "./index.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 
-const mem = config.paths.memory;
-const claude = config.paths.claudeDir;
-const data = config.paths.homerData;
-const homer = config.paths.homerRoot;
-const archive = config.paths.archive;
+const runtimePaths = getRuntimePaths();
+const mem = runtimePaths.memoryDir;
+const claude = runtimePaths.claudeDir;
+const data = runtimePaths.homerDataDir;
+const homer = runtimePaths.homerRoot;
+const archive = runtimePaths.archiveDir;
 
 export const PATHS = {
   // ── Memory root ─────────────────────────────────────────────
@@ -43,7 +44,6 @@ export const PATHS = {
   // ── Claude dir ──────────────────────────────────────────────
   claudeDir: claude,
   claudeMd: `${claude}/CLAUDE.md`,
-  autoMemoryDir: `${claude}/projects/-Users-yj/memory`,
 
   // ── Homer root ─────────────────────────────────────────────
   homerRoot: homer,

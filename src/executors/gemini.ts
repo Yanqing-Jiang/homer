@@ -1,8 +1,7 @@
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { ExecutorResult } from "./types.js";
-import { executeOpenCodeCLI } from "./opencode-cli.js";
-import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
+import { executeGeminiCLIDirect, GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { logger } from "../utils/logger.js";
 
 // ============================================
@@ -261,16 +260,16 @@ export async function executeGeminiAPI(
 }
 
 // ============================================
-// GEMINI CLI FLASH WRAPPER
+// ANTIGRAVITY FLASH WRAPPER
 // ============================================
 
 /**
- * Route Flash text-gen through Gemini CLI (via OpenCode routing layer).
+ * Route Flash text generation directly through Antigravity CLI.
  * Uses multi-account rotation for rate limit resilience.
  *
  * Compatible return type with executeGeminiAPI for easy swapping.
  */
-export async function executeFlashViaOpenCode(
+export async function executeFlashViaAgy(
   prompt: string,
   options: { systemPrompt?: string; timeout?: number; signal?: AbortSignal; researchOnly?: boolean } = {}
 ): Promise<GeminiAPIResult> {
@@ -278,10 +277,9 @@ export async function executeFlashViaOpenCode(
     ? `${options.systemPrompt}\n\n---\n\n${prompt}`
     : prompt;
 
-  const result = await executeOpenCodeCLI(fullPrompt, "", {
-    model: `google/${GEMINI_CLI_FLASH_MODEL}`,
-    forceOpenCode: true,
-    researchOnly: options.researchOnly ?? true,
+  const result = await executeGeminiCLIDirect(fullPrompt, {
+    model: GEMINI_CLI_FLASH_MODEL,
+    role: options.researchOnly === false ? undefined : "research",
     timeout: options.timeout ?? 300_000,
     signal: options.signal,
   });
@@ -292,8 +290,6 @@ export async function executeFlashViaOpenCode(
     duration: result.duration,
     executor: "gemini-flash",
     model: GEMINI_CLI_FLASH_MODEL,
-    inputTokens: result.stats?.input_tokens,
-    outputTokens: result.stats?.output_tokens,
   };
 }
 
@@ -340,7 +336,7 @@ export async function summarizeWithGemini(
 ): Promise<string> {
   const defaultInstruction = "Summarize the following content, highlighting key points and actionable items.";
 
-  const result = await executeFlashViaOpenCode(
+  const result = await executeFlashViaAgy(
     `${instruction || defaultInstruction}\n\n---\n\n${content}`,
     {
       systemPrompt: "You are an expert at analyzing and summarizing content. Extract key insights concisely.",
@@ -399,7 +395,7 @@ export async function generateMorningBriefing(
   findings: string,
   dailyLog: string
 ): Promise<string> {
-  const result = await executeFlashViaOpenCode(
+  const result = await executeFlashViaAgy(
     `Generate a morning briefing based on overnight findings and yesterday's log.
 
 ## Overnight Findings

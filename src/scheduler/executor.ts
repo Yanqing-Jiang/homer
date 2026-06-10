@@ -9,7 +9,7 @@ import { executeKimiCLI } from "../executors/kimi-cli.js";
 import { executeCodexCLI } from "../executors/codex-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { RESEARCH_ONLY_PREFIX } from "../executors/opencode-cli.js";
-import { executeFlashViaOpenCode } from "../executors/gemini.js";
+import { executeFlashViaAgy } from "../executors/gemini.js";
 import { executeGeminiCLIDirect, GEMINI_CLI_PRO_MODEL } from "../executors/gemini-cli.js";
 import {
   runWithFallbackChain,
@@ -41,7 +41,7 @@ function loadContextFiles(files: string[]): string {
   return contents.join("\n\n---\n\n");
 }
 
-const CLAUDE_PATH = process.env.CLAUDE_PATH ?? "/Users/yj/.local/bin/claude";
+const CLAUDE_PATH = process.env.CLAUDE_PATH ?? "claude";
 const KILL_GRACE_MS = 5_000;
 const MAX_OUTPUT_BYTES = 1 * 1024 * 1024; // 1MB capture cap
 
@@ -65,7 +65,6 @@ function isMemoryJob(job: RegisteredJob): boolean {
   return (
     id.includes("memory") ||
     id.includes("daily-log") ||
-    id.includes("session-summaries") ||
     query.includes("/nightly-memory") ||
     query.includes("memory/daily")
   );
@@ -228,7 +227,7 @@ async function executeGeminiJob(
         exitCode = result.exitCode;
       } else {
         // Route Flash models through OpenCode routing layer
-        const result = await executeFlashViaOpenCode(fullPrompt, { timeout });
+        const result = await executeFlashViaAgy(fullPrompt, { timeout });
         output = result.output;
         exitCode = result.exitCode;
       }
