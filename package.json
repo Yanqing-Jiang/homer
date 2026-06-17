@@ -4,6 +4,13 @@
   "description": "Hybrid Orchestration for Multi-model Execution and Routing",
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./mcp/server": {
+      "types": "./dist/mcp/server.d.ts",
+      "import": "./dist/mcp/server.js"
+    }
+  },
   "engines": {
     "node": ">=24"
   },
@@ -30,8 +37,6 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",
-    "@azure/cosmos": "^4.9.3",
-    "@azure/identity": "^4.13.1",
     "@azure/storage-blob": "^12.26.0",
     "@google/generative-ai": "^0.24.1",
     "@modelcontextprotocol/sdk": "^1.29.0",

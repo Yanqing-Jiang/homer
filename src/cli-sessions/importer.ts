@@ -346,8 +346,8 @@ export class CLISessionImporter {
         `INSERT INTO session_summaries (
           id, agent, native_session_id, started_at, ended_at,
           model, project, title, message_count, summary,
-          raw_excerpt, is_sub_agent, content_hash
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
+          raw_excerpt, is_sub_agent, content_hash, origin_device
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'mac-mini')`
       )
       .run(
         id,

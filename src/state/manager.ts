@@ -2083,8 +2083,8 @@ export class StateManager {
       .digest("hex");
 
     this._db.prepare(
-      `INSERT INTO session_summaries (id, agent, started_at, project, title, summary, content_hash, created_at, status, processed_for_promotion)
-       VALUES (?, 'daemon', ?, ?, ?, ?, ?, ?, 'active', 0)`
+      `INSERT INTO session_summaries (id, agent, started_at, project, title, summary, content_hash, created_at, status, processed_for_promotion, origin_device)
+       VALUES (?, 'daemon', ?, ?, ?, ?, ?, ?, 'active', 0, 'mac-mini')`
     ).run(id, now, project ?? null, title, summary, contentHash, now);
 
     return id;
