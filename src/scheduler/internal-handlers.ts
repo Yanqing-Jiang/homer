@@ -210,7 +210,7 @@ const RETRYABLE_HANDLERS = new Set([
   "harness_auto_improve",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
   "candidate_expiry",
-  "cosmos_sync",
+  "deaddrop_drain",
 ]);
 
 const TRANSIENT_PATTERNS = [
@@ -910,43 +910,27 @@ async function runHandler(
           result.success ? { notificationIntent: "operational_status" } : {}
         );
       }
-      case "cosmos_sync": {
-        // One nightly job, two phases: push local memory UP to Cosmos, then pull
-        // other devices' memory DOWN into the local DB. Each phase is isolated so a
-        // pull failure still reports a successful push (and vice versa).
-        const { runCosmosSync, runCosmosPull } = await import("../scripts/sync-to-cosmos.js");
-        const dev = "home-mac";
-        let pushOut = "", pullOut = "", ok = true;
+      case "deaddrop_drain": {
+        // Nightly ingress: drain the work-laptop session dead-drop
+        // (homer-data/worklaptop/sessions) into local session_summaries, then
+        // delete each drained blob. This is the only cross-device memory path —
+        // Cosmos push/pull was decommissioned 2026-06-16 (memory_search is fully
+        // local; the laptop pushes sessions via blob SAS, never Cosmos).
+        let drainOut = "", ok = true;
         try {
-          const s = await runCosmosSync({ mode: "reconcile", deviceId: dev, dryRun: false });
-          pushOut =
-            `push: claims ${s.claims_synced}/${s.claims_scanned}, ` +
-            `entries ${s.entries_synced}/${s.entries_scanned}, ` +
-            `sessions ${s.sessions_synced}/${s.sessions_scanned}, skipped ${s.skipped_unchanged}, ` +
-            `emb reused=${s.embeddings_reused} gen=${s.embeddings_generated}, ` +
-            `429s=${s.cosmos_429s} gemFail=${s.gemini_failures}`;
+          const { runDeadDropDrain } = await import("../scripts/drain-deaddrop.js");
+          const d = await runDeadDropDrain(ctx.stateManager);
+          drainOut =
+            `drain: blobs ${d.blobs}, +${d.sessionsUpserted} sessions, dup ${d.duplicates}, ` +
+            `filtered ${d.filtered}, invalid ${d.invalid}, del ${d.deleted}, err ${d.errors}`;
+          // A blob-level error (or an invalid item that left a blob behind) means a
+          // batch was left undrained — surface it.
+          if (d.errors > 0 || d.invalid > 0) ok = false;
         } catch (e: any) {
           ok = false;
-          pushOut = `push FAILED: ${String(e?.message ?? e)}`;
+          drainOut = `drain FAILED: ${String(e?.message ?? e)}`;
         }
-        try {
-          const p = await runCosmosPull({ localDeviceId: dev, dryRun: false });
-          pullOut =
-            `pull: claims +${p.claims_upserted}/${p.claims_scanned}, ` +
-            `sessions +${p.sessions_upserted}/${p.sessions_scanned}, emb ${p.embeddings_written}, ` +
-            `unchanged ${p.skipped_unchanged}, filtered ${p.skipped_filtered}, invalid ${p.skipped_invalid}, ` +
-            `hashDup ${p.skipped_duplicate_hash}, originConflict ${p.skipped_origin_conflict}, errors ${p.errors}`;
-          // Row-level errors don't throw, but the job must not report green while
-          // silently dropping foreign memory. skipped_invalid = malformed producer
-          // docs (a contract violation worth alerting on); skipped_filtered =
-          // expected policy exclusions (terminal lifecycle), which do NOT fail.
-          if (p.errors > 0 || p.skipped_origin_conflict > 0 || p.skipped_invalid > 0) ok = false;
-        } catch (e: any) {
-          ok = false;
-          pullOut = `pull FAILED: ${String(e?.message ?? e)}`;
-        }
-        const output = `${pushOut} | ${pullOut}`;
-        return buildResult(job, startedAt, ok, output, ok ? undefined : output, { notificationIntent: ok ? "operational_status" : "failure_alert" });
+        return buildResult(job, startedAt, ok, drainOut, ok ? undefined : drainOut, { notificationIntent: ok ? "operational_status" : "failure_alert" });
       }
       case "weekly_memory_audit": {
         try {
