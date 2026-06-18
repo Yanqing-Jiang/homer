@@ -87,7 +87,6 @@ const HANDLER_SOURCE_MAP: Record<string, string> = {
   nightly_memory: "src/scheduler/jobs/nightly-memory.ts",
   session_harvester: "src/scheduler/jobs/session-harvester.ts",
   homer_improvements: "src/scheduler/jobs/homer-improvements.ts",
-  mentor_layer: "src/scheduler/jobs/mentor-layer.ts",
   career_truth: "src/scheduler/jobs/career-truth.ts",
   memory_embeddings: "src/scheduler/jobs/memory-embeddings.ts",
   memory_reindex: "src/scheduler/jobs/memory-reindex.ts",
