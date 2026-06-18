@@ -21,6 +21,15 @@
  * session-import mapping so a blob-drained row is byte-identical to a Cosmos-
  * pulled one.
  *
+ * POLICY — summaries-only: the laptop is the curation/scrubbing point. It hand-
+ * writes a scrubbed `session_summary` per session; the RAW conversation is
+ * deliberately NOT mirrored here (it carries unscrubbed corp detail — tenant ids,
+ * hostnames, command logs). OpenCode's sync default can still auto-emit raw
+ * `thread_message` records (or an assembled `session_transcript`); we recognize
+ * and DISCARD them — not stored, but the blob is still deleted so raw content
+ * neither lands in homer.db nor lingers in the dead-drop. Only an unknown/
+ * malformed source_type leaves the blob and fails the run (producer bug).
+ *
  * Idempotent: `session_summaries.content_hash` is UNIQUE and we dedup on both id
  * and content_hash, so a re-drain of a clean batch is a no-op. A blob that fails
  * mid-parse, or whose batch has any structurally-invalid item, is left in place
@@ -53,9 +62,16 @@ export interface DeadDropDrainStats {
   sessionsUpserted: number; // session_summaries rows inserted or updated
   duplicates: number;       // already present & unchanged (id or content_hash)
   filtered: number;         // policy-skipped (new import not active+searchable)
-  invalid: number;          // items dropped (missing/invalid required fields)
+  invalid: number;          // unknown/malformed items (leaves blob, fails run)
   errors: number;           // blob-level processing errors
   deleted: number;          // blobs deleted after success
+  // POLICY: summaries-only. The laptop is the curation point — it scrubs each
+  // session into a hand-written summary; raw transcript content is intentionally
+  // NOT mirrored to homer.db (it carries unscrubbed corp detail). OpenCode's sync
+  // default can still auto-emit raw `thread_message` / `session_transcript` records;
+  // we recognize and DISCARD them (skip storing, allow the blob to delete) so raw
+  // content never lands locally and never lingers in the dead-drop.
+  discardedRaw: number;     // recognized raw records intentionally not stored
 }
 
 interface SessionItem {
@@ -117,7 +133,7 @@ function localId(item: SessionItem): string | null {
 export async function runDeadDropDrain(sm: StateManager): Promise<DeadDropDrainStats> {
   const stats: DeadDropDrainStats = {
     blobs: 0, parsed: 0, sessionsUpserted: 0, duplicates: 0,
-    filtered: 0, invalid: 0, errors: 0, deleted: 0,
+    filtered: 0, invalid: 0, errors: 0, deleted: 0, discardedRaw: 0,
   };
 
   const connStr = process.env.AZURE_STORAGE_CONNECTION_STRING;
@@ -199,6 +215,17 @@ export async function runDeadDropDrain(sm: StateManager): Promise<DeadDropDrainS
 
       let hadInvalid = false;
       for (const it of items) {
+        // ── Policy gate: discard raw records, store only scrubbed summaries ────
+        // The laptop scrubs each session into a hand-written summary; the raw
+        // conversation (thread_message records, or an assembled session_transcript)
+        // is OpenCode sync noise carrying unscrubbed corp detail. We recognize and
+        // DROP it — not stored, but it does NOT block blob deletion, so the raw
+        // content is discarded rather than left to re-fail or linger in the drop.
+        if (it.source_type === "thread_message" || it.source_type === "session_transcript") {
+          stats.discardedRaw++;
+          continue;
+        }
+
         const id = localId(it);
         const agent = sessionAgent(it);
         const contentHash = str(it.content_hash);
@@ -295,10 +322,10 @@ export async function runDeadDropDrain(sm: StateManager): Promise<DeadDropDrainS
         stats.sessionsUpserted++;
       }
 
-      // Delete ONLY a batch with no structural problems. A policy-filtered item is
-      // fine to delete; a missing/invalid item leaves the blob so a producer bug
-      // never silently drops a session. The drain is idempotent, so re-draining a
-      // clean batch is safe.
+      // Delete ONLY a batch with no structural problems. A policy-filtered or
+      // discarded-raw item is fine to delete (it was handled); a missing/invalid
+      // session item leaves the blob so a producer bug never silently drops a
+      // summary. The drain is idempotent, so re-draining a clean batch is safe.
       if (!hadInvalid) {
         await blobClient.delete();
         stats.deleted++;

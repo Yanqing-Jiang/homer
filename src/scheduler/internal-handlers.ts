@@ -922,9 +922,11 @@ async function runHandler(
           const d = await runDeadDropDrain(ctx.stateManager);
           drainOut =
             `drain: blobs ${d.blobs}, +${d.sessionsUpserted} sessions, dup ${d.duplicates}, ` +
-            `filtered ${d.filtered}, invalid ${d.invalid}, del ${d.deleted}, err ${d.errors}`;
+            `filtered ${d.filtered}, discardedRaw ${d.discardedRaw}, invalid ${d.invalid}, ` +
+            `del ${d.deleted}, err ${d.errors}`;
           // A blob-level error (or an invalid item that left a blob behind) means a
-          // batch was left undrained — surface it.
+          // batch was left undrained — surface it. Discarded raw records (policy:
+          // summaries-only) do NOT fail the job; the blob is still deleted.
           if (d.errors > 0 || d.invalid > 0) ok = false;
         } catch (e: any) {
           ok = false;
