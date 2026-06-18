@@ -68,7 +68,6 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
   { id: "job-hunt-discover", name: "Job Hunt Discover", kind: "internal", handler: "job_hunt_discover", handlerFile: "job-hunt-discover", expectedInSchedule: true },
   { id: "job-hunt-email-monitor", name: "Job Hunt Email Monitor", kind: "internal", handler: "job_hunt_email_monitor", handlerFile: "job-hunt-email-monitor", expectedInSchedule: true },
   { id: "job-hunt-followup", name: "Job Hunt Followup", kind: "internal", handler: "job_hunt_followup", handlerFile: "job-hunt-followup", expectedInSchedule: true },
-  { id: "mentor-layer", name: "Mentor Layer", kind: "internal", handler: "mentor_layer", handlerFile: "mentor-layer", expectedInSchedule: true, note: "active-work mentor, Mon/Wed/Fri 08:30" },
   { id: "career-truth", name: "Career Truth", kind: "internal", handler: "career_truth", handlerFile: "career-truth", expectedInSchedule: true, note: "1 PM Tue/Wed/Thu, shared state with mentor-layer" },
   { id: "deaddrop-drain", name: "Dead-Drop Drain", kind: "internal", handler: "deaddrop_drain", expectedInSchedule: true, note: "drains work-laptop session dead-drop (homer-data/worklaptop/sessions) into local session_summaries at 00:15 PT, then deletes each blob. No handlerFile — imports from scripts/drain-deaddrop.ts. (Cosmos push/pull decommissioned 2026-06-16.)" },
   { id: "link-processor", name: "Link Processor", kind: "internal", handler: "link_processor", handlerFile: "link-processor", expectedInSchedule: true },
@@ -109,7 +108,6 @@ const SCHEDULED_INLINE_ONLY: JobEntry[] = [
   { id: "overnight-review", name: "Overnight Review", kind: "internal", handler: "overnight_review", expectedInSchedule: true, note: "disabled" },
   { id: "reminder-check", name: "Reminder Check", kind: "internal", handler: "reminder_check", expectedInSchedule: true },
   { id: "session-maintenance", name: "Session Maintenance", kind: "internal", handler: "session_maintenance", expectedInSchedule: true },
-  { id: "weekly-memory-audit", name: "Weekly Memory Audit", kind: "internal", handler: "weekly_memory_audit", expectedInSchedule: true },
 ];
 
 /**

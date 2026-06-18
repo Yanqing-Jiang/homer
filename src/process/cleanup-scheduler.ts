@@ -366,11 +366,23 @@ export class CleanupScheduler {
       const idleMs = Date.now() - getLastCdpUseAt();
       if (idleMs < CDP_IDLE_TEARDOWN_MS) return;
 
-      const tabs = await countCdpPages(CDP_PORT);
-      if (tabs <= CDP_MAX_IDLE_TABS) return;
-
       const pid = [...this.cdp.listenerPids][0] ?? 0;
       const idleMin = Math.round(idleMs / 60000);
+      const pageProbe = await countCdpPages(CDP_PORT);
+      if (!pageProbe.ok) {
+        logger.warn({ pid, idleMin, reason: pageProbe.reason }, "MONITOR: CDP page probe failed; skipping idle teardown");
+        actions.push({ pid, command: "chrome-cdp", action: "spared", reason: `cdp page probe failed: ${pageProbe.reason}` });
+        return;
+      }
+
+      const tabs = pageProbe.pages;
+      if (tabs === 0) {
+        logger.warn({ pid, idleMin }, "MONITOR: Idle CDP Chrome has no page targets; empty-session teardown disabled");
+        actions.push({ pid, command: "chrome-cdp", action: "spared", reason: `monitor-only: idle ${idleMin}min, 0 tabs; empty teardown disabled` });
+        return;
+      }
+
+      if (tabs <= CDP_MAX_IDLE_TABS) return;
 
       if (!this.enforce) {
         logger.warn({ pid, tabs, idleMin }, "MONITOR: Would tear down idle CDP Chrome");
@@ -563,21 +575,27 @@ export class CleanupScheduler {
 }
 
 /**
- * Count open page targets on the CDP port via its /json endpoint. Returns 0 on
- * any error (unreachable, non-OK, bad JSON, timeout) — fail-closed, so a probe
- * failure can never authorize a teardown.
+ * Count open page targets on the CDP port via its /json endpoint. Probe failures
+ * stay distinct from "0 pages" so callers can fail closed.
  */
-async function countCdpPages(port: number): Promise<number> {
+type CdpPageProbe =
+  | { ok: true; pages: number }
+  | { ok: false; reason: string };
+
+async function countCdpPages(port: number): Promise<CdpPageProbe> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2000);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2000);
     const resp = await fetch(`http://localhost:${port}/json`, { signal: controller.signal });
+    if (!resp.ok) return { ok: false, reason: `http ${resp.status}` };
+    const list = (await resp.json()) as unknown;
+    if (!Array.isArray(list)) return { ok: false, reason: "non-array response" };
+    return { ok: true, pages: list.filter((t): t is { type?: string } => typeof t === "object" && t !== null && (t as { type?: unknown }).type === "page").length };
+  } catch (err) {
+    const name = err instanceof Error ? err.name : "unknown";
+    return { ok: false, reason: name === "AbortError" ? "timeout" : name };
+  } finally {
     clearTimeout(timer);
-    if (!resp.ok) return 0;
-    const list = (await resp.json()) as Array<{ type?: string }>;
-    return Array.isArray(list) ? list.filter((t) => t.type === "page").length : 0;
-  } catch {
-    return 0;
   }
 }
 

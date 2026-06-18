@@ -202,8 +202,8 @@ async function sendHealthMessage(
 // Handlers safe to retry (idempotent, no user-facing side effects)
 const RETRYABLE_HANDLERS = new Set([
   "ideas_explore", "nightly_memory", "session_harvester", "memory_embeddings", "memory_reindex", "morning_review",
-  "weekly_memory_audit", "homer_improvements", "weekly_consolidation",
-  "mentor_layer", "career_truth",
+  "homer_improvements", "weekly_consolidation",
+  "career_truth",
   "memory_cleanup", "content_scraper", "outcome_tracker",
   "preference_updater", "idea_dedup", "idea_expiry", "nightly_code_push", "db_backup",
   "idea_synthesizer", "idea_deep_linker", "link_processor", "archive_verify", "health_check",
@@ -826,18 +826,6 @@ async function runHandler(
           result.success ? { notificationIntent: "user_info" } : {}
         );
       }
-      case "mentor_layer": {
-        const { runMentorLayer } = await import("./jobs/mentor-layer.js");
-        const result = await runMentorLayer(ctx.stateManager.getDb(), ctx.jobRunId);
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          result.success ? { notificationIntent: "user_info" } : {}
-        );
-      }
       case "career_truth": {
         const { runCareerTruth } = await import("./jobs/career-truth.js");
         const result = await runCareerTruth(ctx.stateManager.getDb(), ctx.jobRunId);
@@ -934,24 +922,6 @@ async function runHandler(
         }
         return buildResult(job, startedAt, ok, drainOut, ok ? undefined : drainOut, { notificationIntent: ok ? "operational_status" : "failure_alert" });
       }
-      case "weekly_memory_audit": {
-        try {
-          const { sendWeeklyMemoryAudit } = await import("../bot/handlers/weekly-memory-audit.js");
-          const result = await sendWeeklyMemoryAudit(ctx.bot, ctx.chatId, ctx.stateManager);
-          return buildResult(
-            job,
-            startedAt,
-            true,
-            `Weekly audit: ${result}`,
-            undefined,
-            { notificationIntent: "decision_request", sideEffectDelivered: true },
-          );
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          return buildResult(job, startedAt, false, "Weekly audit failed", msg, {});
-        }
-      }
-
       case "morning_review": {
         // Consolidated 9 AM morning review — memory candidates, ideas, cleanup proposals, skills
         let parts: string[] = [];

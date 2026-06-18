@@ -20,7 +20,9 @@ import {
   getClaimMetrics,
   type KnowledgeClaim,
 } from "../../memory/claims.js";
-import { sendMemoryMoments } from "./memory-review.js";
+// Memory/skill candidate review moved to the web Review tab (homer-web).
+// sendMemoryMoments is intentionally no longer called from here; its button
+// handlers stay registered in bot/index.ts so historical Telegram cards still work.
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -207,8 +209,9 @@ function renderHealthSignalsBlock(signals: MorningHealthSignal[], startOrdinal: 
 }
 
 /**
- * Send the morning review. Renders candidates inline via sendMemoryMoments
- * (expanded mode, chunked), then appends a health-signals message if present.
+ * Send the morning brief: a daily digest + read-only health signals. Memory and
+ * skill candidate review now lives on the web Review tab (homer-web), so they are
+ * surfaced here only as a count + pointer — not as interactive Telegram cards.
  */
 export async function sendMorningReview(
   bot: Bot,
@@ -229,36 +232,26 @@ export async function sendMorningReview(
   if (summary.healthSignals.length > 0) counts.push(`${summary.healthSignals.length} health`);
   const countLine = counts.join(" • ");
 
-  // Combined candidates render first (memory + skills in one chunked flow), then health
-  const combined = [...summary.memoryCandidates, ...summary.skillCandidates];
+  const lines: string[] = [
+    `🌅 <b>Morning Review</b> ${escapeHtml(headerSuffix)}`,
+    `<i>${escapeHtml(countLine)}</i>`,
+  ];
 
-  const ordinalsEnd = combined.length;
-
-  if (combined.length > 0) {
-    try {
-      await sendMemoryMoments(bot, chatId, combined, {
-        title: `🌅 Morning Review ${headerSuffix}`,
-        subtitle: countLine,
-        expanded: true,
-        chunkCharBudget: 3500,
-      });
-    } catch (err) {
-      logger.error({ error: err }, "Morning review: sendMemoryMoments failed");
-    }
+  // Memory + skill candidates: pointer to the web Review tab (no inline cards).
+  const reviewCount = summary.memoryCandidates.length + summary.skillCandidates.length;
+  if (reviewCount > 0) {
+    lines.push("", `📥 <b>${reviewCount}</b> item${reviewCount === 1 ? "" : "s"} to review → web Review tab`);
   }
 
-  // Health signals: informational inline (no actions in v1 — read-only alerts)
+  // Health signals: informational (read-only alerts).
   if (summary.healthSignals.length > 0) {
-    const header = combined.length === 0
-      ? `🌅 <b>Morning Review</b> ${escapeHtml(headerSuffix)}\n<i>${escapeHtml(countLine)}</i>\n`
-      : "";
-    const block = renderHealthSignalsBlock(summary.healthSignals, ordinalsEnd + 1);
-    const text = header + block;
-    try {
-      await bot.api.sendMessage(chatId, text, { parse_mode: "HTML" });
-    } catch (err) {
-      logger.error({ error: err }, "Morning review: health signals send failed");
-    }
+    lines.push(renderHealthSignalsBlock(summary.healthSignals, 1));
+  }
+
+  try {
+    await bot.api.sendMessage(chatId, lines.join("\n"), { parse_mode: "HTML" });
+  } catch (err) {
+    logger.error({ error: err }, "Morning review: send failed");
   }
 
   logger.info({
@@ -266,7 +259,7 @@ export async function sendMorningReview(
     skills: summary.skillCandidates.length,
     health: summary.healthSignals.length,
     total: summary.totalItems,
-  }, "Sent morning review (inline)");
+  }, "Sent morning brief (memory review on web)");
 }
 
 /**
