@@ -11,10 +11,10 @@
 import { mkdirSync } from "fs";
 import { executeClaudeCommand } from "./claude.js";
 import { executeOpenCodeCLI, type OpenCodeCLIOptions, type OpenCodeCLIResult } from "./opencode-cli.js";
-import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { logger } from "../utils/logger.js";
 
-const FLASH_FALLBACK_MODEL = `google-aistudio/${GEMINI_CLI_FLASH_MODEL}`;
+// Browser-scrape Gemini fallback runs on opencode Flash 3.5 (High), driving agent-browser.
+const FLASH_FALLBACK_MODEL = "google/gemini-3.5-flash";
 
 // Give Claude 90% of the total budget so there's time left for the fallback.
 const CLAUDE_TIMEOUT_RATIO = 0.9;
@@ -87,6 +87,7 @@ export async function executeBrowserScrape(
     ...options,
     timeout: remainingTimeout,
     model: FLASH_FALLBACK_MODEL,
+    forceOpenCode: true,
     browserOnly: true,
   });
 

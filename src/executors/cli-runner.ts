@@ -6,7 +6,6 @@ import { StateManager, type CLIRunStatus, type ExecutorStateType } from "../stat
 import { executeClaudeCommand } from "./claude.js";
 import { executePooledClaudeTurn, closePooledClaudeSession, closeAllPooledClaudeSessions } from "./claude-session-pool.js";
 import { executeOpenCodeCLI } from "./opencode-cli.js";
-import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { runWithFallbackChain, DEFAULT_CHAIN, type ExecutorKind } from "./fallback-orchestrator.js";
@@ -483,7 +482,8 @@ ${pendingContext.context}
 
           if (executorKind === "opencode") {
             const result = await executeOpenCodeCLI(prompt, "", {
-              model: model || `google/${GEMINI_CLI_FLASH_MODEL}`,
+              model: model || "google/gemini-3.5-flash",
+              forceOpenCode: true,
               yolo: true,
               sandbox: true,
               signal: abortController.signal,

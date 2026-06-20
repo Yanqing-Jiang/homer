@@ -1,5 +1,5 @@
 import type { ParsedSession } from "./parsers.js";
-import { executeFlashViaAgy } from "../executors/gemini.js";
+import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -67,7 +67,10 @@ Messages: ${session.messageCount}
 
 ${conversationText}`;
 
-  const result = await executeFlashViaAgy(prompt, {
+  const result = await executeOpenCodeCLI(prompt, "", {
+    model: "google/gemini-3.5-flash",
+    forceOpenCode: true,
+    researchOnly: false,
     timeout: 900_000,
     signal,
   });

@@ -1,6 +1,5 @@
 import { executeClaudeCommand } from "./claude.js";
 import { executeOpenCodeCLI } from "./opencode-cli.js";
-import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import type { ExecutorKind } from "./fallback-orchestrator.js";
@@ -64,7 +63,8 @@ async function runCheckupWithExecutor(
       const res = await executeOpenCodeCLI(prompt, "", {
         timeout: 300000,
         sandbox: true,
-        model: GEMINI_CLI_FLASH_MODEL,
+        model: "google/gemini-3.5-flash",
+        forceOpenCode: true,
       });
       return res.exitCode === 0 ? res.output : null;
     }

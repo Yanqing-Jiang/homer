@@ -3,7 +3,6 @@ import { QueueManager } from "./manager.js";
 import { StateManager, type Job } from "../state/manager.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
-import { GEMINI_CLI_FLASH_MODEL } from "../executors/gemini-cli.js";
 import { executeCodexCLI } from "../executors/codex-cli.js";
 import { executeKimiCLI } from "../executors/kimi-cli.js";
 import { acquireSlot } from "../executors/concurrency.js";
@@ -140,7 +139,8 @@ export class QueueWorker {
           const result = await executeOpenCodeCLI(query, "", {
             timeout: 1200000,
             sandbox: true,
-            model: GEMINI_CLI_FLASH_MODEL,
+            model: "google/gemini-3.5-flash",
+            forceOpenCode: true,
           });
           return {
             exitCode: result.exitCode,

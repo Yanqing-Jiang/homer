@@ -8,9 +8,7 @@ import { LANE_CWD, DEFAULT_JOB_TIMEOUT } from "./types.js";
 import { executeKimiCLI } from "../executors/kimi-cli.js";
 import { executeCodexCLI } from "../executors/codex-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
-import { RESEARCH_ONLY_PREFIX } from "../executors/opencode-cli.js";
-import { executeFlashViaAgy } from "../executors/gemini.js";
-import { executeGeminiCLIDirect, GEMINI_CLI_PRO_MODEL } from "../executors/gemini-cli.js";
+import { RESEARCH_ONLY_PREFIX, executeOpenCodeCLI } from "../executors/opencode-cli.js";
 import {
   runWithFallbackChain,
   DEFAULT_CHAIN,
@@ -178,8 +176,8 @@ async function executeKimiJob(
 
 /**
  * Execute a Gemini-lane job.
- * Flash models route through Gemini CLI (multi-account rotation).
- * Non-flash models fall back to Claude Sonnet.
+ * Flash- and pro-tagged models run on opencode Gemini 3.5 Flash (High).
+ * Non-Gemini models fall back to Claude Sonnet.
  */
 async function executeGeminiJob(
   job: RegisteredJob,
@@ -198,9 +196,8 @@ async function executeGeminiJob(
     ? loadContextFiles(config.contextFiles)
     : "";
 
-  const executorLabel = isGeminiNative
-    ? (model.includes("pro") ? "gemini-pro" : "gemini-flash")
-    : "claude-sonnet";
+  // Both flash- and pro-tagged jobs now run on opencode Gemini 3.5 Flash (High).
+  const executorLabel = isGeminiNative ? "gemini-flash" : "claude-sonnet";
 
   logger.info(
     { jobId: config.id, executor: executorLabel, model, queryLength: query.length },
@@ -216,21 +213,17 @@ async function executeGeminiJob(
         ? `Context:\n${contextPrompt}\n\n---\n\nTask:\n${query}`
         : query;
 
-      if (model.includes("pro")) {
-        // Route Pro models directly through Gemini CLI
-        const result = await executeGeminiCLIDirect(fullPrompt, {
-          model: GEMINI_CLI_PRO_MODEL,
-          timeout,
-          role: "research",
-        });
-        output = result.output;
-        exitCode = result.exitCode;
-      } else {
-        // Route Flash models through OpenCode routing layer
-        const result = await executeFlashViaAgy(fullPrompt, { timeout });
-        output = result.output;
-        exitCode = result.exitCode;
-      }
+      // Both Flash and Pro scheduled jobs run on opencode Flash 3.5 (High).
+      // forceOpenCode bypasses the legacy agy redirect inside executeOpenCodeCLI.
+      const result = await executeOpenCodeCLI(fullPrompt, "", {
+        model: "google/gemini-3.5-flash",
+        timeout,
+        forceOpenCode: true,
+        researchOnly: true,
+        runId: config.id,
+      });
+      output = result.output;
+      exitCode = result.exitCode;
     } else {
       // Non-Gemini models route to Claude Sonnet (existing behavior)
       const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();

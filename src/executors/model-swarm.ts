@@ -13,7 +13,6 @@
 
 import { z } from "zod";
 import { executeOpenCodeCLI } from "./opencode-cli.js";
-import { GEMINI_CLI_FLASH_MODEL, executeGeminiCLIDirect } from "./gemini-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { executeClaudeCommand } from "./claude.js";
@@ -93,7 +92,8 @@ async function executeAgent(
     if (agent.executor === "opencode") {
       const timeout = agent.timeout ?? DEFAULT_AGENT_TIMEOUT;
       const result = await executeOpenCodeCLI(agent.prompt, agent.context ?? "", {
-        model: agent.model ?? `google/${GEMINI_CLI_FLASH_MODEL}`,
+        model: agent.model ?? "google/gemini-3.5-flash",
+        forceOpenCode: true,
         timeout,
         researchOnly: true,
         signal,
@@ -442,9 +442,10 @@ export async function consolidateResults(
   );
 
   const sysPrompt = options?.systemPrompt ?? "You are a precise consolidation engine. Follow instructions exactly. Output valid JSON when requested.";
-  const result = await executeGeminiCLIDirect(
+  const result = await executeOpenCodeCLI(
     sysPrompt + "\n\n---\n\n" + fullPrompt,
-    { timeout: 300_000 },
+    "",
+    { model: "google/gemini-3.5-flash", forceOpenCode: true, researchOnly: false, timeout: 300_000 },
   );
 
   if (result.exitCode !== 0) {
