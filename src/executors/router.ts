@@ -13,7 +13,6 @@ import Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import { logger } from "../utils/logger.js";
 import { executeOpenCodeCLI, getAccountStatus, type OpenCodeCLIOptions } from "./opencode-cli.js";
-import { GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI, type KimiCLIOptions } from "./kimi-cli.js";
 import { executeClaudeCommand, type ClaudeExecutorOptions } from "./claude.js";
@@ -523,7 +522,8 @@ export async function executeWithRouting(
 
     if (executor === "gemini") {
       const res = await executeOpenCodeCLI(query, "", {
-        model: request.model || GEMINI_CLI_FLASH_MODEL,
+        model: request.model || "google/gemini-3.5-flash",
+        forceOpenCode: true,
         sandbox: true,
         yolo: true,
       } as OpenCodeCLIOptions);

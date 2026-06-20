@@ -47,6 +47,11 @@ export interface OpenCodeCLIOptions {
   cwd?: string;
   /** OpenCode agent mode: "build" (default) or "plan" */
   agent?: string;
+  /** Bypass the legacy Gemini-CLI (agy) redirect and run Google/Flash/Pro models
+   *  through opencode's own OAuth backend. The redirect dates to when opencode's
+   *  Google accounts were ToS-blocked; that is no longer true (4 accounts validated
+   *  2026-06-19), so scheduled jobs opt in here to actually use opencode. */
+  forceOpenCode?: boolean;
   /** Homer run identifier — propagated into ProcessRegistry so watchdog/cleanup-scheduler
    *  can join managed_processes.run_id → cli_runs.id when reaping corpses.
    *  Critical: cli-runner routes `executorKind === "gemini"` through executeOpenCodeCLI,
@@ -153,13 +158,15 @@ export async function executeOpenCodeCLI(
     cwd,
     agent,
     runId,
+    forceOpenCode = false,
   } = options;
 
   // Normalize model name: callers may pass "gemini-3-flash-preview" without provider prefix
   const model = rawModel.includes("/") ? rawModel : `google/${rawModel}`;
 
-  // Route Google/Flash/Pro models to Gemini CLI (OpenCode Google account ToS-blocked)
-  if (model.includes("flash") || model.includes("pro") || model.startsWith("google/") || model.startsWith("google-aistudio/")) {
+  // Route Google/Flash/Pro models to Gemini CLI (OpenCode Google account ToS-blocked).
+  // Callers that have validated opencode's OAuth backend pass forceOpenCode to skip this.
+  if (!forceOpenCode && (model.includes("flash") || model.includes("pro") || model.startsWith("google/") || model.startsWith("google-aistudio/"))) {
     const geminiModel = model.replace(/^google(-aistudio)?\//, "");
     const geminiRole = "research" as const;
     const effectivePrompt = context ? `${context}\n\n---\n\n${prompt}` : prompt;
