@@ -1078,7 +1078,7 @@ ${checksStr}`;
         const lane = telegramLane(ctx.chat.id);
         resetExecutorSessionForLane(lane, stateManager, runManager);
         if (!parsed.query) {
-          await ctx.reply("Fresh session started. Executor reset to Claude.");
+          await ctx.reply(`Fresh session started. Executor reset to the default (${stateManager.resolveDefaultExecutor()}).`);
           return;
         }
       }
@@ -1225,7 +1225,7 @@ ${checksStr}`;
         const attachments = consumePendingAttachments(lane);
         await handleNewExecution(ctx, parsed, stateManager, runManager, false, attachments);
       } else {
-        await ctx.reply("Fresh session started. Executor reset to Claude.");
+        await ctx.reply(`Fresh session started. Executor reset to the default (${stateManager.resolveDefaultExecutor()}).`);
       }
       return;
     }
