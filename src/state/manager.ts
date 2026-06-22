@@ -1563,7 +1563,9 @@ export class StateManager {
     const row = this._db
       .prepare("SELECT executor, model FROM harness_default WHERE id = 1")
       .get() as { executor: "claude" | "opencode"; model: string } | undefined;
-    return row ?? { executor: "opencode", model: "opencode-go/glm-5.2" };
+    // Hard 'claude' safety when the row is somehow missing (fresh DB pre-seed / corruption).
+    // The migration seeds opencode as the intended default; this is only the fail-safe floor.
+    return row ?? { executor: "claude", model: "opus[1m]" };
   }
 
   /**

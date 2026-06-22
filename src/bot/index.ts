@@ -181,7 +181,7 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
     // Get current executor state
     const lane = telegramLane(ctx.chat.id);
     const executorState = stateManager.getCurrentExecutor(lane);
-    const currentExecutor = executorState?.executor || "claude";
+    const currentExecutor = executorState?.executor || stateManager.resolveDefaultExecutor();
 
     await ctx.reply(
       "H.O.M.E.R ready.\n\n" +
@@ -234,7 +234,7 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
       if (executorState.model) statusText += ` (${executorState.model})`;
       statusText += `\nSwitched: ${age}m ago (${executorState.messageCount} msgs)\n\n`;
     } else {
-      statusText += "Executor: *claude* (default)\n\n";
+      statusText += `Executor: *${stateManager.resolveDefaultExecutor()}* (global default)\n\n`;
     }
 
     // Session state
@@ -1266,7 +1266,7 @@ ${checksStr}`;
     if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
       const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
       const currentState = stateManager.getCurrentExecutor(lane);
-      const previousExecutor = currentState?.executor ?? "claude";
+      const previousExecutor = currentState?.executor ?? stateManager.resolveDefaultExecutor();
 
       runManager.closeLaneSession(lane, "executor switch");
 
@@ -1304,7 +1304,7 @@ ${checksStr}`;
     if (isExecutorSwitchWithQuery(parsed) && parsed.newExecutor) {
       const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
       const currentState = stateManager.getCurrentExecutor(lane);
-      const previousExecutor = currentState?.executor ?? "claude";
+      const previousExecutor = currentState?.executor ?? stateManager.resolveDefaultExecutor();
 
       runManager.closeLaneSession(lane, "executor switch with query");
 

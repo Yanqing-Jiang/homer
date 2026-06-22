@@ -1,0 +1,13 @@
+-- opencode/GLM-5.2 global-harness flip — one-time cleanup of legacy lane pins.
+--
+-- The pre-flip cli-runner auto-seeded an executor_state row for EVERY lane from the then-default
+-- 'claude' on first use. After the flip those rows pin their lanes to Claude and prevent the
+-- global harness default (and the /harness kill-switch) from reaching them. The new code never
+-- auto-seeds, so any executor='claude' row left here is overwhelmingly a legacy auto-seed (a
+-- deliberate /switch claude was a no-op pre-flip since claude WAS the default, and if cleared the
+-- lane simply follows the global default again — which the user can re-pin with /switch).
+--
+-- Delete ONLY the Claude-pinned rows. Deliberate non-default switches (codex / chatgpt / gemini /
+-- opencode) are real per-lane overrides and are preserved. Claude session continuity is unaffected:
+-- Telegram claude sessions live in executor_session_map and web claude sessions on the thread row.
+DELETE FROM executor_state WHERE executor = 'claude';
