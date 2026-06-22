@@ -59,7 +59,9 @@ async function runCheckupWithExecutor(
   prompt: string
 ): Promise<string | null> {
   try {
-    if (executor === "gemini") {
+    if (executor === "gemini" || executor === "opencode") {
+      // Cheap flash checkup for both the Gemini research path and the opencode GLM harness
+      // (don't burn the GLM cap on a best-effort verification).
       const res = await executeOpenCodeCLI(prompt, "", {
         timeout: 300000,
         sandbox: true,

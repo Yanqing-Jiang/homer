@@ -207,7 +207,8 @@ export class AccountManager {
 
 // Approximate costs per 1K tokens (USD)
 const COST_PER_1K_TOKENS: Record<string, { input: number; output: number }> = {
-  opencode: { input: 0, output: 0 },
+  opencode: { input: 0.0006, output: 0.0022 }, // opencode-go/glm-5.2 (GLM Zen pricing, Phase 3 refines)
+  gemini: { input: 0.00025, output: 0.001 },   // Gemini 3.5 Flash research path
   "gemini-api": { input: 0.00025, output: 0.001 },
   kimi: { input: 0, output: 0 },
   claude: { input: 0.003, output: 0.015 },

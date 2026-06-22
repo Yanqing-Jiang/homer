@@ -1181,6 +1181,24 @@ ${checksStr}`;
       logger.warn({ error }, "Overnight message handling failed, falling back to normal flow");
     }
 
+    // Global harness kill-switch (admin): /harness [claude|opencode|glm|status].
+    // Flips the GLOBAL default for every lane without an explicit per-lane override.
+    const harnessMatch = text.trim().match(/^\/harness(?:@\w+)?(?:\s+(\S+))?\s*$/i);
+    if (harnessMatch) {
+      const arg = (harnessMatch[1] ?? "").toLowerCase();
+      if (arg === "claude") {
+        stateManager.setHarnessDefault("claude");
+        await ctx.reply("🔁 Global harness default → *Claude* (opus[1m]). Lanes without an explicit override now use Claude.", { parse_mode: "Markdown" });
+      } else if (arg === "opencode" || arg === "glm") {
+        stateManager.setHarnessDefault("opencode");
+        await ctx.reply("🔁 Global harness default → *opencode / GLM-5.2*. Lanes without an explicit override now use GLM.", { parse_mode: "Markdown" });
+      } else {
+        const cur = stateManager.getHarnessDefault();
+        await ctx.reply(`Harness default: *${cur.executor}* (${cur.model})\nUsage: \`/harness claude\` | \`/harness opencode\``, { parse_mode: "Markdown" });
+      }
+      return;
+    }
+
     const parsed = parseCommand(text);
 
     if (!parsed) {

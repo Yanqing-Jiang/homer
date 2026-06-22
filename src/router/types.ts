@@ -3,4 +3,4 @@
  */
 export type LaneId = "work" | "default";
 
-export type ExecutorType = "claude" | "gemini" | "codex" | "kimi";
+export type ExecutorType = "claude" | "gemini" | "codex" | "kimi" | "opencode";

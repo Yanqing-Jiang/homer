@@ -21,7 +21,7 @@ export interface ScheduledJobConfig {
   enabled: boolean;
   timeout?: number; // ms, defaults to 600000 (10 min)
   model?: string; // e.g. "sonnet", "haiku", "opus" - defaults to sonnet
-  executor?: "claude" | "codex" | "kimi" | "gemini" | "internal"; // defaults to claude; internal for daemon handlers
+  executor?: "claude" | "codex" | "kimi" | "gemini" | "opencode" | "internal"; // defaults to claude; opencode = GLM-5.2 edit harness; internal for daemon handlers
   handler?: "ideas_review" | "overnight_review" | "idea_ingest" | "idea_dedup" | "idea_expiry" | "session_harvester" | "memory_embeddings" | "memory_reindex" | "weekly_consolidation" | "memory_cleanup" | "ideas_explore" | "nightly_memory" | "homer_improvements" | "career_truth" | "morning_review" | "job_hunt_discover" | "job_hunt_daily_approval" | "job_hunt_weekly_report" | "job_hunt_email_monitor" | "job_hunt_followup" | "job_hunt_stalled_check" | "nightly_code_push" | "db_backup" | "outcome_tracker" | "preference_updater" | "content_scraper" | "idea_synthesizer" | "idea_deep_linker" | "archive_verify" | "health_check" | "architecture_updater" | "daemon_cleanup" | "session_maintenance" | "reminder_check" | "link_processor" | "overnight_youtube" | "harness_auto_improve" | "candidate_expiry" | "sync_wedding_rsvps" | "telegram_registry_cleanup" | "deaddrop_drain";
   contextFiles?: string[]; // files to load and inject as system prompt context
   streamProgress?: boolean; // stream tool usage to Telegram (default: false)

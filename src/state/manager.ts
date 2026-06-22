@@ -1535,6 +1535,58 @@ export class StateManager {
   }
 
   /**
+   * Invalidate a single stale executor session (e.g. opencode `-s` "Session not found").
+   * Deletes the exact (lane, executor, model) session-map row, and clears
+   * executor_state.session_id ONLY if the live row still points at that stale id — so a
+   * concurrent executor/model switch can't clobber a now-current session.
+   */
+  clearStaleExecutorSession(
+    lane: string,
+    executor: ExecutorStateType,
+    model: string | null | undefined,
+    staleSessionId: string
+  ): void {
+    this.clearStoredExecutorSessions(lane, executor, model ?? null);
+    this._db.prepare(
+      `UPDATE executor_state SET session_id = NULL
+       WHERE lane = ? AND executor = ? AND session_id = ?`
+    ).run(lane, executor, staleSessionId);
+  }
+
+  /**
+   * Read the global default harness (migration 104, one row id=1). Falls back to the
+   * opencode/GLM default if the row is somehow missing. Not cached: a single indexed
+   * read, and the kill-switch must be visible across the daemon + MCP processes that
+   * share this DB.
+   */
+  getHarnessDefault(): { executor: "claude" | "opencode"; model: string } {
+    const row = this._db
+      .prepare("SELECT executor, model FROM harness_default WHERE id = 1")
+      .get() as { executor: "claude" | "opencode"; model: string } | undefined;
+    return row ?? { executor: "opencode", model: "opencode-go/glm-5.2" };
+  }
+
+  /**
+   * Flip the global default harness. `setHarnessDefault('claude')` is the instant global
+   * kill-switch (no rebuild/restart); 'opencode' restores GLM-5.2.
+   */
+  setHarnessDefault(executor: "claude" | "opencode", model?: string): void {
+    const effectiveModel = model ?? (executor === "opencode" ? "opencode-go/glm-5.2" : "opus[1m]");
+    this._db
+      .prepare("UPDATE harness_default SET executor = ?, model = ?, updated_at = ? WHERE id = 1")
+      .run(executor, effectiveModel, Date.now());
+    logger.info({ executor, model: effectiveModel }, "Global harness default changed");
+  }
+
+  /**
+   * The realized default executor for any "no explicit choice" decision. Used by the
+   * interactive no-row path, router default/code-change cases, worker/scheduler defaults.
+   */
+  resolveDefaultExecutor(): "claude" | "opencode" {
+    return this.getHarnessDefault().executor;
+  }
+
+  /**
    * Get the current executor for a lane
    */
   getCurrentExecutor(lane: string): ExecutorState | null {

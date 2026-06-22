@@ -15,6 +15,29 @@ import { buildConversationContext, CONTEXT_DEFAULTS, type ContextSource } from "
 
 export type CLIExecutor = "claude" | "gemini" | "codex" | "kimi" | "chatgpt" | "opencode";
 
+const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".heif", ".tiff", ".svg"];
+
+/** True if any attachment path looks like an image (GLM-5.2 is text-only). */
+function hasImageAttachment(attachments?: string[]): boolean {
+  if (!attachments?.length) return false;
+  return attachments.some((p) => IMAGE_EXTENSIONS.some((ext) => p.toLowerCase().endsWith(ext)));
+}
+
+/** Default model for a freshly-resolved executor (no explicit/lane model). */
+function defaultModelFor(executor: CLIExecutor, lane: string): string | undefined {
+  switch (executor) {
+    case "claude":
+    case "chatgpt":
+      return getClaudeDefaultModel(lane);
+    case "gemini":
+    case "codex":
+    case "opencode":
+      return getExecutorModel(executor);
+    default:
+      return undefined;
+  }
+}
+
 export interface CLIRunStartParams {
   lane: string;
   executor?: CLIExecutor;
@@ -244,23 +267,27 @@ export class CLIRunManager {
   }
 
   private async _executeRun(runId: string, params: CLIRunStartParams): Promise<CLIRunResult> {
-    let executorState = this.stateManager.getCurrentExecutor(params.lane);
-    const executor = params.executor ?? executorState?.executor ?? "claude";
-    const model = params.model ?? executorState?.model ?? (
-      executor === "claude"
-        ? getClaudeDefaultModel(params.lane)
-        : executor === "gemini" || executor === "codex" || executor === "opencode"
-          ? getExecutorModel(executor)
-          : executor === "chatgpt"
-            ? getClaudeDefaultModel(params.lane)
-            : undefined
-    );
-    const sessionId = executorState?.sessionId ?? null;
+    const executorState = this.stateManager.getCurrentExecutor(params.lane);
+    // Resolution order: explicit turn/command -> per-lane override -> global harness default.
+    // An executor_state row exists ONLY when the user explicitly /switch-ed the lane; we no
+    // longer auto-seed it from the default, so the global kill-switch (harness_default) reaches
+    // every non-overridden lane. Session/continuity is tracked in executor_session_map, keyed by
+    // (lane, executor, model), independent of the executor_state row.
+    const laneExecutor = params.executor ?? executorState?.executor ?? this.stateManager.resolveDefaultExecutor();
+    const laneModel = params.model ?? executorState?.model ?? defaultModelFor(laneExecutor, params.lane);
 
-    if (!executorState && executor !== "kimi") {
-      this.stateManager.setCurrentExecutor(params.lane, executor, model ?? undefined);
-      executorState = this.stateManager.getCurrentExecutor(params.lane);
-    }
+    // GLM-5.2 (opencode) is text-only: route image-bearing turns to Claude (vision) for THIS
+    // turn only — the lane's persisted executor/model stay opencode and its session is untouched.
+    const imageOverride = laneExecutor === "opencode" && hasImageAttachment(params.attachments);
+    const executor = imageOverride ? "claude" : laneExecutor;
+    const model = imageOverride ? getClaudeDefaultModel(params.lane) : laneModel;
+
+    // Resume the session for the *resolved* executor+model from the session map (never blindly
+    // from executor_state.session_id, which may belong to a different executor). Image-override
+    // turns are stateless w.r.t. the opencode lane — they never resume or persist into it.
+    const sessionId = imageOverride
+      ? null
+      : (this.stateManager.getStoredExecutorSessionId(params.lane, executor as ExecutorStateType, model ?? null) ?? null);
 
     const contextSource: ContextSource | null = params.threadId
       ? params.threadId.startsWith("tg:")
@@ -272,9 +299,10 @@ export class CLIRunManager {
       if (params.suppressContext) return false;
       if (!contextSource) return false;
       if (executorKind !== executor) return true;
-      const messageCount = executorState?.messageCount ?? 0;
-      if (messageCount > 0) return false;
-      if (executorState?.sessionId) return false;
+      // A resumable session (for the resolved executor+model) already carries history.
+      if (sessionId) return false;
+      const sameExecutorRow = executorState?.executor === executor;
+      if (sameExecutorRow && (executorState?.messageCount ?? 0) > 0) return false;
       return true;
     };
 
@@ -481,15 +509,35 @@ ${pendingContext.context}
           }
 
           if (executorKind === "opencode") {
-            const result = await executeOpenCodeCLI(prompt, "", {
-              model: model || "google/gemini-3.5-flash",
-              forceOpenCode: true,
-              yolo: true,
-              sandbox: true,
-              signal: abortController.signal,
-              runId,
-              onPartial: params.onPartial,
-            });
+            const opencodeModel = model || getExecutorModel("opencode");
+            const runOpenCode = (resumeId: string | undefined) =>
+              executeOpenCodeCLI(prompt, "", {
+                model: opencodeModel,
+                forceOpenCode: true,
+                researchOnly: false, // main harness: opencode turns must be edit-capable
+                agent: "build",
+                cwd: params.cwd,
+                resume: resumeId,
+                yolo: true,
+                sandbox: true,
+                signal: abortController.signal,
+                runId,
+                onPartial: params.onPartial,
+              });
+
+            const wantResume = executorKind === executor ? sessionId ?? undefined : undefined;
+            let result = await runOpenCode(wantResume);
+            // opencode `run -s` fails hard ("Session not found") on a pruned/stale session
+            // instead of starting a new one. Invalidate exactly that stale id (keyed +
+            // guarded, won't clobber a concurrently-switched session) and retry fresh once.
+            if (
+              wantResume &&
+              result.exitCode !== 0 &&
+              /session not found|invalid.*session|session.*not.*valid/i.test(result.output)
+            ) {
+              this.stateManager.clearStaleExecutorSession(params.lane, "opencode", opencodeModel ?? null, wantResume);
+              result = await runOpenCode(undefined);
+            }
             return {
               output: result.output,
               exitCode: result.exitCode,
@@ -653,19 +701,31 @@ ${pendingContext.context}
           });
         }
 
-        // Update executor state
+        // Update executor state. An image-override turn ran Claude as a transient vision detour:
+        // store its session only in Claude's own map slot, and never touch the opencode lane's
+        // executor_state row or message count (keeps the opencode session + continuity intact).
         if (persistedSessionId) {
-          this.stateManager.setExecutorSessionId(
-            params.lane,
-            persistedSessionId,
-            executorUsed as ExecutorStateType,
-            model ?? null,
-            newSessionAccountId ?? null
-          );
+          if (imageOverride) {
+            this.stateManager.setStoredExecutorSessionId(
+              params.lane,
+              "claude",
+              persistedSessionId,
+              model ?? null,
+              newSessionAccountId ?? null
+            );
+          } else {
+            this.stateManager.setExecutorSessionId(
+              params.lane,
+              persistedSessionId,
+              executorUsed as ExecutorStateType,
+              model ?? null,
+              newSessionAccountId ?? null
+            );
+          }
         }
 
         const status: CLIRunStatus = exitCode === 0 ? "completed" : (wasCancelled ? "cancelled" : "failed");
-        if (status !== "cancelled") {
+        if (status !== "cancelled" && !imageOverride) {
           this.stateManager.incrementExecutorMessageCount(params.lane);
         }
         this.stateManager.completeCliRun(runId, {

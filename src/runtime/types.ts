@@ -28,7 +28,7 @@ export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'time
 export type RiskLevel = 'low' | 'medium' | 'high';
 export type EffortEstimate = 'trivial' | 'small' | 'medium' | 'large' | 'epic';
 
-export type Executor = 'claude' | 'gemini' | 'kimi' | 'codex' | 'api';
+export type Executor = 'claude' | 'gemini' | 'kimi' | 'codex' | 'opencode' | 'api';
 export type Lane = 'work' | 'default';
 
 export type ApprovalDecision = 'approved' | 'rejected' | 'deferred' | 'modified';
