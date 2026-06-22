@@ -18,6 +18,7 @@ import { executeKimiCLI, type KimiCLIOptions } from "./kimi-cli.js";
 import { executeClaudeCommand, type ClaudeExecutorOptions } from "./claude.js";
 import type { ExecutorResult } from "./types.js";
 import { runWithFallbackChain, DEFAULT_CHAIN, type ExecutorKind } from "./fallback-orchestrator.js";
+import { getExecutorModel } from "../commands/index.js";
 import { AccountManager, CostTracker, DeferralQueue, createRouterState, type RouterState } from "./router-db.js";
 import { writeChainTrace } from "./trace-writer.js";
 
@@ -34,7 +35,8 @@ export type TaskType =
   | "general";       // Default catch-all
 
 export type ExecutorType =
-  | "opencode"
+  | "opencode"      // GLM-5.2 edit harness (opencode-go/glm-5.2)
+  | "gemini"        // Gemini 3.5 Flash research path (opencode OAuth, CLI)
   | "gemini-api"
   | "kimi"
   | "claude"
@@ -113,8 +115,9 @@ export { AccountManager, CostTracker, DeferralQueue };
 // ============================================
 
 // Approximate costs per 1K tokens (USD)
-const COST_PER_1K_TOKENS: Record<ExecutorType, { input: number; output: number }> = {
-  opencode: { input: 0, output: 0 },               // Free (OpenCode CLI)
+const COST_PER_1K_TOKENS: Record<string, { input: number; output: number }> = {
+  opencode: { input: 0.0006, output: 0.0022 },     // opencode-go/glm-5.2 (GLM Zen pricing, Phase 3 refines)
+  "gemini": { input: 0.00025, output: 0.001 },     // Gemini 3.5 Flash research path (opencode OAuth)
   "gemini-api": { input: 0.00025, output: 0.001 }, // $0.25/$1.00 per 1M (flash)
   "kimi": { input: 0, output: 0 },                 // Kimi CLI (Moonshot managed, free tier)
   "claude": { input: 0.003, output: 0.015 },       // Sonnet pricing
@@ -126,8 +129,26 @@ export function estimateCost(
   estimatedInputTokens: number,
   estimatedOutputTokens: number = estimatedInputTokens * 0.5
 ): number {
-  const rates = COST_PER_1K_TOKENS[executor];
+  const rates = COST_PER_1K_TOKENS[executor] ?? { input: 0, output: 0 };
   return (estimatedInputTokens / 1000) * rates.input + (estimatedOutputTokens / 1000) * rates.output;
+}
+
+/**
+ * Global default harness for generic auto-routing (migration 104 harness_default).
+ * Conservative: any read failure falls back to "claude" so we never accidentally route
+ * to GLM when state is unreadable.
+ */
+function getHarnessDefaultExecutor(): ExecutorType {
+  try {
+    const db = _db ?? (getRouterState(), _db);
+    if (!db) return "claude";
+    const row = db.prepare("SELECT executor FROM harness_default WHERE id = 1").get() as
+      | { executor: "claude" | "opencode" }
+      | undefined;
+    return row?.executor ?? "claude";
+  } catch {
+    return "claude";
+  }
 }
 
 // ============================================
@@ -315,10 +336,17 @@ export function removeDeferral(id: string): void {
 const routingCache = new Map<string, { decision: RoutingDecision; timestamp: number }>();
 const ROUTING_CACHE_TTL = 300000; // 5 minutes
 
-function buildRoutingCacheKey(taskType: string, promptLength: number, urgency: string): string {
+function buildRoutingCacheKey(
+  taskType: string,
+  promptLength: number,
+  urgency: string,
+  harnessDefault: ExecutorType
+): string {
   // Bucket prompt length to reduce cache misses
   const bucket = promptLength < 1000 ? "short" : promptLength < 10000 ? "medium" : "long";
-  return `${taskType}:${bucket}:${urgency}`;
+  // Include the live harness default: a /harness kill-switch flip must invalidate any cached
+  // decision whose executor was derived from it (otherwise a flip lags up to ROUTING_CACHE_TTL).
+  return `${taskType}:${bucket}:${urgency}:${harnessDefault}`;
 }
 
 /**
@@ -347,9 +375,11 @@ export function makeRoutingDecision(request: RoutingRequest): RoutingDecision {
     };
   }
 
-  // Check cache first
+  // Check cache first. Read the live harness default once and fold it into the key so a
+  // kill-switch flip can't be masked by a stale cached decision.
+  const harnessDefault = getHarnessDefaultExecutor();
   const promptLength = (request.query?.length || 0) + (request.context?.length || 0);
-  const cacheKey = buildRoutingCacheKey(taskType, promptLength, urgency);
+  const cacheKey = buildRoutingCacheKey(taskType, promptLength, urgency, harnessDefault);
   const cached = routingCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < ROUTING_CACHE_TTL) {
     return { ...cached.decision, reason: `[cached] ${cached.decision.reason}` };
@@ -358,10 +388,12 @@ export function makeRoutingDecision(request: RoutingRequest): RoutingDecision {
   // Deterministic fast-path for common patterns
   const cliStatus = getGeminiCLIPoolStatus();
   const weakExecutors = getWeakExecutors(taskType);
-  const defaultFallbackChain: ExecutorType[] = ["codex", "kimi", "opencode"]
+  // "gemini" = Gemini 3.5 Flash research path (cheap/high-volume). Distinct from the
+  // "opencode" GLM-5.2 edit harness, which is reserved for explicit user-facing turns.
+  const defaultFallbackChain: ExecutorType[] = ["codex", "kimi", "gemini"]
     .filter(e => !weakExecutors.has(e)) as ExecutorType[];
   if (cliStatus.allExhausted) {
-    const idx = defaultFallbackChain.indexOf("opencode");
+    const idx = defaultFallbackChain.indexOf("gemini");
     if (idx >= 0) defaultFallbackChain.splice(idx, 1);
   }
 
@@ -371,7 +403,7 @@ export function makeRoutingDecision(request: RoutingRequest): RoutingDecision {
 
   switch (taskType) {
     case "discovery":
-      executor = cliStatus.allExhausted ? "kimi" : "opencode";
+      executor = cliStatus.allExhausted ? "kimi" : "gemini";
       reason = "Discovery → free research executor";
       break;
     case "long-context":
@@ -387,12 +419,12 @@ export function makeRoutingDecision(request: RoutingRequest): RoutingDecision {
       reason = "Verification → Codex (deep reasoning)";
       break;
     case "batch":
-      executor = cliStatus.allExhausted ? "kimi" : "opencode";
+      executor = cliStatus.allExhausted ? "kimi" : "gemini";
       reason = "Batch → free executor (overnight)";
       break;
     default:
-      executor = "claude";
-      reason = "General → Claude (default)";
+      executor = harnessDefault;
+      reason = `General → harness default (${executor})`;
   }
 
   // Build fallback chain: remove primary from chain, keep others
@@ -421,7 +453,9 @@ function mapExecutorTypeToKind(executor: ExecutorType): ExecutorKind | null {
     case "claude":
       return "claude";
     case "opencode":
-      return "gemini";
+      return "opencode"; // GLM-5.2 edit harness (decoupled from the gemini flash kind)
+    case "gemini":
+      return "gemini"; // Gemini 3.5 Flash research path
     case "codex":
       return "codex";
     case "kimi":
@@ -435,8 +469,10 @@ function mapExecutorKindToType(executor: ExecutorKind): ExecutorType {
   switch (executor) {
     case "claude":
       return "claude";
+    case "opencode":
+      return "opencode"; // GLM-5.2 edit harness
     case "gemini":
-      return "opencode";
+      return "gemini"; // Gemini 3.5 Flash research path
     case "codex":
       return "codex";
     case "kimi":
@@ -507,10 +543,15 @@ export async function executeWithRouting(
     const startedAt = new Date();
     const cwd = request.cwd ?? process.cwd();
 
+    // request.model is meant for the primary executor only. On fallback to a *different* executor
+    // kind, drop it so a GLM/Claude/flash model string never reaches an incompatible CLI — each
+    // fallback executor uses its own default model instead.
+    const modelForExecutor = executor === primary ? request.model : undefined;
+
     if (executor === "claude") {
       const res = await executeClaudeCommand(query, {
         cwd,
-        model: request.model,
+        model: modelForExecutor,
       } as ClaudeExecutorOptions);
       return {
         ...res,
@@ -522,8 +563,27 @@ export async function executeWithRouting(
 
     if (executor === "gemini") {
       const res = await executeOpenCodeCLI(query, "", {
-        model: request.model || "google/gemini-3.5-flash",
+        model: modelForExecutor || "google/gemini-3.5-flash",
         forceOpenCode: true,
+        sandbox: true,
+        yolo: true,
+      } as OpenCodeCLIOptions);
+      return {
+        ...res,
+        error: res.exitCode === 0 ? undefined : res.output,
+        startedAt,
+        completedAt: new Date(),
+      };
+    }
+
+    if (executor === "opencode") {
+      // GLM-5.2 edit harness — edit-capable (researchOnly:false + build agent + skip-perms).
+      const res = await executeOpenCodeCLI(query, "", {
+        model: modelForExecutor || getExecutorModel("opencode"),
+        forceOpenCode: true,
+        researchOnly: false,
+        agent: "build",
+        cwd,
         sandbox: true,
         yolo: true,
       } as OpenCodeCLIOptions);
@@ -772,8 +832,9 @@ export function mapSessionExecutorToRouting(
     case "claude":
       return "claude";
     case "gemini":
+      return "gemini"; // Gemini 3.5 Flash research path
     case "opencode":
-      return "opencode";
+      return "opencode"; // GLM-5.2 edit harness
     case "codex":
       return "codex";
     case "kimi":

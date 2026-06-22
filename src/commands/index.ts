@@ -8,6 +8,8 @@
 export {
   COMMANDS,
   EXECUTOR_MODELS,
+  OPENCODE_DEFAULT_MODEL,
+  CLAUDE_ROLLBACK_MODEL,
   getCommand,
   getExecutorCommands,
   getCommandsByCategory,

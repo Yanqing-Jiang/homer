@@ -159,14 +159,21 @@ export async function executeOpenCodeCLI(
     agent,
     runId,
     forceOpenCode = false,
+    resume,
+    yolo = false,
   } = options;
 
   // Normalize model name: callers may pass "gemini-3-flash-preview" without provider prefix
   const model = rawModel.includes("/") ? rawModel : `google/${rawModel}`;
 
+  // opencode-go/* models (GLM, DeepSeek, MiniMax, …) are first-class Zen models and must
+  // never be diverted to the legacy Gemini CLI — guards against "deepseek-v4-pro" matching
+  // the `includes("pro")` redirect below.
+  const isOpenCodeGo = model.startsWith("opencode-go/");
+
   // Route Google/Flash/Pro models to Gemini CLI (OpenCode Google account ToS-blocked).
   // Callers that have validated opencode's OAuth backend pass forceOpenCode to skip this.
-  if (!forceOpenCode && (model.includes("flash") || model.includes("pro") || model.startsWith("google/") || model.startsWith("google-aistudio/"))) {
+  if (!forceOpenCode && !isOpenCodeGo && (model.includes("flash") || model.includes("pro") || model.startsWith("google/") || model.startsWith("google-aistudio/"))) {
     const geminiModel = model.replace(/^google(-aistudio)?\//, "");
     const geminiRole = "research" as const;
     const effectivePrompt = context ? `${context}\n\n---\n\n${prompt}` : prompt;
@@ -195,6 +202,9 @@ export async function executeOpenCodeCLI(
 
   logger.debug({ model, promptLength: effectivePrompt.length, contextLength: context.length, researchOnly }, "Executing OpenCode CLI");
 
+  // Sandbox browserOnly agents to /tmp to prevent file writes to home directory
+  const effectiveCwd = cwd || (browserOnly ? "/tmp/homer-scrape" : (process.env.HOME || "/Users/yj"));
+
   return new Promise((resolve) => {
     // Build the full message: context + prompt combined via stdin if context exists
     const fullMessage = context
@@ -206,11 +216,18 @@ export async function executeOpenCodeCLI(
       fullMessage,
       "-m", model,
       "--format", "json",
+      // Pin opencode's project dir to the OS cwd: opencode has its own project-dir
+      // semantics, so set both to keep edits/session storage scoped to the same place.
+      "--dir", effectiveCwd,
       ...(agent ? ["--agent", agent] : []),
+      // Autonomous Homer turns: auto-approve tool permissions so edit-capable turns
+      // don't stall waiting for an interactive prompt that never comes.
+      ...(yolo ? ["--dangerously-skip-permissions"] : []),
+      // Resume a prior opencode session for multi-turn continuity. cli-runner clears a
+      // stale session id and retries fresh on "Session not found" (opencode -s fails hard).
+      ...(resume ? ["-s", resume] : []),
     ];
 
-    // Sandbox browserOnly agents to /tmp to prevent file writes to home directory
-    const effectiveCwd = cwd || (browserOnly ? "/tmp/homer-scrape" : (process.env.HOME || "/Users/yj"));
     if (browserOnly) mkdirSync(effectiveCwd, { recursive: true });
 
     const child: ChildProcess = spawn("opencode", args, {

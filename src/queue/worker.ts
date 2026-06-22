@@ -3,6 +3,7 @@ import { QueueManager } from "./manager.js";
 import { StateManager, type Job } from "../state/manager.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
+import { getExecutorModel } from "../commands/index.js";
 import { executeCodexCLI } from "../executors/codex-cli.js";
 import { executeKimiCLI } from "../executors/kimi-cli.js";
 import { acquireSlot } from "../executors/concurrency.js";
@@ -92,7 +93,13 @@ export class QueueWorker {
     let releaseSlot: (() => void) | null = null;
     try {
       const memoryJob = isMemoryJob(job);
-      const chain: ExecutorKind[] = memoryJob ? [...MEMORY_CHAIN] : [...DEFAULT_CHAIN];
+      // Memory jobs stay on the cheap flash chain (high-volume, cap-sensitive). General jobs
+      // follow the global harness default first (opencode/GLM, or claude on the kill-switch).
+      const harnessDefault = this.stateManager.resolveDefaultExecutor() as ExecutorKind;
+      const baseChain: ExecutorKind[] = memoryJob ? [...MEMORY_CHAIN] : [...DEFAULT_CHAIN];
+      const chain: ExecutorKind[] = memoryJob
+        ? baseChain
+        : [harnessDefault, ...baseChain.filter((e) => e !== harnessDefault)];
       const primary: ExecutorKind = chain[0] ?? "claude";
 
       // Determine subagent (used only when executor is Claude)
@@ -156,6 +163,28 @@ export class QueueWorker {
           const result = await executeCodexCLI(query, {
             cwd: HOME,
             timeout: 1800000,
+          });
+          return {
+            exitCode: result.exitCode,
+            output: result.output,
+            error: result.exitCode === 0 ? undefined : result.output,
+            duration: result.duration,
+            startedAt,
+            completedAt: new Date(),
+          };
+        }
+
+        if (executor === "opencode") {
+          // GLM-5.2 edit harness — edit-capable (researchOnly:false + build agent + skip-perms).
+          const result = await executeOpenCodeCLI(query, "", {
+            timeout: 1200000,
+            model: getExecutorModel("opencode"),
+            forceOpenCode: true,
+            researchOnly: false,
+            agent: "build",
+            cwd: HOME,
+            yolo: true,
+            sandbox: true,
           });
           return {
             exitCode: result.exitCode,

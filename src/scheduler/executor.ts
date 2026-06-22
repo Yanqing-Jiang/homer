@@ -8,7 +8,28 @@ import { LANE_CWD, DEFAULT_JOB_TIMEOUT } from "./types.js";
 import { executeKimiCLI } from "../executors/kimi-cli.js";
 import { executeCodexCLI } from "../executors/codex-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
+import Database from "better-sqlite3";
+import { PATHS } from "../config/paths.js";
+
+/**
+ * Lazy read-only connection to read the global harness default (migration 104) without
+ * spinning up a full StateManager (which would re-run migrations). Conservative: any
+ * failure → "claude". Connection lives for the daemon lifetime.
+ */
+let _harnessDb: Database.Database | null = null;
+function harnessDefaultExecutor(): ExecutorKind {
+  try {
+    if (!_harnessDb) _harnessDb = new Database(PATHS.db, { readonly: true });
+    const row = _harnessDb
+      .prepare("SELECT executor FROM harness_default WHERE id = 1")
+      .get() as { executor: "claude" | "opencode" } | undefined;
+    return (row?.executor as ExecutorKind) ?? "claude";
+  } catch {
+    return "claude";
+  }
+}
 import { RESEARCH_ONLY_PREFIX, executeOpenCodeCLI } from "../executors/opencode-cli.js";
+import { OPENCODE_DEFAULT_MODEL } from "../commands/index.js";
 import {
   runWithFallbackChain,
   DEFAULT_CHAIN,
@@ -291,6 +312,104 @@ async function executeGeminiJob(
 
     logger.error({ jobId: config.id, error: errorMessage }, `Gemini-lane job failed (${executorLabel})`);
 
+    return {
+      jobId: config.id,
+      jobName: config.name,
+      sourceFile,
+      startedAt,
+      completedAt,
+      success: false,
+      output: "",
+      error: errorMessage,
+      exitCode: 1,
+      duration,
+    };
+  }
+}
+
+/**
+ * Execute a scheduled job on the opencode GLM-5.2 edit harness.
+ * Edit-capable (researchOnly:false + build agent + skip-perms), unlike executeGeminiJob
+ * which is pinned to the Gemini Flash research path.
+ */
+async function executeOpenCodeJob(
+  job: RegisteredJob,
+  startedAt: Date,
+  onProgress?: ProgressCallback,
+  options?: { queryOverride?: string; emitCompletedEvent?: boolean; timeoutOverride?: number; modelOverride?: string }
+): Promise<JobExecutionResult> {
+  const { config, sourceFile } = job;
+  const timeout = options?.timeoutOverride ?? config.timeout ?? 1200000;
+  const emitCompleted = options?.emitCompletedEvent !== false;
+  const query = options?.queryOverride ?? config.query;
+  const model = options?.modelOverride ?? config.model ?? OPENCODE_DEFAULT_MODEL;
+  const contextPrompt = config.contextFiles?.length ? loadContextFiles(config.contextFiles) : "";
+  const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
+
+  logger.info(
+    { jobId: config.id, executor: "opencode", model, queryLength: query.length },
+    `Executing opencode GLM job`
+  );
+
+  try {
+    const fullPrompt = contextPrompt
+      ? `Context:\n${contextPrompt}\n\n---\n\nTask:\n${query}`
+      : query;
+    const result = await executeOpenCodeCLI(fullPrompt, "", {
+      model,
+      timeout,
+      forceOpenCode: true,
+      researchOnly: false,
+      agent: "build",
+      cwd,
+      yolo: true,
+      sandbox: true,
+      runId: config.id,
+    });
+    const completedAt = new Date();
+    const duration = completedAt.getTime() - startedAt.getTime();
+    const success = result.exitCode === 0;
+
+    if (emitCompleted) {
+      onProgress?.({
+        type: "completed",
+        jobId: config.id,
+        jobName: config.name,
+        timestamp: completedAt,
+        message: success
+          ? `✅ Completed: ${config.name} (${Math.round(duration / 1000)}s, opencode-glm)`
+          : `❌ Failed: ${config.name}`,
+        details: { duration, success },
+      });
+    }
+
+    return {
+      jobId: config.id,
+      jobName: config.name,
+      sourceFile,
+      startedAt,
+      completedAt,
+      success,
+      output: result.output || "(No output)",
+      error: success ? undefined : result.output,
+      exitCode: result.exitCode,
+      duration,
+    };
+  } catch (error) {
+    const completedAt = new Date();
+    const duration = completedAt.getTime() - startedAt.getTime();
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (emitCompleted) {
+      onProgress?.({
+        type: "completed",
+        jobId: config.id,
+        jobName: config.name,
+        timestamp: completedAt,
+        message: `❌ Failed: ${config.name}`,
+        details: { duration, success: false },
+      });
+    }
+    logger.error({ jobId: config.id, error: errorMessage }, `opencode GLM job failed`);
     return {
       jobId: config.id,
       jobName: config.name,
@@ -823,7 +942,12 @@ export async function executeScheduledJob(
   // Acquire concurrency slot before spawning CLI processes
   return withSlot(async () => {
 
-  const defaultChain: ExecutorKind[] = memoryJob ? [...MEMORY_CHAIN] : [...DEFAULT_CHAIN];
+  // No explicit per-job executor → follow the global harness default (opencode/GLM, or
+  // claude on the kill-switch). Memory jobs stay on the cheap flash chain (cap-sensitive).
+  const harnessDefault = harnessDefaultExecutor();
+  const defaultChain: ExecutorKind[] = memoryJob
+    ? [...MEMORY_CHAIN]
+    : [harnessDefault, ...DEFAULT_CHAIN.filter((e) => e !== harnessDefault)];
   const chain: ExecutorKind[] = configuredExecutor
     ? [configuredExecutor, ...defaultChain.filter((e) => e !== configuredExecutor)]
     : defaultChain;
@@ -853,6 +977,13 @@ export async function executeScheduledJob(
     }
     if (executor === "gemini") {
       return executeGeminiJob(job, startedAt, onProgress, {
+        queryOverride,
+        emitCompletedEvent: false,
+        modelOverride: effectiveModel,
+      });
+    }
+    if (executor === "opencode") {
+      return executeOpenCodeJob(job, startedAt, onProgress, {
         queryOverride,
         emitCompletedEvent: false,
         modelOverride: effectiveModel,

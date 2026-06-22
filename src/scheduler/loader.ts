@@ -63,8 +63,8 @@ function validateJob(job: unknown, sourceFile: string): ScheduledJobConfig | nul
     enabled: j.enabled !== false, // default to true
     timeout: typeof j.timeout === "number" ? j.timeout : undefined,
     model: typeof j.model === "string" ? j.model : undefined,
-    executor: typeof j.executor === "string" && ["claude", "codex", "kimi", "gemini", "internal"].includes(j.executor)
-      ? j.executor as "claude" | "codex" | "kimi" | "gemini" | "internal"
+    executor: typeof j.executor === "string" && ["claude", "codex", "kimi", "gemini", "opencode", "internal"].includes(j.executor)
+      ? j.executor as "claude" | "codex" | "kimi" | "gemini" | "opencode" | "internal"
       : undefined,
     handler: hasHandler ? (j.handler as ScheduledJobConfig["handler"]) : undefined,
     contextFiles: Array.isArray(j.contextFiles) ? j.contextFiles : undefined,

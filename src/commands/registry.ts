@@ -29,6 +29,14 @@ export interface CommandDefinition {
 }
 
 /**
+ * Default opencode harness model (GLM-5.2 via the opencode-go/Zen provider) and the
+ * Claude rollback alias. Single source of truth for the "main harness" switch — see
+ * the harness_default table + resolveDefaultExecutor() for the runtime default.
+ */
+export const OPENCODE_DEFAULT_MODEL = "opencode-go/glm-5.2";
+export const CLAUDE_ROLLBACK_MODEL = "opus[1m]";
+
+/**
  * Model configurations for each executor
  */
 export const EXECUTOR_MODELS: Record<ExecutorType, string | undefined> = {
@@ -37,7 +45,7 @@ export const EXECUTOR_MODELS: Record<ExecutorType, string | undefined> = {
   gemini: GEMINI_CLI_FLASH_MODEL, // Fast, cheap
   kimi: "kimi-k2-5",                // Kimi K2.5 via NVIDIA NIM
   chatgpt: undefined,               // Uses Claude + browser skill to access ChatGPT
-  opencode: GEMINI_CLI_FLASH_MODEL, // Gemini CLI (was OpenCode CLI)
+  opencode: OPENCODE_DEFAULT_MODEL, // opencode-go/glm-5.2 — the main harness model
 };
 
 /**
@@ -112,10 +120,18 @@ export const COMMANDS: CommandDefinition[] = [
   {
     name: "/gemini_flash",
     category: "executor",
-    description: "Gemini Flash via Gemini CLI",
-    executor: "opencode",
+    description: "Gemini Flash via Gemini CLI (research)",
+    executor: "gemini",
     model: GEMINI_CLI_FLASH_MODEL,
     aliases: ["/open_flash"],
+  },
+  {
+    name: "/glm",
+    category: "executor",
+    description: "Switch to opencode GLM-5.2 (edit harness)",
+    executor: "opencode",
+    model: OPENCODE_DEFAULT_MODEL,
+    aliases: ["/opencode", "/open_glm"],
   },
   {
     name: "/open_opus",
@@ -133,6 +149,11 @@ export const COMMANDS: CommandDefinition[] = [
   },
 
   // System commands
+  {
+    name: "/harness",
+    category: "system",
+    description: "Global default harness switch: /harness claude | /harness opencode",
+  },
   {
     name: "/status",
     category: "system",
