@@ -47,6 +47,9 @@ export interface OpenCodeCLIOptions {
   cwd?: string;
   /** OpenCode agent mode: "build" (default) or "plan" */
   agent?: string;
+  /** Provider-specific reasoning-effort variant passed to opencode as --variant
+   *  (e.g. "high", "max"). Omitted → opencode uses the model's default variant. */
+  variant?: string;
   /** Bypass the legacy Gemini-CLI (agy) redirect and run Google/Flash/Pro models
    *  through opencode's own OAuth backend. The redirect dates to when opencode's
    *  Google accounts were ToS-blocked; that is no longer true (4 accounts validated
@@ -157,6 +160,7 @@ export async function executeOpenCodeCLI(
     browserOnly = false,
     cwd,
     agent,
+    variant,
     runId,
     forceOpenCode = false,
     resume,
@@ -165,6 +169,11 @@ export async function executeOpenCodeCLI(
 
   // Normalize model name: callers may pass "gemini-3-flash-preview" without provider prefix
   const model = rawModel.includes("/") ? rawModel : `google/${rawModel}`;
+
+  // DeepSeek V4 Pro is only worth its premium at max reasoning effort (it's our
+  // high-quality synthesis model — see eval 2026-06-22), so default it to --variant max
+  // unless a caller explicitly overrides. Other models keep their opencode default.
+  const effectiveVariant = variant ?? (model === "opencode-go/deepseek-v4-pro" ? "max" : undefined);
 
   // opencode-go/* models (GLM, DeepSeek, MiniMax, …) are first-class Zen models and must
   // never be diverted to the legacy Gemini CLI — guards against "deepseek-v4-pro" matching
@@ -215,6 +224,7 @@ export async function executeOpenCodeCLI(
       "run",
       fullMessage,
       "-m", model,
+      ...(effectiveVariant ? ["--variant", effectiveVariant] : []),
       "--format", "json",
       // Pin opencode's project dir to the OS cwd: opencode has its own project-dir
       // semantics, so set both to keep edits/session storage scoped to the same place.

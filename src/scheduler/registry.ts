@@ -114,12 +114,7 @@ const SCHEDULED_INLINE_ONLY: JobEntry[] = [
  * Jobs dispatched via external CLI (no internal handler needed).
  */
 const SCHEDULED_CLI_JOBS: JobEntry[] = [
-  { id: "morning-brief", name: "Morning Brief", kind: "cli", handler: "claude", expectedInSchedule: true },
-  { id: "trading-service-start", name: "Trading Service Start", kind: "cli", handler: "bash", expectedInSchedule: true, note: "disabled" },
-  { id: "trading-service-stop", name: "Trading Service Stop", kind: "cli", handler: "bash", expectedInSchedule: true, note: "disabled" },
-  { id: "trading-fast-signals", name: "Trading Fast Signals", kind: "cli", handler: "bash", expectedInSchedule: true, note: "disabled" },
-  { id: "trading-slow-signals", name: "Trading Slow Signals", kind: "cli", handler: "bash", expectedInSchedule: true, note: "disabled" },
-  { id: "trading-daily-summary", name: "Trading Daily Summary", kind: "cli", handler: "claude", expectedInSchedule: true, note: "disabled" },
+  { id: "morning-brief", name: "Morning Brief", kind: "cli", handler: "opencode", expectedInSchedule: true },
 ];
 
 /**
