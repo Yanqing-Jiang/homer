@@ -62,6 +62,7 @@ function validateJob(job: unknown, sourceFile: string): ScheduledJobConfig | nul
     lane,
     enabled: j.enabled !== false, // default to true
     timeout: typeof j.timeout === "number" ? j.timeout : undefined,
+    minOutputLength: typeof j.minOutputLength === "number" ? j.minOutputLength : undefined,
     model: typeof j.model === "string" ? j.model : undefined,
     executor: typeof j.executor === "string" && ["claude", "codex", "kimi", "gemini", "opencode", "internal"].includes(j.executor)
       ? j.executor as "claude" | "codex" | "kimi" | "gemini" | "opencode" | "internal"
