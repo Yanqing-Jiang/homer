@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-import json, sys, os, urllib.request, urllib.error
+import json, sys, subprocess
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-MODEL = "gemini-3.5-flash"
-BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+# Research grounding routed through Antigravity OAuth (agy-rotate), NOT the metered
+# GEMINI_API_KEY / AI Studio grounding — keeps grounded searches off the capped project.
+# Tradeoff: agy holds a global keychain lock, so concurrent searches serialize.
+AGY_ROTATE = "/Users/yj/bin/agy-rotate"
 BUDGETS = {"fast": 4096, "deep": 16384}
 
 TOOL_DEF = {
@@ -51,65 +52,38 @@ def resolve_budget(level):
     return level, BUDGETS.get(level, BUDGETS["deep"])
 
 def search_gemini(query, urls=None, thinking_level=None):
-    prompt = query
+    level, _budget = resolve_budget(thinking_level)
+    parts = [query]
     if urls:
-        prompt = f"{query}\n\nURLs to analyze:\n" + "\n".join(urls)
-
-    level, budget = resolve_budget(thinking_level)
-
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "tools": [{"googleSearch": {}}],
-        "generationConfig": {
-            "thinkingConfig": {"thinkingBudget": budget, "includeThoughts": False}
-        },
-    }
-
-    url = f"{BASE}/{MODEL}:generateContent?key={GEMINI_API_KEY}"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+        parts.append("URLs to analyze:\n" + "\n".join(urls))
+    depth = ("Give a quick, concise answer."
+             if level == "fast"
+             else "Do thorough research with citations from multiple sources.")
+    prompt = (
+        "Use Google Search to answer the following. " + depth + " "
+        "Return ONLY the findings as concise markdown with inline source URLs. "
+        "Do NOT write any files, and do NOT return a file-path or task summary.\n\n"
+        + "\n\n".join(parts)
     )
+
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode()
-        return f"## Search Error\n\nHTTP {e.code}: {body}"
+        proc = subprocess.run(
+            [AGY_ROTATE, "--dangerously-skip-permissions", "-p", prompt],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        return "## Search Error\n\nAntigravity OAuth search timed out (180s)."
     except Exception as e:
         return f"## Search Error\n\n{e}"
 
-    candidate = (data.get("candidates") or [None])[0]
-    if not candidate:
-        return "## Search Error\n\nNo response from Gemini."
-
-    text = ""
-    parts = (candidate.get("content") or {}).get("parts") or []
-    for p in parts:
-        if "text" in p:
-            text += p["text"]
-
-    sections = [f"## Search Results ({level}, budget={budget})\n", text, ""]
-    gm = candidate.get("groundingMetadata") or {}
-    queries = gm.get("webSearchQueries") or []
-    chunks = gm.get("groundingChunks") or []
-
-    if chunks:
-        sections.append("### Sources")
-        for c in chunks:
-            w = c.get("web") or {}
-            if w.get("uri"):
-                sections.append(f"- [{w.get('title', w['uri'])}]({w['uri']})")
-        sections.append("")
-
-    if queries:
-        sections.append("### Search Queries Used")
-        for q in queries:
-            sections.append(f'- "{q}"')
-
-    return "\n".join(sections)
+    out = (proc.stdout or "").strip()
+    if not out:
+        err = (proc.stderr or "").strip()[:300]
+        return f"## Search Error\n\nagy returned no output (exit {proc.returncode}). {err}"
+    return f"## Search Results ({level}, via Antigravity OAuth)\n\n{out}"
 
 def main():
     while True:
