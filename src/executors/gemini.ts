@@ -430,14 +430,18 @@ Keep it actionable and concise.`,
  * Health check for the native API
  */
 export async function checkGeminiAPIHealth(): Promise<boolean> {
-  try {
-    const result = await executeGeminiAPI("Respond with the single word: OK", {
-      model: "flash3",  // gemini-3.5-flash
-      useGrounding: false,
-      maxTokens: 50,
-    });
-    return result.exitCode === 0 && result.output.length > 0;
-  } catch {
-    return false;
+  const models = ["flash3", "gemini-3-flash-preview"];
+  for (const model of models) {
+    try {
+      const result = await executeGeminiAPI("Respond with the single word: OK", {
+        model,
+        useGrounding: false,
+        maxTokens: 50,
+      });
+      if (result.exitCode === 0 && result.output.length > 0) return true;
+    } catch {
+      // try next model
+    }
   }
+  return false;
 }
