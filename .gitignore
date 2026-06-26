@@ -169,3 +169,5 @@ workspaces/
 /src/state/migrations/081_wedding_rsvps.sql
 /src/state/migrations/089_outbound_call_intents.sql
 /src/state/migrations/096_drop_idea_index.sql
+.env.bak*
+.env.*.bak
