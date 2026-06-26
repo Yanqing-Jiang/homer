@@ -29,7 +29,6 @@ function harnessDefaultExecutor(): ExecutorKind {
   }
 }
 import { RESEARCH_ONLY_PREFIX, executeOpenCodeCLI } from "../executors/opencode-cli.js";
-import { OPENCODE_DEFAULT_MODEL } from "../commands/index.js";
 import {
   runWithFallbackChain,
   DEFAULT_CHAIN,
@@ -342,7 +341,7 @@ async function executeOpenCodeJob(
   const timeout = options?.timeoutOverride ?? config.timeout ?? 1200000;
   const emitCompleted = options?.emitCompletedEvent !== false;
   const query = options?.queryOverride ?? config.query;
-  const model = options?.modelOverride ?? config.model ?? OPENCODE_DEFAULT_MODEL;
+  const model = options?.modelOverride ?? config.model;
   const contextPrompt = config.contextFiles?.length ? loadContextFiles(config.contextFiles) : "";
   const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
 

@@ -3,7 +3,7 @@ import { QueueManager } from "./manager.js";
 import { StateManager, type Job } from "../state/manager.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
-import { getExecutorModel } from "../commands/index.js";
+
 import { executeCodexCLI } from "../executors/codex-cli.js";
 import { executeKimiCLI } from "../executors/kimi-cli.js";
 import { acquireSlot } from "../executors/concurrency.js";
@@ -175,10 +175,10 @@ export class QueueWorker {
         }
 
         if (executor === "opencode") {
-          // GLM-5.2 edit harness — edit-capable (researchOnly:false + build agent + skip-perms).
+          // opencode edit harness — edit-capable (researchOnly:false + build agent + skip-perms).
+          // No model pin: uses opencode's config default (opencode.json model field).
           const result = await executeOpenCodeCLI(query, "", {
             timeout: 1200000,
-            model: getExecutorModel("opencode"),
             forceOpenCode: true,
             researchOnly: false,
             agent: "build",

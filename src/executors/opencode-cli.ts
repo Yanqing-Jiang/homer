@@ -153,7 +153,7 @@ export async function executeOpenCodeCLI(
   options: OpenCodeCLIOptions = {}
 ): Promise<OpenCodeCLIResult> {
   const {
-    model: rawModel = `google/${GEMINI_CLI_FLASH_MODEL}`,
+    model: rawModel,
     timeout = 1200000, // 20 minutes default
     signal,
     researchOnly = true,
@@ -167,8 +167,11 @@ export async function executeOpenCodeCLI(
     yolo = false,
   } = options;
 
-  // Normalize model name: callers may pass "gemini-3-flash-preview" without provider prefix
-  const model = rawModel.includes("/") ? rawModel : `google/${rawModel}`;
+  // Normalize model name: callers may pass "gemini-3-flash-preview" without provider prefix.
+  // When model is undefined, we omit -m entirely so opencode uses its own config default.
+  const model = rawModel
+    ? (rawModel.includes("/") ? rawModel : `google/${rawModel}`)
+    : undefined;
 
   // DeepSeek V4 Pro is only worth its premium at max reasoning effort (it's our
   // high-quality synthesis model — see eval 2026-06-22), so default it to --variant max
@@ -178,11 +181,13 @@ export async function executeOpenCodeCLI(
   // opencode-go/* models (GLM, DeepSeek, MiniMax, …) are first-class Zen models and must
   // never be diverted to the legacy Gemini CLI — guards against "deepseek-v4-pro" matching
   // the `includes("pro")` redirect below.
-  const isOpenCodeGo = model.startsWith("opencode-go/");
+  const isOpenCodeGo = model?.startsWith("opencode-go/") ?? false;
 
   // Route Google/Flash/Pro models to Gemini CLI (OpenCode Google account ToS-blocked).
   // Callers that have validated opencode's OAuth backend pass forceOpenCode to skip this.
-  if (!forceOpenCode && !isOpenCodeGo && (model.includes("flash") || model.includes("pro") || model.startsWith("google/") || model.startsWith("google-aistudio/"))) {
+  // When model is undefined (use opencode config default), skip the redirect — the config
+  // default is an opencode-go model, so Gemini CLI redirect doesn't apply.
+  if (model && !forceOpenCode && !isOpenCodeGo && (model.includes("flash") || model.includes("pro") || model.startsWith("google/") || model.startsWith("google-aistudio/"))) {
     const geminiModel = model.replace(/^google(-aistudio)?\//, "");
     const geminiRole = "research" as const;
     const effectivePrompt = context ? `${context}\n\n---\n\n${prompt}` : prompt;
@@ -223,7 +228,7 @@ export async function executeOpenCodeCLI(
     const args: string[] = [
       "run",
       fullMessage,
-      "-m", model,
+      ...(model ? ["-m", model] : []),
       ...(effectiveVariant ? ["--variant", effectiveVariant] : []),
       "--format", "json",
       // Pin opencode's project dir to the OS cwd: opencode has its own project-dir
@@ -389,7 +394,7 @@ export async function executeOpenCodeCLI(
           duration,
           executor: "opencode",
           sessionId,
-          model,
+          model: model ?? "opencode-default",
           accountId: 1,
           stats: {
             total_tokens: totalInputTokens + totalOutputTokens,
@@ -410,7 +415,7 @@ export async function executeOpenCodeCLI(
           duration,
           executor: "opencode",
           sessionId,
-          model,
+          model: model ?? "opencode-default",
           accountId: 1,
           metrics: buildMetrics(),
         });
@@ -424,7 +429,7 @@ export async function executeOpenCodeCLI(
           duration,
           executor: "opencode",
           sessionId,
-          model,
+          model: model ?? "opencode-default",
           accountId: 1,
           metrics: buildMetrics(),
         });
@@ -438,7 +443,7 @@ export async function executeOpenCodeCLI(
           duration,
           executor: "opencode",
           sessionId,
-          model,
+          model: model ?? "opencode-default",
           accountId: 1,
           metrics: buildMetrics(),
         });
@@ -452,7 +457,7 @@ export async function executeOpenCodeCLI(
           duration,
           executor: "opencode",
           sessionId,
-          model,
+          model: model ?? "opencode-default",
           accountId: 1,
           metrics: buildMetrics(),
         });
@@ -473,7 +478,7 @@ export async function executeOpenCodeCLI(
           duration,
           executor: "opencode",
           sessionId,
-          model,
+          model: model ?? "opencode-default",
           accountId: 1,
           metrics: buildMetrics(),
         });
@@ -486,7 +491,7 @@ export async function executeOpenCodeCLI(
         duration,
         executor: "opencode",
         sessionId,
-        model,
+        model: model ?? "opencode-default",
         accountId: 1,
         metrics: buildMetrics(),
         stats: {
@@ -508,7 +513,7 @@ export async function executeOpenCodeCLI(
         duration: Date.now() - startTime,
         executor: "opencode",
         sessionId: "",
-        model,
+        model: model ?? "opencode-default",
         accountId: 1,
         metrics: buildMetrics(),
       });
