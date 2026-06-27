@@ -10,6 +10,11 @@ import { executeCodexCLI } from "../executors/codex-cli.js";
 import { executeClaudeCommand } from "../executors/claude.js";
 import Database from "better-sqlite3";
 import { PATHS } from "../config/paths.js";
+import type { HarnessExecutor } from "../commands/harness-catalog.js";
+import {
+  mergeHarnessProfiles,
+  requireInternalJobHarnessBaseline,
+} from "./harness-baselines.js";
 
 /**
  * Lazy read-only connection to read the global harness default (migration 104) without
@@ -17,16 +22,34 @@ import { PATHS } from "../config/paths.js";
  * failure → "claude". Connection lives for the daemon lifetime.
  */
 let _harnessDb: Database.Database | null = null;
-function harnessDefaultExecutor(): ExecutorKind {
+function harnessDefault(): { executor: ExecutorKind; model: string | null } {
   try {
     if (!_harnessDb) _harnessDb = new Database(PATHS.db, { readonly: true });
     const row = _harnessDb
-      .prepare("SELECT executor FROM harness_default WHERE id = 1")
-      .get() as { executor: "claude" | "opencode" } | undefined;
-    return (row?.executor as ExecutorKind) ?? "claude";
+      .prepare("SELECT executor, model FROM harness_default WHERE id = 1")
+      .get() as { executor: HarnessExecutor; model: string | null } | undefined;
+    if (row?.executor && isExecutorKind(row.executor)) {
+      return { executor: row.executor, model: row.model };
+    }
+    return { executor: "claude", model: "opus[1m]" };
   } catch {
-    return "claude";
+    return { executor: "claude", model: "opus[1m]" };
   }
+}
+
+function jobHarnessOverride(jobId: string): HarnessSelection | undefined {
+  try {
+    if (!_harnessDb) _harnessDb = new Database(PATHS.db, { readonly: true });
+    const row = _harnessDb
+      .prepare("SELECT executor, model FROM job_harness_override WHERE job_id = ?")
+      .get(jobId) as { executor: HarnessExecutor; model: string | null } | undefined;
+    if (row?.executor && isExecutorKind(row.executor)) {
+      return { executor: row.executor, model: row.model };
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
 }
 import { RESEARCH_ONLY_PREFIX, executeOpenCodeCLI } from "../executors/opencode-cli.js";
 import {
@@ -37,6 +60,61 @@ import {
 } from "../executors/fallback-orchestrator.js";
 import { writeChainTrace } from "../executors/trace-writer.js";
 import { scanContent } from "../skills/guard.js";
+
+export interface HarnessExecutorOptions {
+  codex?: {
+    reasoningEffort?: string;
+  };
+  opencode?: {
+    forceOpenCode?: boolean;
+    researchOnly?: boolean;
+    agent?: string;
+    yolo?: boolean;
+    sandbox?: boolean;
+  };
+  kimi?: {
+    yolo?: boolean;
+  };
+}
+
+export interface HarnessSelection {
+  executor: ExecutorKind;
+  model: string | null;
+  cwdOverride?: string;
+  timeoutOverride?: number;
+  fallbackChain?: ExecutorKind[];
+  fallbackModels?: Partial<Record<ExecutorKind, string | null>>;
+  executorOptions?: HarnessExecutorOptions;
+}
+
+export type InternalHarnessCallProfile = Partial<HarnessSelection>;
+
+export interface RunJobHarnessOptions extends InternalHarnessCallProfile {
+  startedAt: Date;
+  onProgress?: ProgressCallback;
+  baseline?: HarnessSelection;
+  baselineSource?: "file" | "internal-registry" | "global" | "override";
+  emitCompletedEvent?: boolean;
+  singleExecutor?: ExecutorKind;
+  skipDiagnosis?: boolean;
+  scheduledRunId?: number;
+  memoryJob?: boolean;
+  signal?: AbortSignal;
+}
+
+type ExecutorDispatchOptions = {
+  queryOverride?: string;
+  emitCompletedEvent?: boolean;
+  timeoutOverride?: number;
+  modelOverride?: string | null;
+  cwdOverride?: string;
+  signal?: AbortSignal;
+  executorOptions?: HarnessExecutorOptions;
+};
+
+function isExecutorKind(executor: string): executor is ExecutorKind {
+  return executor === "claude" || executor === "gemini" || executor === "codex" || executor === "kimi" || executor === "opencode";
+}
 
 /**
  * Load context files and combine into a single string
@@ -95,11 +173,11 @@ async function executeKimiJob(
   job: RegisteredJob,
   startedAt: Date,
   onProgress?: ProgressCallback,
-  options?: { queryOverride?: string; emitCompletedEvent?: boolean; timeoutOverride?: number; modelOverride?: string }
+  options?: ExecutorDispatchOptions
 ): Promise<JobExecutionResult> {
   const { config, sourceFile } = job;
   const timeout = options?.timeoutOverride ?? config.timeout ?? 1200000; // 20 minutes default for kimi
-  const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
+  const cwd = options?.cwdOverride ?? LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
   const emitCompleted = options?.emitCompletedEvent !== false;
   const query = options?.queryOverride ?? config.query;
 
@@ -116,9 +194,10 @@ async function executeKimiJob(
   try {
     const result = await executeKimiCLI(query, contextPrompt, {
       timeout,
-      yolo: true,
+      yolo: options?.executorOptions?.kimi?.yolo ?? true,
       workDir: cwd,
-      model: options?.modelOverride,
+      model: options?.modelOverride ?? undefined,
+      signal: options?.signal,
     });
 
     const completedAt = new Date();
@@ -203,7 +282,7 @@ async function executeGeminiJob(
   job: RegisteredJob,
   startedAt: Date,
   onProgress?: ProgressCallback,
-  options?: { queryOverride?: string; emitCompletedEvent?: boolean; timeoutOverride?: number; modelOverride?: string }
+  options?: ExecutorDispatchOptions
 ): Promise<JobExecutionResult> {
   const { config, sourceFile } = job;
   const timeout = options?.timeoutOverride ?? config.timeout ?? 1200000;
@@ -241,12 +320,14 @@ async function executeGeminiJob(
         forceOpenCode: true,
         researchOnly: true,
         runId: config.id,
+        signal: options?.signal,
+        cwd: options?.cwdOverride,
       });
       output = result.output;
       exitCode = result.exitCode;
     } else {
       // Non-Gemini models route to Claude Sonnet (existing behavior)
-      const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
+      const cwd = options?.cwdOverride ?? LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
       const fullQuery = contextPrompt
         ? RESEARCH_ONLY_PREFIX + `Context:\n${contextPrompt}\n\n---\n\nTask:\n${query}`
         : RESEARCH_ONLY_PREFIX + query;
@@ -254,6 +335,7 @@ async function executeGeminiJob(
         timeout,
         cwd,
         model: "sonnet",
+        signal: options?.signal,
       });
       output = result.output;
       exitCode = result.exitCode;
@@ -335,7 +417,7 @@ async function executeOpenCodeJob(
   job: RegisteredJob,
   startedAt: Date,
   onProgress?: ProgressCallback,
-  options?: { queryOverride?: string; emitCompletedEvent?: boolean; timeoutOverride?: number; modelOverride?: string }
+  options?: ExecutorDispatchOptions
 ): Promise<JobExecutionResult> {
   const { config, sourceFile } = job;
   const timeout = options?.timeoutOverride ?? config.timeout ?? 1200000;
@@ -343,7 +425,7 @@ async function executeOpenCodeJob(
   const query = options?.queryOverride ?? config.query;
   const model = options?.modelOverride ?? config.model;
   const contextPrompt = config.contextFiles?.length ? loadContextFiles(config.contextFiles) : "";
-  const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
+  const cwd = options?.cwdOverride ?? LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
 
   logger.info(
     { jobId: config.id, executor: "opencode", model, queryLength: query.length },
@@ -357,13 +439,14 @@ async function executeOpenCodeJob(
     const result = await executeOpenCodeCLI(fullPrompt, "", {
       model,
       timeout,
-      forceOpenCode: true,
-      researchOnly: false,
-      agent: "build",
+      forceOpenCode: options?.executorOptions?.opencode?.forceOpenCode ?? true,
+      researchOnly: options?.executorOptions?.opencode?.researchOnly ?? false,
+      agent: options?.executorOptions?.opencode?.agent ?? "build",
       cwd,
-      yolo: true,
-      sandbox: true,
+      yolo: options?.executorOptions?.opencode?.yolo ?? true,
+      sandbox: options?.executorOptions?.opencode?.sandbox ?? true,
       runId: config.id,
+      signal: options?.signal,
     });
     const completedAt = new Date();
     const duration = completedAt.getTime() - startedAt.getTime();
@@ -431,11 +514,11 @@ async function executeCodexJob(
   job: RegisteredJob,
   startedAt: Date,
   onProgress?: ProgressCallback,
-  options?: { queryOverride?: string; emitCompletedEvent?: boolean; timeoutOverride?: number; modelOverride?: string }
+  options?: ExecutorDispatchOptions
 ): Promise<JobExecutionResult> {
   const { config, sourceFile } = job;
   const timeout = options?.timeoutOverride ?? config.timeout ?? 1800000;
-  const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
+  const cwd = options?.cwdOverride ?? LANE_CWD[config.lane] ?? LANE_CWD.default ?? process.cwd();
   const emitCompleted = options?.emitCompletedEvent !== false;
   const query = options?.queryOverride ?? config.query;
 
@@ -456,7 +539,9 @@ async function executeCodexJob(
     const result = await executeCodexCLI(fullQuery, {
       cwd,
       timeout,
-      model: options?.modelOverride,
+      model: options?.modelOverride ?? undefined,
+      signal: options?.signal,
+      reasoningEffort: options?.executorOptions?.codex?.reasoningEffort,
     });
     const completedAt = new Date();
     const duration = completedAt.getTime() - startedAt.getTime();
@@ -525,11 +610,11 @@ async function executeClaudeJob(
   job: RegisteredJob,
   startedAt: Date,
   onProgress?: ProgressCallback,
-  options?: { modelOverride?: string; queryOverride?: string; emitCompletedEvent?: boolean }
+  options?: ExecutorDispatchOptions
 ): Promise<JobExecutionResult> {
   const { config, sourceFile } = job;
-  const timeout = config.timeout ?? DEFAULT_JOB_TIMEOUT;
-  const cwd = LANE_CWD[config.lane] ?? LANE_CWD.default;
+  const timeout = options?.timeoutOverride ?? config.timeout ?? DEFAULT_JOB_TIMEOUT;
+  const cwd = options?.cwdOverride ?? LANE_CWD[config.lane] ?? LANE_CWD.default;
   const model = options?.modelOverride ?? config.model ?? "sonnet";
   const emitCompleted = options?.emitCompletedEvent !== false;
   const query = options?.queryOverride ?? config.query;
@@ -577,10 +662,10 @@ async function executeClaudeJob(
     NO_COLOR: "1",
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
     TMPDIR: process.env.TMPDIR ?? "/tmp",
-    HOME: process.env.HOME ?? "/Users/yj",
+    HOME: process.env.HOME ?? process.cwd(),
   };
   // Load OAuth token from file if not in env
-  const tokenFile = `${process.env.HOME ?? "/Users/yj"}/.homer-claude-token`;
+  const tokenFile = `${env.HOME}/.homer-claude-token`;
   if (!env.CLAUDE_CODE_OAUTH_TOKEN && existsSync(tokenFile)) {
     try {
       const token = readFileSync(tokenFile, "utf-8").trim();
@@ -619,6 +704,7 @@ async function executeClaudeJob(
     let streamedTextContent = ""; // accumulated text blocks across all assistant turns
     let finalResult = ""; // event.type === "result" payload (often just last-turn meta)
     let timedOut = false;
+    let aborted = false;
     let settled = false;
 
     // Track active tools to avoid duplicate progress messages
@@ -742,11 +828,13 @@ async function executeClaudeJob(
       const bestStream = streamed.length >= final.length ? streamed : final;
       let output = bestStream || resultContent.trim() || stdout.trim();
 
-      let success = !timedOut && !error && exitCode === 0;
+      let success = !timedOut && !aborted && !error && exitCode === 0;
 
       let errorMessage = error;
       if (timedOut) {
         errorMessage = `Job timed out after ${timeout / 1000}s`;
+      } else if (aborted) {
+        errorMessage = "Job aborted by signal";
       } else if (exitCode !== 0 && !error) {
         errorMessage = `Exit code ${exitCode}`;
       }
@@ -882,6 +970,215 @@ ${stderr.trim()}`
         }
       }, KILL_GRACE_MS);
     }, timeout);
+
+    const abortHandler = () => {
+      aborted = true;
+      logger.warn({ jobId: config.id }, "Scheduled Claude job aborted");
+      killGroup("SIGTERM");
+      killTimer = setTimeout(() => {
+        if (!settled) killGroup("SIGKILL");
+      }, KILL_GRACE_MS);
+    };
+    if (options?.signal) {
+      if (options.signal.aborted) {
+        abortHandler();
+      } else {
+        options.signal.addEventListener("abort", abortHandler, { once: true });
+        proc.once("close", () => options.signal?.removeEventListener("abort", abortHandler));
+      }
+    }
+  });
+}
+
+function emitHarnessCompletion(
+  job: RegisteredJob,
+  result: JobExecutionResult,
+  executor: ExecutorKind,
+  onProgress?: ProgressCallback,
+): void {
+  onProgress?.({
+    type: "completed",
+    jobId: job.config.id,
+    jobName: job.config.name,
+    timestamp: result.completedAt ?? new Date(),
+    message: result.success
+      ? `✅ Completed: ${job.config.name} (${Math.round(result.duration / 1000)}s, ${executor})`
+      : `❌ Failed: ${job.config.name} (${executor})`,
+    details: { duration: result.duration, success: result.success },
+  });
+}
+
+function mergeExecutorOptions(
+  baseline?: HarnessExecutorOptions,
+  override?: HarnessExecutorOptions,
+): HarnessExecutorOptions | undefined {
+  if (!baseline && !override) return undefined;
+  return {
+    codex: { ...baseline?.codex, ...override?.codex },
+    opencode: { ...baseline?.opencode, ...override?.opencode },
+    kimi: { ...baseline?.kimi, ...override?.kimi },
+  };
+}
+
+function buildChain(
+  primary: ExecutorKind,
+  baseChain: ExecutorKind[],
+): ExecutorKind[] {
+  return [primary, ...baseChain.filter((executor) => executor !== primary)];
+}
+
+export async function runJobHarness(
+  job: RegisteredJob,
+  query: string,
+  options: RunJobHarnessOptions,
+): Promise<JobExecutionResult> {
+  const { config } = job;
+  const memoryJob = options.memoryJob ?? isMemoryJob(job);
+  const override = jobHarnessOverride(config.id);
+  // A DB override swaps executor+model but must PRESERVE the registry/file
+  // baseline's executor-agnostic infra (cwdOverride, timeoutOverride,
+  // executorOptions, fallbackChain) — otherwise an overridden staged internal
+  // job (e.g. nightly-code-push) would lose its cwd=homerRoot. For direct jobs
+  // options.baseline is just {executor,model} (or undefined), so this merge is
+  // equivalent to a replace.
+  const explicitProfile = override
+    ? {
+        ...options,
+        baseline: { ...options.baseline, executor: override.executor, model: override.model },
+        baselineSource: "override" as const,
+      }
+    : options;
+  const baseline = explicitProfile.baseline;
+  const globalDefault = harnessDefault();
+
+  const concreteSelection = baseline ?? (!memoryJob ? globalDefault : undefined);
+  const primary = concreteSelection?.executor ?? MEMORY_CHAIN[0] ?? "claude";
+  const pinnedModel = concreteSelection?.model ?? null;
+  const modelPinnedExecutor = concreteSelection ? primary : undefined;
+  const baseChain = explicitProfile.fallbackChain
+    ?? baseline?.fallbackChain
+    ?? (memoryJob ? MEMORY_CHAIN : DEFAULT_CHAIN);
+  const chain = buildChain(primary, baseChain);
+  const fallbackModels = {
+    ...baseline?.fallbackModels,
+    ...explicitProfile.fallbackModels,
+  };
+  const executorOptions = mergeExecutorOptions(
+    baseline?.executorOptions,
+    explicitProfile.executorOptions,
+  );
+
+  return withSlot(async () => {
+    const runExecutor = async (
+      executor: ExecutorKind,
+      queryOverride?: string,
+      modelOverride?: string,
+    ): Promise<JobExecutionResult> => {
+      const selectedFallbackModel = fallbackModels[executor];
+      const effectiveModel = modelOverride
+        ?? (modelPinnedExecutor === executor ? pinnedModel : undefined)
+        ?? (selectedFallbackModel === null ? undefined : selectedFallbackModel);
+      const dispatchOptions: ExecutorDispatchOptions = {
+        queryOverride: queryOverride ?? query,
+        emitCompletedEvent: false,
+        timeoutOverride: explicitProfile.timeoutOverride ?? baseline?.timeoutOverride,
+        cwdOverride: explicitProfile.cwdOverride ?? baseline?.cwdOverride,
+        signal: explicitProfile.signal,
+        modelOverride: effectiveModel,
+        executorOptions,
+      };
+
+      if (executor === "kimi") return executeKimiJob(job, options.startedAt, options.onProgress, dispatchOptions);
+      if (executor === "gemini") return executeGeminiJob(job, options.startedAt, options.onProgress, dispatchOptions);
+      if (executor === "opencode") return executeOpenCodeJob(job, options.startedAt, options.onProgress, dispatchOptions);
+      if (executor === "codex") return executeCodexJob(job, options.startedAt, options.onProgress, dispatchOptions);
+      return executeClaudeJob(job, options.startedAt, options.onProgress, dispatchOptions);
+    };
+
+    if (options.singleExecutor) {
+      const result = await runExecutor(options.singleExecutor);
+      if (options.emitCompletedEvent !== false) {
+        emitHarnessCompletion(job, result, options.singleExecutor, options.onProgress);
+      }
+      return {
+        ...result,
+        executorUsed: options.singleExecutor,
+        fallbackUsed: false,
+      } as JobExecutionResult;
+    }
+
+    const jobContext = {
+      id: config.id,
+      name: config.name,
+      query,
+      lane: config.lane,
+      source: "scheduler" as const,
+    };
+
+    const notify = async (message: string) => {
+      options.onProgress?.({
+        type: "thinking",
+        jobId: config.id,
+        jobName: config.name,
+        timestamp: new Date(),
+        message,
+      });
+    };
+
+    const fallbackResult = await runWithFallbackChain({
+      primary,
+      chain,
+      job: jobContext,
+      runExecutor,
+      notify,
+      skipDiagnosis: options.skipDiagnosis,
+      jobMeta: { deep: config.deep },
+    });
+
+    writeChainTrace(fallbackResult, {
+      jobId: config.id,
+      source: "scheduler",
+      scheduledRunId: options.scheduledRunId,
+    });
+
+    const result = fallbackResult.result ?? {
+      jobId: config.id,
+      jobName: config.name,
+      sourceFile: job.sourceFile,
+      startedAt: options.startedAt,
+      completedAt: new Date(),
+      success: false,
+      output: "",
+      error: "Executor failed with no result",
+      exitCode: 1,
+      duration: Date.now() - options.startedAt.getTime(),
+    };
+
+    if (options.emitCompletedEvent !== false) {
+      emitHarnessCompletion(job, result, fallbackResult.executorUsed, options.onProgress);
+    }
+
+    return {
+      ...result,
+      executorUsed: fallbackResult.executorUsed,
+      fallbackUsed: fallbackResult.fallbackUsed,
+    } as JobExecutionResult;
+  });
+}
+
+export async function runInternalJobHarness(
+  job: RegisteredJob,
+  prompt: string,
+  options: Omit<RunJobHarnessOptions, "baseline" | "baselineSource" | "memoryJob"> & { stage?: string },
+): Promise<JobExecutionResult> {
+  const baseline = requireInternalJobHarnessBaseline(job.config.id);
+  const stageProfile = options.stage ? baseline.stages?.[options.stage] : undefined;
+  const selection = mergeHarnessProfiles(baseline, stageProfile);
+  return runJobHarness(job, prompt, {
+    ...options,
+    baseline: selection,
+    baselineSource: "internal-registry",
+    memoryJob: isMemoryJob(job),
   });
 }
 
@@ -930,159 +1227,27 @@ export async function executeScheduledJob(
     message: `🚀 Starting: ${config.name}`,
   });
 
-  const memoryJob = isMemoryJob(job);
   const configuredExecutor = config.executor && config.executor !== "internal"
     ? config.executor as ExecutorKind
     : undefined;
   const configuredModel = typeof config.model === "string" && config.model.length > 0
     ? config.model
     : undefined;
-
-  // Acquire concurrency slot before spawning CLI processes
-  return withSlot(async () => {
-
-  // No explicit per-job executor → follow the global harness default (opencode/GLM, or
-  // claude on the kill-switch). Memory jobs stay on the cheap flash chain (cap-sensitive).
-  const harnessDefault = harnessDefaultExecutor();
-  const defaultChain: ExecutorKind[] = memoryJob
-    ? [...MEMORY_CHAIN]
-    : [harnessDefault, ...DEFAULT_CHAIN.filter((e) => e !== harnessDefault)];
-  const chain: ExecutorKind[] = configuredExecutor
-    ? [configuredExecutor, ...defaultChain.filter((e) => e !== configuredExecutor)]
-    : defaultChain;
-  const primary: ExecutorKind = chain[0] ?? "claude";
-
-  // If a model is configured, pin it to the configured executor.
-  // If no executor is configured, pin to whichever executor is primary.
-  const modelPinnedExecutor: ExecutorKind | undefined = configuredModel
-    ? (configuredExecutor ?? primary)
+  const baseline = configuredExecutor
+    ? {
+        executor: configuredExecutor,
+        model: configuredModel ?? null,
+      }
     : undefined;
 
-  const runExecutor = async (
-    executor: ExecutorKind,
-    queryOverride?: string,
-    modelOverride?: string
-  ): Promise<JobExecutionResult> => {
-    const effectiveModel =
-      modelOverride
-      ?? (modelPinnedExecutor === executor ? configuredModel : undefined);
-
-    if (executor === "kimi") {
-      return executeKimiJob(job, startedAt, onProgress, {
-        queryOverride,
-        emitCompletedEvent: false,
-        modelOverride: effectiveModel,
-      });
-    }
-    if (executor === "gemini") {
-      return executeGeminiJob(job, startedAt, onProgress, {
-        queryOverride,
-        emitCompletedEvent: false,
-        modelOverride: effectiveModel,
-      });
-    }
-    if (executor === "opencode") {
-      return executeOpenCodeJob(job, startedAt, onProgress, {
-        queryOverride,
-        emitCompletedEvent: false,
-        modelOverride: effectiveModel,
-      });
-    }
-    if (executor === "codex") {
-      return executeCodexJob(job, startedAt, onProgress, {
-        queryOverride,
-        emitCompletedEvent: false,
-        modelOverride: effectiveModel,
-      });
-    }
-    return executeClaudeJob(job, startedAt, onProgress, {
-      queryOverride,
-      modelOverride: effectiveModel,
-      emitCompletedEvent: false,
-    });
-  };
-
-  // Single executor mode: bypass fallback chain entirely (used by takeover retries)
-  if (options?.singleExecutor) {
-    const result = await runExecutor(options.singleExecutor);
-    onProgress?.({
-      type: "completed",
-      jobId: config.id,
-      jobName: config.name,
-      timestamp: result.completedAt ?? new Date(),
-      message: result.success
-        ? `✅ Completed: ${config.name} (${Math.round(result.duration / 1000)}s, ${options.singleExecutor})`
-        : `❌ Failed: ${config.name} (${options.singleExecutor})`,
-      details: { duration: result.duration, success: result.success },
-    });
-    return {
-      ...result,
-      executorUsed: options.singleExecutor,
-      fallbackUsed: false,
-    } as JobExecutionResult;
-  }
-
-  const jobContext = {
-    id: config.id,
-    name: config.name,
-    query: config.query,
-    lane: config.lane,
-    source: "scheduler" as const,
-  };
-
-  const notify = async (message: string) => {
-    onProgress?.({
-      type: "thinking",
-      jobId: config.id,
-      jobName: config.name,
-      timestamp: new Date(),
-      message,
-    });
-  };
-
-  const fallbackResult = await runWithFallbackChain({
-    primary,
-    chain,
-    job: jobContext,
-    runExecutor,
-    notify,
-    skipDiagnosis: options?.skipDiagnosis,
-    jobMeta: { deep: config.deep },
-  });
-
-  writeChainTrace(fallbackResult, { jobId: config.id, source: "scheduler", scheduledRunId: options?.scheduledRunId });
-
-  const result = fallbackResult.result ?? {
-    jobId: config.id,
-    jobName: config.name,
-    sourceFile: job.sourceFile,
+  return runJobHarness(job, config.query, {
     startedAt,
-    completedAt: new Date(),
-    success: false,
-    output: "",
-    error: "Executor failed with no result",
-    exitCode: 1,
-    duration: Date.now() - startedAt.getTime(),
-  };
-
-  // Emit final completion event
-  const label = fallbackResult.executorUsed;
-  onProgress?.({
-    type: "completed",
-    jobId: config.id,
-    jobName: config.name,
-    timestamp: result.completedAt ?? new Date(),
-    message: result.success
-      ? `✅ Completed: ${config.name} (${Math.round(result.duration / 1000)}s, ${label})`
-      : `❌ Failed: ${config.name} (${label})`,
-    details: { duration: result.duration, success: result.success },
+    onProgress,
+    baseline,
+    baselineSource: baseline ? "file" : undefined,
+    singleExecutor: options?.singleExecutor,
+    skipDiagnosis: options?.skipDiagnosis,
+    scheduledRunId: options?.scheduledRunId,
+    memoryJob: isMemoryJob(job),
   });
-
-  return {
-    ...result,
-    executorUsed: fallbackResult.executorUsed,
-    fallbackUsed: fallbackResult.fallbackUsed,
-  } as JobExecutionResult;
-
-  }); // withSlot
 }

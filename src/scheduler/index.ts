@@ -437,7 +437,6 @@ export class Scheduler {
     "ideas-explore": ["idea-synthesizer"],
     "content-scraper": ["idea-synthesizer"],
     "idea-synthesizer": ["idea-dedup"],
-    "job-hunt-discover": ["job-hunt-daily-approval"],
     "outcome-tracker": ["preference-updater"],
   };
 

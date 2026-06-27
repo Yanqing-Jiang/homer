@@ -65,10 +65,6 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
   { id: "homer-improvements", name: "Homer Improvements", kind: "internal", handler: "homer_improvements", handlerFile: "homer-improvements", expectedInSchedule: true, note: "disabled — pending merge with harness-auto-improve (Phase 4.1)" },
   { id: "idea-synthesizer", name: "Idea Synthesizer", kind: "internal", handler: "idea_synthesizer", handlerFile: "idea-synthesizer", expectedInSchedule: true },
   { id: "ideas-explore", name: "Ideas Explore", kind: "internal", handler: "ideas_explore", handlerFile: "ideas-explore", expectedInSchedule: true },
-  { id: "job-hunt-discover", name: "Job Hunt Discover", kind: "internal", handler: "job_hunt_discover", handlerFile: "job-hunt-discover", expectedInSchedule: true },
-  { id: "job-hunt-email-monitor", name: "Job Hunt Email Monitor", kind: "internal", handler: "job_hunt_email_monitor", handlerFile: "job-hunt-email-monitor", expectedInSchedule: true },
-  { id: "job-hunt-followup", name: "Job Hunt Followup", kind: "internal", handler: "job_hunt_followup", handlerFile: "job-hunt-followup", expectedInSchedule: true },
-  { id: "career-truth", name: "Career Truth", kind: "internal", handler: "career_truth", handlerFile: "career-truth", expectedInSchedule: true, note: "1 PM Tue/Wed/Thu, shared state with mentor-layer" },
   { id: "deaddrop-drain", name: "Dead-Drop Drain", kind: "internal", handler: "deaddrop_drain", expectedInSchedule: true, note: "drains work-laptop session dead-drop (homer-data/worklaptop/sessions) into local session_summaries at 00:15 PT, then deletes each blob. No handlerFile — imports from scripts/drain-deaddrop.ts. (Cosmos push/pull decommissioned 2026-06-16.)" },
   { id: "link-processor", name: "Link Processor", kind: "internal", handler: "link_processor", handlerFile: "link-processor", expectedInSchedule: true },
   { id: "memory-embeddings", name: "Memory Embeddings", kind: "internal", handler: "memory_embeddings", handlerFile: "memory-embeddings", expectedInSchedule: true, note: "event-triggered; cron is safety net" },
@@ -86,7 +82,6 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
  * These are the sources of taxonomy drift Codex's review flagged.
  */
 const SCHEDULED_WITH_ALIASED_HANDLER_FILE: JobEntry[] = [
-  { id: "job-hunt-weekly-report", name: "Job Hunt Weekly Report", kind: "internal", handler: "job_hunt_weekly_report", handlerFile: "job-hunt-report", expectedInSchedule: true, note: "alias: schedule id is job-hunt-weekly-report, file is job-hunt-report" },
   { id: "weekly-memory-cleanup", name: "Weekly Memory Cleanup", kind: "internal", handler: "memory_cleanup", handlerFile: "memory-cleanup", expectedInSchedule: true, note: "alias + disabled — will merge into weekly-memory-maintenance (Phase 4)" },
   { id: "weekly-memory-consolidation", name: "Weekly Memory Consolidation", kind: "internal", handler: "weekly_consolidation", handlerFile: "weekly-consolidation", expectedInSchedule: true, note: "alias: schedule id prefixes 'weekly-memory-'" },
 ];
@@ -97,13 +92,12 @@ const SCHEDULED_WITH_ALIASED_HANDLER_FILE: JobEntry[] = [
 const SCHEDULED_INLINE_ONLY: JobEntry[] = [
   { id: "candidate-expiry", name: "Candidate Expiry", kind: "internal", handler: "candidate_expiry", expectedInSchedule: false, note: "inline helper triggered by other jobs" },
   { id: "daemon-cleanup", name: "Daemon Cleanup", kind: "internal", handler: "daemon_cleanup", expectedInSchedule: true },
+  { id: "docker-restart-weekly", name: "Weekly Docker Desktop Restart", kind: "internal", handler: "docker_restart", expectedInSchedule: true, note: "Tue 5 AM — restarts Docker Desktop to reclaim leaked engine memory" },
   { id: "daily-ideas-review", name: "Daily Ideas Review", kind: "internal", handler: "ideas_review", expectedInSchedule: true, note: "disabled" },
   { id: "health-check", name: "Health Check", kind: "internal", handler: "health_check", expectedInSchedule: true },
   { id: "idea-dedup", name: "Idea Dedup", kind: "internal", handler: "idea_dedup", expectedInSchedule: true },
   { id: "idea-expiry", name: "Idea Auto-Expiry", kind: "internal", handler: "idea_expiry", expectedInSchedule: true },
   { id: "idea-ingest", name: "Idea Ingest", kind: "internal", handler: "idea_ingest", expectedInSchedule: true },
-  { id: "job-hunt-daily-approval", name: "Job Hunt Daily Approval", kind: "internal", handler: "job_hunt_daily_approval", expectedInSchedule: true, note: "disabled" },
-  { id: "job-hunt-stalled-check", name: "Job Hunt Stalled Check", kind: "internal", handler: "job_hunt_stalled_check", expectedInSchedule: true, note: "disabled" },
   { id: "morning-review", name: "Morning Review", kind: "internal", handler: "morning_review", expectedInSchedule: true },
   { id: "overnight-review", name: "Overnight Review", kind: "internal", handler: "overnight_review", expectedInSchedule: true, note: "disabled" },
   { id: "reminder-check", name: "Reminder Check", kind: "internal", handler: "reminder_check", expectedInSchedule: true },

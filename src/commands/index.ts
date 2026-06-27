@@ -32,3 +32,19 @@ export {
   type ParsedCommand,
   type LegacyParsedRoute,
 } from "./parser.js";
+
+// Harness catalog exports (single source of truth for executor/model validation)
+export {
+  getHarnessCatalog,
+  getCatalogEntry,
+  isScheduledHarnessExecutor,
+  validateHarnessSelection,
+  type HarnessExecutor,
+  type InteractiveOnlyExecutor,
+  type CatalogExecutor,
+  type HarnessScope,
+  type HarnessModelOption,
+  type HarnessCatalogEntry,
+  type HarnessValidationOk,
+  type HarnessValidationErr,
+} from "./harness-catalog.js";

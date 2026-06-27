@@ -16,13 +16,14 @@
 import type Database from "better-sqlite3";
 import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
-import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { getActiveVersion, getRecentScores, getVersionHistory } from "../../harness/manager.js";
 import { getTraceStats } from "../../executors/trace-writer.js";
 import { SKILL_PATHS, getPrompts } from "./prompts/idea-synthesizer.js";
 import { logger } from "../../utils/logger.js";
 import { PATHS } from "../../config/paths.js";
 import { storeJobArtifact } from "./artifact-store.js";
+import type { RegisteredJob } from "../types.js";
+import { runInternalJobHarness } from "../executor.js";
 
 const PROPOSALS_DIR = join(PATHS.homerRoot, "output/auto-improve/idea-synthesizer");
 
@@ -35,9 +36,15 @@ interface ProposerResult {
 export async function runHarnessAutoImprove(
   db: Database.Database,
   jobRunId?: number,
-  _signal?: AbortSignal,
+  signal?: AbortSignal,
+  job?: RegisteredJob,
+  startedAt = new Date(),
 ): Promise<ProposerResult> {
   try {
+    if (!job) {
+      return { success: false, output: "", error: "Registered job context required for harness-auto-improve harness" };
+    }
+
     const targetJobId = "idea-synthesizer";
 
     // ── 1. Gather data ──
@@ -159,10 +166,11 @@ Respond with this exact structure:
 ## Risk Assessment
 (what could go wrong, what to monitor)`;
 
-    const result = await executeCodexCLI(proposerPrompt, {
-      cwd: PATHS.homerRoot,
-      model: "gpt-5.5",
-      reasoningEffort: "high",
+    const result = await runInternalJobHarness(job, proposerPrompt, {
+      stage: "propose",
+      startedAt,
+      emitCompletedEvent: false,
+      signal,
     });
 
     if (result.exitCode !== 0 || !result.output.trim()) {
