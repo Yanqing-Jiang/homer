@@ -5,6 +5,11 @@ import { dirname } from "path";
 import { logger } from "../utils/logger.js";
 import { threadEvents } from "../events/thread-events.js";
 import { sessionEvents } from "../events/session-events.js";
+import {
+  getCatalogEntry,
+  isScheduledHarnessExecutor,
+  type HarnessExecutor,
+} from "../commands/harness-catalog.js";
 
 export interface Session {
   id: string;
@@ -1559,23 +1564,35 @@ export class StateManager {
    * this is only the fail-safe floor). Not cached: a single indexed read, and the kill-switch
    * must be visible across the daemon + MCP processes that share this DB.
    */
-  getHarnessDefault(): { executor: "claude" | "opencode"; model: string } {
+  getHarnessDefault(): { executor: HarnessExecutor; model: string | null } {
     const row = this._db
       .prepare("SELECT executor, model FROM harness_default WHERE id = 1")
-      .get() as { executor: "claude" | "opencode"; model: string } | undefined;
+      .get() as { executor: string; model: string | null } | undefined;
     // Hard 'claude' safety when the row is somehow missing (fresh DB pre-seed / corruption).
     // The migration seeds opencode as the intended default; this is only the fail-safe floor.
-    return row ?? { executor: "claude", model: "opus[1m]" };
+    if (!row || !isScheduledHarnessExecutor(row.executor)) {
+      return { executor: "claude", model: "opus[1m]" };
+    }
+    return { executor: row.executor, model: row.model };
   }
 
   /**
    * Flip the global default harness. `setHarnessDefault('claude')` is the instant global
    * kill-switch (no rebuild/restart); 'opencode' restores GLM-5.2.
    */
-  setHarnessDefault(executor: "claude" | "opencode", model?: string): void {
-    const effectiveModel = model ?? (executor === "opencode" ? "opencode-go/glm-5.2" : "opus[1m]");
+  setHarnessDefault(executor: HarnessExecutor, model?: string | null): void {
+    const effectiveModel = model === undefined
+      ? (getCatalogEntry(executor)?.defaultModel ?? null)
+      : model;
     this._db
-      .prepare("UPDATE harness_default SET executor = ?, model = ?, updated_at = ? WHERE id = 1")
+      .prepare(`
+        INSERT INTO harness_default (id, executor, model, updated_at)
+        VALUES (1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          executor = excluded.executor,
+          model = excluded.model,
+          updated_at = excluded.updated_at
+      `)
       .run(executor, effectiveModel, Date.now());
     logger.info({ executor, model: effectiveModel }, "Global harness default changed");
   }
@@ -1584,8 +1601,58 @@ export class StateManager {
    * The realized default executor for any "no explicit choice" decision. Used by the
    * interactive no-row path, router default/code-change cases, worker/scheduler defaults.
    */
-  resolveDefaultExecutor(): "claude" | "opencode" {
+  resolveDefaultExecutor(): HarnessExecutor {
     return this.getHarnessDefault().executor;
+  }
+
+  getJobHarnessOverride(jobId: string): JobHarnessOverride | null {
+    const row = this._db.prepare(`
+      SELECT job_id as jobId, executor, model, updated_at as updatedAt, updated_by as updatedBy, source
+      FROM job_harness_override
+      WHERE job_id = ?
+    `).get(jobId) as JobHarnessOverride | undefined;
+    return row ?? null;
+  }
+
+  setJobHarnessOverride(
+    jobId: string,
+    executor: HarnessExecutor,
+    model: string | null,
+    updatedBy: string,
+    source: JobHarnessOverrideSource,
+  ): void {
+    this._db.prepare(`
+      INSERT INTO job_harness_override (job_id, executor, model, updated_at, updated_by, source)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(job_id) DO UPDATE SET
+        executor = excluded.executor,
+        model = excluded.model,
+        updated_at = excluded.updated_at,
+        updated_by = excluded.updated_by,
+        source = excluded.source
+    `).run(jobId, executor, model, Date.now(), updatedBy, source);
+  }
+
+  clearJobHarnessOverride(jobId: string): boolean {
+    const result = this._db.prepare("DELETE FROM job_harness_override WHERE job_id = ?").run(jobId);
+    return (result.changes ?? 0) > 0;
+  }
+
+  getJobHarnessOverrides(jobIds?: string[]): JobHarnessOverride[] {
+    const select = `
+      SELECT job_id as jobId, executor, model, updated_at as updatedAt, updated_by as updatedBy, source
+      FROM job_harness_override
+    `;
+    if (!jobIds || jobIds.length === 0) {
+      return this._db.prepare(`${select} ORDER BY job_id ASC`).all() as JobHarnessOverride[];
+    }
+
+    const placeholders = jobIds.map(() => "?").join(", ");
+    return this._db.prepare(`
+      ${select}
+      WHERE job_id IN (${placeholders})
+      ORDER BY job_id ASC
+    `).all(...jobIds) as JobHarnessOverride[];
   }
 
   /**
@@ -2485,6 +2552,20 @@ export interface ExecutorState {
   sessionId: string | null;
   switchedAt: number;
   messageCount: number;
+}
+
+// Must match the CHECK constraint in migration 106. Telegram chat/global switches
+// use executor_state/harness_default, NOT job_harness_override, so "telegram" is
+// intentionally not a job-override source.
+export type JobHarnessOverrideSource = "web" | "bulk" | "migration" | "system";
+
+export interface JobHarnessOverride {
+  jobId: string;
+  executor: HarnessExecutor;
+  model: string | null;
+  updatedAt: number;
+  updatedBy: string;
+  source: JobHarnessOverrideSource;
 }
 
 interface ExecutorStateRow {

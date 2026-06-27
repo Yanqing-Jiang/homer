@@ -10,16 +10,8 @@
 
 import type { Bot } from "grammy";
 import type { StateManager } from "../../state/manager.js";
-import type { Scheduler } from "../../scheduler/index.js";
 import { logger } from "../../utils/logger.js";
 import { escapeHtml } from "../../utils/telegram-format.js";
-
-
-let schedulerRef: Scheduler | null = null;
-
-export function setJobScheduler(scheduler: Scheduler): void {
-  schedulerRef = scheduler;
-}
 
 export function registerJobCommands(bot: Bot, stateManager: StateManager): void {
   const db = stateManager.getDb();
@@ -106,61 +98,30 @@ export function registerJobCommands(bot: Bot, stateManager: StateManager): void 
     }
   });
 
-  // /job_search — manually trigger discovery
+  // Scheduled job-hunt automation (discover/report/pause/resume) was retired
+  // 2026-06-27. These commands now reply with a retirement notice instead of
+  // triggering removed jobs or mutating the dead job_hunt_global circuit flag.
+  const RETIRED_MSG =
+    "Scheduled job-hunt automation has been retired. Use /job_queue for any remaining manual application items.";
+
+  // /job_search — retired (was: trigger job-hunt-discover)
   bot.command("job_search", async (ctx) => {
-    if (!schedulerRef) {
-      await ctx.reply("Scheduler not initialized.");
-      return;
-    }
-    const triggered = schedulerRef.triggerJob("job-hunt-discover");
-    if (triggered) {
-      await ctx.reply("Job discovery triggered. You'll be notified when complete.");
-    } else {
-      await ctx.reply("Failed to trigger job discovery. Check if job is registered.");
-    }
+    await ctx.reply(RETIRED_MSG);
   });
 
-  // /job_pause — disable all job-hunt jobs via DB flag
+  // /job_pause — retired (was: open job_hunt_global circuit breaker)
   bot.command("job_pause", async (ctx) => {
-    try {
-      db.prepare(`
-        INSERT INTO circuit_breaker_state (name, state, failure_count)
-        VALUES ('job_hunt_global', 'open', 0)
-        ON CONFLICT(name) DO UPDATE SET state = 'open', opened_at = datetime('now')
-      `).run();
-      await ctx.reply("Job hunt paused. All job-hunt handlers will skip until /job_resume.");
-    } catch (error) {
-      logger.error({ error }, "job_pause failed");
-      await ctx.reply(`Error: ${error instanceof Error ? error.message : "Unknown"}`);
-    }
+    await ctx.reply(RETIRED_MSG);
   });
 
-  // /job_resume — re-enable all job-hunt jobs
+  // /job_resume — retired (was: close job_hunt_global circuit breaker)
   bot.command("job_resume", async (ctx) => {
-    try {
-      db.prepare(`
-        UPDATE circuit_breaker_state SET state = 'closed', failure_count = 0, opened_at = NULL
-        WHERE name = 'job_hunt_global'
-      `).run();
-      await ctx.reply("Job hunt resumed. Handlers will run on their normal schedule.");
-    } catch (error) {
-      logger.error({ error }, "job_resume failed");
-      await ctx.reply(`Error: ${error instanceof Error ? error.message : "Unknown"}`);
-    }
+    await ctx.reply(RETIRED_MSG);
   });
 
-  // /job_report — generate weekly report now
+  // /job_report — retired (was: trigger job-hunt-weekly-report)
   bot.command("job_report", async (ctx) => {
-    if (!schedulerRef) {
-      await ctx.reply("Scheduler not initialized.");
-      return;
-    }
-    const triggered = schedulerRef.triggerJob("job-hunt-weekly-report");
-    if (triggered) {
-      await ctx.reply("Weekly report triggered. You'll receive it shortly.");
-    } else {
-      await ctx.reply("Failed to trigger report. Check if job is registered.");
-    }
+    await ctx.reply(RETIRED_MSG);
   });
 
   // Follow-up draft callbacks: a:fu:<draftId>:send/edit/discard

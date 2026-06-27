@@ -10,7 +10,7 @@ import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { runWithFallbackChain, DEFAULT_CHAIN, type ExecutorKind } from "./fallback-orchestrator.js";
 import { writeChainTrace } from "./trace-writer.js";
-import { getExecutorModel, getClaudeDefaultModel } from "../commands/index.js";
+import { getCatalogEntry, getClaudeDefaultModel } from "../commands/index.js";
 import { buildConversationContext, CONTEXT_DEFAULTS, type ContextSource } from "./context-builder.js";
 
 export type CLIExecutor = "claude" | "gemini" | "codex" | "kimi" | "chatgpt" | "opencode";
@@ -24,18 +24,8 @@ function hasImageAttachment(attachments?: string[]): boolean {
 }
 
 /** Default model for a freshly-resolved executor (no explicit/lane model). */
-function defaultModelFor(executor: CLIExecutor, lane: string): string | undefined {
-  switch (executor) {
-    case "claude":
-    case "chatgpt":
-      return getClaudeDefaultModel(lane);
-    case "gemini":
-    case "codex":
-    case "opencode":
-      return getExecutorModel(executor);
-    default:
-      return undefined;
-  }
+function defaultModelFor(executor: CLIExecutor): string | undefined {
+  return getCatalogEntry(executor)?.defaultModel ?? undefined;
 }
 
 export interface CLIRunStartParams {
@@ -89,7 +79,7 @@ const TELEGRAM_HINT =
 const CHATGPT_BROWSER_HINT =
   "Use the browser tool to access chatgpt.com and complete the task there. Keep the final response here concise and include any relevant output or links.";
 
-const CODEX_HOME = process.env.CODEX_HOME || `${process.env.HOME ?? "/Users/yj"}/.codex`;
+const CODEX_HOME = process.env.CODEX_HOME || `${process.env.HOME ?? process.cwd()}/.codex`;
 const CODEX_AGENT_PATH = `${CODEX_HOME}/AGENTS.md`;
 
 let cachedCodexAgent: string | null = null;
@@ -274,7 +264,7 @@ export class CLIRunManager {
     // every non-overridden lane. Session/continuity is tracked in executor_session_map, keyed by
     // (lane, executor, model), independent of the executor_state row.
     const laneExecutor = params.executor ?? executorState?.executor ?? this.stateManager.resolveDefaultExecutor();
-    const laneModel = params.model ?? executorState?.model ?? defaultModelFor(laneExecutor, params.lane);
+    const laneModel = params.model ?? executorState?.model ?? defaultModelFor(laneExecutor);
 
     // GLM-5.2 (opencode) is text-only: route image-bearing turns to Claude (vision) for THIS
     // turn only — the lane's persisted executor/model stay opencode and its session is untouched.
@@ -509,7 +499,7 @@ ${pendingContext.context}
           }
 
           if (executorKind === "opencode") {
-            const opencodeModel = model || getExecutorModel("opencode");
+            const opencodeModel = model || defaultModelFor("opencode");
             const runOpenCode = (resumeId: string | undefined) =>
               executeOpenCodeCLI(prompt, "", {
                 model: opencodeModel,

@@ -10,9 +10,10 @@ import { execSync } from "child_process";
 import { existsSync } from "fs";
 import type { Bot } from "grammy";
 import { logger } from "../../utils/logger.js";
-import { executeCodexCLI } from "../../executors/codex-cli.js";
 import type { StateManager } from "../../state/manager.js";
 import { PROJECT_DIR } from "../code-push-proposal.js";
+import type { RegisteredJob } from "../types.js";
+import { runInternalJobHarness } from "../executor.js";
 
 const PUSH_RETRIES = 3;
 const PUSH_RETRY_DELAY_MS = 5_000;
@@ -30,8 +31,9 @@ function logPrefix(): string {
  * Use Codex GPT-5.4 to generate a descriptive commit message from the staged diff.
  * Falls back to a generic message if Codex is unavailable or fails.
  */
-async function generateCommitMessage(date: string, fileCount: number): Promise<string> {
+async function generateCommitMessage(date: string, fileCount: number, job?: RegisteredJob, startedAt = new Date()): Promise<string> {
   const fallback = `chore: nightly snapshot ${date} (${fileCount} files)`;
+  if (!job) return fallback;
 
   try {
     const stat = execSync("git diff --cached --stat", {
@@ -65,11 +67,10 @@ Write a commit message with:
 
 Output ONLY the commit message. No preamble, no explanation, no markdown fences.`;
 
-    const result = await executeCodexCLI(prompt, {
-      cwd: PROJECT_DIR,
-      model: "gpt-5.5",
-      reasoningEffort: "high",
-      timeout: 600_000,
+    const result = await runInternalJobHarness(job, prompt, {
+      stage: "push",
+      startedAt,
+      emitCompletedEvent: false,
     });
 
     const output = result.output?.trim() ?? "";
@@ -123,6 +124,8 @@ interface CodePushDeps {
   bot?: Bot;
   chatId?: number;
   stateManager?: StateManager;
+  job?: RegisteredJob;
+  startedAt?: Date;
 }
 
 export async function runNightlyCodePush(_deps: CodePushDeps = {}): Promise<{
@@ -151,7 +154,7 @@ export async function runNightlyCodePush(_deps: CodePushDeps = {}): Promise<{
       logger.info({ fileCount: lines.length }, `${prefix} Staging + committing locally...`);
       execSync("git add -A", { cwd: PROJECT_DIR, timeout: 30_000 });
 
-      commitMsg = await generateCommitMessage(date, lines.length);
+      commitMsg = await generateCommitMessage(date, lines.length, _deps.job, _deps.startedAt);
 
       execSync(`git commit -F -`, {
         cwd: PROJECT_DIR,

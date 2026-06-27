@@ -12,7 +12,6 @@ import { readFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { execSync } from "child_process";
 import { z } from "zod";
-import { executeCodexCLI } from "../../executors/codex-cli.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { buildSchedulerContext } from "../shared-context.js";
 import * as ideaDao from "../../ideas/dao.js";
@@ -21,9 +20,12 @@ import { logger } from "../../utils/logger.js";
 import type Database from "better-sqlite3";
 import { trackImprovement } from "../../outcomes/hooks.js";
 import { storeJobArtifact } from "./artifact-store.js";
+import { PATHS } from "../../config/paths.js";
+import type { RegisteredJob } from "../types.js";
+import { runInternalJobHarness } from "../executor.js";
 
-const HOMER_DIR = "/Users/yj/homer";
-const OUTPUT_DIR = "/Users/yj/homer/output/codex";
+const HOMER_DIR = PATHS.homerRoot;
+const OUTPUT_DIR = join(PATHS.homerRoot, "output/codex");
 const MAX_SOURCE_CHARS = 80_000;
 
 // Priority files to read — core modules that improvements would target
@@ -195,12 +197,21 @@ The JSON must match this exact schema:
 }`;
 }
 
-export async function runHomerImprovements(db?: Database.Database, jobRunId?: number): Promise<{
+export async function runHomerImprovements(
+  db?: Database.Database,
+  jobRunId?: number,
+  job?: RegisteredJob,
+  startedAt = new Date(),
+): Promise<{
   success: boolean;
   output: string;
   error?: string;
 }> {
   try {
+    if (!job) {
+      return { success: false, output: "", error: "Registered job context required for homer-improvements harness" };
+    }
+
     const sourceContext = gatherSourceContext();
     // Skip npm run build — running tsc inside the daemon blocks the event loop
     // for 10-30s and causes OOM under memory pressure. Not worth the crash risk.
@@ -209,7 +220,8 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
 
     let fileListing = "";
     try {
-      fileListing = execSync("find /Users/yj/homer/src -name '*.ts' | sort", {
+      fileListing = execSync("find src -name '*.ts' | sort", {
+        cwd: HOMER_DIR,
         encoding: "utf-8",
         timeout: 10_000,
       }).trim();
@@ -242,11 +254,10 @@ export async function runHomerImprovements(db?: Database.Database, jobRunId?: nu
 
     logger.info("Running homer-improvements: Codex GPT-5.4 high reasoning");
 
-    const result = await executeCodexCLI(prompt, {
-      cwd: HOMER_DIR,
-      model: "gpt-5.5",
-      reasoningEffort: "high",
-      timeout: 1_200_000, // 20 min
+    const result = await runInternalJobHarness(job, prompt, {
+      stage: "propose",
+      startedAt,
+      emitCompletedEvent: false,
     });
 
     // Extract JSON from stdout

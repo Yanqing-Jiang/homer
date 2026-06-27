@@ -7,6 +7,9 @@ import {
   isPureExecutorSwitch,
   isExecutorSwitchWithQuery,
   getExecutorModel,
+  getCatalogEntry,
+  isScheduledHarnessExecutor,
+  validateHarnessSelection,
   type ParsedCommand,
 } from "../commands/index.js";
 import { registerApprovalHandlers, registerPlanApprovalHandlers, registerPlanApprovalCallbacks, registerPlanReviewCallbacks } from "./handlers/approval.js";
@@ -15,7 +18,7 @@ import { registerQuickCommands, registerProposalCallbacks } from "./handlers/pro
 import { registerOvernightCommands, handleOvernightMessage } from "./handlers/overnight.js";
 import { handleYouTubeUrl, initializeYouTubeHandler } from "./handlers/youtube.js";
 import { registerJobApprovalHandlers } from "./handlers/job-approval.js";
-import { registerJobCommands, setJobScheduler } from "./handlers/job-commands.js";
+import { registerJobCommands } from "./handlers/job-commands.js";
 import { handleCallRequest } from "./handlers/phone-call.js";
 import { handleSmsRequest } from "./handlers/sms.js";
 import { registerCallFollowupHandlers } from "./handlers/call-followup.js";
@@ -118,7 +121,6 @@ function resetExecutorSessionForLane(
 
 export function setScheduler(scheduler: Scheduler): void {
   schedulerRef = scheduler;
-  setJobScheduler(scheduler);
 }
 
 export function setReminderManager(reminderManager: ReminderManager): void {
@@ -1181,20 +1183,29 @@ ${checksStr}`;
       logger.warn({ error }, "Overnight message handling failed, falling back to normal flow");
     }
 
-    // Global harness kill-switch (admin): /harness [claude|opencode|glm|status].
+    // Global harness kill-switch (admin): /harness [claude|opencode|glm|codex|gemini|kimi|status].
     // Flips the GLOBAL default for every lane without an explicit per-lane override.
     const harnessMatch = text.trim().match(/^\/harness(?:@\w+)?(?:\s+(\S+))?\s*$/i);
     if (harnessMatch) {
       const arg = (harnessMatch[1] ?? "").toLowerCase();
-      if (arg === "claude") {
-        stateManager.setHarnessDefault("claude");
-        await ctx.reply("🔁 Global harness default → *Claude* (opus[1m]). Lanes without an explicit override now use Claude.", { parse_mode: "Markdown" });
-      } else if (arg === "opencode" || arg === "glm") {
-        stateManager.setHarnessDefault("opencode");
-        await ctx.reply("🔁 Global harness default → *opencode / GLM-5.2*. Lanes without an explicit override now use GLM.", { parse_mode: "Markdown" });
-      } else {
+      const usage = "`/harness claude` | `/harness opencode` | `/harness codex` | `/harness gemini` | `/harness kimi`";
+      if (!arg || arg === "status") {
         const cur = stateManager.getHarnessDefault();
-        await ctx.reply(`Harness default: *${cur.executor}* (${cur.model})\nUsage: \`/harness claude\` | \`/harness opencode\``, { parse_mode: "Markdown" });
+        await ctx.reply(`Harness default: *${cur.executor}*${cur.model ? ` (${cur.model})` : ""}\nUsage: ${usage}`, { parse_mode: "Markdown" });
+      } else {
+        const executor = arg === "glm" ? "opencode" : arg;
+        const validated = validateHarnessSelection({ executor, model: null, scope: "telegram-global" });
+        if (!validated.ok || !isScheduledHarnessExecutor(validated.executor)) {
+          await ctx.reply(`Invalid harness "${arg}". Usage: ${usage}`, { parse_mode: "Markdown" });
+          return;
+        }
+
+        stateManager.setHarnessDefault(validated.executor, validated.model);
+        const entry = getCatalogEntry(validated.executor);
+        await ctx.reply(
+          `🔁 Global harness default → *${entry?.label ?? validated.executor}*${validated.model ? ` (${validated.model})` : ""}. Lanes without an explicit override now use ${entry?.label ?? validated.executor}.`,
+          { parse_mode: "Markdown" }
+        );
       }
       return;
     }
