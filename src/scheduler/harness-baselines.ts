@@ -72,22 +72,27 @@ export const INTERNAL_JOB_HARNESS_BASELINES = {
     },
   },
   "nightly-memory": {
-    executor: "opencode",
-    model: null,
+    executor: "claude",
+    model: "opus[1m]",
     stages: {
       extract: {
-        executor: "opencode",
-        model: null,
+        executor: "claude",
+        model: "opus[1m]",
         cwdOverride: HOME_DIR,
         timeoutOverride: 600_000,
       },
     },
   },
   "weekly-memory-consolidation": {
-    executor: "codex",
-    model: CODEX_MODEL,
+    executor: "claude",
+    model: "opus[1m]",
     stages: {
-      consolidate: codexStage(HOME_DIR, 600_000, "high"),
+      consolidate: {
+        executor: "claude",
+        model: "opus[1m]",
+        cwdOverride: HOME_DIR,
+        timeoutOverride: 600_000,
+      },
     },
   },
   "weekly-memory-cleanup": {

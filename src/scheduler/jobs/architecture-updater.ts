@@ -10,7 +10,7 @@
 import { execSync } from "child_process";
 import { existsSync, readdirSync, readFileSync, mkdirSync } from "fs";
 import { join } from "path";
-import { executeCodexCLI } from "../../executors/codex-cli.js";
+import { executeResolvedHarness } from "../../harness/dispatch.js";
 import { logger } from "../../utils/logger.js";
 import { PATHS } from "../../config/paths.js";
 
@@ -178,21 +178,37 @@ ${scheduleContent.slice(0, 3000)}
 
 Return a 2-sentence summary of what changed.`;
 
-    logger.info("[ArchitectureUpdater] Running Codex to update architecture.md");
+    logger.info("[ArchitectureUpdater] Running architecture analysis (Codex)");
 
-    const result = await executeCodexCLI(prompt, {
-      cwd: HOMER_DIR,
-      model: "gpt-5.5",
-      reasoningEffort: "high",
-      timeout: 1_200_000, // 20 min
+    // DELIBERATE PIN: architecture analysis is an event-triggered, quality-critical deep-reasoning
+    // task that rewrites architecture.md. It is NOT in schedule.json, so it can't be managed from
+    // the Jobs tab — a seeded DB row would be an un-clearable hidden pin. We pin Codex/gpt-5.5
+    // explicitly (visible, behavior-neutral) instead. This is the one job intentionally immune to
+    // switch-all. DEBT: if architecture-updater becomes schedulable/UI-visible, replace this pin
+    // with a seeded job row so switch-all can move it.
+    const result = await executeResolvedHarness({
+      source: "scheduler",
+      mode: "scheduler-job",
+      prompt,
+      explicit: { harness: "codex", model: "gpt-5.5" },
+      baselineProfile: {
+        cwdOverride: HOMER_DIR,
+        timeoutOverride: 1_200_000, // 20 min
+        executorOptions: { codex: { reasoningEffort: "high" } },
+      },
+      requiredCapabilities: [
+        { capability: "code.edit", required: true, reason: "rewrite architecture.md" },
+        { capability: "tools.files.write", required: true, reason: "write architecture.md / output" },
+        { capability: "tools.shell", required: true, reason: "inspect repo state" },
+      ],
     });
 
     if (!result.output && !existsSync(ARCH_FILE)) {
-      return { success: false, output: "", error: "Codex produced no output and architecture.md not found" };
+      return { success: false, output: "", error: "Harness produced no output and architecture.md not found" };
     }
 
-    // If Codex wrote to the output file, read it back for logging
-    let summary = result.output?.slice(0, 500) ?? "Codex completed";
+    // If the harness wrote to the output file, read it back for logging
+    let summary = result.output?.slice(0, 500) ?? "Completed";
     if (existsSync(outputPath)) {
       const out = readFileSync(outputPath, "utf-8");
       summary = out.slice(0, 300);

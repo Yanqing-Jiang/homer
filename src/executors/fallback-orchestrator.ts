@@ -12,9 +12,15 @@ import type { StateManager } from "../state/manager.js";
 export type ExecutorKind = "claude" | "gemini" | "codex" | "kimi" | "opencode";
 export type ErrorType = "timeout" | "rate_limit" | "session_timeout" | "auth" | "unknown";
 
-// OpenCode (gemini) last - research/analysis only, no code changes
-export const DEFAULT_CHAIN: ExecutorKind[] = ["claude", "codex", "gemini"];
-export const MEMORY_CHAIN: ExecutorKind[] = ["gemini", "claude", "codex"];
+// Transitional fallback ORDERING hints (cutover). These are no longer "the chain": the scheduler
+// feeds them to negotiateHarnessAttempts as `compatibilityOrder`, where capability/health decide
+// the actual attempt list and this list only breaks ties between otherwise-equivalent harnesses.
+// Memory jobs keep a cheap flash-first order (high-volume, cap-sensitive). General jobs try the
+// global default first (wired by the caller), then this order.
+// DEBT: derive fallback ranking from capability descriptors + per-job fallback data and delete
+// these named lists; upgrade when descriptors rank degradation targets without a hardcoded order.
+export const DEFAULT_FALLBACK_ORDER: ExecutorKind[] = ["claude", "codex", "gemini"];
+export const MEMORY_FALLBACK_ORDER: ExecutorKind[] = ["gemini", "claude", "codex"];
 
 export const FAILURE_DISABLE_THRESHOLD = 2;
 export const DISABLE_MS = 30 * 60 * 1000;

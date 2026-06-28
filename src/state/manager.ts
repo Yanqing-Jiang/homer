@@ -8,8 +8,11 @@ import { sessionEvents } from "../events/session-events.js";
 import {
   getCatalogEntry,
   isScheduledHarnessExecutor,
+  validateHarnessSelection,
   type HarnessExecutor,
+  type HarnessScope,
 } from "../commands/harness-catalog.js";
+import { createSqliteHarnessSelectionStore } from "../harness/resolution/store.js";
 
 export interface Session {
   id: string;
@@ -1581,20 +1584,18 @@ export class StateManager {
    * kill-switch (no rebuild/restart); 'opencode' restores GLM-5.2.
    */
   setHarnessDefault(executor: HarnessExecutor, model?: string | null): void {
+    // Delegate to the single writer (harness_default is now a read-only view; migration 107).
     const effectiveModel = model === undefined
       ? (getCatalogEntry(executor)?.defaultModel ?? null)
       : model;
-    this._db
-      .prepare(`
-        INSERT INTO harness_default (id, executor, model, updated_at)
-        VALUES (1, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          executor = excluded.executor,
-          model = excluded.model,
-          updated_at = excluded.updated_at
-      `)
-      .run(executor, effectiveModel, Date.now());
-    logger.info({ executor, model: effectiveModel }, "Global harness default changed");
+    this.switchHarness({
+      scope: { type: "global" },
+      harness: executor,
+      model: effectiveModel,
+      updatedBy: "system",
+      source: "system",
+      reason: "setHarnessDefault",
+    });
   }
 
   /**
@@ -1621,21 +1622,238 @@ export class StateManager {
     updatedBy: string,
     source: JobHarnessOverrideSource,
   ): void {
-    this._db.prepare(`
-      INSERT INTO job_harness_override (job_id, executor, model, updated_at, updated_by, source)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(job_id) DO UPDATE SET
-        executor = excluded.executor,
-        model = excluded.model,
-        updated_at = excluded.updated_at,
-        updated_by = excluded.updated_by,
-        source = excluded.source
-    `).run(jobId, executor, model, Date.now(), updatedBy, source);
+    // Delegate to the single writer (job_harness_override is now a read-only view; migration 107).
+    this.switchHarness({
+      scope: { type: "job", id: jobId },
+      harness: executor,
+      model,
+      updatedBy,
+      source,
+      reason: "setJobHarnessOverride",
+    });
+  }
+
+  /** Build a resolver-facing read store over the normalized selection tables. */
+  createHarnessSelectionStore(): import("../harness/resolution/store.js").HarnessSelectionStore {
+    return createSqliteHarnessSelectionStore(this._db);
   }
 
   clearJobHarnessOverride(jobId: string): boolean {
-    const result = this._db.prepare("DELETE FROM job_harness_override WHERE job_id = ?").run(jobId);
-    return (result.changes ?? 0) > 0;
+    // Delegate to the single writer (job_harness_override is now a read-only view; migration 107).
+    return this.clearHarnessSelection({
+      scope: { type: "job", id: jobId },
+      updatedBy: "system",
+      source: "system",
+      reason: "clearJobHarnessOverride",
+    }).changed;
+  }
+
+  // ── Single writer for harness selection (migration 107) ─────────────────────────────
+  // switchHarness() is the ONLY function permitted to mutate harness_selection. Every change
+  // is atomic and recorded in harness_audit. All reads flow through the resolver (or the
+  // legacy compatibility views). Scope→validation-scope mapping: job→scheduled-job,
+  // global→telegram-global, lane/conversation/turn→telegram-chat (allows interactive executors).
+
+  switchHarness(input: SwitchHarnessInput): SwitchHarnessResult {
+    const scopeType = input.scope.type;
+    const scopeId = scopeType === "global" ? "" : (input.scope.id ?? "").trim();
+    if (scopeType !== "global" && !scopeId) {
+      throw new Error(`switchHarness: scope "${scopeType}" requires a non-empty id`);
+    }
+    const validationScope: HarnessScope =
+      scopeType === "job" ? "scheduled-job"
+      : scopeType === "global" ? "telegram-global"
+      : "telegram-chat";
+    const validated = validateHarnessSelection({
+      executor: input.harness,
+      model: input.model,
+      scope: validationScope,
+    });
+    if (!validated.ok) throw new Error(`switchHarness: ${validated.message}`);
+    const harness = validated.executor as HarnessExecutor;
+    const model = validated.model;
+    const profileId = input.profileId ?? null;
+
+    const tx = this._db.transaction((): SwitchHarnessResult => {
+      const now = Date.now();
+      const previous = this._db.prepare(`
+        SELECT harness, model, profile_id as profileId
+        FROM harness_selection WHERE scope_type = ? AND scope_id = ?
+      `).get(scopeType, scopeId) as { harness: HarnessExecutor; model: string | null; profileId: string | null } | undefined;
+
+      this._db.prepare(`
+        INSERT INTO harness_selection (
+          scope_type, scope_id, harness, model, profile_id,
+          enabled, source, updated_by, reason, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+        ON CONFLICT(scope_type, scope_id) DO UPDATE SET
+          harness = excluded.harness,
+          model = excluded.model,
+          profile_id = excluded.profile_id,
+          enabled = 1,
+          source = excluded.source,
+          updated_by = excluded.updated_by,
+          reason = excluded.reason,
+          updated_at = excluded.updated_at
+      `).run(scopeType, scopeId, harness, model, profileId,
+             input.source, input.updatedBy, input.reason ?? null, now);
+
+      const eventId = `hs_${now}_${randomUUID().slice(0, 8)}`;
+      this._db.prepare(`
+        INSERT INTO harness_audit (
+          event_id, action, scope_type, scope_id,
+          old_harness, old_model, old_profile_id, new_harness, new_model, new_profile_id,
+          source, updated_by, reason, created_at
+        )
+        VALUES (?, 'switch', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(eventId, scopeType, scopeId,
+             previous?.harness ?? null, previous?.model ?? null, previous?.profileId ?? null,
+             harness, model, profileId,
+             input.source, input.updatedBy, input.reason ?? null, now);
+
+      const changed = !previous || previous.harness !== harness
+        || previous.model !== model || previous.profileId !== profileId;
+      if (changed) {
+        logger.info({ scopeType, scopeId, harness, model, source: input.source }, "Harness selection changed");
+      }
+      return {
+        changed,
+        previous: previous ?? null,
+        current: { harness, model, profileId },
+        auditEventId: eventId,
+      };
+    });
+    return tx();
+  }
+
+  clearHarnessSelection(input: ClearHarnessSelectionInput): { changed: boolean; previous: SwitchHarnessResult["previous"]; auditEventId: string } {
+    const scopeType = input.scope.type;
+    const scopeId = scopeType === "global" ? "" : (input.scope.id ?? "").trim();
+    const tx = this._db.transaction(() => {
+      const now = Date.now();
+      const previous = this._db.prepare(`
+        SELECT harness, model, profile_id as profileId
+        FROM harness_selection WHERE scope_type = ? AND scope_id = ?
+      `).get(scopeType, scopeId) as { harness: HarnessExecutor; model: string | null; profileId: string | null } | undefined;
+
+      const result = this._db.prepare(
+        "DELETE FROM harness_selection WHERE scope_type = ? AND scope_id = ?",
+      ).run(scopeType, scopeId);
+
+      const eventId = `hs_${now}_${randomUUID().slice(0, 8)}`;
+      this._db.prepare(`
+        INSERT INTO harness_audit (
+          event_id, action, scope_type, scope_id,
+          old_harness, old_model, old_profile_id, new_harness, new_model, new_profile_id,
+          source, updated_by, reason, created_at
+        )
+        VALUES (?, 'clear', ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)
+      `).run(eventId, scopeType, scopeId,
+             previous?.harness ?? null, previous?.model ?? null, previous?.profileId ?? null,
+             input.source, input.updatedBy, input.reason ?? null, now);
+
+      return {
+        changed: (result.changes ?? 0) > 0,
+        previous: previous ?? null,
+        auditEventId: eventId,
+      };
+    });
+    return tx();
+  }
+
+  /**
+   * "Switch all → X" as a GLOBAL TAKEOVER: in ONE transaction set the global selection to X
+   * and DELETE the given job-scope rows so every job follows global. The only way to make the
+   * global flip + the per-job clears atomic — a loop over switchHarness/clearHarnessSelection
+   * could not (each is its own transaction). Every global switch and per-job clear is audited.
+   */
+  switchAllHarness(input: SwitchAllHarnessInput): SwitchAllHarnessResult {
+    const validated = validateHarnessSelection({
+      executor: input.harness,
+      model: input.model,
+      scope: "telegram-global",
+    });
+    if (!validated.ok) throw new Error(`switchAllHarness: ${validated.message}`);
+    const harness = validated.executor as HarnessExecutor;
+    const model = validated.model;
+
+    const tx = this._db.transaction((): SwitchAllHarnessResult => {
+      const now = Date.now();
+      // 1. Global takeover.
+      const prevGlobal = this._db.prepare(`
+        SELECT harness, model, profile_id as profileId
+        FROM harness_selection WHERE scope_type = 'global' AND scope_id = ''
+      `).get() as { harness: HarnessExecutor; model: string | null; profileId: string | null } | undefined;
+      this._db.prepare(`
+        INSERT INTO harness_selection (
+          scope_type, scope_id, harness, model, profile_id, enabled, source, updated_by, reason, updated_at
+        )
+        VALUES ('global', '', ?, ?, NULL, 1, ?, ?, ?, ?)
+        ON CONFLICT(scope_type, scope_id) DO UPDATE SET
+          harness = excluded.harness, model = excluded.model, profile_id = NULL, enabled = 1,
+          source = excluded.source, updated_by = excluded.updated_by,
+          reason = excluded.reason, updated_at = excluded.updated_at
+      `).run(harness, model, input.source, input.updatedBy, input.reason ?? "switch-all global takeover", now);
+      const globalEventId = `hs_${now}_${randomUUID().slice(0, 8)}`;
+      this._db.prepare(`
+        INSERT INTO harness_audit (
+          event_id, action, scope_type, scope_id,
+          old_harness, old_model, old_profile_id, new_harness, new_model, new_profile_id,
+          source, updated_by, reason, created_at
+        )
+        VALUES (?, 'switch', 'global', '', ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+      `).run(globalEventId, prevGlobal?.harness ?? null, prevGlobal?.model ?? null, prevGlobal?.profileId ?? null,
+             harness, model, input.source, input.updatedBy, input.reason ?? "switch-all global takeover", now);
+      const globalChanged = !prevGlobal || prevGlobal.harness !== harness || prevGlobal.model !== model;
+
+      // 2. Clear each named job-scope row.
+      const selectJob = this._db.prepare(`
+        SELECT harness, model, profile_id as profileId
+        FROM harness_selection WHERE scope_type = 'job' AND scope_id = ?
+      `);
+      const deleteJob = this._db.prepare("DELETE FROM harness_selection WHERE scope_type = 'job' AND scope_id = ?");
+      const auditClear = this._db.prepare(`
+        INSERT INTO harness_audit (
+          event_id, action, scope_type, scope_id,
+          old_harness, old_model, old_profile_id, new_harness, new_model, new_profile_id,
+          source, updated_by, reason, created_at
+        )
+        VALUES (?, 'clear', 'job', ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)
+      `);
+      const cleared: SwitchAllHarnessResult["cleared"] = [];
+      for (const jobId of input.jobIdsToClear) {
+        const prev = selectJob.get(jobId) as { harness: HarnessExecutor; model: string | null; profileId: string | null } | undefined;
+        const res = deleteJob.run(jobId);
+        if ((res.changes ?? 0) > 0 && prev) {
+          const eid = `hs_${now}_${randomUUID().slice(0, 8)}`;
+          auditClear.run(eid, jobId, prev.harness, prev.model, prev.profileId,
+                         input.source, input.updatedBy, input.reason ?? "switch-all clear job override", now);
+          cleared.push({ jobId, previous: prev, auditEventId: eid });
+        }
+      }
+
+      // Permanently suppress the internal-baseline seed. Once the user takes everything over, a
+      // daemon restart must never re-seed the rows just cleared. No-op if the marker already
+      // exists (the normal case — seed runs at init). Covers the web-inits-DB-before-homer-seeds
+      // race. Marker key mirrors harness-baseline-seed.ts INTERNAL_BASELINE_SEED_KEY.
+      this._db.prepare(
+        "INSERT OR IGNORE INTO harness_selection_meta (key, value_json, updated_at) VALUES (?, ?, ?)",
+      ).run(
+        "internal_job_harness_baselines_seeded_v1",
+        JSON.stringify({ version: 1, status: "suppressed-by-switch-all", suppressedAt: now }),
+        now,
+      );
+
+      logger.info({ harness, model, cleared: cleared.length, source: input.source }, "Harness switch-all (global takeover)");
+      return {
+        mode: "global-takeover",
+        changed: (globalChanged ? 1 : 0) + cleared.length,
+        global: { changed: globalChanged, previous: prevGlobal ?? null, current: { harness, model, profileId: null }, auditEventId: globalEventId },
+        cleared,
+      };
+    });
+    return tx();
   }
 
   getJobHarnessOverrides(jobIds?: string[]): JobHarnessOverride[] {
@@ -2540,6 +2758,59 @@ export interface SessionSummaryRow {
   isSubAgent: number;
   createdAt: string;
   status: string;
+}
+
+// Harness selection writer types (migration 107). switchHarness() is the single writer.
+export type HarnessSwitchSource = "web" | "bulk" | "migration" | "system" | "telegram" | "runtime";
+
+export interface HarnessSwitchScope {
+  type: "global" | "job" | "lane" | "conversation" | "turn";
+  id?: string; // required except global
+}
+
+export interface SwitchHarnessInput {
+  scope: HarnessSwitchScope;
+  harness: HarnessExecutor;
+  model?: string | null;
+  profileId?: string | null;
+  updatedBy: string;
+  source: HarnessSwitchSource;
+  reason?: string;
+}
+
+export interface SwitchHarnessResult {
+  changed: boolean;
+  previous: { harness: HarnessExecutor; model: string | null; profileId: string | null } | null;
+  current: { harness: HarnessExecutor; model: string | null; profileId: string | null };
+  auditEventId: string;
+}
+
+export interface ClearHarnessSelectionInput {
+  scope: HarnessSwitchScope;
+  updatedBy: string;
+  source: HarnessSwitchSource;
+  reason?: string;
+}
+
+export interface SwitchAllHarnessInput {
+  harness: HarnessExecutor;
+  model?: string | null;
+  /** Job-scope rows to delete so they follow the new global (the "takeover" set). */
+  jobIdsToClear: string[];
+  updatedBy: string;
+  source: HarnessSwitchSource;
+  reason?: string;
+}
+
+export interface SwitchAllHarnessResult {
+  mode: "global-takeover";
+  changed: number;
+  global: SwitchHarnessResult;
+  cleared: Array<{
+    jobId: string;
+    previous: { harness: HarnessExecutor; model: string | null; profileId: string | null };
+    auditEventId: string;
+  }>;
 }
 
 // Executor state types

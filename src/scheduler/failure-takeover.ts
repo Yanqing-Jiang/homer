@@ -1,7 +1,7 @@
 import { readFileSync, existsSync, mkdirSync, readdirSync } from "fs";
 import { join } from "path";
 import { logger } from "../utils/logger.js";
-import { executeClaudeCommand } from "../executors/claude.js";
+import { executeResolvedHarness } from "../harness/dispatch.js";
 import { executeInternalJob } from "./internal-handlers.js";
 import { executeScheduledJob } from "./executor.js";
 import type { RegisteredJob, JobExecutionResult } from "./types.js";
@@ -434,17 +434,27 @@ export async function runFailureTakeover(params: {
     const cwd = "/tmp/homer-takeover";
     mkdirSync(cwd, { recursive: true });
 
-    // Spawn Claude Code session
+    // Spawn a takeover session on the job's selected harness.
     let claudeOutput: string;
     try {
-      const result = await executeClaudeCommand(prompt, {
+      const result = await executeResolvedHarness({
+        source: "scheduler",
+        mode: "scheduler-job",
+        prompt,
+        scope: { jobId },
         cwd,
-        model: "opus",
+        requiredCapabilities: allowAutoFix
+          ? [
+              { capability: "code.edit", required: true, reason: "auto-fix failing job" },
+              { capability: "tools.files.write", required: true, reason: "edit source files" },
+              { capability: "tools.shell", required: true, reason: "run build/retry" },
+            ]
+          : [{ capability: "text.generate", required: true, reason: "diagnose-only report" }],
       });
       claudeOutput = result.output;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      logger.error({ jobId, error: msg }, "Takeover Claude session failed");
+      logger.error({ jobId, error: msg }, "Takeover session failed");
       return null;
     }
 

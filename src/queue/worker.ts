@@ -10,8 +10,8 @@ import { acquireSlot } from "../executors/concurrency.js";
 import { runCompletionCheckup } from "../executors/completion-checkup.js";
 import {
   runWithFallbackChain,
-  DEFAULT_CHAIN,
-  MEMORY_CHAIN,
+  DEFAULT_FALLBACK_ORDER,
+  MEMORY_FALLBACK_ORDER,
   type ExecutorKind,
 } from "../executors/fallback-orchestrator.js";
 import { writeChainTrace } from "../executors/trace-writer.js";
@@ -93,22 +93,22 @@ export class QueueWorker {
     let releaseSlot: (() => void) | null = null;
     try {
       const memoryJob = isMemoryJob(job);
-      // Memory jobs stay on the cheap flash chain (high-volume, cap-sensitive). General jobs
-      // follow the global harness default first (opencode/GLM, or claude on the kill-switch).
+      // Selection: a job that names a concrete executor is honored as the explicit primary
+      // (e.g. /codex, /gemini). A "default"/unknown job follows the global harness default;
+      // memory jobs lead with the cheap flash chain (high-volume, cap-sensitive). The requested
+      // executor runs DIRECTLY — no more hiding gemini/codex inside a Claude subagent.
       const harnessDefault = this.stateManager.resolveDefaultExecutor() as ExecutorKind;
-      const baseChain: ExecutorKind[] = memoryJob ? [...MEMORY_CHAIN] : [...DEFAULT_CHAIN];
-      const chain: ExecutorKind[] = memoryJob
-        ? baseChain
-        : [harnessDefault, ...baseChain.filter((e) => e !== harnessDefault)];
-      const primary: ExecutorKind = chain[0] ?? "claude";
-
-      // Determine subagent (used only when executor is Claude)
-      let subagent: "gemini" | "codex" | undefined;
-      if (job.executor === "gemini") {
-        subagent = "gemini";
-      } else if (job.executor === "codex") {
-        subagent = "codex";
-      }
+      const baseChain: ExecutorKind[] = memoryJob ? [...MEMORY_FALLBACK_ORDER] : [...DEFAULT_FALLBACK_ORDER];
+      const VALID_EXECUTORS: ExecutorKind[] = ["claude", "gemini", "codex", "kimi", "opencode"];
+      const requested = VALID_EXECUTORS.includes(job.executor as ExecutorKind)
+        ? (job.executor as ExecutorKind)
+        : undefined;
+      const primary: ExecutorKind =
+        requested ?? (memoryJob ? (baseChain[0] ?? "gemini") : harnessDefault);
+      // DEBT: chain is built from the static compatibility order, not negotiateHarnessAttempts.
+      // Equivalent today (queue jobs declare no required capabilities). Upgrade when queue jobs
+      // carry capability requirements, and route runExecutor through the harness adapters.
+      const chain: ExecutorKind[] = [primary, ...baseChain.filter((e) => e !== primary)];
 
       // Claude session handling
       const initialClaudeSessionId = this.stateManager.getClaudeSessionId(job.lane);
@@ -125,7 +125,6 @@ export class QueueWorker {
           const result = await executeClaudeCommand(query, {
             cwd: HOME,
             claudeSessionId: lastClaudeSessionId,
-            subagent,
           });
           if (result.claudeSessionId) {
             lastClaudeSessionId = result.claudeSessionId;

@@ -16,7 +16,12 @@
   },
   "scripts": {
     "build": "npx tsc && cp src/state/migrations/*.sql dist/state/migrations/ && mkdir -p dist/executors/scrape-scripts && cp src/executors/scrape-scripts/*.js dist/executors/scrape-scripts/ && echo \"{\\\"sha\\\": \\\"$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')\\\", \\\"time\\\": \\\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\\\"}\" > dist/.build-version",
-    "check": "npm run typecheck && npm run build",
+    "skills:render": "tsx scripts/render-harness-assets.ts render",
+    "skills:check": "tsx scripts/render-harness-assets.ts check",
+    "skills:install": "tsx scripts/render-harness-assets.ts render --install",
+    "harness:lint": "tsx scripts/harness-lint.ts",
+    "harness:conformance": "tsx scripts/harness-conformance.ts",
+    "check": "npm run typecheck && npm run build && npm run skills:check && npm run harness:lint && npm run harness:conformance",
     "test": "npm run check",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
