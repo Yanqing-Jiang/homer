@@ -52,10 +52,26 @@ export interface ClaudeExecutorOptions {
   onPartial?: (text: string) => void;
   /** Called with structured step events (tool_use, tool_result, thinking) */
   onEvent?: (event: StreamStepEvent) => void;
+  /** Injected via --append-system-prompt (scheduler context-file injection). */
+  appendSystemPrompt?: string;
+  /** CLAUDE_CODE_ENTRYPOINT identity for analytics (default "homer"). */
+  entrypoint?: string;
+  /** Return the longest of accumulated streamed text vs the final `result`
+   *  event, instead of last-result-wins. Guards multi-turn jobs whose last turn
+   *  is a short meta-comment that would otherwise clobber the real deliverable.
+   *  Off by default so existing callers keep their current semantics. */
+  preferLongestText?: boolean;
+  /** Keep stderr out of `output` (returned separately on result.stderr) so
+   *  callers that parse structured output aren't polluted by CLI warnings.
+   *  Off by default so existing callers keep stderr appended to output. */
+  cleanOutput?: boolean;
 }
 
 export interface ClaudeExecutorResult extends ExecutorResult {
   claudeSessionId?: string;
+  /** Captured stderr, always exposed separately here (and, unless `cleanOutput`
+   *  is set, also appended to `output` for backward compatibility). */
+  stderr?: string;
 }
 
 export interface ContentBlock {
@@ -171,6 +187,10 @@ export async function executeClaudeCommand(
     logger.debug({ claudeSessionId }, "Resuming Claude session");
   }
 
+  if (options.appendSystemPrompt) {
+    args.push("--append-system-prompt", options.appendSystemPrompt);
+  }
+
   args.push("--", finalQuery);
 
   // In Aqua session, Claude CLI can access keychain directly for OAuth.
@@ -179,7 +199,7 @@ export async function executeClaudeCommand(
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    CLAUDE_CODE_ENTRYPOINT: "homer",
+    CLAUDE_CODE_ENTRYPOINT: options.entrypoint ?? "homer",
     CI: process.env.CI ?? "1",
     TERM: process.env.TERM ?? "dumb",
     NO_COLOR: process.env.NO_COLOR ?? "1",
@@ -240,6 +260,10 @@ export async function executeClaudeCommand(
     let capturedSessionId: string | undefined;
     // Accumulated result content
     let resultContent = "";
+    // Separate accumulators for preferLongestText: streamed assistant text
+    // (never overwritten) vs the final `result` event payload (last-turn only).
+    let streamedText = "";
+    let finalResultText = "";
 
     let exitCode: number | null = null;
     let exitSignal: NodeJS.Signals | null = null;
@@ -279,6 +303,7 @@ export async function executeClaudeCommand(
             for (const block of content) {
               if (block.type === "text" && block.text) {
                 resultContent += block.text;
+                streamedText += block.text;
               } else if (block.type === "tool_use" && block.name && options.onEvent) {
                 // Flush accumulated text via onPartial BEFORE emitting tool_use,
                 // so consumers see the text delta before the step marker.
@@ -307,7 +332,9 @@ export async function executeClaudeCommand(
               }
             }
           } else {
-            resultContent += extractTextContent(content);
+            const text = extractTextContent(content);
+            resultContent += text;
+            streamedText += text;
           }
           if (options.onPartial && resultContent) {
             try { options.onPartial(resultContent); } catch { /* don't crash executor */ }
@@ -342,6 +369,7 @@ export async function executeClaudeCommand(
         // Capture result content (final response)
         if (event.type === "result" && event.result) {
           resultContent = event.result;
+          finalResultText = event.result;
         }
       } catch {
         // Not JSON, might be stderr or other output
@@ -358,8 +386,18 @@ export async function executeClaudeCommand(
       // Use parsed result content if available, otherwise fall back to raw stdout
       let output = resultContent.trim() || stdout.trim();
 
-      if (stderr) {
-        output = output ? `${output}\n\nStderr:\n${stderr}` : stderr;
+      // preferLongestText: pick the fuller of streamed text vs final-result
+      // event, so a short last-turn meta-comment can't clobber the deliverable.
+      if (options.preferLongestText) {
+        const s = streamedText.trim();
+        const f = finalResultText.trim();
+        const best = s.length >= f.length ? s : f;
+        if (best) output = best;
+      }
+
+      const capturedStderr = stderr.trim();
+      if (capturedStderr && !options.cleanOutput) {
+        output = output ? `${output}\n\nStderr:\n${capturedStderr}` : capturedStderr;
       }
 
       logger.debug(
@@ -396,6 +434,7 @@ export async function executeClaudeCommand(
         duration,
         executor: "claude",
         claudeSessionId: capturedSessionId,
+        stderr: capturedStderr || undefined,
       });
     };
 

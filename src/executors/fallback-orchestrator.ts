@@ -485,18 +485,37 @@ export async function runWithFallbackChain<T extends ExecutorAttemptResult>(
       });
     }
 
-    // Rate limit: skip same-executor retry AND skip LLM diagnosis — immediately switch
-    if (errorType === "rate_limit") {
+    // Fast empty failure: a sub-2s non-zero exit that produced no output or
+    // stderr (errorSummary collapsed to just "Exit code N"). The CLI died at
+    // startup — a bad flag (e.g. a prompt the arg parser misread), a transient
+    // API reject, or an auth blip — before talking to the model. A same-executor
+    // retry with identical args is almost always futile and an LLM diagnosis is
+    // pure waste. Treat like a rate limit: skip both and switch immediately.
+    const strippedError = failure.errorSummary
+      .replace(/Exit code -?\d+/gi, "")
+      .replace(/\(No output\)/gi, "")
+      .trim();
+    const isFastEmptyFailure =
+      errorType === "unknown" &&
+      (result.duration ?? Infinity) < 2000 &&
+      strippedError.length === 0;
+
+    // Rate limit (or fast empty failure): skip same-executor retry AND skip LLM
+    // diagnosis — immediately switch to the next executor.
+    if (errorType === "rate_limit" || isFastEmptyFailure) {
       logger.info(
-        { jobId: job.id, executor: current, errorType },
-        "Rate limit detected — skipping retry and diagnosis, switching executor"
+        { jobId: job.id, executor: current, errorType, fastEmpty: isFastEmptyFailure, durationMs: result.duration },
+        isFastEmptyFailure
+          ? "Fast empty failure — skipping retry and diagnosis, switching executor"
+          : "Rate limit detected — skipping retry and diagnosis, switching executor"
       );
       const nextIdx: number = chain.indexOf(current) + 1;
       if (nextIdx < chain.length) {
         const nextExecutor: ExecutorKind = chain[nextIdx]!;
         if (!notifiedFallback && notify) {
           notifiedFallback = true;
-          await notify(`⚠️ ${current} rate-limited for ${job.name}. Switching to ${nextExecutor}.`);
+          const why = isFastEmptyFailure ? "failed instantly" : "rate-limited";
+          await notify(`⚠️ ${current} ${why} for ${job.name}. Switching to ${nextExecutor}.`);
         }
         fallbackUsed = true;
         current = nextExecutor;
