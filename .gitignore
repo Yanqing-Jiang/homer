@@ -49,6 +49,7 @@ config/.DS_Store
 !docs/INSTALL.md
 !docs/CONTRIBUTING.md
 !docs/telephony.md
+!docs/harness-independence.md
 
 # Internal agent / model instructions — never publish
 CLAUDE.md
