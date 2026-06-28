@@ -512,11 +512,14 @@ ${latestUserMessage}
 - Output valid Telegram HTML only. No Markdown. No code fences
 - End with a follow-up question or observation to keep discussion productive`;
 
-  const { executeClaudeCommand } = await import("../../executors/claude.js");
-  const result = await executeClaudeCommand(prompt, {
+  const { executeResolvedHarness } = await import("../../harness/dispatch.js");
+  const result = await executeResolvedHarness({
+    source: "runtime",
+    mode: "runtime-turn",
+    prompt,
     cwd: config.paths.homerRoot,
-    model: "sonnet",
-    timeout: 900_000,
+    timeoutMs: 900_000,
+    outputContract: { kind: "text" },
   });
 
   if (result.exitCode !== 0) {
@@ -1359,7 +1362,7 @@ export function registerPlanReviewCallbacks(bot: Bot, stateManager: StateManager
       stateManager.updatePlanReviewStatus(planId, "executing");
       stateManager.clearPendingPlan(planId);
 
-      import("../../executors/claude.js").then(({ executeClaudeCommand }) => {
+      import("../../harness/dispatch.js").then(({ executeResolvedHarness }) => {
         const rawPlan = plan.rawText || review.planJson;
         const prompt = `You are implementing an approved Homer improvement plan.
 
@@ -1379,10 +1382,17 @@ ${rawPlan}
 
 Output a brief summary of what you changed and whether the build passes.`;
 
-        executeClaudeCommand(prompt, {
-          cwd: "/Users/yj/homer",
-          model: "opus",
-          timeout: 20 * 60 * 1000,
+        executeResolvedHarness({
+          source: "runtime",
+          mode: "runtime-turn",
+          prompt,
+          cwd: config.paths.homerRoot,
+          timeoutMs: 20 * 60 * 1000,
+          requiredCapabilities: [
+            { capability: "code.edit", required: true, reason: "implement approved plan" },
+            { capability: "tools.files.write", required: true, reason: "edit source files" },
+            { capability: "tools.shell", required: true, reason: "run npm build + commit" },
+          ],
         }).then(async (result) => {
           stateManager.updatePlanReviewStatus(planId, "completed");
           const summary = (result.output || "completed").slice(0, 1500);
@@ -1402,7 +1412,7 @@ Output a brief summary of what you changed and whether the build passes.`;
             );
           } catch { /* best effort */ }
         });
-      }).catch(err => logger.error({ planId, error: err }, "Failed to import claude executor"));
+      }).catch(err => logger.error({ planId, error: err }, "Failed to import harness dispatch"));
     }
   });
 
@@ -1511,7 +1521,7 @@ export async function handlePlanRevisionReply(
   await bot.api.sendMessage(chatId, `🔄 <b>Revising plan...</b>\n<i>${escapeHtml(feedbackText.slice(0, 200))}</i>`, { parse_mode: "HTML" });
 
   try {
-    const { executeClaudeCommand } = await import("../../executors/claude.js");
+    const { executeResolvedHarness } = await import("../../harness/dispatch.js");
     const prompt = `You are revising a Homer implementation plan based on user feedback.
 
 ## Original Plan
@@ -1530,10 +1540,13 @@ ${feedbackText}
 4. Only change what the feedback asks for. Keep everything else.
 5. Output ONLY the revised plan text, nothing else.`;
 
-    const result = await executeClaudeCommand(prompt, {
-      cwd: "/Users/yj/homer",
-      model: "sonnet",
-      timeout: 90_000,
+    const result = await executeResolvedHarness({
+      source: "runtime",
+      mode: "runtime-turn",
+      prompt,
+      cwd: config.paths.homerRoot,
+      timeoutMs: 90_000,
+      outputContract: { kind: "text" },
     });
 
     if (result.exitCode !== 0) throw new Error(result.output?.slice(0, 300) || "Revision failed");
@@ -1648,10 +1661,10 @@ export function registerPlanApprovalHandlers(bot: Bot, stateManager: StateManage
       });
     } catch { /* best-effort */ }
 
-    // Fire-and-forget: spawn Claude Code to implement the plan on main (no branch)
+    // Fire-and-forget: spawn the selected harness to implement the plan on main (no branch)
     const cmdChatId = ctx.chat?.id;
     if (cmdChatId) {
-      import("../../executors/claude.js").then(({ executeClaudeCommand }) => {
+      import("../../harness/dispatch.js").then(({ executeResolvedHarness }) => {
         const prompt = `You are implementing an approved Homer improvement plan.
 
 ## The Plan
@@ -1670,10 +1683,17 @@ ${plan}
 
 Output a brief summary of what you changed and whether the build passes.`;
 
-        executeClaudeCommand(prompt, {
-          cwd: "/Users/yj/homer",
-          model: "opus",
-          timeout: 20 * 60 * 1000,
+        executeResolvedHarness({
+          source: "runtime",
+          mode: "runtime-turn",
+          prompt,
+          cwd: config.paths.homerRoot,
+          timeoutMs: 20 * 60 * 1000,
+          requiredCapabilities: [
+            { capability: "code.edit", required: true, reason: "implement approved plan" },
+            { capability: "tools.files.write", required: true, reason: "edit source files" },
+            { capability: "tools.shell", required: true, reason: "run npm build + commit" },
+          ],
         }).then(async (result) => {
           const summary = (result.output || "completed").slice(0, 1500);
           try {
@@ -1683,7 +1703,7 @@ Output a brief summary of what you changed and whether the build passes.`;
             );
           } catch { /* best effort */ }
         }).catch(async (err) => {
-          logger.error({ jobId, error: err }, "Plan implementation via Claude Code failed");
+          logger.error({ jobId, error: err }, "Plan implementation via selected harness failed");
           try {
             await bot.api.sendMessage(cmdChatId,
               `❌ <b>Plan implementation failed</b>\n<b>ID:</b> <code>${escapeHtml(jobId)}</code>\n<code>${escapeHtml(String(err).slice(0, 500))}</code>`,
@@ -1823,11 +1843,11 @@ export function registerPlanApprovalCallbacks(bot: Bot, stateManager: StateManag
       });
     } catch { /* best-effort */ }
 
-    // Fire-and-forget: spawn Claude Code to implement the plan on main (no branch)
+    // Fire-and-forget: spawn the selected harness to implement the plan on main (no branch)
     const chatId = ctx.chat?.id;
     if (chatId) {
       stateManager.clearPendingPlan(jobId);
-      import("../../executors/claude.js").then(({ executeClaudeCommand }) => {
+      import("../../harness/dispatch.js").then(({ executeResolvedHarness }) => {
         const prompt = `You are implementing an approved Homer improvement plan.
 
 ## The Plan
@@ -1846,10 +1866,17 @@ ${plan}
 
 Output a brief summary of what you changed and whether the build passes.`;
 
-        executeClaudeCommand(prompt, {
-          cwd: "/Users/yj/homer",
-          model: "opus",
-          timeout: 20 * 60 * 1000,
+        executeResolvedHarness({
+          source: "runtime",
+          mode: "runtime-turn",
+          prompt,
+          cwd: config.paths.homerRoot,
+          timeoutMs: 20 * 60 * 1000,
+          requiredCapabilities: [
+            { capability: "code.edit", required: true, reason: "implement approved plan" },
+            { capability: "tools.files.write", required: true, reason: "edit source files" },
+            { capability: "tools.shell", required: true, reason: "run npm build + commit" },
+          ],
         }).then(async (result) => {
           const summary = (result.output || "completed").slice(0, 1500);
           try {
@@ -1859,7 +1886,7 @@ Output a brief summary of what you changed and whether the build passes.`;
             );
           } catch { /* best effort */ }
         }).catch(async (err) => {
-          logger.error({ jobId, error: err }, "Plan implementation via Claude Code failed");
+          logger.error({ jobId, error: err }, "Plan implementation via selected harness failed");
           try {
             await bot.api.sendMessage(chatId,
               `❌ <b>Plan implementation failed</b>\n<b>ID:</b> <code>${escapeHtml(jobId)}</code>\n<code>${escapeHtml(String(err).slice(0, 500))}</code>`,
@@ -1868,7 +1895,7 @@ Output a brief summary of what you changed and whether the build passes.`;
           } catch { /* best effort */ }
         });
       }).catch(err => {
-        logger.error({ jobId, error: err }, "Failed to import claude executor");
+        logger.error({ jobId, error: err }, "Failed to import harness dispatch");
       });
     }
   });

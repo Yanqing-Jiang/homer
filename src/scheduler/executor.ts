@@ -50,12 +50,16 @@ function jobHarnessOverride(jobId: string): HarnessSelection | undefined {
   return undefined;
 }
 import { RESEARCH_ONLY_PREFIX, executeOpenCodeCLI } from "../executors/opencode-cli.js";
+import { resolveHarnessSelection } from "../harness/resolution/resolver.js";
+import { createSqliteHarnessSelectionStore, type HarnessSelectionStore } from "../harness/resolution/store.js";
 import {
   runWithFallbackChain,
-  DEFAULT_CHAIN,
-  MEMORY_CHAIN,
+  DEFAULT_FALLBACK_ORDER,
+  MEMORY_FALLBACK_ORDER,
   type ExecutorKind,
 } from "../executors/fallback-orchestrator.js";
+import { negotiateHarnessAttempts } from "../harness/negotiation.js";
+import type { ResolvedHarnessPlan } from "../harness/resolution/types.js";
 import { writeChainTrace } from "../executors/trace-writer.js";
 import { scanContent } from "../skills/guard.js";
 
@@ -803,6 +807,95 @@ function buildChain(
   return [primary, ...baseChain.filter((executor) => executor !== primary)];
 }
 
+let _harnessStore: HarnessSelectionStore | null = null;
+function harnessSelectionStore(): HarnessSelectionStore | null {
+  try {
+    if (!_harnessStore) {
+      if (!_harnessDb) _harnessDb = new Database(PATHS.db, { readonly: true });
+      _harnessStore = createSqliteHarnessSelectionStore(_harnessDb);
+    }
+    return _harnessStore;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * CUTOVER: scheduler SELECTION (primary harness + pinned model) is now purely DB-driven —
+ * the single resolver decides: job row → global → system-default. The code/file baseline is
+ * ONLY an executor-agnostic runtime profile (cwd/timeout/executorOptions/fallbackModels); its
+ * executor/model no longer select. Deliberate per-job tuning lives as seeded job rows
+ * (see harness-baseline-seed.ts), so "switch all → X" moves everything by clearing those rows.
+ *
+ * The old baseline-as-selector bridge (which made a flip of the global default a no-op for
+ * tuned jobs) is deleted. Any resolver/store failure falls back to a legacy physical read so a
+ * pre-migration DB or a transient read error can never crash or mis-route a scheduled job.
+ */
+function resolveSchedulerPrimary(
+  jobId: string,
+  globalDefault: { executor: ExecutorKind; model: string | null },
+): { primary: ExecutorKind; pinnedModel: string | null; modelPinnedExecutor: ExecutorKind | undefined; plan?: ResolvedHarnessPlan } {
+  // Legacy safety fallback (store unavailable / pre-108 DB): job override → global → hard claude.
+  const legacy = () => {
+    const concrete = jobHarnessOverride(jobId) ?? globalDefault;
+    const primary = concrete?.executor ?? "claude";
+    return {
+      primary,
+      pinnedModel: concrete?.model ?? null,
+      modelPinnedExecutor: concrete ? primary : undefined,
+    };
+  };
+
+  const store = harnessSelectionStore();
+  if (!store) return legacy();
+
+  try {
+    const plan = resolveHarnessSelection(
+      { requestId: `sched-${jobId}`, source: "scheduler", scope: { jobId } },
+      store,
+    );
+    return {
+      primary: plan.selection.harness,
+      pinnedModel: plan.selection.model,
+      modelPinnedExecutor: plan.selection.harness,
+      plan,
+    };
+  } catch {
+    return legacy();
+  }
+}
+
+/**
+ * Build the ordered fallback chain via the capability negotiator (cutover). The negotiator decides
+ * the attempt list from the resolved plan + capability descriptors; `compatibilityOrder` only ranks
+ * otherwise-equivalent harnesses, preserving today's fallback order. With no required capabilities
+ * (the common scheduler case) this reduces to `buildChain(primary, compatibilityOrder)` — so it is
+ * behavior-neutral today while routing the live path through the negotiator. Falls back to the plain
+ * chain on any negotiator error.
+ */
+function negotiatedSchedulerChain(
+  plan: ResolvedHarnessPlan,
+  compatibilityOrder: ExecutorKind[],
+  primary: ExecutorKind,
+): ExecutorKind[] {
+  try {
+    const attemptPlan = negotiateHarnessAttempts({
+      resolved: plan,
+      mode: "scheduler-job",
+      compatibilityOrder: compatibilityOrder as ResolvedHarnessPlan["selection"]["harness"][],
+      allowDegradation: true,
+    });
+    const seen = new Set<ExecutorKind>();
+    const chain: ExecutorKind[] = [];
+    for (const h of [attemptPlan.primary.harness, ...attemptPlan.attempts.map((a) => a.harness)] as ExecutorKind[]) {
+      if (!seen.has(h)) { seen.add(h); chain.push(h); }
+    }
+    return chain.length ? chain : buildChain(primary, compatibilityOrder);
+  } catch {
+    return buildChain(primary, compatibilityOrder);
+  }
+}
+
 export async function runJobHarness(
   job: RegisteredJob,
   query: string,
@@ -827,14 +920,21 @@ export async function runJobHarness(
   const baseline = explicitProfile.baseline;
   const globalDefault = harnessDefault();
 
-  const concreteSelection = baseline ?? (!memoryJob ? globalDefault : undefined);
-  const primary = concreteSelection?.executor ?? MEMORY_CHAIN[0] ?? "claude";
-  const pinnedModel = concreteSelection?.model ?? null;
-  const modelPinnedExecutor = concreteSelection ? primary : undefined;
-  const baseChain = explicitProfile.fallbackChain
+  // CUTOVER: selection is purely DB-driven (job row → global → default). The code/file baseline
+  // contributes only its executor-agnostic profile (cwd/timeout/executorOptions/fallbackModels)
+  // below — its executor/model no longer select.
+  const { primary, pinnedModel, modelPinnedExecutor, plan } = resolveSchedulerPrimary(
+    config.id,
+    globalDefault,
+  );
+  // Per-job fallback chain wins; else today's default order (memory jobs keep flash-first). This is
+  // the `compatibilityOrder` the negotiator ranks within — not a hardcoded chain.
+  const compatibilityOrder = explicitProfile.fallbackChain
     ?? baseline?.fallbackChain
-    ?? (memoryJob ? MEMORY_CHAIN : DEFAULT_CHAIN);
-  const chain = buildChain(primary, baseChain);
+    ?? (memoryJob ? MEMORY_FALLBACK_ORDER : DEFAULT_FALLBACK_ORDER);
+  const chain = plan
+    ? negotiatedSchedulerChain(plan, compatibilityOrder, primary)
+    : buildChain(primary, compatibilityOrder);
   const fallbackModels = {
     ...baseline?.fallbackModels,
     ...explicitProfile.fallbackModels,

@@ -1,5 +1,5 @@
 import type { ParsedSession } from "./parsers.js";
-import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
+import { executeResolvedHarness } from "../harness/dispatch.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -67,11 +67,14 @@ Messages: ${session.messageCount}
 
 ${conversationText}`;
 
-  const result = await executeOpenCodeCLI(prompt, "", {
-    model: "google/gemini-3.5-flash",
-    forceOpenCode: true,
-    researchOnly: false,
-    timeout: 900_000,
+  // Semantic pin: cost-sensitive summarization stays on OpenCode Gemini Flash (immune to switch-all).
+  const result = await executeResolvedHarness({
+    source: "runtime",
+    mode: "runtime-turn",
+    prompt,
+    explicit: { harness: "opencode", model: "google/gemini-3.5-flash" },
+    baselineProfile: { executorOptions: { opencode: { forceOpenCode: true, researchOnly: false } } },
+    timeoutMs: 900_000,
     signal,
   });
 

@@ -1,0 +1,56 @@
+# Logical → harness MCP tool aliases. Canonical assets reference ONLY logical names
+# (in `tools.logical` and `{{tool:logical.name}}` body macros); the generator rewrites them
+# to each harness's native tool name. Grounded fact: the homer-memory tool names are identical
+# across harnesses — only the prefix differs (Claude: mcp__homer-memory__<t>; opencode/codex: <t>).
+version: 1
+logicalTools:
+  memory.search:
+    capability: memory.read
+    description: Search Homer memory / knowledge claims.
+    harness:
+      claude: { tool: mcp__homer-memory__memory_search }
+      opencode: { tool: memory_search, mcpServer: homer-memory }
+      codex: { tool: memory_search, mcpServer: homer-memory }
+  memory.read:
+    capability: memory.read
+    harness:
+      claude: { tool: mcp__homer-memory__memory_read }
+      opencode: { tool: memory_read, mcpServer: homer-memory }
+      codex: { tool: memory_read, mcpServer: homer-memory }
+  memory.context:
+    capability: memory.read
+    harness:
+      claude: { tool: mcp__homer-memory__memory_context }
+      opencode: { tool: memory_context, mcpServer: homer-memory }
+      codex: { tool: memory_context, mcpServer: homer-memory }
+  memory.suggest:
+    capability: memory.write.reviewed
+    harness:
+      claude: { tool: mcp__homer-memory__memory_suggest }
+      opencode: { tool: memory_suggest, mcpServer: homer-memory }
+      codex: { tool: memory_suggest, mcpServer: homer-memory }
+  memory.promote:
+    capability: memory.write.durable
+    requiresReview: true
+    harness:
+      claude: { tool: mcp__homer-memory__memory_promote }
+      opencode: { tool: memory_promote, mcpServer: homer-memory }
+      codex: { tool: memory_promote, mcpServer: homer-memory }
+  idea.list:
+    capability: idea.read
+    harness:
+      claude: { tool: mcp__homer-memory__idea_list }
+      opencode: { tool: idea_list, mcpServer: homer-memory }
+      codex: { tool: idea_list, mcpServer: homer-memory }
+  idea.update:
+    capability: idea.write
+    harness:
+      claude: { tool: mcp__homer-memory__idea_update }
+      opencode: { tool: idea_update, mcpServer: homer-memory }
+      codex: { tool: idea_update, mcpServer: homer-memory }
+  blob.upload:
+    capability: blob.write
+    harness:
+      claude: { tool: mcp__homer-memory__blob_upload }
+      opencode: { tool: blob_upload, mcpServer: homer-memory }
+      codex: { tool: blob_upload, mcpServer: homer-memory }

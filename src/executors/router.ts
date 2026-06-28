@@ -17,7 +17,7 @@ import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI, type KimiCLIOptions } from "./kimi-cli.js";
 import { executeClaudeCommand, type ClaudeExecutorOptions } from "./claude.js";
 import type { ExecutorResult } from "./types.js";
-import { runWithFallbackChain, DEFAULT_CHAIN, type ExecutorKind } from "./fallback-orchestrator.js";
+import { runWithFallbackChain, DEFAULT_FALLBACK_ORDER, type ExecutorKind } from "./fallback-orchestrator.js";
 import { getExecutorModel } from "../commands/index.js";
 import { AccountManager, CostTracker, DeferralQueue, createRouterState, type RouterState } from "./router-db.js";
 import { writeChainTrace } from "./trace-writer.js";
@@ -497,7 +497,7 @@ function buildExecutorChain(decision: RoutingDecision): ExecutorKind[] {
   }
 
   if (chain.length === 0) {
-    return [...DEFAULT_CHAIN];
+    return [...DEFAULT_FALLBACK_ORDER];
   }
 
   return chain;

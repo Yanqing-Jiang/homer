@@ -80,6 +80,16 @@ async function main(): Promise<void> {
   logger.info("Running database migrations...");
   runMigrations(stateManager.getDb());
 
+  // Seed internal-baseline job rows once (harness-independence cutover, B-semantics).
+  // Idempotent + guarded by a marker so a switch-all is never undone by a restart.
+  try {
+    const { seedInternalHarnessBaselines } = await import("./scheduler/harness-baseline-seed.js");
+    const seed = seedInternalHarnessBaselines(stateManager.getDb());
+    if (seed.seeded) logger.info({ jobRows: seed.jobRows }, "Internal harness baselines seeded");
+  } catch (err) {
+    logger.warn({ err }, "Internal-baseline seed failed to run (non-blocking)");
+  }
+
   // Phase 0.9: validate memory-file registry against PATHS (warn-only)
   try {
     const { validateAndLogMemoryRegistry } = await import("./memory/registry.js");

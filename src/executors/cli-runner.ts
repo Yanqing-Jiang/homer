@@ -8,7 +8,7 @@ import { executePooledClaudeTurn, closePooledClaudeSession, closeAllPooledClaude
 import { executeOpenCodeCLI } from "./opencode-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
-import { runWithFallbackChain, DEFAULT_CHAIN, type ExecutorKind } from "./fallback-orchestrator.js";
+import { runWithFallbackChain, DEFAULT_FALLBACK_ORDER, type ExecutorKind } from "./fallback-orchestrator.js";
 import { writeChainTrace } from "./trace-writer.js";
 import { getCatalogEntry, getClaudeDefaultModel } from "../commands/index.js";
 import { buildConversationContext, CONTEXT_DEFAULTS, type ContextSource } from "./context-builder.js";
@@ -556,7 +556,7 @@ ${pendingContext.context}
         if (executor === "claude") {
           const fallbackResult = await runWithFallbackChain({
             primary: "claude",
-            chain: DEFAULT_CHAIN,
+            chain: DEFAULT_FALLBACK_ORDER,
             job: {
               id: runId,
               name: params.query.slice(0, 80),
