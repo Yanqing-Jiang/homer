@@ -1,4 +1,6 @@
 import { Bot, type Context } from "grammy";
+import { autoRetry } from "@grammyjs/auto-retry";
+import { apiThrottler } from "@grammyjs/transformer-throttler";
 import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
 import { authMiddleware } from "./middleware/auth.js";
@@ -132,7 +134,21 @@ export function setMeetingManager(meetingManager: MeetingManager): void {
 }
 
 export function createBot(stateManager: StateManager, runManager: CLIRunManager): Bot {
-  const bot = new Bot(config.telegram.botToken);
+  // timeoutSeconds bounds every Bot API call. grammy's default is 500s (8m20s),
+  // so a black-holed api.telegram.org would hang handlers/scheduler/startup for
+  // 8+ minutes. 45s is well under that yet exceeds the 30s long-poll getUpdates
+  // timeout (must be > poll timeout or long polling self-aborts).
+  const bot = new Bot(config.telegram.botToken, {
+    client: { timeoutSeconds: 45 },
+  });
+
+  // Outbound resilience (order matters — throttler outermost, then auto-retry):
+  //  - apiThrottler: queues requests under Telegram's rate limits (avoids 429s).
+  //  - autoRetry: rides out 429 (retry_after), 5xx (502/503), and transport
+  //    errors with exponential backoff. maxDelaySeconds caps the per-call wait
+  //    so a long flood/outage fails fast instead of blocking for an hour.
+  bot.api.config.use(apiThrottler());
+  bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 60 }));
 
   const reminderManager = new ReminderManager(stateManager);
   reminderManagerRef = reminderManager;
@@ -1042,13 +1058,20 @@ ${checksStr}`;
       return;
     }
 
+    // Keep a live "typing" indicator from the moment the voice note arrives,
+    // through download → transcription → execution → TTS synthesis. A one-shot
+    // chat action expires after ~5s, and handleNewExecution shows no indicator
+    // when called with returnResponse=true (the voice path), so without this the
+    // user sees no feedback while the (often multi-second) pipeline runs.
+    const typingLoop = new TelegramTypingLoop(ctx.chat.id, ctx.api);
+    typingLoop.start();
+
     try {
       const file = await ctx.getFile();
       const fileUrl = `https://api.telegram.org/file/bot${config.telegram.botToken}/${file.file_path}`;
       const response = await fetch(fileUrl);
       const audioBuffer = Buffer.from(await response.arrayBuffer());
 
-      await ctx.replyWithChatAction("typing");
       const transcription = await transcribeAudio(audioBuffer, voiceConfig);
 
       if (!transcription.text.trim()) {
@@ -1140,6 +1163,8 @@ ${checksStr}`;
     } catch (error) {
       logger.error({ error }, "Voice processing failed");
       await ctx.reply(`Voice error: ${error instanceof Error ? error.message : "Unknown"}`);
+    } finally {
+      typingLoop.stop();
     }
   });
 

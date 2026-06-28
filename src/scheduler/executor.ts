@@ -1,8 +1,6 @@
-import { spawn } from "child_process";
 import { readFileSync, existsSync } from "fs";
 import { logger } from "../utils/logger.js";
 import { withSlot } from "../executors/concurrency.js";
-import { processRegistry } from "../process/registry.js";
 import type { RegisteredJob, JobExecutionResult, ProgressCallback, ProgressEvent } from "./types.js";
 import { LANE_CWD, DEFAULT_JOB_TIMEOUT } from "./types.js";
 import { executeKimiCLI } from "../executors/kimi-cli.js";
@@ -136,24 +134,6 @@ function loadContextFiles(files: string[]): string {
   }
   return contents.join("\n\n---\n\n");
 }
-
-const CLAUDE_PATH = process.env.CLAUDE_PATH ?? "claude";
-const KILL_GRACE_MS = 5_000;
-const MAX_OUTPUT_BYTES = 1 * 1024 * 1024; // 1MB capture cap
-
-// Tool name mappings - super short for Telegram
-const TOOL_DISPLAY_NAMES: Record<string, string> = {
-  WebSearch: "🔍 Search",
-  WebFetch: "🌐 Fetch",
-  Read: "📖 Read",
-  Glob: "📂 Find",
-  Grep: "🔎 Grep",
-  Bash: "💻 Run",
-  Task: "🤖 Agent",
-  Edit: "✏️ Edit",
-  Write: "📝 Write",
-  TodoWrite: "📋 Todo",
-};
 
 function isMemoryJob(job: RegisteredJob): boolean {
   const id = job.config.id.toLowerCase();
@@ -636,358 +616,154 @@ async function executeClaudeJob(
     ? loadContextFiles(config.contextFiles)
     : "";
 
-  const args = [
-    "-p", // Print mode - no session resume for scheduled jobs
-    "--verbose", // Required for stream-json output
-    "--output-format",
-    "stream-json",
-    "--model",
-    model,
-    "--dangerously-skip-permissions",
-  ];
-
-  // Inject context files as system prompt
-  if (contextPrompt) {
-    args.push("--append-system-prompt", contextPrompt);
-    logger.info({ jobId: config.id, contextLength: contextPrompt.length }, "Injected context files");
-  }
-
-  args.push(query);
-
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    CLAUDE_CODE_ENTRYPOINT: "homer-scheduler",
-    CI: "1",
-    TERM: "dumb",
-    NO_COLOR: "1",
-    PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
-    TMPDIR: process.env.TMPDIR ?? "/tmp",
-    HOME: process.env.HOME ?? process.cwd(),
-  };
-  // Load OAuth token from file if not in env
-  const tokenFile = `${env.HOME}/.homer-claude-token`;
-  if (!env.CLAUDE_CODE_OAUTH_TOKEN && existsSync(tokenFile)) {
+  // Delegate to the canonical Claude executor (src/executors/claude.ts) rather
+  // than maintaining a divergent spawn/stream-parse copy here. Opt-in flags
+  // preserve scheduler semantics: clean output (stderr separated so JSON-parsing
+  // stages aren't polluted), prefer-longest-text (the meta-comment guard), and
+  // the homer-scheduler entrypoint. This consolidation kills the args/env-drift
+  // bug class — the `--`-frontmatter bug lived only in this former duplicate.
+  const activeTools = new Set<string>();
+  const emitProgress = (event: ProgressEvent) => {
     try {
-      const token = readFileSync(tokenFile, "utf-8").trim();
-      if (token) {
-        env.CLAUDE_CODE_OAUTH_TOKEN = token;
-        logger.info({ tokenSet: true }, "Loaded CLAUDE_CODE_OAUTH_TOKEN from file");
-      }
+      onProgress?.(event);
     } catch (err) {
-      logger.warn({ error: err }, "Failed to read OAuth token file");
+      logger.warn({ error: err }, "Failed to emit progress event");
     }
-  }
+  };
 
-  return new Promise((resolve) => {
-    const proc = spawn(CLAUDE_PATH, args, {
-      cwd,
-      env,
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: true,
-    });
-
-    // Register with process lifecycle management
-    processRegistry.register(proc, {
-      command: "claude",
-      type: "executor",
-      timeoutMs: timeout,
-      source: "scheduler",
-      jobId: config.id,
-      detached: true,
-    });
-
-    let stdout = "";
-    let stderr = "";
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    let resultContent = "";
-    let streamedTextContent = ""; // accumulated text blocks across all assistant turns
-    let finalResult = ""; // event.type === "result" payload (often just last-turn meta)
-    let timedOut = false;
-    let aborted = false;
-    let settled = false;
-
-    // Track active tools to avoid duplicate progress messages
-    const activeTools = new Set<string>();
-
-    let timeoutTimer: NodeJS.Timeout | undefined;
-    let killTimer: NodeJS.Timeout | undefined;
-
-    const clearTimers = () => {
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (killTimer) clearTimeout(killTimer);
-    };
-
-    const emitProgress = (event: ProgressEvent) => {
-      try {
-        onProgress?.(event);
-      } catch (err) {
-        logger.warn({ error: err }, "Failed to emit progress event");
-      }
-    };
-
-    const parseStreamEvent = (line: string): void => {
-      if (!line.trim()) return;
-      try {
-        const event = JSON.parse(line) as {
-          type: string;
-          subtype?: string;
-          message?: {
-            content?: string | Array<{ type: string; name?: string; input?: Record<string, unknown> }>;
-          };
-          result?: string;
-        };
-
-        // Capture assistant message content (only if string, not array of blocks)
-        if (event.type === "assistant" && typeof event.message?.content === "string") {
-          streamedTextContent += event.message.content;
-        }
-
-        // Capture final result separately. Claude CLI's `result` event contains
-        // only the LAST assistant turn's text — when a job's last turn is a
-        // meta-comment (e.g. "Late Flash completed, no action needed"), this
-        // would otherwise overwrite the real streamed deliverable. Keep both
-        // and let finalize() pick the substantial one.
-        if (event.type === "result" && event.result) {
-          finalResult = event.result;
-        }
-
-        // Emit progress for tool usage (content is in event.message.content for stream-json)
-        const contentBlocks = event.message?.content as Array<{ type: string; name?: string; input?: Record<string, unknown>; text?: string }> | undefined;
-        if (event.type === "assistant" && contentBlocks && Array.isArray(contentBlocks)) {
-          for (const block of contentBlocks) {
-            // Capture text-block content too — stream-json puts assistant text
-            // here when the message has any tool_use blocks alongside it.
-            if (block.type === "text" && typeof block.text === "string") {
-              streamedTextContent += block.text;
-            }
-            if (block.type === "tool_use") {
-              const toolName = block.name || "unknown";
-
-              // Skip if we already emitted for this tool
-              if (activeTools.has(toolName)) continue;
-              activeTools.add(toolName);
-
-              const displayName = TOOL_DISPLAY_NAMES[toolName] || `🔧 ${toolName}`;
-              let details = "";
-
-              // Extract useful details from input
-              if (block.input) {
-                if (toolName === "WebSearch" && block.input.query) {
-                  details = `: "${block.input.query}"`;
-                } else if (toolName === "Read" && block.input.file_path) {
-                  const path = String(block.input.file_path);
-                  details = `: ${path.split("/").pop()}`;
-                } else if (toolName === "Bash" && block.input.command) {
-                  const cmd = String(block.input.command).slice(0, 30);
-                  details = `: ${cmd}${String(block.input.command).length > 30 ? "..." : ""}`;
-                } else if (toolName === "Task" && block.input.description) {
-                  details = `: ${block.input.description}`;
-                } else if (toolName === "Grep" && block.input.pattern) {
-                  details = `: "${block.input.pattern}"`;
-                }
-              }
-
-              emitProgress({
-                type: toolName === "Task" ? "subagent_start" : "tool_use",
-                jobId: config.id,
-                jobName: config.name,
-                timestamp: new Date(),
-                message: `${displayName}${details}`,
-                details: { tool: toolName },
-              });
-            }
-          }
-        }
-
-        // Tool result - clear from active set
-        if (event.type === "tool_result" || event.type === "user") {
-          // Reset active tools on tool results
-          activeTools.clear();
-        }
-
-      } catch {
-        // Not JSON
-      }
-    };
-
-    const finalize = async (exitCode: number | null, error?: string) => {
-      if (settled) return;
-      settled = true;
-      clearTimers();
-
-      const completedAt = new Date();
-      const duration = completedAt.getTime() - startedAt.getTime();
-
-      // Prefer the longer of streamed text (full transcript) vs. finalResult
-      // (last-turn only). If finalResult is a tiny meta-comment but streaming
-      // captured a full deliverable, we want the deliverable. Fall back to
-      // legacy resultContent / stdout for non-stream-json executions.
-      const streamed = streamedTextContent.trim();
-      const final = finalResult.trim();
-      const bestStream = streamed.length >= final.length ? streamed : final;
-      let output = bestStream || resultContent.trim() || stdout.trim();
-
-      let success = !timedOut && !aborted && !error && exitCode === 0;
-
-      let errorMessage = error;
-      if (timedOut) {
-        errorMessage = `Job timed out after ${timeout / 1000}s`;
-      } else if (aborted) {
-        errorMessage = "Job aborted by signal";
-      } else if (exitCode !== 0 && !error) {
-        errorMessage = `Exit code ${exitCode}`;
-      }
-
-      // minOutputLength guard: prevents the "meta-comment as deliverable" silent
-      // failure (e.g. morning-brief sending "Late Flash completed" instead of
-      // the actual brief). Only flips success→failure; never the reverse.
-      if (success && config.minOutputLength && output.length < config.minOutputLength) {
-        success = false;
-        errorMessage =
-          `Output too short (${output.length} chars, expected ≥ ${config.minOutputLength}). ` +
-          `Likely the executor returned a meta-comment instead of the deliverable. ` +
-          `Streamed=${streamed.length} final=${final.length}.`;
-        logger.warn(
-          { jobId: config.id, outputLength: output.length, minOutputLength: config.minOutputLength, streamedLength: streamed.length, finalLength: final.length, outputPreview: output.slice(0, 200) },
-          "Job flagged failed by minOutputLength guard"
-        );
-      }
-
-      if (stderr.trim()) {
-        errorMessage = errorMessage
-          ? `${errorMessage}
-
-Stderr:
-${stderr.trim()}`
-          : stderr.trim();
-      }
-
-      if (emitCompleted) {
+  try {
+    const result = await executeClaudeCommand(query, {
+      cwd: cwd ?? process.cwd(),
+      model,
+      signal: options?.signal,
+      timeout,
+      appendSystemPrompt: contextPrompt || undefined,
+      entrypoint: "homer-scheduler",
+      preferLongestText: true,
+      cleanOutput: true,
+      onEvent: (ev) => {
+        // Clear on tool_result so a repeated tool (second Read, second Bash…)
+        // re-emits progress later in a long job, matching the former parser.
+        if (ev.type === "tool_result") { activeTools.clear(); return; }
+        if (ev.type !== "tool_use" || !ev.tool) return;
+        if (activeTools.has(ev.tool)) return;
+        activeTools.add(ev.tool);
         emitProgress({
-          type: "completed",
+          type: ev.tool === "Task" ? "subagent_start" : "tool_use",
           jobId: config.id,
           jobName: config.name,
-          timestamp: completedAt,
-          message: success
-            ? `✅ Completed: ${config.name} (${Math.round(duration / 1000)}s)`
-            : `❌ Failed: ${config.name}`,
-          details: { duration, success },
+          timestamp: new Date(),
+          message: ev.label,
+          details: { tool: ev.tool },
         });
-      }
+      },
+    });
 
-      logger.info(
-        {
-          jobId: config.id,
-          success,
-          duration,
-          exitCode,
-          timedOut,
-          outputLength: output.length,
-        },
-        "Scheduled job completed"
+    const completedAt = new Date();
+    const duration = completedAt.getTime() - startedAt.getTime();
+
+    // Canonical returns "(No output)" when nothing was produced; normalize to
+    // empty so the minOutputLength guard and the orchestrator's fast-empty
+    // classification (#5) see a truly empty result.
+    let output = (result.output ?? "").trim();
+    if (output === "(No output)") output = "";
+    const stderrText = (result.stderr ?? "").trim();
+
+    let success = result.exitCode === 0;
+    let errorMessage: string | undefined = success ? undefined : `Exit code ${result.exitCode}`;
+
+    // minOutputLength guard: prevents the "meta-comment as deliverable" silent
+    // failure. Only flips success→failure; never the reverse.
+    if (success && config.minOutputLength && output.length < config.minOutputLength) {
+      success = false;
+      errorMessage =
+        `Output too short (${output.length} chars, expected ≥ ${config.minOutputLength}). ` +
+        `Likely the executor returned a meta-comment instead of the deliverable.`;
+      logger.warn(
+        { jobId: config.id, outputLength: output.length, minOutputLength: config.minOutputLength, outputPreview: output.slice(0, 200) },
+        "Job flagged failed by minOutputLength guard"
       );
+    }
 
-      resolve({
+    // Keep stderr in the error field (not output) so JSON-parsing stages stay
+    // clean, while the fallback orchestrator can still read it to classify.
+    if (stderrText) {
+      errorMessage = errorMessage ? `${errorMessage}\n\nStderr:\n${stderrText}` : stderrText;
+    }
+
+    if (emitCompleted) {
+      emitProgress({
+        type: "completed",
         jobId: config.id,
         jobName: config.name,
-        sourceFile,
-        startedAt,
-        completedAt,
-        success,
-        output: output || "(No output)",
-        error: errorMessage,
-        exitCode: exitCode ?? 1,
-        duration,
+        timestamp: completedAt,
+        message: success
+          ? `✅ Completed: ${config.name} (${Math.round(duration / 1000)}s)`
+          : `❌ Failed: ${config.name}`,
+        details: { duration, success },
       });
+    }
+
+    logger.info(
+      { jobId: config.id, success, duration, exitCode: result.exitCode, outputLength: output.length },
+      "Scheduled job completed"
+    );
+
+    return {
+      jobId: config.id,
+      jobName: config.name,
+      sourceFile,
+      startedAt,
+      completedAt,
+      success,
+      output: output || "(No output)",
+      error: errorMessage,
+      exitCode: result.exitCode ?? 1,
+      duration,
     };
+  } catch (err) {
+    // executeClaudeCommand rejects only on timeout ("...timed out...") or abort
+    // ("Cancelled"). Map both to a graceful failed JobExecutionResult.
+    const completedAt = new Date();
+    const duration = completedAt.getTime() - startedAt.getTime();
+    const msg = err instanceof Error ? err.message : String(err);
+    const aborted = /cancelled/i.test(msg);
+    const timedOut = !aborted && /timed out/i.test(msg);
+    const errorMessage = aborted
+      ? "Job aborted by signal"
+      : timedOut
+        ? `Job timed out after ${timeout / 1000}s`
+        : msg;
 
-    // Close stdin
-    if (proc.stdin) {
-      proc.stdin.on("error", () => {});
-      proc.stdin.end();
-    }
-
-    if (proc.stdout) {
-      proc.stdout.setEncoding("utf8");
-      let buffer = "";
-
-      proc.stdout.on("data", (chunk: string) => {
-        stdoutBytes += Buffer.byteLength(chunk);
-        if (proc.pid) processRegistry.touch(proc.pid);
-        if (stdoutBytes <= MAX_OUTPUT_BYTES) {
-          stdout += chunk;
-          buffer += chunk;
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-          for (const line of lines) {
-            parseStreamEvent(line);
-          }
-        }
-      });
-
-      proc.stdout.on("end", () => {
-        if (buffer) parseStreamEvent(buffer);
+    if (emitCompleted) {
+      emitProgress({
+        type: "completed",
+        jobId: config.id,
+        jobName: config.name,
+        timestamp: completedAt,
+        message: `❌ Failed: ${config.name}`,
+        details: { duration, success: false },
       });
     }
 
-    if (proc.stderr) {
-      proc.stderr.setEncoding("utf8");
-      proc.stderr.on("data", (chunk: string) => {
-        stderrBytes += Buffer.byteLength(chunk);
-        if (stderrBytes <= MAX_OUTPUT_BYTES) {
-          stderr += chunk;
-        }
-      });
-    }
+    logger.info(
+      { jobId: config.id, success: false, duration, exitCode: 1, timedOut, outputLength: 0 },
+      "Scheduled job completed"
+    );
 
-    proc.once("error", (err) => {
-      void finalize(null, err.message);
-    });
-
-    proc.once("close", (code) => {
-      void finalize(code);
-    });
-
-    // Kill entire process group (detached) for clean child cleanup
-    const killGroup = (sig: NodeJS.Signals) => {
-      try {
-        if (proc.pid) process.kill(-proc.pid, sig);
-      } catch {
-        try { proc.kill(sig); } catch { /* already dead */ }
-      }
+    return {
+      jobId: config.id,
+      jobName: config.name,
+      sourceFile,
+      startedAt,
+      completedAt,
+      success: false,
+      output: "(No output)",
+      error: errorMessage,
+      exitCode: 1,
+      duration,
     };
-
-    // Timeout handling
-    timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      logger.warn({ jobId: config.id, timeout }, "Scheduled job timed out");
-      killGroup("SIGTERM");
-
-      killTimer = setTimeout(() => {
-        if (!settled) {
-          killGroup("SIGKILL");
-        }
-      }, KILL_GRACE_MS);
-    }, timeout);
-
-    const abortHandler = () => {
-      aborted = true;
-      logger.warn({ jobId: config.id }, "Scheduled Claude job aborted");
-      killGroup("SIGTERM");
-      killTimer = setTimeout(() => {
-        if (!settled) killGroup("SIGKILL");
-      }, KILL_GRACE_MS);
-    };
-    if (options?.signal) {
-      if (options.signal.aborted) {
-        abortHandler();
-      } else {
-        options.signal.addEventListener("abort", abortHandler, { once: true });
-        proc.once("close", () => options.signal?.removeEventListener("abort", abortHandler));
-      }
-    }
-  });
+  }
 }
 
 function emitHarnessCompletion(

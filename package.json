@@ -39,6 +39,8 @@
     "@anthropic-ai/sdk": "^0.72.1",
     "@azure/storage-blob": "^12.26.0",
     "@google/generative-ai": "^0.24.1",
+    "@grammyjs/auto-retry": "^2.0.2",
+    "@grammyjs/transformer-throttler": "^1.2.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@mozilla/readability": "^0.6.0",
     "@types/fs-ext": "^2.0.3",
