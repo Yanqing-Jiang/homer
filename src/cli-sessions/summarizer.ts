@@ -5,9 +5,10 @@ import { logger } from "../utils/logger.js";
 /**
  * Smart session summarization with tiered strategy:
  * - ≤ 4 messages: template (free)
- * - 5-20 messages: Gemini Flash 3-5 bullets (~$0.001)
- * - 21+ messages: Gemini Flash 5-8 bullets, truncated (~$0.005)
+ * - 5-20 messages: global-harness 3-5 bullets
+ * - 21+ messages: global-harness 5-8 bullets, truncated
  * - Sub-agent: skip (no summary)
+ * Model/harness is controlled by the `global` harness_selection row, not pinned here.
  */
 export async function summarizeSession(session: ParsedSession, signal?: AbortSignal): Promise<string> {
   const msgCount = session.messageCount;
@@ -17,11 +18,11 @@ export async function summarizeSession(session: ParsedSession, signal?: AbortSig
     return templateSummary(session);
   }
 
-  // Medium/large sessions: Gemini Flash
+  // Medium/large sessions: global harness
   try {
-    return await geminiSummary(session, signal);
+    return await harnessSummary(session, signal);
   } catch (error) {
-    logger.warn({ error, sessionId: session.sessionId }, "Gemini summary failed, falling back to template");
+    logger.warn({ error, sessionId: session.sessionId }, "Session summary failed, falling back to template");
     return templateSummary(session);
   }
 }
@@ -43,9 +44,9 @@ function templateSummary(session: ParsedSession): string {
 }
 
 /**
- * Gemini Flash summary for medium/large sessions
+ * Global-harness summary for medium/large sessions
  */
-async function geminiSummary(session: ParsedSession, signal?: AbortSignal): Promise<string> {
+async function harnessSummary(session: ParsedSession, signal?: AbortSignal): Promise<string> {
   const isLarge = session.messageCount > 20;
   const bulletCount = isLarge ? "5-8" : "3-5";
 
@@ -67,19 +68,17 @@ Messages: ${session.messageCount}
 
 ${conversationText}`;
 
-  // Semantic pin: cost-sensitive summarization stays on OpenCode Gemini Flash (immune to switch-all).
+  // Follows the global harness switcher (no pin) — controlled by the `global` harness_selection row.
   const result = await executeResolvedHarness({
     source: "runtime",
     mode: "runtime-turn",
     prompt,
-    explicit: { harness: "opencode", model: "google/gemini-3.5-flash" },
-    baselineProfile: { executorOptions: { opencode: { forceOpenCode: true, researchOnly: false } } },
     timeoutMs: 900_000,
     signal,
   });
 
   if (result.exitCode !== 0) {
-    throw new Error(`Gemini Flash error: ${result.output}`);
+    throw new Error(`Session summary harness error: ${result.output}`);
   }
 
   return result.output.trim();

@@ -19,8 +19,6 @@ import { registerIdeaCommands, registerIdeaCallbacks } from "./handlers/idea.js"
 import { registerQuickCommands, registerProposalCallbacks } from "./handlers/proposal-approval.js";
 import { registerOvernightCommands, handleOvernightMessage } from "./handlers/overnight.js";
 import { handleYouTubeUrl, initializeYouTubeHandler } from "./handlers/youtube.js";
-import { registerJobApprovalHandlers } from "./handlers/job-approval.js";
-import { registerJobCommands } from "./handlers/job-commands.js";
 import { handleCallRequest } from "./handlers/phone-call.js";
 import { handleSmsRequest } from "./handlers/sms.js";
 import { registerCallFollowupHandlers } from "./handlers/call-followup.js";
@@ -173,10 +171,6 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
 
   // Register overnight work commands (/overnight) and inline button callbacks
   registerOvernightCommands(bot, stateManager);
-
-  // Register job hunt approval callbacks and commands
-  registerJobApprovalHandlers(bot, stateManager);
-  registerJobCommands(bot, stateManager);
 
   // Register call follow-up and SMS reply inline button callbacks
   registerCallFollowupHandlers(bot);

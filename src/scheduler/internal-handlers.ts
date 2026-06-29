@@ -369,9 +369,12 @@ async function runHealthCheck(
   }
 
   try {
-    const geminiOk = await checkGeminiAPIHealth();
-    if (!geminiOk) {
-      issues.push("🔴 Gemini API: health check failed (flash3 / gemini-3-flash-preview)");
+    const gemini = await checkGeminiAPIHealth();
+    // Mute transient 503/overload (degraded) — not actionable and not a key/auth fault.
+    if (!gemini.ok && !gemini.degraded) {
+      issues.push(`🔴 Gemini API: health check failed — ${gemini.detail}`);
+    } else if (gemini.degraded) {
+      logger.warn({ detail: gemini.detail }, "Gemini API degraded (transient overload) — alert muted");
     }
   } catch {
     issues.push("🔴 Gemini API: health check threw");
