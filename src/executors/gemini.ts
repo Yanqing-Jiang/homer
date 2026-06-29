@@ -427,10 +427,29 @@ Keep it actionable and concise.`,
 }
 
 /**
- * Health check for the native API
+ * Health check for the native API.
+ *
+ * Probes the preview models first, then falls back to a stable GA model
+ * (`gemini-2.5-flash`) so the check reflects "is the key/API working" rather
+ * than "is a preview model overloaded right this second". Preview models 503
+ * ("high demand") constantly on Google's side — that's transient and not
+ * actionable, so it's reported as `degraded` (not `ok=false` with a real fault).
  */
-export async function checkGeminiAPIHealth(): Promise<boolean> {
-  const models = ["flash3", "gemini-3-flash-preview"];
+export interface GeminiHealth {
+  ok: boolean; // at least one probe model responded
+  degraded: boolean; // all probes failed, but only with transient 503/overload
+  detail: string;
+}
+
+function isTransientOverload(message: string): boolean {
+  return /\b503\b|UNAVAILABLE|high demand|overloaded/i.test(message);
+}
+
+export async function checkGeminiAPIHealth(): Promise<GeminiHealth> {
+  // Preview models first (what we actually use), GA flash last as a reliable anchor.
+  const models = ["flash3", "gemini-3-flash-preview", "gemini-2.5-flash"];
+  let sawNonTransientFailure = false;
+  let lastError = "";
   for (const model of models) {
     try {
       const result = await executeGeminiAPI("Respond with the single word: OK", {
@@ -438,10 +457,18 @@ export async function checkGeminiAPIHealth(): Promise<boolean> {
         useGrounding: false,
         maxTokens: 50,
       });
-      if (result.exitCode === 0 && result.output.length > 0) return true;
-    } catch {
-      // try next model
+      if (result.exitCode === 0 && result.output.length > 0) {
+        return { ok: true, degraded: false, detail: `ok via ${model}` };
+      }
+      lastError = result.output;
+      if (!isTransientOverload(result.output)) sawNonTransientFailure = true;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      if (!isTransientOverload(lastError)) sawNonTransientFailure = true;
     }
   }
-  return false;
+  if (!sawNonTransientFailure) {
+    return { ok: false, degraded: true, detail: `transient overload (503): ${lastError}` };
+  }
+  return { ok: false, degraded: false, detail: lastError || "all probe models failed" };
 }
