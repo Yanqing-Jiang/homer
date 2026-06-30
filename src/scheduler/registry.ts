@@ -65,7 +65,6 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
   { id: "homer-improvements", name: "Homer Improvements", kind: "internal", handler: "homer_improvements", handlerFile: "homer-improvements", expectedInSchedule: true, note: "disabled — pending merge with harness-auto-improve (Phase 4.1)" },
   { id: "idea-synthesizer", name: "Idea Synthesizer", kind: "internal", handler: "idea_synthesizer", handlerFile: "idea-synthesizer", expectedInSchedule: true },
   { id: "ideas-explore", name: "Ideas Explore", kind: "internal", handler: "ideas_explore", handlerFile: "ideas-explore", expectedInSchedule: true },
-  { id: "deaddrop-drain", name: "Dead-Drop Drain", kind: "internal", handler: "deaddrop_drain", expectedInSchedule: true, note: "drains work-laptop session dead-drop (homer-data/worklaptop/sessions) into local session_summaries at 00:15 PT, then deletes each blob. No handlerFile — imports from scripts/drain-deaddrop.ts. (Cosmos push/pull decommissioned 2026-06-16.)" },
   { id: "link-processor", name: "Link Processor", kind: "internal", handler: "link_processor", handlerFile: "link-processor", expectedInSchedule: true },
   { id: "memory-embeddings", name: "Memory Embeddings", kind: "internal", handler: "memory_embeddings", handlerFile: "memory-embeddings", expectedInSchedule: true, note: "event-triggered; cron is safety net" },
   { id: "memory-reindex", name: "Memory Reindex", kind: "internal", handler: "memory_reindex", handlerFile: "memory-reindex", expectedInSchedule: true, note: "event-triggered; cron is safety net" },
