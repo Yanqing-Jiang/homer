@@ -211,7 +211,6 @@ const RETRYABLE_HANDLERS = new Set([
   "harness_auto_improve",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
   "candidate_expiry",
-  "deaddrop_drain",
   "docker_restart",
 ]);
 
@@ -877,30 +876,6 @@ async function runHandler(
           result.error,
           result.success ? { notificationIntent: "operational_status" } : {}
         );
-      }
-      case "deaddrop_drain": {
-        // Nightly ingress: drain the work-laptop session dead-drop
-        // (homer-data/worklaptop/sessions) into local session_summaries, then
-        // delete each drained blob. This is the only cross-device memory path —
-        // Cosmos push/pull was decommissioned 2026-06-16 (memory_search is fully
-        // local; the laptop pushes sessions via blob SAS, never Cosmos).
-        let drainOut = "", ok = true;
-        try {
-          const { runDeadDropDrain } = await import("../scripts/drain-deaddrop.js");
-          const d = await runDeadDropDrain(ctx.stateManager);
-          drainOut =
-            `drain: blobs ${d.blobs}, +${d.sessionsUpserted} sessions, dup ${d.duplicates}, ` +
-            `filtered ${d.filtered}, discardedRaw ${d.discardedRaw}, invalid ${d.invalid}, ` +
-            `del ${d.deleted}, err ${d.errors}`;
-          // A blob-level error (or an invalid item that left a blob behind) means a
-          // batch was left undrained — surface it. Discarded raw records (policy:
-          // summaries-only) do NOT fail the job; the blob is still deleted.
-          if (d.errors > 0 || d.invalid > 0) ok = false;
-        } catch (e: any) {
-          ok = false;
-          drainOut = `drain FAILED: ${String(e?.message ?? e)}`;
-        }
-        return buildResult(job, startedAt, ok, drainOut, ok ? undefined : drainOut, { notificationIntent: ok ? "operational_status" : "failure_alert" });
       }
       case "morning_review": {
         // Consolidated 9 AM morning review — memory candidates, ideas, cleanup proposals, skills
