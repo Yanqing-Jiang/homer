@@ -252,6 +252,7 @@ export async function sendMorningReview(
     await bot.api.sendMessage(chatId, lines.join("\n"), { parse_mode: "HTML" });
   } catch (err) {
     logger.error({ error: err }, "Morning review: send failed");
+    throw err;
   }
 
   logger.info({

@@ -4,9 +4,6 @@
  * in-memory map. The sqlite implementation reads the normalized tables from migration 107.
  */
 
-// @ts-ignore — better-sqlite3 ships `export =`; type-only default import trips noUnusedLocals
-// here exactly as in src/state/migrations/index.ts, which suppresses it the same way.
-import type Database from "better-sqlite3";
 import type { HarnessId } from "../types.js";
 import type {
   HarnessProfile,
@@ -14,6 +11,14 @@ import type {
   HarnessScopeType,
 } from "./types.js";
 import { isScheduledHarnessExecutor } from "../../commands/harness-catalog.js";
+
+interface SqliteStatementLike {
+  get(...params: unknown[]): unknown;
+}
+
+export interface SqliteHarnessDatabase {
+  prepare(sql: string): SqliteStatementLike;
+}
 
 export interface HarnessSelectionRow {
   scopeType: HarnessScopeType;
@@ -57,7 +62,7 @@ interface RawProfileRow {
 }
 
 /** SQLite-backed store over the migration-107 tables. */
-export function createSqliteHarnessSelectionStore(db: Database.Database): HarnessSelectionStore {
+export function createSqliteHarnessSelectionStore(db: SqliteHarnessDatabase): HarnessSelectionStore {
   const selectStmt = db.prepare(`
     SELECT scope_type, scope_id, harness, model, profile_id, enabled,
            updated_at, updated_by, source, reason

@@ -32,7 +32,7 @@ import { saveTodo } from "../todos/dao.js";
 import { sendThinkingIndicator, editWithResponse, TelegramDraftStream, sendFinalResponse, TelegramTypingLoop } from "./streaming.js";
 import { loadBootstrapFiles } from "../memory/loader.js";
 import { getMemoryIndexer } from "../memory/indexer.js";
-import { transcribeAudio, synthesizeSpeech, truncateForTTS } from "../voice/index.js";
+import { transcribeWithFallback, synthesizeSpeech, truncateForTTS } from "../voice/index.js";
 import type { VoiceConfig, SynthesisOptions } from "../voice/types.js";
 import { InputFile } from "grammy";
 import type { Scheduler } from "../scheduler/index.js";
@@ -1066,14 +1066,19 @@ ${checksStr}`;
       const response = await fetch(fileUrl);
       const audioBuffer = Buffer.from(await response.arrayBuffer());
 
-      const transcription = await transcribeAudio(audioBuffer, voiceConfig);
+      const transcription = await transcribeWithFallback(audioBuffer, {
+        elevenLabsApiKey: voiceConfig.elevenLabsApiKey,
+      });
 
       if (!transcription.text.trim()) {
         await ctx.reply("Could not transcribe audio.");
         return;
       }
 
-      logger.info({ text: transcription.text.slice(0, 50) }, "Voice transcribed");
+      logger.info(
+        { text: transcription.text.slice(0, 50), engine: transcription.engine },
+        "Voice transcribed",
+      );
 
       const parsed = parseCommand(transcription.text);
       if (!parsed) {

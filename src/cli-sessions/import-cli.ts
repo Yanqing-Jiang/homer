@@ -111,6 +111,9 @@ async function main() {
     console.log(`  ✅ Scanned: ${stats.scanned} files`);
     console.log(`  ✅ Imported: ${stats.imported} sessions`);
     console.log(`  ⏭️  Skipped: ${stats.skipped} (duplicates)`);
+    if (stats.parseErrors > 0) {
+      console.log(`  ⚠️  Parse errors quarantined: ${stats.parseErrors}`);
+    }
     console.log(`  ❌ Errors: ${stats.errors}`);
 
     if (args.dryRun) {

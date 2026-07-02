@@ -9,13 +9,33 @@
     "./mcp/server": {
       "types": "./dist/mcp/server.d.ts",
       "import": "./dist/mcp/server.js"
+    },
+    "./voice/*.js": {
+      "types": "./dist/voice/*.d.ts",
+      "import": "./dist/voice/*.js"
+    },
+    "./harness/resolution/resolver.js": {
+      "types": "./dist/harness/resolution/resolver.d.ts",
+      "import": "./dist/harness/resolution/resolver.js"
+    },
+    "./harness/resolution/store.js": {
+      "types": "./dist/harness/resolution/store.d.ts",
+      "import": "./dist/harness/resolution/store.js"
+    },
+    "./harness/resolution/types.js": {
+      "types": "./dist/harness/resolution/types.d.ts",
+      "import": "./dist/harness/resolution/types.js"
+    },
+    "./scheduler/harness-baselines.js": {
+      "types": "./dist/scheduler/harness-baselines.d.ts",
+      "import": "./dist/scheduler/harness-baselines.js"
     }
   },
   "engines": {
     "node": ">=24"
   },
   "scripts": {
-    "build": "npx tsc && cp src/state/migrations/*.sql dist/state/migrations/ && mkdir -p dist/executors/scrape-scripts && cp src/executors/scrape-scripts/*.js dist/executors/scrape-scripts/ && echo \"{\\\"sha\\\": \\\"$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')\\\", \\\"time\\\": \\\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\\\"}\" > dist/.build-version",
+    "build": "rm -rf dist && npx tsc && mkdir -p dist/state/migrations dist/executors/scrape-scripts && cp src/state/migrations/*.sql dist/state/migrations/ && cp src/executors/scrape-scripts/*.js dist/executors/scrape-scripts/ && node scripts/write-build-version.mjs",
     "skills:render": "tsx scripts/render-harness-assets.ts render",
     "skills:check": "tsx scripts/render-harness-assets.ts check",
     "skills:install": "tsx scripts/render-harness-assets.ts render --install",
@@ -38,7 +58,8 @@
     "app:service:unregister": "bash scripts/manage-app-service.sh unregister",
     "restart": "bash scripts/request-daemon-restart.sh manual-restart --now",
     "restart:force": "bash scripts/request-daemon-restart.sh manual-force-restart --force",
-    "deploy": "npm run build && npm run app:build && node scripts/smoke-test.mjs && bash scripts/pre-restart-check.sh && npm run restart"
+    "restart:force-stale": "bash scripts/request-daemon-restart.sh manual-force-stale-restart --force --force-stale",
+    "deploy": "npm run build && npm run app:build && node scripts/smoke-test.mjs && bash scripts/pre-restart-check.sh && npm run restart && node scripts/wait-runtime-build.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",

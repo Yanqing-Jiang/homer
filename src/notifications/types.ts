@@ -4,7 +4,7 @@ export type NotificationIntent =
   | "operational_status"
   | "failure_alert";
 
-export type NotificationDecision = "sent" | "suppressed";
+export type NotificationDecision = "sent" | "suppressed" | "failed";
 
 export type NotificationSourceType =
   | "scheduler_job"
