@@ -48,6 +48,12 @@ export interface TranscriptionOptions {
   entityDetection?: "all" | string | string[];
   /** Custom vocabulary terms to bias recognition (max 100) */
   keyterms?: string[];
+  /** MIME type of the audio (e.g. "audio/webm"). Defaults to audio/ogg. */
+  mimeType?: string;
+  /** Filename hint sent to the API (extension helps format detection). */
+  filename?: string;
+  /** Abort signal to bound the request (e.g. AbortSignal.timeout(...)). */
+  signal?: AbortSignal;
 }
 
 export type AudioFormat = "ogg_opus" | "mp3_44100_128" | "pcm_16000";

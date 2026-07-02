@@ -14,6 +14,7 @@ import {
 } from "./parsers.js";
 import { statSync } from "fs";
 import { createHash } from "crypto";
+import { basename } from "path";
 import { summarizeSession, generateTitle, buildRawExcerpt, getLogDate } from "./summarizer.js";
 
 export type AgentType = "codex" | "gemini" | "claude" | "opencode" | "telegram" | "web" | "all";
@@ -33,7 +34,9 @@ interface ImportStats {
   imported: number;
   skipped: number;
   subAgents: number;
+  parseErrors: number;
   errors: number;
+  aborted: boolean;
 }
 
 // Prompt patterns that indicate a sub-agent session
@@ -45,47 +48,79 @@ const SUB_AGENT_PATTERNS = [
   "Return ONLY a brief summary",
 ];
 
+const SCHEDULER_HEURISTIC_EXCLUDED_JOB_IDS = new Set([
+  "reminder-check",
+  "reminder_check",
+  "session-maintenance",
+  "session_maintenance",
+  "daemon-cleanup",
+  "daemon_cleanup",
+]);
+
+function hasTempProject(session: ParsedSession): boolean {
+  if (!session.project) {
+    return false;
+  }
+  const p = session.project.toLowerCase();
+  return p === "/tmp" || p.startsWith("/tmp/") || p === "/private/tmp" || p.startsWith("/private/tmp/");
+}
+
+function hasSubAgentPrompt(session: ParsedSession): boolean {
+  const firstUser = session.messages.find((m) => m.role === "user");
+  if (!firstUser) {
+    return false;
+  }
+  return SUB_AGENT_PATTERNS.some((pattern) => firstUser.content.includes(pattern));
+}
+
+function isBotOnlyThread(session: ParsedSession): boolean {
+  if (session.agent !== "telegram" && session.agent !== "web") {
+    return false;
+  }
+  return !session.messages.some((m) => m.role === "user");
+}
+
+function findNearbySchedulerJob(session: ParsedSession, db: Database.Database): string | null {
+  if (!session.startedAt) {
+    return null;
+  }
+
+  try {
+    const sessionStart = new Date(session.startedAt).toISOString();
+    const rows = db.prepare(`
+      SELECT job_id as jobId
+      FROM scheduled_job_runs
+      WHERE datetime(started_at) BETWEEN datetime(?, '-60 seconds') AND datetime(?, '+60 seconds')
+      ORDER BY ABS(strftime('%s', started_at) - strftime('%s', ?)) ASC
+      LIMIT 5
+    `).all(sessionStart, sessionStart, sessionStart) as Array<{ jobId: string }>;
+
+    const row = rows.find((candidate) => !SCHEDULER_HEURISTIC_EXCLUDED_JOB_IDS.has(candidate.jobId));
+    return row?.jobId ?? null;
+  } catch {
+    // Table might not exist in edge cases.
+    return null;
+  }
+}
+
 /**
  * Detect if a session is a sub-agent (spawned by scheduler/swarm, not interactive)
  */
 function isSubAgent(session: ParsedSession, db: Database.Database): boolean {
-  // 1. Working directory: /tmp or /private/tmp indicates sub-agent
-  if (session.project) {
-    const p = session.project.toLowerCase();
-    if (p === "/tmp" || p.startsWith("/tmp/") || p === "/private/tmp" || p.startsWith("/private/tmp/")) {
-      return true;
-    }
+  // Strong signals: temp project, known sub-agent prompt wrapper, or bot-only thread.
+  if (hasTempProject(session) || hasSubAgentPrompt(session) || isBotOnlyThread(session)) {
+    return true;
   }
 
-  // 2. Cross-ref with scheduled_job_runs: session started within 60s of a job run
-  if (session.startedAt) {
-    try {
-      const sessionStart = new Date(session.startedAt).toISOString();
-      const match = db.prepare(`
-        SELECT 1 FROM scheduled_job_runs
-        WHERE datetime(started_at) BETWEEN datetime(?, '-60 seconds') AND datetime(?, '+60 seconds')
-        LIMIT 1
-      `).get(sessionStart, sessionStart);
-      if (match) return true;
-    } catch {
-      // Table might not exist in edge cases
-    }
-  }
-
-  // 3. Prompt patterns in first user message
-  const firstUser = session.messages.find((m) => m.role === "user");
-  if (firstUser) {
-    for (const pattern of SUB_AGENT_PATTERNS) {
-      if (firstUser.content.includes(pattern)) {
-        return true;
-      }
-    }
-  }
-
-  // 4. Thread-specific: skip threads where user never sent a message (pure bot notifications)
-  if (session.agent === "telegram" || session.agent === "web") {
-    const hasUserMessage = session.messages.some((m) => m.role === "user");
-    if (!hasUserMessage) return true;
+  // Weak signal only: a nearby scheduled job is not enough to skip a session.
+  // Minute-cadence internal jobs make the old +/-60s heuristic classify almost
+  // every human CLI session as a sub-agent.
+  const nearbySchedulerJob = findNearbySchedulerJob(session, db);
+  if (nearbySchedulerJob) {
+    logger.debug(
+      { sessionId: session.sessionId, agent: session.agent, nearbySchedulerJob },
+      "Ignoring scheduler-only sub-agent signal"
+    );
   }
 
   return false;
@@ -114,7 +149,9 @@ export class CLISessionImporter {
       imported: 0,
       skipped: 0,
       subAgents: 0,
+      parseErrors: 0,
       errors: 0,
+      aborted: false,
     };
 
     logger.info({ sinceDays, agent, dryRun, hasCutoffs: !!cutoffPerAgent }, "Starting CLI session import");
@@ -154,6 +191,7 @@ export class CLISessionImporter {
     // Process each session file
     for (const { agent: sessionAgent, path } of sessionFiles) {
       if (signal?.aborted) {
+        stats.aborted = true;
         logger.info("Session import aborted by signal (file loop)");
         break;
       }
@@ -170,8 +208,11 @@ export class CLISessionImporter {
         }
 
         if (!session) {
-          stats.errors++;
-          logger.warn({ path }, "Failed to parse session");
+          stats.parseErrors++;
+          if (!dryRun) {
+            this.recordParseError(sessionAgent, path);
+          }
+          logger.warn({ path }, "Failed to parse session; quarantined as parse-error");
           continue;
         }
 
@@ -224,6 +265,7 @@ export class CLISessionImporter {
     // Process thread sessions (Telegram + Web UI) — already parsed
     for (const session of threadSessions) {
       if (signal?.aborted) {
+        stats.aborted = true;
         logger.info("Session import aborted by signal (thread loop)");
         break;
       }
@@ -283,7 +325,7 @@ export class CLISessionImporter {
   private isAlreadyImported(contentHash: string): boolean {
     // Check both tables
     const inIndex = this.db
-      .prepare("SELECT 1 FROM cli_session_index WHERE content_hash = ?")
+      .prepare("SELECT 1 FROM cli_session_index WHERE content_hash = ? AND status IN ('imported', 'processed')")
       .get(contentHash);
     if (inIndex) return true;
 
@@ -291,6 +333,51 @@ export class CLISessionImporter {
       .prepare("SELECT 1 FROM session_summaries WHERE content_hash = ?")
       .get(contentHash);
     return inSummaries !== undefined;
+  }
+
+  /**
+   * Record an unparsable session file without treating it as imported.
+   * Parse-error quarantine lets the harvester watermark advance while keeping
+   * the bad source visible for later inspection/backfill.
+   */
+  private recordParseError(agent: string, filePath: string): void {
+    try {
+      let size = 0;
+      let mtimeMs = Date.now();
+      try {
+        const stats = statSync(filePath);
+        size = stats.size;
+        mtimeMs = stats.mtimeMs;
+      } catch { /* source file may have disappeared between scan and parse */ }
+
+      const id = randomUUID();
+      const contentHash = createHash("sha256")
+        .update(`parse-error:${agent}:${filePath}:${size}:${mtimeMs}`)
+        .digest("hex");
+      const logDate = new Date(mtimeMs).toISOString().slice(0, 10);
+
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO cli_session_index (
+            id, agent, native_session_id, native_file_path,
+            started_at, ended_at, imported_at,
+            content_hash, log_date, message_count, token_estimate,
+            status, is_sub_agent, project, title, model, error
+          ) VALUES (?, ?, ?, ?, NULL, NULL, datetime('now'), ?, ?, 0, NULL, 'parse-error', 0, '', ?, NULL, ?)`
+        )
+        .run(
+          id,
+          agent,
+          `parse-error:${contentHash.slice(0, 16)}`,
+          filePath,
+          contentHash,
+          logDate,
+          `Parse error: ${basename(filePath)}`,
+          "Failed to parse session file"
+        );
+    } catch (error) {
+      logger.warn({ error, agent, path: filePath }, "Failed to record parse-error session");
+    }
   }
 
   /**
@@ -367,12 +454,29 @@ export class CLISessionImporter {
     // Record in cli_session_index for dedup tracking
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO cli_session_index (
+        `INSERT INTO cli_session_index (
           id, agent, native_session_id, native_file_path,
           started_at, ended_at, imported_at,
           content_hash, log_date, message_count, token_estimate,
           status, is_sub_agent, project, title, model
-        ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, 'imported', 0, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, 'imported', 0, ?, ?, ?)
+        ON CONFLICT(content_hash) DO UPDATE SET
+          agent = excluded.agent,
+          native_session_id = excluded.native_session_id,
+          native_file_path = excluded.native_file_path,
+          started_at = excluded.started_at,
+          ended_at = excluded.ended_at,
+          imported_at = excluded.imported_at,
+          log_date = excluded.log_date,
+          message_count = excluded.message_count,
+          token_estimate = excluded.token_estimate,
+          status = 'imported',
+          error = NULL,
+          is_sub_agent = 0,
+          project = excluded.project,
+          title = excluded.title,
+          model = excluded.model
+        WHERE cli_session_index.status NOT IN ('imported', 'processed')`
       )
       .run(
         id,

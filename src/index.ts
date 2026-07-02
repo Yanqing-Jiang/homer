@@ -30,7 +30,7 @@ import { SessionTimeoutManager } from "./process/timeout-manager.js";
 import { cleanupScheduler } from "./process/cleanup-scheduler.js";
 import { initFallbackChain } from "./process/fallback-chain.js";
 import { initTraceWriter, rehydrateHealth, setGitCommit } from "./executors/trace-writer.js";
-import { setRuntimeBuildInfo } from "./utils/build-info.js";
+import { readDiskBuildInfo, setRuntimeBuildInfo, writeRuntimeBuildStamp } from "./utils/build-info.js";
 import type { FastifyInstance } from "fastify";
 import type { VoiceConfig } from "./voice/types.js";
 import { getRuntimePaths } from "./utils/runtime-paths.js";
@@ -41,13 +41,11 @@ import path from "path";
 async function main(): Promise<void> {
   const runtimePaths = getRuntimePaths();
   // Log build version for stale-daemon detection
-  try {
-    const { readFileSync } = await import("fs");
-    const versionPath = new URL("./.build-version", import.meta.url).pathname;
-    const buildInfo = JSON.parse(readFileSync(versionPath, "utf-8"));
+  const buildInfo = readDiskBuildInfo();
+  if (buildInfo) {
     setRuntimeBuildInfo(buildInfo);
     logger.info({ build: buildInfo }, "H.O.M.E.R Phase 5 starting up...");
-  } catch {
+  } else {
     logger.info("H.O.M.E.R Phase 5 starting up... (no build version stamp)");
   }
 
@@ -208,6 +206,13 @@ async function main(): Promise<void> {
       chatId: config.telegram.allowedChatId,
     });
     await startTelephonyServer(telephonyServer);
+  }
+
+  const runtimeStamp = writeRuntimeBuildStamp("homer-daemon");
+  if (runtimeStamp) {
+    logger.info({ runtimeStamp }, "Runtime build stamp written");
+  } else {
+    logger.warn("Failed to write runtime build stamp");
   }
 
   // Graceful shutdown — two-phase approach:

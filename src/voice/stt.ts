@@ -44,9 +44,12 @@ export async function transcribeAudio(
 ): Promise<TranscriptionResult> {
   const formData = new FormData();
 
-  // Audio file
-  const blob = new Blob([audioBuffer], { type: "audio/ogg" });
-  formData.append("file", blob, "audio.ogg");
+  // Audio file. Honor the caller's container type/filename so the API detects
+  // the format correctly (web mic records WebM; Telegram voice is OGG/Opus).
+  const mimeType = options.mimeType || "audio/ogg";
+  const filename = options.filename || "audio.ogg";
+  const blob = new Blob([audioBuffer], { type: mimeType });
+  formData.append("file", blob, filename);
 
   // Model - use Scribe v2 for best accuracy
   formData.append("model_id", options.model || "scribe_v2");
@@ -93,6 +96,7 @@ export async function transcribeAudio(
         "xi-api-key": config.elevenLabsApiKey,
       },
       body: formData,
+      signal: options.signal,
     }
   );
 

@@ -29,6 +29,15 @@ export interface ExecutorSession {
   lastUsedAt: number;
 }
 
+export interface NotificationEventCleanupResult {
+  suppressedOperational: number;
+  suppressedOther: number;
+  sent: number;
+  failed: number;
+  ancient: number;
+  total: number;
+}
+
 export class StateManager {
   private _db: Database.Database;
   private _closed = false;
@@ -748,17 +757,64 @@ export class StateManager {
    * Uses INSERT OR IGNORE so existing rows are untouched.
    */
   ensureJobStateRows(jobs: Array<{ jobId: string; sourceFile: string; enabled: boolean }>): void {
-    const stmt = this._db.prepare(
+    const insertStmt = this._db.prepare(
       `INSERT OR IGNORE INTO scheduled_job_state (job_id, source_file, enabled, updated_at)
        VALUES (?, ?, ?, ?)`
+    );
+    const updateSourceStmt = this._db.prepare(
+      `UPDATE scheduled_job_state
+       SET source_file = ?,
+           enabled = CASE WHEN source_file = '(removed)' THEN ? ELSE enabled END,
+           updated_at = ?
+       WHERE job_id = ? AND source_file != ?`
     );
     const now = new Date().toISOString();
     const tx = this._db.transaction(() => {
       for (const j of jobs) {
-        stmt.run(j.jobId, j.sourceFile, j.enabled ? 1 : 0, now);
+        insertStmt.run(j.jobId, j.sourceFile, j.enabled ? 1 : 0, now);
+        updateSourceStmt.run(j.sourceFile, j.enabled ? 1 : 0, now, j.jobId, j.sourceFile);
       }
     });
     tx();
+  }
+
+  /**
+   * Disable job state rows whose definitions disappeared from the loaded schedule set.
+   * Returns only newly tombstoned rows so callers can alert once.
+   */
+  tombstoneRemovedScheduledJobs(activeJobIds: string[]): string[] {
+    const active = new Set(activeJobIds);
+    const existing = this._db.prepare(
+      `SELECT job_id as jobId
+       FROM scheduled_job_state
+       WHERE source_file != '(removed)'`
+    ).all() as Array<{ jobId: string }>;
+
+    const removed = existing
+      .map((row) => row.jobId)
+      .filter((jobId) => !active.has(jobId));
+    if (removed.length === 0) {
+      return [];
+    }
+
+    const now = new Date().toISOString();
+    const stmt = this._db.prepare(
+      `UPDATE scheduled_job_state
+       SET enabled = 0,
+           source_file = '(removed)',
+           next_run_at = NULL,
+           next_run_at_ms = NULL,
+           is_running = 0,
+           updated_at = ?
+       WHERE job_id = ? AND source_file != '(removed)'`
+    );
+    const tx = this._db.transaction(() => {
+      for (const jobId of removed) {
+        stmt.run(now, jobId);
+      }
+    });
+    tx();
+    return removed;
   }
 
   /**
@@ -799,6 +855,56 @@ export class StateManager {
       ).run(cutoffDate);
     });
     return txn().changes;
+  }
+
+  cleanupNotificationEvents(nowMs: number = Date.now()): NotificationEventCleanupResult {
+    const daysAgo = (days: number) => new Date(nowMs - days * 24 * 60 * 60 * 1000).toISOString();
+    const runDelete = (sql: string, cutoff: string) => this._db.prepare(sql).run(cutoff).changes;
+
+    const suppressedOperational = runDelete(
+      `DELETE FROM notification_events
+       WHERE decision = 'suppressed'
+         AND intent = 'operational_status'
+         AND datetime(created_at) < datetime(?)`,
+      daysAgo(7)
+    );
+    const suppressedOther = runDelete(
+      `DELETE FROM notification_events
+       WHERE decision = 'suppressed'
+         AND datetime(created_at) < datetime(?)`,
+      daysAgo(30)
+    );
+    const sent = runDelete(
+      `DELETE FROM notification_events
+       WHERE decision = 'sent'
+         AND datetime(created_at) < datetime(?)`,
+      daysAgo(90)
+    );
+    const failed = runDelete(
+      `DELETE FROM notification_events
+       WHERE decision = 'failed'
+         AND datetime(created_at) < datetime(?)`,
+      daysAgo(180)
+    );
+    const ancient = runDelete(
+      `DELETE FROM notification_events
+       WHERE datetime(created_at) < datetime(?)`,
+      daysAgo(365)
+    );
+
+    return {
+      suppressedOperational,
+      suppressedOther,
+      sent,
+      failed,
+      ancient,
+      total: suppressedOperational + suppressedOther + sent + failed + ancient,
+    };
+  }
+
+  runDatabaseMaintenance(): void {
+    this._db.pragma("wal_checkpoint(TRUNCATE)");
+    this._db.pragma("optimize");
   }
 
   // Reminder methods

@@ -42,6 +42,7 @@ export interface RouteTelegramNotificationOptions {
   reason?: string | null;
   metadata?: Record<string, unknown>;
   deliver?: () => Promise<TelegramDeliveryResult | void>;
+  criticalFallback?: (message: string) => Promise<void>;
 }
 
 export interface RouteTelegramNotificationResult {
@@ -192,6 +193,52 @@ function fallbackPlainText(message: string, parseMode?: "HTML" | "Markdown" | "M
   return message;
 }
 
+function isCriticalIntent(intent: NotificationIntent): boolean {
+  return intent === "failure_alert" || intent === "decision_request";
+}
+
+function shouldSkipSuppressionAudit(options: RouteTelegramNotificationOptions): boolean {
+  const isReminderCheck =
+    options.sourceId === "reminder-check" ||
+    options.sourceId.startsWith("reminder-check:");
+  return (
+    options.sourceType === "scheduler_job" &&
+    isReminderCheck &&
+    options.intent === "operational_status"
+  );
+}
+
+async function sendCriticalTelegramFailureFallback(
+  options: RouteTelegramNotificationOptions,
+  errorMessage: string,
+): Promise<void> {
+  if (!isCriticalIntent(options.intent)) {
+    return;
+  }
+
+  const fallbackMessage = [
+    `Telegram delivery failed for ${options.intent}`,
+    options.title ? `Title: ${stripHtmlTags(options.title)}` : null,
+    `Source: ${options.sourceType}/${options.sourceId}`,
+    `Error: ${errorMessage}`,
+    stripHtmlTags(options.messageText).slice(0, 500),
+  ].filter(Boolean).join("\n");
+
+  try {
+    if (options.criticalFallback) {
+      await options.criticalFallback(fallbackMessage);
+      return;
+    }
+    const { sendEmergencySms } = await import("../telephony/emergency-sms.js");
+    await sendEmergencySms(fallbackMessage);
+  } catch (fallbackError) {
+    logger.error(
+      { error: fallbackError, sourceType: options.sourceType, sourceId: options.sourceId },
+      "Critical notification SMS fallback failed"
+    );
+  }
+}
+
 function logNotificationEvent(entry: NotificationAuditEntry): void {
   if (!entry.db) {
     return;
@@ -255,18 +302,20 @@ export async function routeTelegramNotification(
   }
 
   if (!isDeliverableIntent(options.intent)) {
-    logNotificationEvent({
-      db: options.db,
-      sourceType: options.sourceType,
-      sourceId: options.sourceId,
-      jobRunId: options.jobRunId,
-      intent: options.intent,
-      decision: "suppressed",
-      title: options.title,
-      messageText: options.messageText,
-      reason: options.reason ?? "operational_status",
-      metadata: options.metadata,
-    });
+    if (!shouldSkipSuppressionAudit(options)) {
+      logNotificationEvent({
+        db: options.db,
+        sourceType: options.sourceType,
+        sourceId: options.sourceId,
+        jobRunId: options.jobRunId,
+        intent: options.intent,
+        decision: "suppressed",
+        title: options.title,
+        messageText: options.messageText,
+        reason: options.reason ?? "operational_status",
+        metadata: options.metadata,
+      });
+    }
     return { decision: "suppressed" };
   }
 
@@ -315,7 +364,7 @@ export async function routeTelegramNotification(
     };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    logger.warn(
+    logger.error(
       { error, sourceType: options.sourceType, sourceId: options.sourceId },
       "Telegram notification delivery failed"
     );
@@ -326,7 +375,7 @@ export async function routeTelegramNotification(
       sourceId: options.sourceId,
       jobRunId: options.jobRunId,
       intent: options.intent,
-      decision: "suppressed",
+      decision: "failed",
       title: options.title,
       messageText: options.messageText,
       reason: options.reason ?? "telegram_send_failed",
@@ -336,7 +385,9 @@ export async function routeTelegramNotification(
       },
     });
 
-    return { decision: "suppressed" };
+    await sendCriticalTelegramFailureFallback(options, errorMessage);
+
+    return { decision: "failed" };
   }
 }
 

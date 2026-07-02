@@ -4,13 +4,15 @@
 # Writes a restart.request file; heartbeat picks it up on next cycle (<=20s).
 # Safe: heartbeat defers if active CLI runs exist.
 #
-# Usage: request-daemon-restart.sh [reason] [--now] [--force]
-#   --now    If no active CLI runs, restart immediately via kickstart (skip heartbeat wait)
-#   --force  Bypass CLI safety check entirely
+# Usage: request-daemon-restart.sh [reason] [--now] [--force] [--force-stale]
+#   --now          If no active CLI runs, restart immediately via kickstart (skip heartbeat wait)
+#   --force        Bypass CLI safety check entirely
+#   --force-stale  Skip the build-freshness gate (intentional stale restart / crash recovery)
 #
 
 set -eo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_SUPPORT_DIR="${HOME}/Library/Application Support/Homer"
 REQUEST_FILE="${APP_SUPPORT_DIR}/restart.request"
 DB_PATH="${HOME}/homer/data/homer.db"
@@ -21,15 +23,23 @@ LAUNCHD_TARGET="${LAUNCHD_DOMAIN}/${HOMER_LABEL}"
 REASON=""
 NOW_MODE=0
 FORCE_MODE=0
+FORCE_STALE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --now)   NOW_MODE=1 ;;
-    --force) FORCE_MODE=1 ;;
-    *)       [ -z "$REASON" ] && REASON="$1" ;;
+    --now)         NOW_MODE=1 ;;
+    --force)       FORCE_MODE=1 ;;
+    --force-stale) FORCE_STALE=1 ;;
+    *)             [ -z "$REASON" ] && REASON="$1" ;;
   esac
   shift
 done
+
+# Build-freshness gate: refuse to restart stale dist (would "ship" un-built src).
+# Skipped for intentional stale restarts (--force-stale / HOMER_ALLOW_STALE_RESTART=1).
+if (( FORCE_STALE == 0 )); then
+  bash "${SCRIPT_DIR}/assert-build-fresh.sh"
+fi
 
 REASON="${REASON:-scheduled-maintenance}"
 mkdir -p "$APP_SUPPORT_DIR"

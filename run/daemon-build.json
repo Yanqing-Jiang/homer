@@ -1,0 +1,14 @@
+{
+  "service": "homer-daemon",
+  "pid": 89837,
+  "processStartedAt": "2026-07-01T23:52:44.651Z",
+  "stampedAt": "2026-07-01T23:52:47.035Z",
+  "build": {
+    "sha": "b354b44",
+    "dirty": true,
+    "builtAt": "2026-07-01T23:52:33.983Z",
+    "sourceFingerprint": "c3cc13dae3abdb0f95dd1c95df2cd0b0c67eaf51e0eea469ff7d1a38dbbd85a4",
+    "maxSourceMtimeMs": 1782949845659,
+    "time": "2026-07-01T23:52:33.983Z"
+  }
+}

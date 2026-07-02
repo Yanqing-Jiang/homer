@@ -10,7 +10,7 @@ import { isPlanRequiringApproval, sendPlanForReview } from "../bot/handlers/appr
 import { parsePlanFromOutput } from "../plans/review-parser.js";
 import { executeInternalJob } from "./internal-handlers.js";
 import { runCompletionCheckup } from "../executors/completion-checkup.js";
-import { routeTelegramNotification } from "../notifications/telegram-router.js";
+import { routeTelegramNotification, sendChunkedTelegramMessage } from "../notifications/telegram-router.js";
 import { startHeartbeat, stopHeartbeat, startWatchdog, stopWatchdog } from "./observability.js";
 import { validateAndLogRegistry } from "./registry.js";
 import { memoryEvents } from "../events/memory-events.js";
@@ -98,6 +98,7 @@ export class Scheduler {
     // (multi-source schedule set + system jobs). Fatal on missing handler files;
     // warn on cosmetic drift.
     validateAndLogRegistry({ loadedScheduledIds: jobs.map((j) => j.id) });
+    await this.tombstoneRemovedJobs(jobs, "startup");
 
     // Phase 3: Seed DB rows BEFORE registration so job:updated → updateScheduledJobNextRun works
     this.stateManager.ensureJobStateRows(
@@ -107,9 +108,7 @@ export class Scheduler {
     // Phase 4: Merge DB disabled state (circuit breaker) with config enabled state.
     // If DB says disabled (circuit breaker set it), override config to keep it disabled.
     const dbStates = this.stateManager.getAllScheduledJobStates();
-    const dbDisabled = new Set(
-      dbStates.filter(s => !s.enabled).map(s => s.jobId)
-    );
+    const dbDisabled = this.getDbDisabledJobIds(dbStates);
     for (const job of jobs) {
       if (dbDisabled.has(job.id) && job.enabled) {
         logger.warn({ jobId: job.id }, "Job kept disabled from DB state (circuit breaker)");
@@ -325,6 +324,8 @@ export class Scheduler {
     // Register new jobs + system jobs
     const jobs = getAllJobs(schedules);
     jobs.push(...Scheduler.SYSTEM_JOBS);
+    validateAndLogRegistry({ loadedScheduledIds: jobs.map((j) => j.id) });
+    await this.tombstoneRemovedJobs(jobs, "hot_reload");
 
     for (const job of jobs) {
       this.cronManager.registerJob(job, job.sourceFile);
@@ -348,9 +349,7 @@ export class Scheduler {
       jobs.map(j => ({ jobId: j.id, sourceFile: j.sourceFile, enabled: j.enabled }))
     );
     const dbStates = this.stateManager.getAllScheduledJobStates();
-    const dbDisabled = new Set(
-      dbStates.filter(s => !s.enabled).map(s => s.jobId)
-    );
+    const dbDisabled = this.getDbDisabledJobIds(dbStates);
     for (const job of jobs) {
       if (dbDisabled.has(job.id) && job.enabled) {
         job.enabled = false;
@@ -464,6 +463,48 @@ export class Scheduler {
       sourceFile: "system",
     },
   ];
+
+  private getDbDisabledJobIds(dbStates: ReturnType<StateManager["getAllScheduledJobStates"]>): Set<string> {
+    return new Set(
+      dbStates
+        .filter((state) => !state.enabled)
+        .map((state) => state.jobId)
+    );
+  }
+
+  private async tombstoneRemovedJobs(
+    jobs: Array<import("./types.js").ScheduledJobConfig & { sourceFile: string }>,
+    phase: "startup" | "hot_reload",
+  ): Promise<void> {
+    const removed = this.stateManager.tombstoneRemovedScheduledJobs(jobs.map((job) => job.id));
+    if (removed.length === 0) {
+      return;
+    }
+
+    logger.warn({ removed, phase }, "Scheduled jobs removed from loaded config; tombstoned DB state");
+    const message = [
+      "<b>Scheduler jobs removed</b>",
+      `Phase: ${escapeHtml(phase)}`,
+      ...removed.map((jobId) => `- ${escapeHtml(jobId)}`),
+    ].join("\n");
+
+    await routeTelegramNotification({
+      db: this.stateManager.getDb(),
+      sourceType: "scheduler_job",
+      sourceId: `scheduler_removed_jobs:${phase}`,
+      intent: "failure_alert",
+      title: "Scheduler jobs removed",
+      messageText: message,
+      reason: "scheduled_job_removed",
+      metadata: { removed, phase },
+      deliver: async () => sendChunkedTelegramMessage({
+        bot: this.bot,
+        chatId: this.chatId,
+        message,
+        parseMode: "HTML",
+      }),
+    });
+  }
 
   private fireDependencyTriggers(jobId: string): void {
     // Check config-based triggers first, fall back to hardcoded map

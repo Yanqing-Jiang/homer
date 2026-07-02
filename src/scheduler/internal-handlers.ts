@@ -13,6 +13,7 @@ import { runMigrations } from "../state/migrations/index.js";
 import { logger } from "../utils/logger.js";
 import { CronUtils } from "../utils/cron.js";
 import { getClaudeAuthStatus } from "../utils/claude-auth.js";
+import { buildInfoMatches, describeBuildInfo, getRuntimeBuildInfo, readDiskBuildInfo } from "../utils/build-info.js";
 import { checkGeminiAPIHealth } from "../executors/gemini.js";
 import {
   formatScheduledTelegramHtml,
@@ -417,6 +418,22 @@ async function runHealthCheck(
     }
   } catch (err) {
     logger.warn({ error: err }, "Process monitoring in health handler failed");
+  }
+
+  // Build drift: a fresh dist exists but the running process is still on an old
+  // build — a restart that failed, was bypassed, or never happened. The freshness
+  // gate PREVENTS shipping stale src; this DETECTS a landed build that didn't
+  // take. Detection only — never auto-restart from the health handler.
+  try {
+    const runtimeBuild = getRuntimeBuildInfo();
+    const diskBuild = readDiskBuildInfo();
+    if (runtimeBuild && diskBuild && !buildInfoMatches(runtimeBuild, diskBuild)) {
+      issues.push(
+        `🟡 Build drift: running ${describeBuildInfo(runtimeBuild)} but dist is ${describeBuildInfo(diskBuild)} — controlled restart required`,
+      );
+    }
+  } catch (err) {
+    logger.warn({ error: err }, "Build-drift check in health handler failed");
   }
 
   if (issues.length === 0) {
@@ -882,12 +899,32 @@ async function runHandler(
         let parts: string[] = [];
 
         // 1. Send morning review summary (memory + cleanup + skills + health)
-        try {
-          const { sendMorningReview } = await import("../bot/handlers/morning-review.js");
-          await sendMorningReview(ctx.bot, ctx.chatId, ctx.stateManager);
-          parts.push("morning review sent");
-        } catch (err) {
-          logger.debug({ error: err }, "Morning review summary skipped");
+        const { sendMorningReview } = await import("../bot/handlers/morning-review.js");
+        let morningReviewSent = false;
+        let morningReviewError: string | undefined;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            await sendMorningReview(ctx.bot, ctx.chatId, ctx.stateManager);
+            morningReviewSent = true;
+            parts.push("morning review sent");
+            break;
+          } catch (err) {
+            morningReviewError = err instanceof Error ? err.message : String(err);
+            logger.error({ error: err, attempt }, "Morning review summary failed");
+            if (attempt < 2) {
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+          }
+        }
+        if (!morningReviewSent) {
+          return buildResult(
+            job,
+            startedAt,
+            false,
+            "Morning review summary failed",
+            morningReviewError,
+            { notificationIntent: "failure_alert" }
+          );
         }
 
         // 2. Send ideas for review (previously at 7 AM, now consolidated)
@@ -1105,11 +1142,14 @@ async function runHandler(
       }
       case "session_maintenance": {
         const errors: string[] = [];
+        let cleanedNotificationEvents = 0;
         const steps: [string, () => void | Promise<void>][] = [
           ["cleanupExpiredSessions", () => ctx.stateManager.cleanupExpiredSessions()],
           ["cleanupOldJobs", () => ctx.stateManager.cleanupOldJobs()],
           ["cleanupOldReminders", () => ctx.stateManager.cleanupOldReminders()],
           ["cleanupOldScheduledJobRuns", () => { cleanedRuns = ctx.stateManager.cleanupOldScheduledJobRuns(); }],
+          ["cleanupNotificationEvents", () => { cleanedNotificationEvents = ctx.stateManager.cleanupNotificationEvents().total; }],
+          ["runDatabaseMaintenance", () => ctx.stateManager.runDatabaseMaintenance()],
           ["checkAndFlushExpiringSessions", async () => {
             const ttlMs = config.session.ttlHours * 60 * 60 * 1000;
             await checkAndFlushExpiringSessions(ctx.stateManager, ttlMs);
@@ -1127,6 +1167,9 @@ async function runHandler(
         }
         const parts: string[] = ["Session maintenance done"];
         if (cleanedRuns > 0) parts.push(`cleaned ${cleanedRuns} old runs`);
+        if (cleanedNotificationEvents > 0) {
+          parts.push(`cleaned ${cleanedNotificationEvents} notification events`);
+        }
         if (errors.length > 0) parts.push(`${errors.length} step(s) failed: ${errors.join("; ")}`);
         return buildResult(
           job,
@@ -1152,6 +1195,7 @@ async function runHandler(
         }
         const pending = reminderManager.getPendingDue();
         let sent = 0;
+        const failures: string[] = [];
         for (const reminder of pending) {
           try {
             await ctx.bot.api.sendMessage(
@@ -1162,17 +1206,31 @@ async function runHandler(
             reminderManager.markSent(reminder.id);
             sent++;
           } catch (error) {
-            logger.error({ error, reminderId: reminder.id }, "Failed to send reminder");
-            reminderManager.markSent(reminder.id);
+            const message = error instanceof Error ? error.message : String(error);
+            failures.push(`${reminder.id}: ${message}`);
+            logger.error(
+              { error, reminderId: reminder.id },
+              "Failed to send reminder; leaving pending for retry"
+            );
           }
+        }
+        const outputParts: string[] = [];
+        if (sent > 0) outputParts.push(`Sent ${sent} reminder${sent === 1 ? "" : "s"}`);
+        if (failures.length > 0) {
+          outputParts.push(`${failures.length} reminder${failures.length === 1 ? "" : "s"} failed; left pending for retry`);
+          outputParts.push(failures.join("; "));
         }
         return buildResult(
           job,
           startedAt,
           true,
-          sent > 0 ? `Sent ${sent} reminders` : "No pending reminders",
+          outputParts.length > 0 ? outputParts.join("; ") : "No pending reminders",
           undefined,
-          sent > 0
+          failures.length > 0
+            ? {
+                notificationIntent: "failure_alert",
+              }
+            : sent > 0
             ? {
                 notificationIntent: "user_info",
                 sideEffectDelivered: true,

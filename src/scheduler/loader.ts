@@ -63,6 +63,7 @@ function validateJob(job: unknown, sourceFile: string): ScheduledJobConfig | nul
     enabled: j.enabled !== false, // default to true
     timeout: typeof j.timeout === "number" ? j.timeout : undefined,
     minOutputLength: typeof j.minOutputLength === "number" ? j.minOutputLength : undefined,
+    emptyStateMarker: typeof j.emptyStateMarker === "string" ? j.emptyStateMarker : undefined,
     model: typeof j.model === "string" ? j.model : undefined,
     executor: typeof j.executor === "string" && ["claude", "codex", "kimi", "gemini", "opencode", "internal"].includes(j.executor)
       ? j.executor as "claude" | "codex" | "kimi" | "gemini" | "opencode" | "internal"
@@ -80,15 +81,28 @@ function validateJob(job: unknown, sourceFile: string): ScheduledJobConfig | nul
 }
 
 /**
+ * Outcome of loading one schedule file:
+ *  - "ok":      parsed and shape-valid (jobs may be empty after per-job validation)
+ *  - "absent":  file does not exist — expected, not an error
+ *  - "invalid": read/JSON-parse failure or missing/non-array `jobs` — file-level
+ *               fatal. During hot reload this must NOT be treated as "no jobs",
+ *               otherwise a mid-write/corrupt file would silently wipe live crons.
+ */
+type LoadOutcome =
+  | { status: "ok"; schedule: LoadedSchedule }
+  | { status: "absent" }
+  | { status: "invalid"; path: string };
+
+/**
  * Load and validate a schedule file
  */
 async function loadScheduleFile(
   path: string,
   defaultLane: "work" | "default" | "trading"
-): Promise<LoadedSchedule | null> {
+): Promise<LoadOutcome> {
   if (!existsSync(path)) {
     logger.debug({ path }, "Schedule file does not exist");
-    return null;
+    return { status: "absent" };
   }
 
   try {
@@ -97,7 +111,7 @@ async function loadScheduleFile(
 
     if (!data.jobs || !Array.isArray(data.jobs)) {
       logger.warn({ path }, "Schedule file has no jobs array");
-      return { jobs: [], sourceFile: path };
+      return { status: "invalid", path };
     }
 
     const validJobs: ScheduledJobConfig[] = [];
@@ -113,26 +127,43 @@ async function loadScheduleFile(
     }
 
     logger.info({ path, jobCount: validJobs.length }, "Loaded schedule file");
-    return { jobs: validJobs, sourceFile: path };
+    return { status: "ok", schedule: { jobs: validJobs, sourceFile: path } };
   } catch (error) {
     logger.error({ path, error }, "Failed to load schedule file");
-    return null;
+    return { status: "invalid", path };
   }
 }
 
 /**
- * Load all schedule files from configured locations
+ * Load all schedule files, reporting which (if any) failed file-level validation.
+ * Callers that mutate live state (hot reload) MUST refuse to apply when
+ * `invalidFiles` is non-empty, so a transient bad write can't wipe the cron set.
  */
-export async function loadAllSchedules(): Promise<LoadedSchedule[]> {
+export async function loadSchedulesWithStatus(): Promise<{
+  schedules: LoadedSchedule[];
+  invalidFiles: string[];
+}> {
   const schedules: LoadedSchedule[] = [];
+  const invalidFiles: string[] = [];
 
   for (const { path, lane } of SCHEDULE_LOCATIONS) {
-    const schedule = await loadScheduleFile(path, lane);
-    if (schedule && schedule.jobs.length > 0) {
-      schedules.push(schedule);
+    const outcome = await loadScheduleFile(path, lane);
+    if (outcome.status === "ok" && outcome.schedule.jobs.length > 0) {
+      schedules.push(outcome.schedule);
+    } else if (outcome.status === "invalid") {
+      invalidFiles.push(outcome.path);
     }
+    // "absent", or "ok" with zero jobs (file legitimately emptied): skip silently.
   }
 
+  return { schedules, invalidFiles };
+}
+
+/**
+ * Load all schedule files from configured locations (lenient — used at startup).
+ */
+export async function loadAllSchedules(): Promise<LoadedSchedule[]> {
+  const { schedules } = await loadSchedulesWithStatus();
   return schedules;
 }
 
@@ -213,7 +244,17 @@ export class ScheduleWatcher {
     }
 
     this.debounceTimer = setTimeout(async () => {
-      const schedules = await loadAllSchedules();
+      const { schedules, invalidFiles } = await loadSchedulesWithStatus();
+      // Transactional reload: if any watched file failed to parse/validate
+      // (e.g. caught mid-write), keep the current cron set live and skip the
+      // reload rather than tearing down jobs and re-registering a partial set.
+      if (invalidFiles.length > 0) {
+        logger.error(
+          { invalidFiles },
+          "Schedule hot-reload skipped: file(s) failed to parse/validate — keeping current jobs live",
+        );
+        return;
+      }
       this.callback(schedules);
     }, this.debounceMs);
   }

@@ -28,6 +28,7 @@ export interface ScheduledJobConfig {
   notifyOnSuccess?: boolean; // defaults to true
   notifyOnFailure?: boolean; // defaults to true
   minOutputLength?: number; // if set, output shorter than this flips success→failure (guards against meta-comment-as-deliverable)
+  emptyStateMarker?: string; // if output contains this substring, it's a legitimate empty-state success and bypasses the minOutputLength guard
   deep?: boolean; // Use Pro model for Gemini executor (skip Flash)
   failureTakeover?: boolean; // spawn Claude Code to diagnose+retry on failure (default: true)
   allowAutoFix?: boolean; // let takeover edit handler code on fix_and_retry (default: false)
