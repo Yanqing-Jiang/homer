@@ -140,10 +140,8 @@ export const INTERNAL_JOB_HARNESS_BASELINES = {
     executor: "codex",
     model: CODEX_MODEL,
     stages: {
-      triage: codexStage(TMP_DIR, IDEA_STEP_TIMEOUT, "medium"),
-      synthesize: codexStage(TMP_DIR, IDEA_STEP_TIMEOUT, "medium"),
-      critique: codexStage(TMP_DIR, IDEA_STEP_TIMEOUT, "medium"),
-      enrich: codexStage(TMP_DIR, IDEA_STEP_TIMEOUT, "medium"),
+      // Single batched judgement (triage+synthesize+critique+enrich merged).
+      harvest: codexStage(TMP_DIR, IDEA_STEP_TIMEOUT, "medium"),
     },
   },
   "idea-dedup": {
