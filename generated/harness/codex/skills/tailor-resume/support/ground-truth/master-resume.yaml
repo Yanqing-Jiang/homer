@@ -1,0 +1,737 @@
+# Master Resume Ground Truth — Yanqing Jiang
+#
+# This YAML is the SINGLE SOURCE OF TRUTH for all claims that may appear in
+# tailored resumes and cover letters. The skill MAY:
+#   - select a subset of bullets
+#   - reorder bullets and skills
+#   - rephrase bullet text for keyword alignment
+#   - add a target-role headline (only as positioning, never as past title)
+#
+# The skill MUST NOT:
+#   - invent employers, roles, dates, education, certifications, metrics, or technologies
+#   - paraphrase metrics into different numbers ("$200M+" cannot become "over $200M")
+#   - claim a target role title as a past held title
+#   - derive new claims beyond what is in `derived_claims` below
+#
+# When Yanqing's experience changes:
+#   1. Edit this file directly. Add new entries with stable `id`s (kebab-case).
+#   2. Re-run the skill.
+#   3. The fit-analysis step (step 4 of the workflow) is the canonical place to
+#      surface and add new facts when a JD reveals coverage gaps.
+
+person:
+  name: Yanqing Jiang
+  location: Seattle, WA
+  email: jiangyanqing90@gmail.com
+  phone: "(270) 978-9240"
+  website: yanqing.app
+  linkedin: https://www.linkedin.com/in/jiangyanqing/
+  github: https://github.com/Yanqing-Jiang
+
+source:
+  master_resume_docx: "/Users/yj/Desktop/Resume-Yanqing Jiang.docx"
+  canonicalized_from_text_date: "2026-05-01"
+  rule: "Tailored outputs may select, reorder, and rephrase claims here, but may not add new factual claims."
+
+# Pre-approved derived claims. These are the ONLY derivations the model may use.
+# Adding a new derived claim requires explicit human approval — paste it here first.
+derived_claims:
+  years_experience:
+    value: "10+ years"
+    derivation: "Analytics work spans the full career: ecommerce ownership (Jan 2014-, cost/profit analysis, API integrations, multi-platform ad management across Amazon/eBay/Google/Facebook), US Army (Nov 2015-Jan 2020, dashboard building, budget analysis, travel budget consolidation), and analytics/AI/data-engineering (Jan 2020-present). Dated 2014->2026 (~12 yrs); 10+ is conservative. Approved by Yanqing 2026-06-16."
+    approved_phrasings:
+      - "10+ years"
+      - "10+ years of analytics experience"
+      - "Senior analytics and AI leader with 10+ years"
+      - "Ten-plus years of progressive analytics, AI, and data engineering experience"
+  years_experience_total:
+    value: "10+ years"
+    derivation: "Self-employment began after college (Jan 2014, ecommerce) and counts as continuous work experience. Spans self-employed/ecommerce (Jan 2014), US Army supply/program-management (Nov 2015-Jan 2020), and analytics/AI (Jan 2020-present). Dated work history 2014->2026 (~12 yrs); 10+ is conservative. Approved by Yanqing 2026-06-16."
+    approved_phrasings:
+      - "10+ years"
+      - "10+ years of working experience"
+      - "10+ years building and launching technical products and analytics platforms"
+  total_revenue_impact:
+    value: "$420M+"
+    derivation: "$200M media optimizer + $150M ML pipeline + $70M forecasting (verbatim from bullets)"
+    approved_phrasings:
+      - "delivered $400M+ in incremental revenue and optimized spend"
+    note: "Use sparingly — this is a sum, not a verbatim ledger fact."
+
+# Positioning rules.
+positioning:
+  approved_titles:
+    - Advanced Analytics Senior Manager  # current
+    - Analytics & Insight Senior Manager
+    - Data Analytics Engineer
+    - Supply Specialist
+    - Ecommerce Retailer
+  target_title_policy:
+    allowed: true
+    rule: "A target title may appear in the resume headline or summary as a target/objective, NEVER as a past held title."
+
+# Keyword universe — only skills that are demonstrably backed by experience bullets.
+# When tailoring, the skill may surface these in the Skills section ONLY if at least
+# one experience bullet contextualizes the skill.
+skills:
+  analytics_ai:
+    - demand creation analytics
+    - sales growth analytics
+    - marketing optimization
+    - campaign fund optimization
+    - keyword bidding automation
+    - A/B testing
+    - hypothesis testing
+    - machine learning pipelines
+    - forecasting algorithms
+    - Gen AI invoice matching
+    - enterprise BI
+    - digital commerce analytics
+    - opportunity detection
+  data_engineering:
+    - MS SQL Server
+    - database administration
+    - ETL pipelines
+    - terabyte-level data management
+    - cloud-based data platforms
+    - full-stack application development
+    - data visualization
+    - Power BI Premium
+    - PowerApps
+    - Power Automate
+  business_domains:
+    - Amazon sales
+    - Walgreens sales
+    - global procurement
+    - supply chain
+    - ecommerce retail
+    - upper funnel media
+    - store-level forecasting
+    - digital commerce
+  leadership:
+    - cross-functional alignment
+    - tech lead
+    - enterprise product development
+    - analytics transformation
+    - global team enablement
+    - workflow automation
+    - investment decision support
+
+experience:
+
+  - employer: Procter & Gamble
+    role: Advanced Analytics Senior Manager
+    team: Amazon Sales Team
+    location: Seattle, WA
+    start: "2024-07"
+    end: Present
+    bullets:
+      - id: pg-amazon-growth-analytics
+        claim: "Led demand creation and sales growth analytics for P&G's #1 Growth team that contributes 50% of total company sales growth."
+        metrics: ["50% of total company sales growth"]
+        skills: [demand creation analytics, sales growth analytics, Amazon sales]
+      - id: pg-amazon-campaign-optimizer
+        claim: "Built a campaign fund optimizer that helped allocate $200M+ in upper funnel media spend, doubled audience reach year over year, and delivered 50%+ incremental sales with flat budget."
+        metrics: ["$200M+ upper funnel media spend", "doubled audience reach YOY", "50%+ incremental sales", "flat budget"]
+        skills: [campaign fund optimization, marketing optimization, upper funnel media]
+      - id: pg-amazon-keyword-platform
+        claim: "Co-created a proprietary smart keyword-bidding platform that automated workflows previously handled by 8-10 FTEs and freed the team to focus on strategy."
+        metrics: ["8-10 FTE workflows automated"]
+        skills: [keyword bidding automation, workflow automation]
+      - id: pg-amazon-ab-tests
+        claim: "Architected and analyzed 100+ A/B and hypothesis tests to drive marketing optimization and billion-plus-level investment decision-making."
+        metrics: ["100+ A/B and hypothesis tests", "billion-plus-level investment decision-making"]
+        skills: [A/B testing, hypothesis testing, investment decision support]
+      - id: pg-amazon-experimentation-platform
+        claim: "Architected the underlying experimentation platform and data pipelines (assignment, metric computation, lift analysis) that powered 100+ A/B and hypothesis tests used in billion-plus-level investment decision-making."
+        metrics: ["100+ A/B and hypothesis tests", "billion-plus-level investment decision-making"]
+        skills: [A/B testing, experimentation platform, data pipelines, hypothesis testing, measurement framework]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+        parent_bullet: pg-amazon-ab-tests
+      - id: pg-amazon-aws-stack
+        claim: "Operates a Python + AWS Redshift / S3 data lake stack for the Amazon analytics platform supporting demand-creation and growth analytics."
+        metrics: []
+        skills: [Python, AWS, Redshift, S3, data lake, cloud data platforms]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+      - id: pg-amazon-ai-copilots
+        claim: "Built and piloted AI-powered analytics copilots embedded in the team's daily workflow, accelerating reporting and analysis with measurable productivity gains."
+        metrics: ["measurable productivity gains"]
+        skills: [AI agents, LLM, analytics copilots, AI workflows, prompt engineering]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+      - id: pg-amazon-distributed-mgmt
+        claim: "Leads a dotted-line team of 3-5 contractors and vendors and partners with cross-functional collaborators across multiple US and international time zones on P&G's Amazon Sales team, accumulating 2-3 years of geographically distributed team leadership."
+        metrics: ["3-5 dotted-line reports", "2-3 years", "multi time zone"]
+        skills: [people management, dotted-line management, vendor management, geographically distributed team, cross-geo collaboration]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+      - id: pg-amazon-causal-inference
+        claim: "Designed and applied causal inference methods — geo-experiments, marketing mix modeling, synthetic controls, difference-in-differences, and propensity score matching — to measure incrementality on P&G's $200M+ upper-funnel media program."
+        metrics: ["$200M+ upper-funnel media program"]
+        skills: [causal inference, geo-experiments, marketing mix modeling, MMM, synthetic controls, difference-in-differences, propensity score matching, media incrementality]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+        parent_bullet: pg-amazon-campaign-optimizer
+      - id: pg-amazon-modern-stack
+        claim: "Authors PySpark and Spark SQL on Azure Databricks daily, orchestrates pipelines with Airflow, and manages SQL transformations with dbt powering the Amazon analytics platform that supports demand-creation and growth analytics."
+        metrics: []
+        skills: [PySpark, Spark, Spark SQL, Databricks, Airflow, dbt, distributed processing, ETL orchestration, modern data stack]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+        parent_bullet: pg-amazon-aws-stack
+      - id: pg-amazon-tableau
+        claim: "Builds and maintains Tableau dashboards alongside Power BI for cross-functional Amazon Sales stakeholders, distilling 100+ A/B test outcomes and $200M+ media performance into executive-ready visualizations."
+        metrics: ["100+ A/B test outcomes", "$200M+ media performance"]
+        skills: [Tableau, Power BI, data visualization, executive dashboards, BI tools, stakeholder reporting]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+      - id: pg-amazon-data-modeling
+        claim: "Designed dimensional (Kimball-style fact/dim) models, dbt-managed transformations, and semantic-layer metric definitions backing the Amazon analytics platform, ensuring consistent metric architecture across Product, Finance, and Sales-leadership reporting."
+        metrics: []
+        skills: [dimensional modeling, Kimball, fact tables, conformed dimensions, slowly changing dimensions, dbt, semantic layer, metric repository, single source of truth, data modeling, data warehouse]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+      - id: pg-amazon-external-codev
+        claim: "Partnered directly with Amazon partner-engineering counterparts on joint co-development of the $200M+ upper-funnel media optimizer and measurement interfaces, defining shared use cases and integration scope across two engineering organizations."
+        metrics: ["$200M+ upper-funnel media"]
+        skills: [external customer engagement, partner engineering, joint co-development, customer-facing TPM, cross-organization collaboration]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+        parent_bullet: pg-amazon-campaign-optimizer
+      - id: pg-amazon-ds-team-lead
+        claim: "Leads a dotted-line team of 3-5 data scientists and analysts (contractor and vendor staff) on P&G's Amazon Sales team — sets the quality bar, reviews deliverables, and coaches their work across multiple US and international time zones over 2-3 years."
+        metrics: ["3-5 dotted-line data scientists and analysts", "2-3 years", "multi time zone"]
+        skills: [people leadership, dotted-line management, data scientist mentorship, analyst coaching, quality bar setting, deliverable review, geographically distributed team, cross-geo collaboration]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+        parent_bullet: pg-amazon-distributed-mgmt
+      - id: pg-amazon-tech-spend
+        claim: "Drove non-wage tech spend analytics — SaaS license rationalization, cloud / infrastructure cost, and a multi-vendor engineering contract portfolio — across $100M+ in tech spend over analytics roles, surfacing consolidation, renegotiation, and rationalization opportunities for executive decisioning."
+        metrics: ["$100M+ tech spend across roles"]
+        skills: [non-wage tech spend, SaaS license optimization, cloud cost optimization, FinOps, vendor portfolio analytics, contract spend, spend decisioning, executive analytics, finance partnership, procurement partnership]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+      - id: pg-amazon-itsm-platform
+        claim: "Operates the Amazon analytics platform under formal SLAs and change-management cadence, with ITSM dashboards tracking incident, change, and request flow for cross-functional stakeholders."
+        metrics: []
+        skills: [SLA management, change management, incident response, ITSM, ITIL-aligned, ServiceNow analytics, service management framework, platform reliability]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+        parent_bullet: pg-amazon-modern-stack
+      - id: pg-amazon-direct-reports
+        claim: "Manages 1-2 direct reports on P&G's Amazon Sales analytics team in addition to a 3-5 person dotted-line team of contractors and vendors across multiple US and international time zones."
+        metrics: ["1-2 direct reports", "3-5 dotted-line", "multi time zone"]
+        skills: [people management, direct reports, supervisory, mentoring, distributed team leadership, vendor management]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+        parent_bullet: pg-amazon-distributed-mgmt
+      - id: pg-amazon-multi-sided
+        claim: "Optimized P&G's $200M+ upper-funnel media program across multi-sided trade-offs — balancing advertiser ROI, consumer experience signals, and Amazon platform partner relationships when allocating spend, audiences, and creative."
+        metrics: ["$200M+ upper-funnel media"]
+        skills: [multi-sided marketplace, multi-stakeholder optimization, advertiser ROI, consumer experience, platform health, marketplace dynamics, three-sided trade-offs]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+        parent_bullet: pg-amazon-campaign-optimizer
+      - id: pg-amazon-funnel-optimization
+        claim: "Built funnel-optimization diagnostics on the $200M+ Amazon media program — impression to engagement to conversion to repeat purchase — to identify drop-off, tune budget allocation by stage, and improve incremental sales efficiency."
+        metrics: ["$200M+ Amazon media program"]
+        skills: [funnel optimization, conversion funnel, full-funnel marketing, drop-off analysis, marketing analytics, funnel diagnostics]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+        parent_bullet: pg-amazon-campaign-optimizer
+      - id: pg-amazon-segmentation
+        claim: "Drove audience segmentation and cohort modeling on the $200M+ Amazon upper-funnel program — defined segments, allocated budget by segment, and measured segment-level lift, doubling audience reach year over year."
+        metrics: ["$200M+ Amazon program", "doubled audience reach YOY"]
+        skills: [user segmentation, audience segmentation, cohort analysis, customer segmentation, segment-level targeting, audience modeling]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+        parent_bullet: pg-amazon-campaign-optimizer
+      - id: pg-amazon-full-mgmt-cycle
+        claim: "Owns full people-management cycle for a 5-7 person multi-level team (1-2 direct reports plus 3-5 dotted-line contractors and vendor staff) on P&G's Amazon Sales analytics — formal performance reviews, hiring-loop interviews, and career-path development conversations across multiple US and international time zones."
+        metrics: ["5-7 person multi-level team", "1-2 direct reports", "3-5 dotted-line"]
+        skills: [people management, performance reviews, hiring loops, career development, coaching, multi-level team leadership, distributed team, talent development]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+        parent_bullet: pg-amazon-direct-reports
+      - id: pg-amazon-ltv
+        claim: "Built lifetime-value (LTV/CLV) models on the $200M+ Amazon upper-funnel program — scoring audiences by predicted customer lifetime value to prioritize high-LTV segments in budget allocation, contributing to doubled audience reach year over year."
+        metrics: ["$200M+ Amazon upper-funnel program", "doubled audience reach YOY"]
+        skills: [lifetime value modeling, LTV, CLV, customer lifetime value, predictive modeling, audience valuation, behavioral analytics]
+        added_via: fit-analysis
+        added_date: "2026-06-02"
+        parent_bullet: pg-amazon-segmentation
+      - id: pg-amazon-platform-monitoring
+        claim: "Built monitoring, alerting, and anomaly-detection on the Amazon analytics platform — automated data-quality and pipeline-health checks that catch failures and metric anomalies before they reach stakeholders."
+        metrics: []
+        skills: [monitoring, alerting, anomaly detection, observability, data quality, pipeline health, production operations, incident detection, SRE-adjacent, reliability]
+        added_via: fit-analysis
+        added_date: "2026-06-02"
+        parent_bullet: pg-amazon-itsm-platform
+      - id: pg-amazon-predictive-diagnostics
+        claim: "Built ML-based predictive and diagnostic models on the Amazon analytics platform that forecast pipeline and data-quality failures and surface likely root causes — shifting the team from reacting to issues to predicting, preventing, and diagnosing them."
+        metrics: []
+        skills: [predictive analytics, anomaly detection, root-cause analysis, ML for operations, AIOps, failure prediction, diagnostics, production operations, AI development lifecycle]
+        added_via: fit-analysis
+        added_date: "2026-06-02"
+        parent_bullet: pg-amazon-platform-monitoring
+      - id: pg-amazon-syndicated-harmonization
+        claim: "Harmonized external syndicated scanner and retailer point-of-sale market data (e.g., Nielsen, Circana) with internal shipment and financial data on P&G's Amazon business — reconciling vendors with mismatched product and calendar/timing hierarchies into a single conformed view for demand-creation and growth analytics."
+        metrics: []
+        skills: [syndicated data, scanner data, Nielsen, Circana, market measurement, point-of-sale data, data harmonization, shipment data, conformed dimensions, product hierarchy mapping, calendar harmonization, external-internal data integration]
+        added_via: fit-analysis
+        added_date: "2026-06-07"
+        parent_bullet: pg-amazon-data-modeling
+      - id: pg-amazon-medallion
+        claim: "Designed and owns curated silver and gold (medallion-architecture) data layers on the Azure Databricks lakehouse backing P&G's Amazon analytics platform — turning raw ingested data into governed, business-ready datasets and KPIs consumed across Product, Finance, and Sales leadership."
+        metrics: []
+        skills: [medallion architecture, bronze silver gold, lakehouse, Databricks, Delta Lake, curated data layers, gold layer, silver layer, data products, governed datasets, KPI layer]
+        added_via: fit-analysis
+        added_date: "2026-06-07"
+        parent_bullet: pg-amazon-data-modeling
+      - id: pg-amazon-code-reviews
+        claim: "Conducts regular hands-on code reviews of the team's Python, SQL, PySpark, and dbt code on the Amazon analytics platform — enforcing engineering standards, correctness, and maintainability across direct reports, contractors, and vendor staff."
+        metrics: []
+        skills: [code review, engineering standards, Python, SQL, PySpark, dbt, hands-on technical leadership, mentorship, quality assurance]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+        parent_bullet: pg-amazon-ds-team-lead
+      - id: pg-amazon-ai-roadmap
+        claim: "Defined the AI and analytics roadmap by business area for P&G's Amazon Sales team — identifying high-value AI opportunities (campaign optimization, keyword-bidding automation, analytics copilots), prioritizing them against business goals, and setting the data science strategy the team executes."
+        metrics: []
+        skills: [AI strategy, AI roadmap, data science strategy, opportunity identification, AI trends, prioritization, strategic planning, business-area roadmap]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+        parent_bullet: pg-amazon-growth-analytics
+      - id: pg-amazon-revenue-pl-forecast
+        claim: "Built revenue and margin forecasting models feeding P&G's Amazon business P&L, projecting sales and profitability to guide growth-investment and budget decisions for sales leadership."
+        metrics: []
+        skills: [financial forecasting, revenue forecasting, margin forecasting, P&L modeling, profitability analysis, FP&A, finance partnership, decision intelligence]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+        parent_bullet: pg-amazon-growth-analytics
+
+  - employer: Procter & Gamble
+    role: Analytics & Insight Senior Manager
+    team: Walgreens Sales Team
+    location: Chicago, IL
+    start: "2022-04"
+    end: "2024-06"
+    bullets:
+      - id: pg-walgreens-ml-pipeline
+        claim: "Built an end-to-end machine learning pipeline that generated $150M+ incremental sales in under a year."
+        metrics: ["$150M+ incremental sales", "under a year"]
+        skills: [machine learning pipelines]
+      - id: pg-walgreens-python-databricks
+        claim: "Built the end-to-end machine learning pipeline in Python on Azure Databricks (pandas, scikit-learn) that generated $150M+ incremental sales in under a year."
+        metrics: ["$150M+ incremental sales", "under a year"]
+        skills: [Python, Databricks, scikit-learn, pandas, Azure, machine learning pipelines]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+        parent_bullet: pg-walgreens-ml-pipeline
+      - id: pg-walgreens-genai-invoice
+        claim: "Built a full-stack Gen AI invoice matching system that saved 1000+ yearly contracted hours."
+        metrics: ["1000+ yearly contracted hours saved"]
+        skills: [Gen AI invoice matching, full-stack application development]
+      - id: pg-walgreens-python-genai
+        claim: "Built a full-stack Gen AI invoice matching system in Python that saved 1000+ yearly contracted hours."
+        metrics: ["1000+ yearly contracted hours saved"]
+        skills: [Python, Gen AI, full-stack application development, LLM integration]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+        parent_bullet: pg-walgreens-genai-invoice
+      - id: pg-walgreens-event-pipelines
+        claim: "Built event-level pipelines on the terabyte-scale internal BI / analytics products to track user actions and feature adoption across cross-functional product teams."
+        metrics: ["terabyte-scale data"]
+        skills: [event pipelines, telemetry, feature usage tracking, product analytics, cloud-based data platforms]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+        parent_bullet: pg-walgreens-bi-platforms
+      - id: pg-walgreens-platform-pm-reach
+        claim: "Drove the BI / analytics product roadmap end-to-end — discovery, design, build, ship, monitor — adopted by 5-10 cross-functional product teams at P&G."
+        metrics: ["5-10 cross-functional product teams"]
+        skills: [product roadmap, platform PM, dev-facing platforms, multi-team enablement, cross-functional]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+        parent_bullet: pg-walgreens-bi-platforms
+      - id: pg-walgreens-forecasting
+        claim: "Served as tech lead for a store-level forecasting algorithm that outperformed a multimillion-dollar AI company and added $70M incremental sales in three months."
+        metrics: ["$70M incremental sales", "three months"]
+        skills: [forecasting algorithms, tech lead]
+      - id: pg-walgreens-bi-platforms
+        claim: "Led development and alignment of enterprise BI and analytics products, including terabyte-level data management, cloud-based data platforms, and digital product development cycles."
+        metrics: ["terabyte-level data management"]
+        skills: [enterprise BI, terabyte-level data management, cloud-based data platforms]
+      - id: pg-walgreens-digital-transformation
+        claim: "Led digital commerce analytics transformation, driving sales-team adoption of digital strategies and revolutionizing BI with automation, actionable insights, and opportunity detection; reversed digital growth rate from -8% to 20% in under a year."
+        metrics: ["digital growth rate from -8% to 20%", "under a year"]
+        skills: [digital commerce analytics, analytics transformation, opportunity detection]
+      - id: pg-walgreens-spark-airflow
+        claim: "Built the end-to-end ML pipeline using PySpark on Azure Databricks orchestrated with Airflow, generating $150M+ incremental sales in under a year."
+        metrics: ["$150M+ incremental sales", "under a year"]
+        skills: [PySpark, Spark, Databricks, Airflow, ETL orchestration, ML pipelines, distributed processing]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+        parent_bullet: pg-walgreens-ml-pipeline
+      - id: pg-walgreens-tableau
+        claim: "Built Tableau dashboards alongside Power BI for Walgreens Sales stakeholders to support digital commerce analytics transformation and forecasting reviews."
+        metrics: []
+        skills: [Tableau, Power BI, data visualization, BI tools]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+      - id: pg-walgreens-vendor-codev
+        claim: "Served as tech lead on a joint engineering engagement with an external multimillion-dollar AI forecasting vendor — co-defined model scope, integration interfaces, and validation criteria; the in-house algorithm shipped alongside the vendor delivery added $70M incremental sales in three months."
+        metrics: ["$70M incremental sales", "three months"]
+        skills: [external vendor engineering, customer-facing engagement, vendor co-development, joint engineering, technical leadership]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+        parent_bullet: pg-walgreens-forecasting
+      - id: pg-walgreens-vendor-portfolio
+        claim: "Managed a portfolio of multiple external engineering vendors across internal BI/AI projects and external-facing engineering programs, owning scope, integration, and acceptance criteria as the technical Product Owner."
+        metrics: []
+        skills: [vendor management, external vendor engineering, Product Owner, customer engagement, technical scoping]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+      - id: pg-walgreens-platform-roadmap
+        claim: "Owned the BI/analytics platform multi-year roadmap (2022–2024+) with quarterly review cadence and staged release plans, driving discovery-through-monitoring across 5-10 cross-functional product teams."
+        metrics: ["multi-year roadmap", "5-10 cross-functional product teams"]
+        skills: [multi-year roadmap, quarterly reviews, staged release, governance, platform PM, Product Owner]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+        parent_bullet: pg-walgreens-platform-pm-reach
+      - id: pg-walgreens-itsm-platform
+        claim: "Ran the BI / analytics platform under formal SLAs, change management, and incident response across 5-10 cross-functional product teams; built ITSM analytics dashboards over incident, change, and request data tracking platform reliability and operational health."
+        metrics: ["5-10 cross-functional product teams"]
+        skills: [SLA management, change management, incident response, ITSM, ITIL-aligned, ServiceNow analytics, service management framework, platform reliability, operational health, ITSM dashboards]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+        parent_bullet: pg-walgreens-platform-roadmap
+      - id: pg-walgreens-tech-spend
+        claim: "Owned analytics on a multi-vendor engineering portfolio — cloud, SaaS, third-party AI vendors — supporting BI/analytics product development; informed renewal, consolidation, and rationalization decisions across the program."
+        metrics: []
+        skills: [non-wage tech spend, vendor portfolio analytics, SaaS, cloud spend, contract spend, FinOps, procurement partnership]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+        parent_bullet: pg-walgreens-vendor-portfolio
+      - id: pg-walgreens-funnel-optimization
+        claim: "Built funnel diagnostics on the Walgreens digital commerce transformation — defined stages, measured drop-off, and tuned the digital experience that reversed the digital growth rate from -8% to 20% in under a year."
+        metrics: ["digital growth rate from -8% to 20%", "under a year"]
+        skills: [funnel optimization, conversion funnel, digital commerce funnel, drop-off analysis, marketing analytics]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+        parent_bullet: pg-walgreens-digital-transformation
+      - id: pg-walgreens-segmentation
+        claim: "Drove shopper segmentation work on the Walgreens digital commerce transformation — defined cohorts, designed segment-level analytics, and built targeting strategies that supported reversing digital growth from -8% to 20% in under a year."
+        metrics: ["digital growth from -8% to 20%", "under a year"]
+        skills: [user segmentation, shopper segmentation, customer segmentation, cohort analysis, targeting strategy]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+        parent_bullet: pg-walgreens-digital-transformation
+      - id: pg-walgreens-ltv
+        claim: "Built lifetime-value (LTV/CLV) models on the Walgreens digital commerce transformation — valuing shopper cohorts by predicted lifetime value to target retention and repeat purchase, supporting the reversal of digital growth from -8% to 20% in under a year."
+        metrics: ["digital growth from -8% to 20%", "under a year"]
+        skills: [lifetime value modeling, LTV, CLV, customer lifetime value, predictive modeling, cohort value, retention modeling, behavioral analytics]
+        added_via: fit-analysis
+        added_date: "2026-06-02"
+        parent_bullet: pg-walgreens-segmentation
+      - id: pg-walgreens-forecast-simulation
+        claim: "Built scenario and sensitivity simulations around the store-level forecasting work — benchmarking multiple model configurations and what-if assumptions to stress-test projections before they drove sales and inventory decisions."
+        metrics: []
+        skills: [scenario modeling, what-if analysis, simulation, sensitivity analysis, forecast benchmarking, model validation, decision intelligence]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+        parent_bullet: pg-walgreens-forecasting
+
+  - employer: Archer Daniels Midland
+    role: Data Analytics Engineer
+    team: Global Procurement & Supply Chain
+    location: Decatur, IL
+    start: "2020-01"
+    end: "2022-03"
+    bullets:
+      - id: adm-project-management-app
+        claim: "Built an end-to-end project management application for global teams with 400+ members, cut communication time by more than 80%, and saved $300K+ yearly budget."
+        metrics: ["400+ members", "80%+ communication time reduction", "$300K+ yearly budget saved"]
+        skills: [full-stack application development, global team enablement]
+      - id: adm-sql-etl
+        claim: "Managed MS SQL Server databases with 100+ tables containing million-to-billion-row datasets and developed weekly ETL pipelines moving terabyte-level data."
+        metrics: ["100+ tables", "million-to-billion-row datasets", "terabyte-level data"]
+        skills: [MS SQL Server, database administration, ETL pipelines]
+      - id: adm-power-platform
+        claim: "Managed enterprise data visualization and analytics solutions in Power Platform, including Power BI Premium, PowerApps, and Power Automate."
+        metrics: []
+        skills: [data visualization, Power BI Premium, PowerApps, Power Automate]
+      - id: adm-tableau
+        claim: "Built Tableau dashboards alongside Power BI Premium for global procurement and supply chain stakeholders, supporting terabyte-scale data visualization across 400+ team members."
+        metrics: ["400+ team members"]
+        skills: [Tableau, Power BI, data visualization, BI tools]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+      - id: adm-tech-spend
+        claim: "Contributed to spend analytics across multi-million-dollar tech and indirect categories at ADM Global Procurement — combining SQL pipelines, Power BI dashboards, and PowerApps workflows — surfacing sourcing, consolidation, and rationalization opportunities for procurement leadership."
+        metrics: ["multi-million-dollar tech and indirect categories"]
+        skills: [non-wage spend analytics, procurement analytics, sourcing, category management, vendor consolidation, finance partnership, procurement partnership]
+        added_via: fit-analysis
+        added_date: "2026-05-04"
+        parent_bullet: adm-sql-etl
+      - id: adm-budget-forecast
+        claim: "Built procurement cost and category budget forecasts across multi-million-dollar indirect and tech categories at ADM Global Procurement, projecting spend to support sourcing, budget-setting, and resource-allocation decisions for procurement leadership."
+        metrics: ["multi-million-dollar indirect and tech categories"]
+        skills: [budget forecasting, cost forecasting, category budgeting, procurement forecasting, spend forecasting, resource allocation, finance partnership]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+        parent_bullet: adm-tech-spend
+
+  - employer: US Army
+    role: Supply Specialist
+    team: 2-35 Infantry Battalion
+    location: Schofield Barracks, HI
+    start: "2015-11"
+    end: "2020-01"
+    bullets:
+      - id: army-gtc-program-manager
+        claim: "Served as Government Travel Card Program Manager — first E4 soldier to hold the role in battalion history."
+        metrics: ["first E4 soldier"]
+        skills: [program management]
+      - id: army-dts-approving-official
+        claim: "Served as Defense Travel System Approving Official — first E4 soldier to hold the role in battalion history."
+        metrics: ["first E4 soldier"]
+        skills: [approval workflow management]
+      - id: army-purchase-card
+        claim: "Served as Government Purchase Card Holder; single-handedly expanded battalion budget by 20%."
+        metrics: ["20% battalion budget expansion"]
+        skills: [budget management]
+      - id: army-tracking-dashboards
+        claim: "Built spend-budget, government-travel, and personnel tracking dashboards at the battalion supply headquarters using Army internal systems and Excel — consolidating and reporting data for supply-headquarters decision-making."
+        metrics: []
+        skills: [data visualization, dashboards, Excel, budget tracking, reporting analytics, data consolidation]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: army-budget-analysis
+        claim: "Supported budget analysis and accountability for $100M+ in operating budget and $500M+ in equipment at the battalion supply headquarters, reconciling and consolidating travel and equipment spend for leadership reporting."
+        metrics: ["$100M+ operating budget", "$500M+ equipment"]
+        skills: [budget analysis, spend analytics, equipment accountability, reconciliation, financial reporting]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: army-budget-forecast
+        claim: "Forecasted and allocated the battalion's $100M+ operating budget and $500M+ in equipment at the supply headquarters — projecting requirements, tracking burn, and reallocating funds to support leadership resourcing decisions."
+        metrics: ["$100M+ operating budget", "$500M+ equipment"]
+        skills: [budget forecasting, resource allocation, financial planning, burn tracking, reallocation, financial reporting]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+        parent_bullet: army-budget-analysis
+
+  - employer: Self-employed (Alpha J Store, Inc.)
+    role: Ecommerce Retailer
+    location: City of Industry, CA
+    start: "2014-01"
+    end: "2015-11"
+    bullets:
+      - id: alpha-revenue-skus
+        claim: "Built an ecommerce business from $0 to $1.2M revenue with 1000+ SKUs across Amazon, eBay, and Etsy."
+        metrics: ["$0 to $1.2M revenue", "1000+ SKUs"]
+        skills: [ecommerce retail]
+      - id: alpha-luggage-market-entry
+        claim: "Introduced a top-10 Chinese luggage manufacturer into the North American market, became its exclusive online retailer, and established 100+ retail partnerships."
+        metrics: ["top-10 Chinese luggage manufacturer", "100+ retail partnerships"]
+        skills: [market entry, retail partnerships]
+      - id: alpha-multi-platform-ads
+        claim: "Planned and ran paid advertising and campaigns across Amazon, eBay, Google, Facebook/Meta, and Pinterest — managing creative, picture showcases, and budget allocation to drive traffic and sales across 1000+ SKUs."
+        metrics: ["1000+ SKUs"]
+        skills: [Amazon Ads, eBay Ads, Google Ads, Facebook Ads, Meta Ads, Pinterest Ads, paid media, campaign management, multi-platform advertising, digital marketing]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: alpha-margin-roas-analytics
+        claim: "Drove pricing and scaling decisions through per-SKU margin analysis, ROAS by channel, and ad-spend efficiency — determining which products and product lines to scale across the catalog."
+        metrics: []
+        skills: [profit analysis, margin analysis, ROAS, channel analytics, pricing strategy, ad-spend efficiency, unit economics, cost analysis]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: alpha-inventory-api
+        claim: "Integrated Amazon and eBay inventory connections to keep listings and stock synchronized across marketplaces."
+        metrics: []
+        skills: [inventory integration, API integration, marketplace sync, Amazon, eBay, ecommerce operations]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: alpha-html-listings
+        claim: "Hand-coded HTML product pages for eBay listings with clear product photography, manufacturer-site showcases, and physical-store references — clearly demonstrating product advantages, which drove early-adopter shoppers to prefer the storefront over competitors."
+        metrics: []
+        skills: [HTML, product listing optimization, conversion optimization, ecommerce merchandising, product demonstration, web content]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+
+education:
+  - institution: The Ohio State University, Max M. Fisher College of Business
+    dates: "2012-01 to 2013-12"
+    degree: Bachelor of Science
+    field: Corporate Finance
+    note: "Transferred from Murray State University; completed bachelor's degree at Ohio State."
+  - institution: Murray State University
+    dates: "2010-01 to 2011-12"
+    degree: null
+    field: null
+    optional: true
+    rule: "Optional. Default to omitting from tailored resumes — Ohio State alone is the canonical degree line. Show Murray State only if there's a specific reason: e.g., role values KY/regional connection, military-friendly institution, or you need filler to balance a 2-page layout."
+
+certifications:
+  - Machine Learning Specialization — DeepLearning.AI
+  - Data Analyst Professional Certificate — IBM
+  - Data Science Professional Certificate — IBM
+  - SQL Server for Database Administrators — DataCamp
+
+personal_projects:
+  - id: homer-ai-workspace
+    name: Homer
+    url: yanqing.app
+    start: "2025-01"
+    end: Present
+    bullets:
+      - id: homer-overview
+        claim: "Built and operates Homer, a personal AI workspace on Claude + MCP — long-term memory, multi-agent orchestration, and 50+ custom tools spanning code, calendar, email, knowledge, and analytics."
+        metrics: ["50+ custom tools"]
+        skills: [Claude, MCP, Model Context Protocol, AI agents, multi-agent orchestration, prompt engineering, personal AI infrastructure, Cursor]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+      - id: homer-architecture-deep
+        claim: "Homer's architecture: 5+ specialized subagents (Claude, Codex, Gemini, Kimi, Opus) with explicit routing rules; 10+ self-authored MCP servers (memory, calendar, email, blob, ideas, plans, etc.); SQLite + vector embeddings + FTS5 memory layer with a 2-tier canonical/live model; telemetry and eval pipelines tracking agent quality via traces, outcome checks, and debug logs."
+        metrics: ["5+ subagents", "10+ MCP servers"]
+        skills: [agent-to-agent, A2A, subagent routing, MCP authoring, multi-agent orchestration, shared memory, vector embeddings, FTS5, telemetry, eval pipelines, observability, agent quality, traces]
+        added_via: fit-analysis
+        added_date: "2026-05-02"
+        parent_bullet: homer-overview
+      - id: homer-bigquery
+        claim: "Uses Google BigQuery hands-on for ad-hoc analysis and personal data projects — writing SQL against BigQuery datasets and wiring results into the Homer AI workspace."
+        metrics: []
+        skills: [BigQuery, Google Cloud Platform, GCP, SQL, ad-hoc analysis, cloud data warehouse]
+        added_via: fit-analysis
+        added_date: "2026-06-02"
+        parent_bullet: homer-overview
+
+  - id: ai-portfolio
+    name: AI Portfolio
+    url: yanqing.app
+    start: "2021"   # earliest showcased project; catalog spans 2021-2026
+    end: Present
+    note: "React + FastAPI portfolio at yanqing.app showcasing 14 AI/analytics projects, each tagged with the year it was built (2021-2026). Each bullet below is one showcased project; select the most JD-relevant. Source: ~/ai-portfolio (constants.ts for year, public/ai-projects.json for detail). Some projects (Ask My Resume, Research GPT) retired June 2026 and shown as historical case studies."
+    added_via: fit-analysis
+    added_date: "2026-06-16"
+    bullets:
+      - id: proj-agent-to-ui
+        year: 2026
+        claim: "Built Agent to UI (A2UI) — agent-guided generative dashboards that stream widgets, KPIs, and news from finance questions using the Claude Agent SDK, FastAPI SSE, and a custom React renderer."
+        metrics: []
+        skills: [A2UI Protocol, Claude Agent SDK, generative UI, React renderer, SSE streaming, FastAPI]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: proj-conversational-analytics
+        year: 2025
+        claim: "Built a Conversational Analytics Agent that clarifies intent, queries a Postgres financial dataset, generates SQL and charts, and delivers analyst-grade explanations with traceable steps using the Claude Agent SDK."
+        metrics: []
+        skills: [Claude Agent SDK, SQL, charts, RAG, long-term memory, human-in-the-loop, multi-agent workflow, Postgres]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: proj-agentic-trade-bot
+        year: 2025
+        claim: "Built an Agentic Trading Bot — a LangGraph multi-agent system connecting IBKR execution, Unusual Whales flow, and Morningstar insights to size trades, achieving a 200% supervised gain."
+        metrics: ["200% supervised gain"]
+        skills: [LangGraph, multi-agent, IBKR API, Unusual Whales, Morningstar, agentic framework, trading automation]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: proj-next-gen-sql-copilot
+        year: 2024
+        claim: "Built a Next Gen Analytics SQL Copilot — a streaming SQL copilot pairing LangGraph orchestration with Supabase analytics to generate charts, commentary, and comparisons for semiconductor tickers in real time."
+        metrics: []
+        skills: [LangGraph, agentic workflow, state management, RAG, smart SQL, Supabase, streaming]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: proj-llm-invoice-processor
+        year: 2024
+        claim: "Built a production LLM Invoice Processor that parses PDFs/XLSB files, reconciles parent-child items, and auto-generates discrepancy reports, saving 1,000+ hours every year."
+        metrics: ["1,000+ hours saved yearly"]
+        skills: [LLM, function calling, zero-shot prompting, JSON structured output, JavaScript, TailwindCSS, document automation]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: proj-linkedin-headshot
+        year: 2025
+        claim: "Built an AI LinkedIn Headshot Generator — upload a portrait, choose an executive style, and generate a LinkedIn-ready headshot with FastAPI and Gemini image editing with transparent prompts."
+        metrics: []
+        skills: [Google Gemini 3, Gemini Nano Banana, image editing, dynamic prompts, prompt engineering, FastAPI]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: proj-goggins-gpt
+        year: 2023
+        claim: "Built Goggins GPT — a voice-enabled motivational companion that streams Gemini responses through ElevenLabs while toggling 'Goggins Mode' prompts for no-excuse coaching."
+        metrics: []
+        skills: [Gemini API, ElevenLabs, voice AI, prompt engineering, state management]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: proj-ask-my-resume
+        year: 2023
+        claim: "Built Ask My Resume — a retrieval-augmented resume agent that embeds roles and projects, answers hiring questions, and advocates with evidence-backed responses. (Retired June 2026; shown as a historical case study.)"
+        metrics: []
+        skills: [RAG, vector search, FAISS, agent, embeddings]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: proj-research-gpt
+        year: 2022
+        claim: "Built Research GPT — an early LangChain web-research agent (pre-Perplexity) combining Serper search, Browserless scraping, and summarization loops for timely briefs. (Retired June 2026; shown as a historical case study.)"
+        metrics: []
+        skills: [LangChain, agent, Serper API, Browserless scraping, memory chain, OpenAI API, web research]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: proj-global-inventory-tower
+        year: 2021
+        claim: "Built a Global Inventory Control Tower in Power BI consolidating 20+ regional inventory feeds, action cards, and Dataflow automation so leaders mitigate stock risks within minutes."
+        metrics: ["20+ regional inventory feeds"]
+        skills: [Power BI, supply chain analytics, data automation, Dataflow]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: proj-r-time-series-forecasting
+        year: 2021
+        claim: "Built an automated R forecasting pipeline embedded in Power BI to benchmark seven models, refresh results, and publish demand outlooks directly to merchandisers."
+        metrics: ["seven models benchmarked"]
+        skills: [Power BI, R, forecasting, time series, demand planning]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: proj-supplier-review-system
+        year: 2021
+        claim: "Built a Supplier Review System combining Power BI, Power Automate, and Power Apps for live scorecards, qualitative notes, and automated PDF/email distribution."
+        metrics: []
+        skills: [Power BI, Power Automate, Power Apps, supplier management, automation]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: proj-capex-tracker
+        year: 2021
+        claim: "Built a Capex Project Tracker in Power Apps that merges headers and line items, introduces shopping-cart-style approvals, and feeds Power BI for capital planning alignment."
+        metrics: []
+        skills: [Power Apps, project management, process automation, Power BI]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+      - id: proj-engagement-intake-portal
+        year: 2021
+        claim: "Built an Engagement Intake Portal on Power Platform enforcing thousands of procurement business rules, orchestrating approvals, and syncing status to Power BI dataflows for 100-200 daily users."
+        metrics: ["thousands of business rules", "100-200 daily users"]
+        skills: [Power Platform, workflow automation, procurement, business rules, Power BI]
+        added_via: fit-analysis
+        added_date: "2026-06-16"
+
+# ----------------------------------------------------------------------------
+# EXPANSION QUEUE — facts the fit-analysis interview may need to add
+# ----------------------------------------------------------------------------
+# When a JD requires something not covered above, the fit-analysis prompt
+# asks Yanqing for the actual experience. Confirmed answers get added to
+# `experience[].bullets[]` with new stable IDs. Common gaps to anticipate:
+#
+# - Specific programming languages (Python? R? SQL is implicit in adm-sql-etl)
+# - Specific cloud platforms (AWS? Azure? GCP? — only Power Platform is named)
+# - Specific ML frameworks (TensorFlow? PyTorch? scikit-learn?)
+# - Specific BI tools beyond Power BI (Tableau? Looker?)
+# - Team size / direct reports / dotted-line reports
+# - Budget P&L ownership at specific dollar levels
+# - Speaking, writing, or external presence (conferences, blog, OSS contribs)
+# - Languages spoken (relevant for international roles)
+#
+# When the user adds new facts during a fit interview, the skill should
+# emit a YAML diff for review and append after explicit approval.
+# ----------------------------------------------------------------------------

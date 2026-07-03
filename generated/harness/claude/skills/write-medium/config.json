@@ -1,0 +1,6 @@
+{
+  "description": "Generate Medium articles in Yanqing's voice — 1200-2000 words, contrarian framing, bold section closers. Trigger on 'Medium article', 'write for Medium', 'Medium draft'.",
+  "word_range": [1200, 2000],
+  "target_read_time": "5-8 min",
+  "header_level": "h3"
+}

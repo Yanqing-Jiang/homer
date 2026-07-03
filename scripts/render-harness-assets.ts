@@ -13,7 +13,7 @@
  * table (skills/aliases/mcp-tools.yaml) maps them to each harness's native tool name.
  */
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, rmSync, statSync } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, relative } from "path";
 import { fileURLToPath } from "url";
 import { parse as parseYaml } from "yaml";
 
@@ -36,9 +36,11 @@ interface CanonicalAsset {
   frontmatter: Record<string, any>;
   body: string;
   sourceRel: string; // path relative to repo root, for banners/errors
+  sourceAbs: string;
+  sourceDir: string;
 }
 
-interface RenderedFile { path: string; content: string; installPath?: string }
+interface RenderedFile { path: string; content: string | Buffer; installPath?: string }
 
 function loadAliases(): AliasTable {
   const raw = readFileSync(join(CANON, "aliases", "mcp-tools.yaml"), "utf-8");
@@ -70,7 +72,15 @@ function loadCanonicalAssets(): CanonicalAsset[] {
         : full;
       if (!existsSync(file) || !file.endsWith(".md")) continue;
       const { fm, body } = splitFrontmatter(readFileSync(file, "utf-8"));
-      assets.push({ kind, id: fm.id ?? entry.replace(/\.md$/, ""), frontmatter: fm, body, sourceRel: file.replace(HOMER + "/", "") });
+      assets.push({
+        kind,
+        id: fm.id ?? entry.replace(/\.md$/, ""),
+        frontmatter: fm,
+        body,
+        sourceRel: file.replace(HOMER + "/", ""),
+        sourceAbs: file,
+        sourceDir: dirname(file),
+      });
     }
   }
   return assets.sort((a, b) => a.id.localeCompare(b.id));
@@ -121,14 +131,55 @@ function yamlFrontmatter(obj: Record<string, any>): string {
   return lines.join("\n");
 }
 
+function toolList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String).map((v) => v.trim()).filter(Boolean);
+  if (typeof value === "string") return value.split(",").map((v) => v.trim()).filter(Boolean);
+  return [];
+}
+
+function asBuffer(content: string | Buffer): Buffer {
+  return Buffer.isBuffer(content) ? content : Buffer.from(content);
+}
+
+function renderResourceFiles(a: CanonicalAsset, targetDir: string, installDir?: string): RenderedFile[] {
+  const files: RenderedFile[] = [];
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir)) {
+      if (entry === ".DS_Store" || entry === "__pycache__") continue;
+      const file = join(dir, entry);
+      const stat = statSync(file);
+      if (stat.isDirectory()) {
+        walk(file);
+        continue;
+      }
+      if (file === a.sourceAbs) continue;
+      const rel = relative(a.sourceDir, file);
+      files.push({
+        path: join(targetDir, rel),
+        content: readFileSync(file),
+        installPath: installDir ? join(installDir, rel) : undefined,
+      });
+    }
+  };
+  walk(a.sourceDir);
+  return files;
+}
+
 // ── Renderers ────────────────────────────────────────────────────────────────────────────
 function renderClaude(a: CanonicalAsset, aliases: AliasTable): RenderedFile[] {
   const h = a.frontmatter.harness?.claude ?? {};
   const files: RenderedFile[] = [];
   const { body, nativeTools } = resolveBody(a.body, "claude", aliases);
-  const allowed = Array.from(new Set([...(h.allowedTools ?? []), ...logicalToNative(a.frontmatter.tools?.logical, "claude", aliases), ...nativeTools]));
+  const allowed = Array.from(new Set([
+    ...toolList(a.frontmatter["allowed-tools"]),
+    ...toolList(h.allowedTools),
+    ...logicalToNative(a.frontmatter.tools?.logical, "claude", aliases),
+    ...nativeTools,
+  ]));
 
-  if (a.kind === "skill" && h.emitSkill) {
+  if (a.kind === "skill" && (h.emitSkill ?? true)) {
+    const targetDir = join(GENERATED, "claude", "skills", a.id);
+    const installDir = join(HOME, ".claude", "skills", a.id);
     const fm = yamlFrontmatter({
       name: a.id,
       description: a.frontmatter.description,
@@ -136,10 +187,11 @@ function renderClaude(a: CanonicalAsset, aliases: AliasTable): RenderedFile[] {
       "disable-model-invocation": h.disableModelInvocation ?? a.frontmatter.execution?.disableModelInvocation,
     });
     files.push({
-      path: join(GENERATED, "claude", "skills", a.id, "SKILL.md"),
+      path: join(targetDir, "SKILL.md"),
       content: `${BANNER(a.sourceRel)}\n${fm}\n\n${body}`,
-      installPath: join(HOME, ".claude", "skills", a.id, "SKILL.md"),
+      installPath: join(installDir, "SKILL.md"),
     });
+    files.push(...renderResourceFiles(a, targetDir, installDir));
   }
   if (a.kind === "command" && (h.emitCommand ?? true)) {
     const fm = yamlFrontmatter({
@@ -160,6 +212,17 @@ function renderOpenCode(a: CanonicalAsset, aliases: AliasTable): RenderedFile[] 
   const h = a.frontmatter.harness?.opencode ?? {};
   const files: RenderedFile[] = [];
   const { body } = resolveBody(a.body, "opencode", aliases);
+  if (a.kind === "skill" && (h.emitSkill ?? true)) {
+    const targetDir = join(GENERATED, "opencode", "skills", a.id);
+    const installDir = join(HOME, ".config", "opencode", "skills", a.id);
+    const fm = yamlFrontmatter({ name: a.id, description: a.frontmatter.description });
+    files.push({
+      path: join(targetDir, "SKILL.md"),
+      content: `${BANNER(a.sourceRel)}\n${fm}\n\n${body}`,
+      installPath: join(installDir, "SKILL.md"),
+    });
+    files.push(...renderResourceFiles(a, targetDir, installDir));
+  }
   if ((a.kind === "command" && (h.emitCommand ?? true)) || (a.kind === "skill" && a.frontmatter.triggers?.slash && h.emitCommand)) {
     const fm = yamlFrontmatter({ description: a.frontmatter.description, "argument-hint": a.frontmatter.arguments?.hint });
     files.push({
@@ -178,14 +241,17 @@ function renderCodex(a: CanonicalAsset, aliases: AliasTable): RenderedFile[] {
   // Codex has no ~/.codex/prompts: commands render as skills with a slash-trigger note in the body.
   const emitSkill = h.emitSkill ?? (a.kind === "skill");
   if (emitSkill) {
+    const targetDir = join(GENERATED, "codex", "skills", a.id);
+    const installDir = join(HOME, ".codex", "skills", "homer", a.id);
     const slash = a.frontmatter.triggers?.slash?.[0];
     const desc = a.kind === "command" && slash ? `${a.frontmatter.description} (invoke: ${slash})` : a.frontmatter.description;
     const fm = yamlFrontmatter({ name: a.id, description: desc });
     files.push({
-      path: join(GENERATED, "codex", "skills", a.id, "SKILL.md"),
+      path: join(targetDir, "SKILL.md"),
       content: `${BANNER(a.sourceRel)}\n${fm}\n\n${body}`,
-      installPath: join(HOME, ".codex", "skills", "homer", a.id, "SKILL.md"),
+      installPath: join(installDir, "SKILL.md"),
     });
+    if (a.kind === "skill") files.push(...renderResourceFiles(a, targetDir, installDir));
   }
   return files;
 }
@@ -233,8 +299,8 @@ function cmdCheck(): number {
   const files = renderAll();
   const drift: string[] = [];
   for (const f of files) {
-    const onDisk = existsSync(f.path) ? readFileSync(f.path, "utf-8") : null;
-    if (onDisk !== f.content) drift.push(f.path.replace(HOME, "~"));
+    const onDisk = existsSync(f.path) ? readFileSync(f.path) : null;
+    if (!onDisk || Buffer.compare(onDisk, asBuffer(f.content)) !== 0) drift.push(f.path.replace(HOME, "~"));
   }
   // Also flag committed files with no canonical source (stale).
   const expected = new Set(files.map((f) => f.path));

@@ -54,3 +54,11 @@ logicalTools:
       claude: { tool: mcp__homer-memory__blob_upload }
       opencode: { tool: blob_upload, mcpServer: homer-memory }
       codex: { tool: blob_upload, mcpServer: homer-memory }
+  telephone.call_person:
+    capability: telephone.call
+    description: Place an outbound phone call through Homer.
+    requiresReview: true
+    harness:
+      claude: { tool: mcp__homer-memory__call_person }
+      opencode: { tool: call_person, mcpServer: homer-memory }
+      codex: { tool: call_person, mcpServer: homer-memory }

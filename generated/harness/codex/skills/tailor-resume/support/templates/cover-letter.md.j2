@@ -1,0 +1,19 @@
+{# Markdown template for cover letter. Rendered to DOCX via:
+   pandoc cover-letter.md -o cover-letter.docx --reference-doc=reference.docx
+
+   Variables expected from cover-letter.md output JSON:
+     contact: { name, location, email, phone, website, linkedin }
+     date: "Month YYYY"  (today's date when generating)
+     cover_letter: { salutation, company, role_title, body_markdown, sign_off }
+#}
+**{{ contact.name }}**
+
+{{ contact.location }} | {{ contact.email }} | {{ contact.phone }}{% if contact.website %} | {{ contact.website }}{% endif %}{% if contact.linkedin %} | {{ contact.linkedin }}{% endif %}
+
+{{ date }}
+
+{{ cover_letter.salutation }}
+
+{{ cover_letter.body_markdown }}
+
+{{ cover_letter.sign_off }}

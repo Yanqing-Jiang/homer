@@ -1,0 +1,19 @@
+{
+  "description": "Monthly review of ~/ and ~/archive for housekeeping, plus a 30-day sweep of /tmp, ~/Desktop agent-output folders, and the web/Telegram upload-drop dirs. Trigger on '/home-cleanup', 'monthly home cleanup', 'check ~ for stale files'. Scheduled: last day of month at 9 AM.",
+  "schedule": "0 9 L * *",
+  "review_dir": "~/homer/output/home-cleanup",
+  "archive_age_months": 3,
+  "delete_age_months": 4,
+  "sweep_age_days": 30,
+  "sweep_locations": [
+    "/tmp",
+    "~/Desktop/homer-output",
+    "~/Desktop/gemini-output",
+    "~/Desktop/kimi-output",
+    "~/Desktop/opencode-output",
+    "~/Desktop/codex-output",
+    "~/homer-upload-landing/web",
+    "~/homer-upload-landing/tg"
+  ],
+  "modes": ["scan", "execute"]
+}

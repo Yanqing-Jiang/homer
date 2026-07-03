@@ -1,0 +1,9 @@
+{
+  "description": "Orchestrate article generation for Medium or LinkedIn. Trigger on 'write article', 'draft article', 'write post', 'content creation', 'write for Medium', 'write for LinkedIn'.",
+  "platforms": ["medium", "linkedin"],
+  "corpus_files": {
+    "medium": "~/memory/medium-posts.md",
+    "linkedin": "~/memory/linkedin-posts.md"
+  },
+  "patterns_file": "~/memory/patterns.md"
+}

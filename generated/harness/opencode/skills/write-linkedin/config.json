@@ -1,0 +1,6 @@
+{
+  "description": "Generate LinkedIn posts in Yanqing's voice — 150-250 words, no emojis, technical credibility + casual delivery. Trigger on 'LinkedIn post', 'write LinkedIn', 'LinkedIn draft'.",
+  "word_range": [150, 250],
+  "emojis": false,
+  "hashtags_max": 2
+}

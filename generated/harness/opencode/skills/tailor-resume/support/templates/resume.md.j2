@@ -1,0 +1,49 @@
+{# Markdown template for tailored resume. Rendered to DOCX via:
+   pandoc resume.md -o resume.docx --reference-doc=reference.docx
+   The reference.docx controls fonts, margins, heading sizes.
+
+   Variables expected from tailoring.md output JSON:
+     contact: { name, location, email, phone, website, linkedin }
+     target: { resume_headline }
+     summary: [str, str, str]
+     skills: { "Analytics and AI": [...], "Data Engineering": [...], "Business and Leadership": [...] }
+     experience: [ { employer, role, team, location, start, end, selected_bullets: [{rewritten_bullet, ...}] } ]
+     education: [str]
+     certifications: [str]
+#}
+# {{ contact.name }}
+
+{{ contact.location }} | {{ contact.email }} | {{ contact.phone }}{% if contact.website %} | {{ contact.website }}{% endif %}{% if contact.linkedin %} | {{ contact.linkedin }}{% endif %}
+
+**{{ target.resume_headline }}**
+
+## Summary
+
+{% for line in summary %}{{ line }}{% if not loop.last %} {% endif %}{% endfor %}
+
+## Skills
+
+**Analytics and AI:** {{ skills["Analytics and AI"] | join(", ") }}
+
+**Data Engineering:** {{ skills["Data Engineering"] | join(", ") }}
+
+**Business and Leadership:** {{ skills["Business and Leadership"] | join(", ") }}
+
+## Experience
+
+{% for job in experience %}
+**{{ job.employer }} — {{ job.role }}**{% if job.team %}, {{ job.team }}{% endif %} | {{ job.location }} | {{ job.start }} – {{ job.end }}
+
+{% for bullet in job.selected_bullets %}- {{ bullet.rewritten_bullet }}
+{% endfor %}
+
+{% endfor %}
+## Education
+
+{% for line in education %}- {{ line }}
+{% endfor %}
+
+## Certifications
+
+{% for line in certifications %}- {{ line }}
+{% endfor %}

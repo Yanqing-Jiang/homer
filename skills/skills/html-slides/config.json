@@ -1,0 +1,7 @@
+{
+  "description": "Generate self-contained HTML slide decks with Tailwind, animations, and P&G branding. Trigger on 'make slides', 'presentation', 'slide deck', 'HTML slides', 'pitch deck'.",
+  "brand_color": "#003DA5",
+  "accent_color": "#F5A623",
+  "font_family": "Inter",
+  "output_dir": "~/homer/output/claude/"
+}
