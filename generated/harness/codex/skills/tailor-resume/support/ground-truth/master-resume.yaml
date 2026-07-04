@@ -60,15 +60,24 @@ derived_claims:
 
 # Positioning rules.
 positioning:
-  approved_titles:
+  approved_titles:  # titles Yanqing has actually held — may appear as PAST roles
     - Advanced Analytics Senior Manager  # current
     - Analytics & Insight Senior Manager
     - Data Analytics Engineer
     - Supply Specialist
     - Ecommerce Retailer
+  approved_target_titles:  # target/objective only — may appear in headline/summary, NEVER as a past held title
+    - Director of Agents
+    - Director of Applied AI
+    - Director of AI / Analytics
+    - AI Engineering Lead
+    - Principal AI Engineer
+    - Staff AI Engineer
+    - Head of Applied AI
+    - Director of Analytics
   target_title_policy:
     allowed: true
-    rule: "A target title may appear in the resume headline or summary as a target/objective, NEVER as a past held title."
+    rule: "A target title (from approved_target_titles, or the JD's exact title) may appear in the resume headline or summary as a target/objective, NEVER as a past held title. Only approved_titles may appear as past roles."
 
 # Keyword universe — only skills that are demonstrably backed by experience bullets.
 # When tailoring, the skill may surface these in the Skills section ONLY if at least
