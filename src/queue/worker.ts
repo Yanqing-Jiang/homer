@@ -15,8 +15,9 @@ import { negotiateHarnessAttempts } from "../harness/negotiation.js";
 import { resolveHarnessSelection } from "../harness/resolution/resolver.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { logger } from "../utils/logger.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 
-const HOME = process.env.HOME || "/Users/yj";
+const HOME = getRuntimePaths().homeDir;
 
 function isMemoryJob(job: Job): boolean {
   const query = job.query.toLowerCase();
@@ -64,11 +65,11 @@ function uniqueExecutorChain(executors: ExecutorKind[]): ExecutorKind[] {
 export class QueueWorker {
   private queueManager: QueueManager;
   private stateManager: StateManager;
-  private bot: Bot;
+  private bot: Bot | null;
   private running = false;
   private jobReadyHandler: (job: Job) => void;
 
-  constructor(queueManager: QueueManager, stateManager: StateManager, bot: Bot) {
+  constructor(queueManager: QueueManager, stateManager: StateManager, bot: Bot | null) {
     this.queueManager = queueManager;
     this.stateManager = stateManager;
     this.bot = bot;
@@ -240,7 +241,9 @@ export class QueueWorker {
         },
         runExecutor,
         notify: async (message) => {
-          await this.bot.api.sendMessage(job.chatId, message);
+          if (this.bot) {
+            await this.bot.api.sendMessage(job.chatId, message);
+          }
         },
       });
 
@@ -259,7 +262,9 @@ export class QueueWorker {
       }
 
       // Send response to Telegram
-      if (job.messageId) {
+      if (!this.bot) {
+        logger.info({ jobId: job.id }, "Telegram disabled; queue result stored without chat delivery");
+      } else if (job.messageId) {
         try {
           await this.bot.api.editMessageText(job.chatId, job.messageId, result.output, {
             parse_mode: "Markdown",
@@ -302,7 +307,9 @@ export class QueueWorker {
           if (typeof check.confidence === "number") {
             lines.push(`Confidence: ${Math.round(check.confidence * 100)}%`);
           }
-          await this.bot.api.sendMessage(job.chatId, lines.join("\n"));
+          if (this.bot) {
+            await this.bot.api.sendMessage(job.chatId, lines.join("\n"));
+          }
         }
 
         this.queueManager.completeJob(job.id, result.output);
@@ -314,7 +321,9 @@ export class QueueWorker {
       logger.error({ jobId: job.id, error: errorMessage }, "Job execution failed");
 
       try {
-        if (job.messageId) {
+        if (!this.bot) {
+          logger.info({ jobId: job.id }, "Telegram disabled; queue error stored without chat delivery");
+        } else if (job.messageId) {
           await this.bot.api.editMessageText(job.chatId, job.messageId, `❌ Error: ${errorMessage}`);
         } else {
           await this.bot.api.sendMessage(job.chatId, `❌ Error: ${errorMessage}`);

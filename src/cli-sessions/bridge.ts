@@ -14,15 +14,16 @@
 import { randomUUID } from "crypto";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
-import { homedir } from "os";
 import { StateManager, type ThreadMessage, type Thread } from "../state/manager.js";
 import { runMigrations } from "../state/migrations/index.js";
 import Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 
-const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects", "-Users-yj");
+const runtimePaths = getRuntimePaths();
+const CLAUDE_PROJECTS_DIR = join(runtimePaths.claudeDir, "projects", runtimePaths.homeDir.replace(/\//g, "-"));
 const CLAUDE_CODE_VERSION = "2.1.63";
-const DEFAULT_CWD = "/Users/yj";
+const DEFAULT_CWD = runtimePaths.homeDir;
 
 export interface BridgeResult {
   sessionId: string;
@@ -437,7 +438,7 @@ async function listRecentThreads(sm: StateManager): Promise<void> {
 async function main() {
   const args = process.argv.slice(2);
 
-  const dbPath = join(homedir(), "homer", "data", "homer.db");
+  const dbPath = runtimePaths.databasePath;
   const db = new Database(dbPath);
   db.pragma("busy_timeout = 5000");
 

@@ -34,7 +34,7 @@ const PROGRESS_THROTTLE_MS = 2000; // Min 2s between progress updates
  * Main Scheduler class that orchestrates scheduled job execution
  */
 export class Scheduler {
-  private bot: Bot;
+  private bot: Bot | null;
   private chatId: number;
   private stateManager: StateManager;
   private cronManager: CronManager;
@@ -45,7 +45,7 @@ export class Scheduler {
   private lastProgressTime: Map<string, number> = new Map(); // jobId -> timestamp
   private debouncedTriggers = new Map<string, ReturnType<typeof setTimeout>>();
 
-  constructor(bot: Bot, chatId: number, stateManager: StateManager) {
+  constructor(bot: Bot | null, chatId: number, stateManager: StateManager) {
     this.bot = bot;
     this.chatId = chatId;
     this.stateManager = stateManager;
@@ -412,13 +412,15 @@ export class Scheduler {
     this.cronManager.disableJob(jobId, this.stateManager);
     logger.warn({ jobId, consecutiveFailures: job.consecutiveFailures }, "Circuit breaker: job auto-disabled after 5 consecutive failures");
 
-    try {
-      await this.bot.api.sendMessage(
-        this.chatId,
-        `⚠️ <b>${escapeHtml(jobName)}</b> auto-disabled after 5 consecutive failures. Re-enable manually.`,
-        { parse_mode: "HTML" }
-      );
-    } catch { /* notification best-effort */ }
+    if (this.bot) {
+      try {
+        await this.bot.api.sendMessage(
+          this.chatId,
+          `⚠️ <b>${escapeHtml(jobName)}</b> auto-disabled after 5 consecutive failures. Re-enable manually.`,
+          { parse_mode: "HTML" }
+        );
+      } catch { /* notification best-effort */ }
+    }
 
     // Emergency SMS as backup notification
     try {
@@ -487,6 +489,7 @@ export class Scheduler {
       `Phase: ${escapeHtml(phase)}`,
       ...removed.map((jobId) => `- ${escapeHtml(jobId)}`),
     ].join("\n");
+    const bot = this.bot;
 
     await routeTelegramNotification({
       db: this.stateManager.getDb(),
@@ -497,12 +500,12 @@ export class Scheduler {
       messageText: message,
       reason: "scheduled_job_removed",
       metadata: { removed, phase },
-      deliver: async () => sendChunkedTelegramMessage({
-        bot: this.bot,
+      deliver: bot ? async () => sendChunkedTelegramMessage({
+        bot,
         chatId: this.chatId,
         message,
         parseMode: "HTML",
-      }),
+      }) : undefined,
     });
   }
 
@@ -541,7 +544,8 @@ export class Scheduler {
         : undefined;
 
       const isInternal = job.config.executor === "internal" || !!job.config.handler;
-      const takeoverEnabled = job.config.failureTakeover !== false;
+      const bot = this.bot;
+      const takeoverEnabled = job.config.failureTakeover !== false && bot !== null;
 
       // Execute the job (internal handler or CLI executor) with hang watchdog.
       // Default: 25 min (covers LLM reasoning tasks); minimum 10 min enforced for all jobs.
@@ -570,7 +574,7 @@ export class Scheduler {
         const execPromise = isInternal
           ? executeInternalJob(job, {
               stateManager: this.stateManager,
-              bot: this.bot,
+              bot,
               chatId: this.chatId,
               jobRunId: runId,
               signal: controller.signal,
@@ -601,7 +605,7 @@ export class Scheduler {
       }
 
       // === FAILURE + TAKEOVER PATH ===
-      if (!result.success && takeoverEnabled) {
+      if (!result.success && takeoverEnabled && bot) {
         // Record failure but keep is_running lock held
         this.stateManager.recordScheduledJobFailed(
           runId, job.config.id, result.output, result.error, result.exitCode
@@ -614,7 +618,7 @@ export class Scheduler {
             failedResult: result,
             runId,
             stateManager: this.stateManager,
-            bot: this.bot,
+            bot,
             chatId: this.chatId,
             disableScheduledJob: (id) => this.cronManager.disableJob(id, this.stateManager),
           });
@@ -643,7 +647,7 @@ export class Scheduler {
 
             try {
               const diagSnippet = escapeHtml(takeoverResult.decision.diagnosis.slice(0, 200));
-              await this.bot.api.sendMessage(
+              await bot.api.sendMessage(
                 this.chatId,
                 `<b>🔧 ${escapeHtml(job.config.name)} recovered</b>\n\nDiagnosis: ${diagSnippet}\nAction: ${takeoverResult.decision.action}`,
                 { parse_mode: "HTML" }
@@ -666,7 +670,7 @@ export class Scheduler {
             try {
               const diagSnippet = escapeHtml(diagnosis.slice(0, 300));
               const reportSnippet = reportMsg ? `\n\n${escapeHtml(reportMsg.slice(0, 300))}` : "";
-              await this.bot.api.sendMessage(
+              await bot.api.sendMessage(
                 this.chatId,
                 `<b>❌ ${escapeHtml(job.config.name)} failed</b>\n\nDiagnosis: ${diagSnippet}${reportSnippet}`,
                 { parse_mode: "HTML" }
@@ -716,7 +720,11 @@ export class Scheduler {
         // Also save in legacy table for backward compat
         this.stateManager.savePendingPlan(job.config.id, result.output);
 
-        await sendPlanForReview(this.bot, this.stateManager, this.chatId, plan);
+        if (this.bot) {
+          await sendPlanForReview(this.bot, this.stateManager, this.chatId, plan);
+        } else {
+          logger.warn({ jobId: job.config.id, planId: plan.id }, "Plan review requires Telegram; saved pending plan without sending");
+        }
 
         // Don't send normal notification - plan approval takes over
         return;
@@ -766,7 +774,9 @@ export class Scheduler {
           }
           lines.push(`Job: ${job.config.id}`);
           try {
-            await this.bot.api.sendMessage(this.chatId, lines.join("\n"));
+            if (this.bot) {
+              await this.bot.api.sendMessage(this.chatId, lines.join("\n"));
+            }
           } catch (err) {
             logger.warn({ error: err, jobId: job.config.id }, "Failed to send completion checkup");
           }
@@ -777,7 +787,7 @@ export class Scheduler {
 
       // Clean up progress message
       const existingMsgId = this.progressMessageId.get(job.config.id);
-      if (existingMsgId) {
+      if (existingMsgId && this.bot) {
         try {
           await this.bot.api.deleteMessage(this.chatId, existingMsgId);
         } catch {
@@ -810,7 +820,7 @@ export class Scheduler {
       }
 
       // Notify failure
-      if (job.config.notifyOnFailure !== false) {
+      if (job.config.notifyOnFailure !== false && this.bot) {
         try {
           await this.bot.api.sendMessage(
             this.chatId,

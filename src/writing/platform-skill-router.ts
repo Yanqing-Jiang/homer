@@ -8,11 +8,12 @@
 
 import { existsSync, readFileSync } from "fs";
 import { PATHS } from "../config/paths.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 export type WritingPlatform = "medium" | "linkedin" | "x";
 
 const PATTERNS_PATH = PATHS.patterns;
-const HOME = process.env.HOME ?? "/Users/yj";
+const HOME = getRuntimePaths().homeDir;
 
 const SKILL_PATHS: Record<WritingPlatform, string> = {
   medium: `${HOME}/.claude/skills/write-medium/SKILL.md`,

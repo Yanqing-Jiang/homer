@@ -89,8 +89,8 @@ if [ ! -x "$HOMER_APP_BIN" ] && [ -x "$HOMER_DIR/scripts/build-homer-app.sh" ]; 
 fi
 # If the wrapper still isn't there, use node directly so the plist still works.
 if [ ! -x "$HOMER_APP_BIN" ]; then
-  echo -e "${YELLOW}Note:${NC} no Homer.app wrapper — using $NODE_BIN as ProgramArguments[0]."
-  HOMER_APP_BIN="$NODE_BIN"
+  echo -e "${YELLOW}Note:${NC} no Homer.app wrapper — using /usr/bin/env to launch node."
+  HOMER_APP_BIN="/usr/bin/env"
 fi
 
 # --- Generate plist from template -------------------------------------------

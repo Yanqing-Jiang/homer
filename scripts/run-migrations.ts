@@ -5,11 +5,16 @@
  */
 
 import Database from "better-sqlite3";
+import { mkdirSync } from "fs";
+import { dirname } from "path";
 import { runMigrations, getAppliedMigrations } from "../src/state/migrations/index.js";
+import { getRuntimePaths } from "../src/utils/runtime-paths.js";
 
-const DB_PATH = process.env.HOMER_DB_PATH || `${process.env.HOME}/homer/data/homer.db`;
+const runtimePaths = getRuntimePaths();
+const DB_PATH = process.env.DATABASE_PATH || process.env.HOMER_DB_PATH || runtimePaths.databasePath;
 
 console.log(`Opening database: ${DB_PATH}`);
+mkdirSync(dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
 
 console.log("\nApplied migrations before:");

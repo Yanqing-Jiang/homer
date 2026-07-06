@@ -188,11 +188,13 @@ export class ConnectivityMonitor {
   async checkAll(): Promise<HealthStatus[]> {
     const results: HealthStatus[] = [];
 
-    // Telegram: use authenticated bot API instead of raw HTTP
-    const telegramStatus = await this.checkTelegram();
-    results.push(telegramStatus);
-    this.lastStatus.set("Telegram", telegramStatus);
-    await this.trackFailures("Telegram", telegramStatus);
+    // Telegram: use authenticated bot API instead of raw HTTP when configured.
+    if (this.bot) {
+      const telegramStatus = await this.checkTelegram();
+      results.push(telegramStatus);
+      this.lastStatus.set("Telegram", telegramStatus);
+      await this.trackFailures("Telegram", telegramStatus);
+    }
 
     for (const endpoint of HEALTH_ENDPOINTS) {
       const status = await this.checkEndpoint(endpoint);
