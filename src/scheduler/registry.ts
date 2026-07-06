@@ -81,7 +81,6 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
  * These are the sources of taxonomy drift Codex's review flagged.
  */
 const SCHEDULED_WITH_ALIASED_HANDLER_FILE: JobEntry[] = [
-  { id: "weekly-memory-cleanup", name: "Weekly Memory Cleanup", kind: "internal", handler: "memory_cleanup", handlerFile: "memory-cleanup", expectedInSchedule: true, note: "alias + disabled — will merge into weekly-memory-maintenance (Phase 4)" },
   { id: "weekly-memory-consolidation", name: "Weekly Memory Consolidation", kind: "internal", handler: "weekly_consolidation", handlerFile: "weekly-consolidation", expectedInSchedule: true, note: "alias: schedule id prefixes 'weekly-memory-'" },
 ];
 
@@ -92,13 +91,11 @@ const SCHEDULED_INLINE_ONLY: JobEntry[] = [
   { id: "candidate-expiry", name: "Candidate Expiry", kind: "internal", handler: "candidate_expiry", expectedInSchedule: false, note: "inline helper triggered by other jobs" },
   { id: "daemon-cleanup", name: "Daemon Cleanup", kind: "internal", handler: "daemon_cleanup", expectedInSchedule: true },
   { id: "docker-restart-weekly", name: "Weekly Docker Desktop Restart", kind: "internal", handler: "docker_restart", expectedInSchedule: true, note: "Tue 5 AM — restarts Docker Desktop to reclaim leaked engine memory" },
-  { id: "daily-ideas-review", name: "Daily Ideas Review", kind: "internal", handler: "ideas_review", expectedInSchedule: true, note: "disabled" },
   { id: "health-check", name: "Health Check", kind: "internal", handler: "health_check", expectedInSchedule: true },
   { id: "idea-dedup", name: "Idea Dedup", kind: "internal", handler: "idea_dedup", expectedInSchedule: true },
   { id: "idea-expiry", name: "Idea Auto-Expiry", kind: "internal", handler: "idea_expiry", expectedInSchedule: true },
   { id: "idea-ingest", name: "Idea Ingest", kind: "internal", handler: "idea_ingest", expectedInSchedule: true },
   { id: "morning-review", name: "Morning Review", kind: "internal", handler: "morning_review", expectedInSchedule: true },
-  { id: "overnight-review", name: "Overnight Review", kind: "internal", handler: "overnight_review", expectedInSchedule: true, note: "disabled" },
   { id: "reminder-check", name: "Reminder Check", kind: "internal", handler: "reminder_check", expectedInSchedule: true },
   { id: "session-maintenance", name: "Session Maintenance", kind: "internal", handler: "session_maintenance", expectedInSchedule: true },
 ];
@@ -108,6 +105,7 @@ const SCHEDULED_INLINE_ONLY: JobEntry[] = [
  */
 const SCHEDULED_CLI_JOBS: JobEntry[] = [
   { id: "morning-brief", name: "Morning Brief", kind: "cli", handler: "opencode", expectedInSchedule: true },
+  { id: "morning-reads", name: "Morning Reads", kind: "cli", handler: "claude", expectedInSchedule: true },
 ];
 
 /**

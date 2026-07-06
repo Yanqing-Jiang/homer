@@ -738,6 +738,10 @@ export class Scheduler {
         });
       }
 
+      if (result.success) {
+        this.stateManager.deleteSuccessfulHeartbeatRun(runId, job.config.id);
+      }
+
       // Run completion checkup for manual triggers
       if (manual && result.success) {
         const check = await runCompletionCheckup({

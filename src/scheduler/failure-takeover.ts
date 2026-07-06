@@ -90,7 +90,6 @@ const HANDLER_SOURCE_MAP: Record<string, string> = {
   memory_embeddings: "src/scheduler/jobs/memory-embeddings.ts",
   memory_reindex: "src/scheduler/jobs/memory-reindex.ts",
   weekly_consolidation: "src/scheduler/jobs/weekly-consolidation.ts",
-  memory_cleanup: "src/scheduler/jobs/memory-cleanup.ts",
   idea_ingest: "src/ideas/ingest.ts",
   idea_dedup: "src/ideas/dedup.ts",
   ideas_review: "src/bot/handlers/approval.ts",
