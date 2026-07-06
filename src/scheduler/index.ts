@@ -456,7 +456,7 @@ export class Scheduler {
       sourceFile: "system",
     },
     {
-      id: "reminder-check", name: "Reminder Check", cron: "* * * * *",
+      id: "reminder-check", name: "Reminder Check", cron: "*/30 * * * *",
       query: "", lane: "default", enabled: true, executor: "internal",
       handler: "reminder_check", timeout: 600_000,
       notifyOnSuccess: false, notifyOnFailure: false, failureTakeover: false,

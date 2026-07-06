@@ -206,11 +206,10 @@ async function sendHealthMessage(
 // Handlers safe to retry (idempotent, no user-facing side effects)
 const RETRYABLE_HANDLERS = new Set([
   "ideas_explore", "nightly_memory", "session_harvester", "memory_embeddings", "memory_reindex", "morning_review",
-  "homer_improvements", "weekly_consolidation",
+  "weekly_consolidation",
   "content_scraper", "outcome_tracker",
   "preference_updater", "idea_dedup", "idea_expiry", "nightly_code_push", "db_backup",
   "idea_synthesizer", "idea_deep_linker", "link_processor", "archive_verify", "health_check",
-  "harness_auto_improve",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
   "candidate_expiry",
   "docker_restart",
@@ -811,30 +810,6 @@ async function runHandler(
           const msg = err instanceof Error ? err.message : String(err);
           return buildResult(job, startedAt, false, "", msg);
         }
-      }
-      case "homer_improvements": {
-        const { runHomerImprovements } = await import("./jobs/homer-improvements.js");
-        const result = await runHomerImprovements(ctx.stateManager.getDb(), ctx.jobRunId, job, startedAt);
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          result.success ? { notificationIntent: "user_info" } : {}
-        );
-      }
-      case "harness_auto_improve": {
-        const { runHarnessAutoImprove } = await import("./jobs/harness-auto-improve.js");
-        const result = await runHarnessAutoImprove(ctx.stateManager.getDb(), ctx.jobRunId, ctx.signal, job, startedAt);
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          result.success ? { notificationIntent: "user_info" } : {}
-        );
       }
       case "session_harvester": {
         const { runSessionHarvester } = await import("./jobs/session-harvester.js");

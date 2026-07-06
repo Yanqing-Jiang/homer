@@ -61,8 +61,6 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
   { id: "archive-verify", name: "Archive Verify", kind: "internal", handler: "archive_verify", handlerFile: "archive-verify", expectedInSchedule: true },
   { id: "content-scraper", name: "Content Scraper", kind: "internal", handler: "content_scraper", handlerFile: "content-scraper", expectedInSchedule: true },
   { id: "db-backup", name: "DB Backup", kind: "internal", handler: "db_backup", handlerFile: "db-backup", expectedInSchedule: true },
-  { id: "harness-auto-improve", name: "Harness Auto-Improve", kind: "internal", handler: "harness_auto_improve", handlerFile: "harness-auto-improve", expectedInSchedule: true, note: "disabled — pending merge with homer-improvements (Phase 4.1)" },
-  { id: "homer-improvements", name: "Homer Improvements", kind: "internal", handler: "homer_improvements", handlerFile: "homer-improvements", expectedInSchedule: true, note: "disabled — pending merge with harness-auto-improve (Phase 4.1)" },
   { id: "idea-synthesizer", name: "Idea Synthesizer", kind: "internal", handler: "idea_synthesizer", handlerFile: "idea-synthesizer", expectedInSchedule: true },
   { id: "ideas-explore", name: "Ideas Explore", kind: "internal", handler: "ideas_explore", handlerFile: "ideas-explore", expectedInSchedule: true },
   { id: "link-processor", name: "Link Processor", kind: "internal", handler: "link_processor", handlerFile: "link-processor", expectedInSchedule: true },

@@ -105,13 +105,6 @@ export const INTERNAL_JOB_HARNESS_BASELINES = {
       },
     },
   },
-  "homer-improvements": {
-    executor: "codex",
-    model: CODEX_MODEL,
-    stages: {
-      propose: codexStage(PATHS.homerRoot, 1_200_000, "high"),
-    },
-  },
   "overnight-youtube": {
     executor: "opencode",
     model: OPENCODE_FLASH_MODEL,
@@ -190,13 +183,6 @@ export const INTERNAL_JOB_HARNESS_BASELINES = {
         model: "sonnet",
         timeoutOverride: 30_000,
       },
-    },
-  },
-  "harness-auto-improve": {
-    executor: "codex",
-    model: CODEX_MODEL,
-    stages: {
-      propose: codexStage(PATHS.homerRoot, 1_200_000, "high"),
     },
   },
 } satisfies Record<string, InternalJobHarnessBaseline>;
