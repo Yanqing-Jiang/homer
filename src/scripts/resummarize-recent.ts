@@ -41,6 +41,10 @@ interface ResummarizeOptions {
   days: number;
   dryRun: boolean;
   signal?: AbortSignal;
+  /** Optional harness pin for the bulk run (e.g. opencode + opencode-go-2/glm-5.2)
+   *  so a large backfill does not drain the global (often claude) harness quota. */
+  harness?: string;
+  model?: string;
 }
 
 interface ResummarizeStats {
@@ -102,10 +106,14 @@ export async function resummarizeRecent(options: ResummarizeOptions): Promise<Re
 
         const title = generateTitle(session);
         const rawExcerpt = buildRawExcerpt(session);
-        const summary = await summarizeSession(session, options.signal);
         const model = session.model || row.model;
 
+        // Dry-run must stay free: summarizeSession costs one LLM call per session.
         if (!options.dryRun) {
+          const explicit = options.harness
+            ? { harness: options.harness as never, model: options.model ?? null }
+            : undefined;
+          const summary = await summarizeSession(session, options.signal, explicit);
           update.run(summary, title, rawExcerpt, model, row.id);
         }
         stats.updated++;
@@ -156,6 +164,8 @@ function ensureFtsSynced(db: ReturnType<StateManager["getDb"]>): void {
 function parseArgs(argv: string[]): ResummarizeOptions {
   let days = 30;
   let dryRun = false;
+  let harness: string | undefined;
+  let model: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -168,14 +178,24 @@ function parseArgs(argv: string[]): ResummarizeOptions {
       i++;
     } else if (arg?.startsWith("--days=")) {
       days = Number.parseInt(arg.slice("--days=".length), 10);
+    } else if (arg === "--harness") {
+      harness = argv[++i];
+      if (!harness) throw new Error("--harness requires a value");
+    } else if (arg === "--model") {
+      model = argv[++i];
+      if (!model) throw new Error("--model requires a value");
     }
+  }
+
+  if (model && !harness) {
+    throw new Error("--model requires --harness");
   }
 
   if (!Number.isFinite(days) || days <= 0) {
     throw new Error("--days must be a positive integer");
   }
 
-  return { days, dryRun };
+  return { days, dryRun, harness, model };
 }
 
 const isMain = process.argv[1] ? fileURLToPath(import.meta.url) === process.argv[1] : false;
