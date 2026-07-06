@@ -6,6 +6,25 @@ import { processRegistry } from "../process/registry.js";
 
 const DEFAULT_TIMEOUT = 1800_000; // 30 minutes
 const KILL_GRACE_MS = 5_000;
+const CODEX_CLI_MODEL = "gpt-5.5";
+
+function resolveCodexModelVariant(
+  model: string | undefined,
+  reasoningEffort: string | undefined,
+): { model: string; reasoningEffort: string } {
+  switch (model) {
+    case undefined:
+    case "":
+    case CODEX_CLI_MODEL:
+      return { model: CODEX_CLI_MODEL, reasoningEffort: reasoningEffort ?? "high" };
+    case "gpt-5.5-medium":
+      return { model: CODEX_CLI_MODEL, reasoningEffort: "medium" };
+    case "gpt-5.5-xhigh":
+      return { model: CODEX_CLI_MODEL, reasoningEffort: "xhigh" };
+    default:
+      return { model, reasoningEffort: reasoningEffort ?? "high" };
+  }
+}
 
 export interface CodexCLIOptions {
   cwd: string;
@@ -112,7 +131,7 @@ export async function executeCodexCLI(
     signal,
     sessionId,
     model,
-    reasoningEffort = "high",
+    reasoningEffort,
     runId,
     onPartial,
     onMessageChunk,
@@ -120,6 +139,7 @@ export async function executeCodexCLI(
   } = options;
 
   return new Promise((resolve, reject) => {
+    const codexVariant = resolveCodexModelVariant(model, reasoningEffort);
     const args: string[] = sessionId
       ? [
           "exec",
@@ -129,9 +149,8 @@ export async function executeCodexCLI(
         ]
       : ["exec", "--json", "--dangerously-bypass-approvals-and-sandbox"];
 
-    if (model) args.push("-m", model);
-    if (reasoningEffort)
-      args.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
+    args.push("-m", codexVariant.model);
+    args.push("-c", `model_reasoning_effort="${codexVariant.reasoningEffort}"`);
 
     // `--` ends clap option parsing so prompts starting with `-`/`--`/`---`
     // (e.g. skill files with YAML front-matter) are treated as positional.

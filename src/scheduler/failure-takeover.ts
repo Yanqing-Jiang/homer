@@ -502,9 +502,7 @@ export async function runFailureTakeover(params: {
             disableScheduledJob,
           });
         } else {
-          retryResult = await executeScheduledJob(job, undefined, {
-            singleExecutor: "claude",
-          });
+          retryResult = await executeScheduledJob(job);
         }
         finalSuccess = retryResult.success;
       } catch (error) {

@@ -138,7 +138,7 @@ export const COMMANDS: CommandDefinition[] = [
     category: "executor",
     description: "OpenCode with Claude Opus (GitHub Copilot)",
     executor: "opencode",
-    model: "github-copilot/claude-opus-4.6",
+    model: "github-copilot/claude-opus-4.8",
   },
 
   // Search commands

@@ -202,7 +202,7 @@ export class CLISessionImporter {
         if (sessionAgent === "codex") {
           session = parseCodexSession(path);
         } else if (sessionAgent === "claude") {
-          session = parseClaudeSession(path);
+          session = parseClaudeSession(path, { archiveFidelity: true });
         } else if (sessionAgent === "opencode") {
           session = parseOpencodeSession(path);
         }
@@ -516,10 +516,16 @@ export class CLISessionImporter {
       ).get(session.contentHash);
       if (existing) return;
 
-      // For Claude sessions, re-parse with archiveFidelity to get full messages
+      // Re-parse archive-fidelity variants where summary parse intentionally
+      // omits or truncates content that should remain in the transcript archive.
       let fullMessages = session.messages;
       if (session.agent === "claude" && session.nativeFilePath && !session.nativeFilePath.startsWith("thread:")) {
         const fullSession = parseClaudeSession(session.nativeFilePath, { archiveFidelity: true });
+        if (fullSession) {
+          fullMessages = fullSession.messages;
+        }
+      } else if (session.agent === "opencode" && session.nativeFilePath && !session.nativeFilePath.startsWith("thread:")) {
+        const fullSession = parseOpencodeSession(session.nativeFilePath, { archiveFidelity: true });
         if (fullSession) {
           fullMessages = fullSession.messages;
         }
