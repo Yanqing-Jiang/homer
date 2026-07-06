@@ -30,7 +30,13 @@ import { SessionTimeoutManager } from "./process/timeout-manager.js";
 import { cleanupScheduler } from "./process/cleanup-scheduler.js";
 import { initFallbackChain } from "./process/fallback-chain.js";
 import { initTraceWriter, rehydrateHealth, setGitCommit } from "./executors/trace-writer.js";
-import { readDiskBuildInfo, setRuntimeBuildInfo, writeRuntimeBuildStamp } from "./utils/build-info.js";
+import {
+  describeBuildInfo,
+  readDiskBuildInfo,
+  setRuntimeBuildInfo,
+  startBuildDriftRestartGuard,
+  writeRuntimeBuildStamp,
+} from "./utils/build-info.js";
 import type { FastifyInstance } from "fastify";
 import type { VoiceConfig } from "./voice/types.js";
 import { getRuntimePaths } from "./utils/runtime-paths.js";
@@ -214,6 +220,53 @@ async function main(): Promise<void> {
   } else {
     logger.warn("Failed to write runtime build stamp");
   }
+  const getRecentActiveCliRunCount = (): number => {
+    const cutoffMs = Date.now() - 2 * 60 * 60 * 1000;
+    const row = stateManager.getDb()
+      .prepare("SELECT COUNT(*) as count FROM cli_runs WHERE status = 'running' AND started_at > ?")
+      .get(cutoffMs) as { count: number } | undefined;
+    return row?.count ?? Number.POSITIVE_INFINITY;
+  };
+  const stopBuildDriftGuard = startBuildDriftRestartGuard({
+    service: "homer-daemon",
+    reason: "build-drift",
+    onDrift: (drift, request) => {
+      logger.warn(
+        {
+          runtimeBuild: describeBuildInfo(drift.runtimeBuild),
+          diskBuild: describeBuildInfo(drift.diskBuild),
+          restartRequest: request,
+        },
+        "Build drift detected; restart requested through heartbeat"
+      );
+    },
+    selfExit: {
+      exitCode: 0,
+      getActiveWorkCount: getRecentActiveCliRunCount,
+      onExit: (drift, request, context) => {
+        logger.warn(
+          {
+            runtimeBuild: describeBuildInfo(drift.runtimeBuild),
+            diskBuild: describeBuildInfo(drift.diskBuild),
+            exitCode: context.exitCode,
+            restartRequest: request,
+            consecutiveChecks: context.consecutiveChecks,
+            diskBuildAgeMs: Math.round(context.diskBuildAgeMs),
+            processUptimeMs: Math.round(context.processUptimeMs),
+            activeCliRuns: context.activeWorkCount,
+          },
+          "Build drift stable; exiting so launchd restarts the daemon"
+        );
+        process.exitCode = context.exitCode;
+        try {
+          process.kill(process.pid, "SIGTERM");
+        } catch (err) {
+          logger.warn({ err, exitCode: context.exitCode }, "Failed to signal graceful shutdown; exiting directly");
+          process.exit(context.exitCode);
+        }
+      },
+    },
+  });
 
   // Graceful shutdown — two-phase approach:
   // Phase 1: Stop accepting new work (immediate)
@@ -243,6 +296,7 @@ async function main(): Promise<void> {
     scheduler.stop();
     queueWorker.stop();
     connectivityMonitor.stop();
+    stopBuildDriftGuard();
     staleMapCleaner.stop();
     timeoutManager.stop();
   });

@@ -14,7 +14,7 @@ import { CronUtils } from "../utils/cron.js";
 import { loadAllSchedules, getAllJobs } from "./loader.js";
 import { JOB_REGISTRY } from "./registry.js";
 import { getClaudeAuthStatus } from "../utils/claude-auth.js";
-import { buildInfoMatches, describeBuildInfo, getRuntimeBuildInfo, readDiskBuildInfo } from "../utils/build-info.js";
+import { buildInfoMatches, describeBuildInfo, getRuntimeBuildInfo, readDiskBuildInfo, requestBuildDriftRestart } from "../utils/build-info.js";
 import { checkGeminiAPIHealth } from "../executors/gemini.js";
 import {
   formatScheduledTelegramHtml,
@@ -428,8 +428,9 @@ async function runHealthCheck(
     const runtimeBuild = getRuntimeBuildInfo();
     const diskBuild = readDiskBuildInfo();
     if (runtimeBuild && diskBuild && !buildInfoMatches(runtimeBuild, diskBuild)) {
+      const restartRequest = requestBuildDriftRestart("homer-daemon", "build-drift");
       issues.push(
-        `🟡 Build drift: running ${describeBuildInfo(runtimeBuild)} but dist is ${describeBuildInfo(diskBuild)} — controlled restart required`,
+        `🟡 Build drift: running ${describeBuildInfo(runtimeBuild)} but dist is ${describeBuildInfo(diskBuild)} — restart ${restartRequest?.status ?? "request failed"}`,
       );
     }
   } catch (err) {
@@ -1073,7 +1074,7 @@ async function runHandler(
         );
       }
       case "daemon_cleanup": {
-        await cleanupScheduler.run("scheduled");
+        const cleanup = await cleanupScheduler.run("scheduled");
         const cleanedRuns = ctx.stateManager.cleanupScheduledJobRunsOlderThan(60);
         const schedules = await loadAllSchedules();
         const activeJobIds = new Set([
@@ -1088,6 +1089,16 @@ async function runHandler(
           );
         }
         const outputParts = ["Daemon cleanup completed"];
+        const logParts: string[] = [];
+        if (cleanup.logMaintenance.rotated > 0) logParts.push(`rotated ${cleanup.logMaintenance.rotated} log(s)`);
+        if (cleanup.logMaintenance.pruned > 0) logParts.push(`pruned ${cleanup.logMaintenance.pruned} retained log(s)`);
+        if (cleanup.logMaintenance.deletedDeadLogs > 0) {
+          logParts.push(`deleted ${cleanup.logMaintenance.deletedDeadLogs} retired watchdog log(s)`);
+        }
+        if (cleanup.logMaintenance.errors.length > 0) {
+          logParts.push(`${cleanup.logMaintenance.errors.length} log maintenance error(s)`);
+        }
+        if (logParts.length > 0) outputParts.push(logParts.join(", "));
         if (cleanedRuns > 0) outputParts.push(`pruned ${cleanedRuns} run rows older than 60d`);
         if (prunedStateRows.length > 0) outputParts.push(`pruned state rows: ${prunedStateRows.join(", ")}`);
         return buildResult(
