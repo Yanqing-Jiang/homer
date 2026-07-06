@@ -1,11 +1,6 @@
 import type { Bot } from "grammy";
 import { QueueManager } from "./manager.js";
 import { StateManager, type Job } from "../state/manager.js";
-import { executeClaudeCommand } from "../executors/claude.js";
-import { executeOpenCodeCLI } from "../executors/opencode-cli.js";
-
-import { executeCodexCLI } from "../executors/codex-cli.js";
-import { executeKimiCLI } from "../executors/kimi-cli.js";
 import { acquireSlot } from "../executors/concurrency.js";
 import { runCompletionCheckup } from "../executors/completion-checkup.js";
 import {
@@ -15,6 +10,9 @@ import {
   type ExecutorKind,
 } from "../executors/fallback-orchestrator.js";
 import { writeChainTrace } from "../executors/trace-writer.js";
+import { executeResolvedHarness } from "../harness/dispatch.js";
+import { negotiateHarnessAttempts } from "../harness/negotiation.js";
+import { resolveHarnessSelection } from "../harness/resolution/resolver.js";
 import { chunkMessage } from "../utils/chunker.js";
 import { logger } from "../utils/logger.js";
 
@@ -28,6 +26,39 @@ function isMemoryJob(job: Job): boolean {
     query.includes("daily log") ||
     query.includes("memory")
   );
+}
+
+type QueueJobScope = Job & { turnId?: string | null; conversationId?: string | null };
+
+function harnessScopeForQueueJob(job: Job): {
+  turnId?: string | null;
+  conversationId?: string | null;
+  lane?: string | null;
+  jobId?: string | null;
+} {
+  const scoped = job as QueueJobScope;
+  return {
+    turnId: scoped.turnId ?? null,
+    conversationId: scoped.conversationId ?? null,
+    lane: job.lane,
+    jobId: null,
+  };
+}
+
+function queueTimeoutMs(executor: ExecutorKind): number {
+  return executor === "claude" || executor === "codex" ? 1_800_000 : 1_200_000;
+}
+
+function uniqueExecutorChain(executors: ExecutorKind[]): ExecutorKind[] {
+  const seen = new Set<ExecutorKind>();
+  const chain: ExecutorKind[] = [];
+  for (const executor of executors) {
+    if (!seen.has(executor)) {
+      seen.add(executor);
+      chain.push(executor);
+    }
+  }
+  return chain;
 }
 
 export class QueueWorker {
@@ -94,21 +125,63 @@ export class QueueWorker {
     try {
       const memoryJob = isMemoryJob(job);
       // Selection: a job that names a concrete executor is honored as the explicit primary
-      // (e.g. /codex, /gemini). A "default"/unknown job follows the global harness default;
-      // memory jobs lead with the cheap flash chain (high-volume, cap-sensitive). The requested
-      // executor runs DIRECTLY — no more hiding gemini/codex inside a Claude subagent.
-      const harnessDefault = this.stateManager.resolveDefaultExecutor() as ExecutorKind;
+      // (e.g. /codex, /gemini). A "default"/unknown job follows resolver scope order
+      // (turn/conversation if present, lane, then global). Memory jobs only change fallback order.
       const baseChain: ExecutorKind[] = memoryJob ? [...MEMORY_FALLBACK_ORDER] : [...DEFAULT_FALLBACK_ORDER];
       const VALID_EXECUTORS: ExecutorKind[] = ["claude", "gemini", "codex", "kimi", "opencode"];
       const requested = VALID_EXECUTORS.includes(job.executor as ExecutorKind)
         ? (job.executor as ExecutorKind)
         : undefined;
-      const primary: ExecutorKind =
-        requested ?? (memoryJob ? (baseChain[0] ?? "gemini") : harnessDefault);
-      // DEBT: chain is built from the static compatibility order, not negotiateHarnessAttempts.
-      // Equivalent today (queue jobs declare no required capabilities). Upgrade when queue jobs
-      // carry capability requirements, and route runExecutor through the harness adapters.
-      const chain: ExecutorKind[] = [primary, ...baseChain.filter((e) => e !== primary)];
+      const scope = harnessScopeForQueueJob(job);
+      const store = this.stateManager.createHarnessSelectionStore();
+      const baselineProfile = {
+        cwdOverride: HOME,
+        executorOptions: {
+          opencode: {
+            forceOpenCode: true,
+            researchOnly: false,
+            agent: "build",
+            yolo: true,
+            sandbox: true,
+          },
+          kimi: { yolo: true },
+        },
+      };
+      const attemptModels = new Map<ExecutorKind, string | null>();
+      let primary: ExecutorKind;
+      let chain: ExecutorKind[];
+
+      try {
+        const plan = resolveHarnessSelection(
+          {
+            requestId: `queue-${job.id}`,
+            source: "queue",
+            scope,
+            explicit: requested ? { harness: requested, model: null } : null,
+            baselineProfile,
+          },
+          store,
+        );
+        const attemptPlan = negotiateHarnessAttempts({
+          resolved: plan,
+          mode: "runtime-turn",
+          compatibilityOrder: baseChain,
+          allowDegradation: true,
+        });
+        for (const attempt of attemptPlan.attempts) {
+          attemptModels.set(attempt.harness, attempt.model);
+        }
+        primary = attemptPlan.primary.harness;
+        chain = uniqueExecutorChain([
+          primary,
+          ...attemptPlan.attempts.map((attempt) => attempt.harness),
+          ...baseChain,
+        ]);
+      } catch (error) {
+        logger.warn({ jobId: job.id, error }, "Queue harness resolution failed; using static fallback chain");
+        primary = requested ?? baseChain[0] ?? "claude";
+        chain = uniqueExecutorChain([primary, ...baseChain]);
+      }
 
       // Claude session handling
       const initialClaudeSessionId = this.stateManager.getClaudeSessionId(job.lane);
@@ -116,94 +189,38 @@ export class QueueWorker {
 
       const runExecutor = async (
         executor: ExecutorKind,
-        queryOverride?: string
+        queryOverride?: string,
+        modelOverride?: string
       ): Promise<{ exitCode: number; output: string; error?: string; duration: number; startedAt: Date; completedAt: Date }> => {
         const query = queryOverride ?? job.query;
         const startedAt = new Date();
-
-        if (executor === "claude") {
-          const result = await executeClaudeCommand(query, {
-            cwd: HOME,
-            claudeSessionId: lastClaudeSessionId,
-          });
-          if (result.claudeSessionId) {
-            lastClaudeSessionId = result.claudeSessionId;
-          } else if (lastClaudeSessionId) {
-            this.stateManager.updateClaudeSessionActivity(job.lane);
-          }
-          return {
-            exitCode: result.exitCode,
-            output: result.output,
-            error: result.exitCode === 0 ? undefined : result.output,
-            duration: result.duration,
-            startedAt,
-            completedAt: new Date(),
-          };
-        }
-
-        if (executor === "gemini") {
-          const result = await executeOpenCodeCLI(query, "", {
-            timeout: 1200000,
-            sandbox: true,
-            model: "google/gemini-3.5-flash",
-            forceOpenCode: true,
-          });
-          return {
-            exitCode: result.exitCode,
-            output: result.output,
-            error: result.exitCode === 0 ? undefined : result.output,
-            duration: result.duration,
-            startedAt,
-            completedAt: new Date(),
-          };
-        }
-
-        if (executor === "codex") {
-          const result = await executeCodexCLI(query, {
-            cwd: HOME,
-            timeout: 1800000,
-          });
-          return {
-            exitCode: result.exitCode,
-            output: result.output,
-            error: result.exitCode === 0 ? undefined : result.output,
-            duration: result.duration,
-            startedAt,
-            completedAt: new Date(),
-          };
-        }
-
-        if (executor === "opencode") {
-          // opencode edit harness — edit-capable (researchOnly:false + build agent + skip-perms).
-          // No model pin: uses opencode's config default (opencode.json model field).
-          const result = await executeOpenCodeCLI(query, "", {
-            timeout: 1200000,
-            forceOpenCode: true,
-            researchOnly: false,
-            agent: "build",
-            cwd: HOME,
-            yolo: true,
-            sandbox: true,
-          });
-          return {
-            exitCode: result.exitCode,
-            output: result.output,
-            error: result.exitCode === 0 ? undefined : result.output,
-            duration: result.duration,
-            startedAt,
-            completedAt: new Date(),
-          };
-        }
-
-        const result = await executeKimiCLI(query, "", {
-          timeout: 1200000,
-          yolo: true,
-          workDir: HOME,
+        const model = modelOverride ?? attemptModels.get(executor) ?? null;
+        const result = await executeResolvedHarness({
+          requestId: `queue-${job.id}-${executor}`,
+          source: "queue",
+          mode: "runtime-turn",
+          prompt: query,
+          scope,
+          explicit: { harness: executor, model },
+          baselineProfile,
+          cwd: HOME,
+          timeoutMs: queueTimeoutMs(executor),
+          session: executor === "claude" && lastClaudeSessionId
+            ? { lane: job.lane, sessionId: lastClaudeSessionId, harness: "claude", model }
+            : null,
+          store,
         });
+
+        if (result.session?.harness === "claude" && result.session.sessionId) {
+          lastClaudeSessionId = result.session.sessionId;
+        } else if (executor === "claude" && lastClaudeSessionId) {
+          this.stateManager.updateClaudeSessionActivity(job.lane);
+        }
+
         return {
           exitCode: result.exitCode,
           output: result.output,
-          error: result.exitCode === 0 ? undefined : result.output,
+          error: result.exitCode === 0 ? undefined : result.stderr ?? result.output,
           duration: result.duration,
           startedAt,
           completedAt: new Date(),

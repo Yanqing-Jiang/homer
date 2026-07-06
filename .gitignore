@@ -172,3 +172,5 @@ workspaces/
 /src/state/migrations/096_drop_idea_index.sql
 .env.bak*
 .env.*.bak
+/archive/
+/src/scripts/ranking-eval-golden.json

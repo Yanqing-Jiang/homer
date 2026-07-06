@@ -20,11 +20,15 @@ const PROJECT_DIR = PATHS.homerRoot;
 function codexStage(
   cwdOverride: string,
   timeoutOverride: number,
-  reasoningEffort: "medium" | "high" = "medium",
+  reasoningEffort: "medium" | "high" | "xhigh" = "medium",
 ): InternalHarnessCallProfile {
+  const model =
+    reasoningEffort === "medium" ? "gpt-5.5-medium" :
+    reasoningEffort === "xhigh" ? "gpt-5.5-xhigh" :
+    CODEX_MODEL;
   return {
     executor: "codex",
-    model: CODEX_MODEL,
+    model,
     cwdOverride,
     timeoutOverride,
     executorOptions: {

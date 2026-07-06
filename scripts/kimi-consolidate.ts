@@ -2,7 +2,7 @@
 /**
  * Kimi Memory Consolidation Script
  *
- * Uses Kimi's 128k context to analyze large daily logs and:
+ * Uses Kimi's long context to analyze large daily logs and:
  * 1. Generate a weekly summary
  * 2. Extract facts worth promoting to permanent memory
  * 3. Identify patterns and insights
@@ -17,10 +17,11 @@ import { join } from "path";
 // Load env before importing modules that need it
 config({ path: join(import.meta.dirname, "../.env") });
 
-import { summarizeWithKimi, extractMemoryFacts } from "../src/executors/kimi.js";
+import { executeKimiCLI } from "../src/executors/kimi-cli.js";
 
 const MEMORY_DIR = process.env.HOME + "/memory";
 const DAILY_DIR = join(MEMORY_DIR, "daily");
+const KIMI_TIMEOUT_MS = 1_200_000;
 
 interface ConsolidationResult {
   period: { start: string; end: string };
@@ -32,6 +33,72 @@ interface ConsolidationResult {
   }>;
   totalTokensUsed: number;
   cost: number;
+}
+
+async function runKimi(prompt: string, systemPrompt: string): Promise<string> {
+  const result = await executeKimiCLI(prompt, systemPrompt, {
+    timeout: KIMI_TIMEOUT_MS,
+    yolo: true,
+    workDir: process.env.HOME ?? "/Users/yj",
+  });
+
+  if (result.exitCode !== 0) {
+    throw new Error(result.output);
+  }
+
+  return result.output;
+}
+
+async function summarizeWithKimi(content: string, instruction: string): Promise<string> {
+  return runKimi(
+    `${instruction}\n\n---\n\n${content}`,
+    "You are an expert at analyzing and summarizing content. Extract key insights, decisions, and actionable items. Be thorough but concise.",
+  );
+}
+
+async function extractMemoryFacts(dailyLogContent: string): Promise<{
+  promotions: Array<{
+    content: string;
+    file: "me" | "work" | "preferences" | "tools";
+    section?: string;
+  }>;
+  summary: string;
+}> {
+  const output = await runKimi(
+    `Analyze this daily log and extract facts that should be saved to permanent memory.
+
+Categories:
+- me: Identity, personal goals, routines, life context, HOMER config
+- work: Career, projects, contacts, professional context
+- preferences: Communication style, technical preferences
+- tools: Tool configurations, workflows, integrations
+
+For each fact, provide:
+1. The content to save (concise, standalone statement)
+2. Which file it belongs to
+3. Optional section header if it fits under a specific topic
+
+Also provide a brief summary of the day's key activities.
+
+Return as JSON:
+{
+  "promotions": [
+    {"content": "...", "file": "work", "section": "Projects"}
+  ],
+  "summary": "..."
+}
+
+---
+
+${dailyLogContent}`,
+    "You are a memory curator. Extract lasting facts from daily logs. Only include information worth remembering long-term. Be selective - not everything needs to be saved. Return valid JSON only.",
+  );
+
+  const jsonMatch = output.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error("No JSON found in Kimi response");
+  }
+  return JSON.parse(jsonMatch[0]);
 }
 
 async function consolidateMemory(days: number, dryRun: boolean): Promise<void> {

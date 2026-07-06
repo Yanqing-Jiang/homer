@@ -27,6 +27,52 @@ export interface ParsedSession {
   contentHash: string;
 }
 
+const SCAFFOLDING_BLOCK_TAGS = [
+  "local-command-caveat",
+  "command-name",
+  "command-message",
+  "command-args",
+  "local-command-stdout",
+  "system-reminder",
+];
+
+export function stripSessionScaffolding(text: string): string {
+  let cleaned = text;
+
+  for (const tag of SCAFFOLDING_BLOCK_TAGS) {
+    cleaned = cleaned.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, "gi"), "");
+  }
+
+  return cleaned
+    .replace(/^\s*\[(?:user|assistant|system)\]:\s*$/gim, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractClaudeTextContent(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .filter((c: any) => c.type === "text")
+      .map((c: any) => c.text)
+      .join("\n");
+  }
+
+  return "";
+}
+
+function hashMessages(messages: ParsedMessage[]): string {
+  const normalizedContent = messages
+    .map((m) => `${m.role}:${m.content.trim().toLowerCase()}`)
+    .join("\n");
+  return createHash("sha256")
+    .update(normalizedContent)
+    .digest("hex");
+}
+
 function getCodexSessionsDir(homeDir: string): string {
   const codexHome = process.env.CODEX_HOME || join(homeDir, ".codex");
   return join(codexHome, "sessions");
@@ -314,6 +360,8 @@ interface OpencodeMessageMeta {
     providerID: string;
     modelID: string;
   };
+  providerID?: string;
+  modelID?: string;
 }
 
 interface OpencodePart {
@@ -339,6 +387,44 @@ interface OpencodePart {
     start: number;
     end: number;
   };
+}
+
+export interface ParseOpencodeOptions {
+  /** Include tool output in message bodies for transcript archival. */
+  archiveFidelity?: boolean;
+}
+
+function getOpencodeModel(msgMeta: OpencodeMessageMeta): string | undefined {
+  const providerID = msgMeta.model?.providerID || msgMeta.providerID;
+  const modelID = msgMeta.model?.modelID || msgMeta.modelID;
+  if (!providerID || !modelID) {
+    return undefined;
+  }
+  return `${providerID}/${modelID}`;
+}
+
+function formatOpencodeToolPart(part: OpencodePart): string {
+  if (!part.state) {
+    return "";
+  }
+
+  const toolName = part.tool || "tool";
+  const toolStatus = part.state.status || "unknown";
+  const toolTitle = part.state.title || "";
+  let content = "";
+
+  if (toolTitle) {
+    content += `\n[${toolName}: ${toolTitle} (${toolStatus})]\n`;
+  }
+
+  if (part.state.output && typeof part.state.output === "string") {
+    const output = part.state.output.length > 500
+      ? part.state.output.slice(0, 500) + "...\n[output truncated]"
+      : part.state.output;
+    content += output + "\n";
+  }
+
+  return content;
 }
 
 /**
@@ -499,6 +585,7 @@ export function parseClaudeSession(filePath: string, options?: ParseClaudeOption
     const lines = content.split("\n").filter((line) => line.trim());
 
     const allMessages: ParsedMessage[] = [];
+    const legacyHashMessages: ParsedMessage[] = [];
     let sessionId = "";
     let model = "";
     let startTime = "";
@@ -521,40 +608,33 @@ export function parseClaudeSession(filePath: string, options?: ParseClaudeOption
         }
 
         if (entry.type === "user" && entry.message) {
-          let msgContent = "";
           const msgObj = entry.message;
-          if (typeof msgObj.content === "string") {
-            msgContent = msgObj.content;
-          } else if (Array.isArray(msgObj.content)) {
-            msgContent = msgObj.content
-              .filter((c: any) => c.type === "text")
-              .map((c: any) => c.text)
-              .join("\n");
-          }
+          const msgContent = extractClaudeTextContent(msgObj.content);
+          const cleanedContent = stripSessionScaffolding(msgContent);
 
           if (!project && entry.cwd) {
             project = entry.cwd;
           }
 
           if (msgContent) {
-            allMessages.push({
+            legacyHashMessages.push({
               role: "user",
               content: msgContent,
               timestamp: entry.timestamp,
             });
           }
+
+          if (cleanedContent) {
+            allMessages.push({
+              role: "user",
+              content: cleanedContent,
+              timestamp: entry.timestamp,
+            });
+          }
         } else if (entry.type === "assistant" && entry.message) {
-          let msgContent = "";
           let msgModel = "";
           const msgObj = entry.message;
-          if (Array.isArray(msgObj.content)) {
-            msgContent = msgObj.content
-              .filter((c: any) => c.type === "text")
-              .map((c: any) => c.text)
-              .join("\n");
-          } else if (typeof msgObj.content === "string") {
-            msgContent = msgObj.content;
-          }
+          const msgContent = extractClaudeTextContent(msgObj.content);
           if (msgObj.model) {
             msgModel = msgObj.model;
           }
@@ -564,6 +644,11 @@ export function parseClaudeSession(filePath: string, options?: ParseClaudeOption
           }
 
           if (msgContent) {
+            legacyHashMessages.push({
+              role: "assistant",
+              content: msgContent,
+              timestamp: entry.timestamp,
+            });
             allMessages.push({
               role: "assistant",
               content: msgContent,
@@ -583,14 +668,9 @@ export function parseClaudeSession(filePath: string, options?: ParseClaudeOption
     // Apply truncation unless archiveFidelity is requested
     const messages = archiveFidelity ? allMessages : truncateForSummary(allMessages);
 
-    // Generate content hash from truncated messages (compatible with existing session_summaries)
-    const truncatedForHash = archiveFidelity ? truncateForSummary(allMessages) : messages;
-    const normalizedContent = truncatedForHash
-      .map((m) => `${m.role}:${m.content.trim().toLowerCase()}`)
-      .join("\n");
-    const contentHash = createHash("sha256")
-      .update(normalizedContent)
-      .digest("hex");
+    // Hash the legacy truncated, unstripped shape so deployed parser-quality
+    // improvements do not cause already-imported Claude sessions to re-import.
+    const contentHash = hashMessages(truncateForSummary(legacyHashMessages));
 
     return {
       sessionId: sessionId || `claude-${Date.now()}`,
@@ -610,7 +690,9 @@ export function parseClaudeSession(filePath: string, options?: ParseClaudeOption
   }
 }
 
-export function parseOpencodeSession(filePath: string): ParsedSession | null {
+export function parseOpencodeSession(filePath: string, options?: ParseOpencodeOptions): ParsedSession | null {
+  const archiveFidelity = options?.archiveFidelity ?? false;
+
   try {
     // Read session metadata
     const sessionMeta: OpencodeSessionMeta = JSON.parse(readFileSync(filePath, "utf-8"));
@@ -632,11 +714,17 @@ export function parseOpencodeSession(filePath: string): ParsedSession | null {
       .sort(); // Ensure chronological order
 
     const messages: ParsedMessage[] = [];
+    const legacyHashMessages: ParsedMessage[] = [];
     const reasoningParts: string[] = [];
+    let model = "";
 
     for (const msgFile of messageFiles) {
       const msgPath = join(messagesDir, msgFile);
       const msgMeta: OpencodeMessageMeta = JSON.parse(readFileSync(msgPath, "utf-8"));
+      const msgModel = getOpencodeModel(msgMeta);
+      if (!model && msgModel) {
+        model = msgModel;
+      }
 
       const msgPartsDir = join(partsDir, msgMeta.id);
       if (!existsSync(msgPartsDir)) {
@@ -662,32 +750,35 @@ export function parseOpencodeSession(filePath: string): ParsedSession | null {
 
       // Build message content from parts
       let content = "";
+      let legacyContent = "";
       const msgReasoning: string[] = [];
 
       for (const part of parts) {
         if (part.type === "text" && part.text) {
           content += part.text;
+          legacyContent += part.text;
         } else if (part.type === "reasoning" && part.text) {
           msgReasoning.push(part.text);
         } else if (part.type === "tool" && part.state) {
-          // Include tool usage info
-          const toolName = part.tool || "tool";
-          const toolStatus = part.state.status || "unknown";
-          const toolTitle = part.state.title || "";
-
-          if (toolTitle) {
-            content += `\n[${toolName}: ${toolTitle} (${toolStatus})]\n`;
-          }
-
-          // Include tool output if available
-          if (part.state.output && typeof part.state.output === "string") {
-            // Truncate long outputs
-            const output = part.state.output.length > 500
-              ? part.state.output.slice(0, 500) + "...\n[output truncated]"
-              : part.state.output;
-            content += output + "\n";
+          const toolContent = formatOpencodeToolPart(part);
+          legacyContent += toolContent;
+          if (archiveFidelity) {
+            content += toolContent;
           }
         }
+      }
+
+      if (legacyContent.trim() || msgReasoning.length > 0) {
+        const timestamp = msgMeta.time?.created
+          ? new Date(msgMeta.time.created).toISOString()
+          : undefined;
+
+        legacyHashMessages.push({
+          role: msgMeta.role,
+          content: legacyContent.trim(),
+          timestamp,
+          metadata: msgReasoning.length > 0 ? { thoughts: msgReasoning.map((r) => ({ subject: "Reasoning", description: r })) } : undefined,
+        });
       }
 
       if (content.trim() || msgReasoning.length > 0) {
@@ -712,13 +803,7 @@ export function parseOpencodeSession(filePath: string): ParsedSession | null {
     }
 
     // Generate content hash
-    const normalizedContent = messages
-      .map((m) => `${m.role}:${m.content.trim().toLowerCase()}`)
-      .join("\n");
-    const contentHash = createHash("sha256").update(normalizedContent).digest("hex");
-
-    // Extract model info from message metadata
-    let model = "opencode-unknown";
+    const contentHash = hashMessages(legacyHashMessages);
 
     // Format timestamps
     const startedAt = sessionMeta.time?.created
@@ -733,7 +818,7 @@ export function parseOpencodeSession(filePath: string): ParsedSession | null {
       agent: "opencode",
       nativeFilePath: filePath,
       messages,
-      model: model || "opencode-unknown",
+      model: model || undefined,
       startedAt,
       endedAt,
       messageCount: messages.length,

@@ -48,25 +48,10 @@ export {
   type GeminiAPIResult,
 } from "./gemini.js";
 export {
-  executeKimiCommand,
-  summarizeWithKimi,
-  extractMemoryFacts,
-  type KimiExecutorOptions,
-  type KimiExecutorResult,
-} from "./kimi.js";
-export {
   executeKimiCLI,
   type KimiCLIOptions,
   type KimiCLIResult,
 } from "./kimi-cli.js";
-export {
-  executeKimiAgent,
-  kimiResearch,
-  kimiDesign,
-  kimiSummarize,
-  type KimiAgentOptions,
-  type KimiAgentResult,
-} from "./kimi-agent.js";
 
 // Router system
 export {
