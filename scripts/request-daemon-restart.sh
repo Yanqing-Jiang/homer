@@ -13,12 +13,14 @@
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_SUPPORT_DIR="${HOME}/Library/Application Support/Homer"
-REQUEST_FILE="${APP_SUPPORT_DIR}/restart.request"
-DB_PATH="${HOME}/homer/data/homer.db"
-HOMER_LABEL="com.homer.daemon"
-LAUNCHD_DOMAIN="gui/$(/usr/bin/id -u)"
+HOMER_ROOT="${HOMER_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+APP_SUPPORT_DIR="${APP_SUPPORT_DIR:-${HOME}/Library/Application Support/Homer}"
+REQUEST_FILE="${RESTART_REQUEST:-${APP_SUPPORT_DIR}/restart.request}"
+DB_PATH="${DB_PATH:-${HOME}/homer/data/homer.db}"
+HOMER_LABEL="${HOMER_LABEL:-com.homer.daemon}"
+LAUNCHD_DOMAIN="${LAUNCHD_DOMAIN:-gui/$(/usr/bin/id -u)}"
 LAUNCHD_TARGET="${LAUNCHD_DOMAIN}/${HOMER_LABEL}"
+ASSERT_BUILD_FRESH="${ASSERT_BUILD_FRESH:-${HOMER_ROOT}/scripts/assert-build-fresh.sh}"
 
 REASON=""
 NOW_MODE=0
@@ -38,7 +40,7 @@ done
 # Build-freshness gate: refuse to restart stale dist (would "ship" un-built src).
 # Skipped for intentional stale restarts (--force-stale / HOMER_ALLOW_STALE_RESTART=1).
 if (( FORCE_STALE == 0 )); then
-  bash "${SCRIPT_DIR}/assert-build-fresh.sh"
+  bash "${ASSERT_BUILD_FRESH}"
 fi
 
 REASON="${REASON:-scheduled-maintenance}"

@@ -10,12 +10,22 @@
  */
 
 import { execSync, spawnSync } from "child_process";
-import { readdirSync, rmSync, statSync } from "fs";
-import { join } from "path";
+import {
+  copyFileSync,
+  existsSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  truncateSync,
+  unlinkSync,
+} from "fs";
+import { basename, dirname, join } from "path";
 import { processRegistry } from "./registry.js";
 import type { ProcessRecord } from "./registry.js";
 import { logger } from "../utils/logger.js";
 import { teardownIdleSession, getLastCdpUseAt } from "../scraping/chrome-launcher.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 // @ts-ignore
 import type Database from "better-sqlite3";
 
@@ -46,6 +56,9 @@ const CDP_PROFILE_MIN_AGE_MS = 30 * 60 * 1000; // grace period before sweeping a
 // single-tab session is left warm; only an actual tab pile-up triggers teardown.
 const CDP_IDLE_TEARDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours
 const CDP_MAX_IDLE_TABS = 3;
+const MIB = 1024 * 1024;
+const LOG_RETENTION_AGE_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
+const LOG_RETENTION_MAX_FILES = 200;
 
 /** True only for a real Homer CDP Chrome process (has both the Chrome binary and our temp profile). */
 function isCdpChromeCmdline(cmdline: string): boolean {
@@ -63,6 +76,32 @@ interface CleanupAction {
   command: string;
   action: "killed" | "spared";
   reason: string;
+}
+
+interface LogMaintenanceSummary {
+  rotated: number;
+  pruned: number;
+  deletedDeadLogs: number;
+  errors: string[];
+}
+
+interface CleanupRunSummary {
+  scanned: number;
+  killed: number;
+  spared: number;
+  logMaintenance: LogMaintenanceSummary;
+}
+
+interface RotationTarget {
+  path: string;
+  maxBytes: number;
+  generations: number;
+}
+
+interface RetentionTarget {
+  dir: string;
+  maxAgeMs: number;
+  maxFiles: number;
 }
 
 interface CdpState {
@@ -95,11 +134,12 @@ export class CleanupScheduler {
   /**
    * Run a full cleanup cycle. Called by cron or manually.
    */
-  async run(trigger: "scheduled" | "shutdown" | "manual" = "scheduled"): Promise<void> {
+  async run(trigger: "scheduled" | "shutdown" | "manual" = "scheduled"): Promise<CleanupRunSummary> {
     const actions: CleanupAction[] = [];
     let scanned = 0;
     let killed = 0;
     let spared = 0;
+    let logMaintenance = emptyLogMaintenanceSummary();
 
     try {
       // Snapshot live CDP state once per cycle — used to spare the active :9222
@@ -120,6 +160,10 @@ export class CleanupScheduler {
       // D: Tear down the long-lived CDP Chrome if it is idle with piled-up tabs.
       await this.maybeTeardownIdleCdp(actions);
 
+      // E: Log lifecycle maintenance. Copy-truncate keeps launchd/cloudflared
+      // file descriptors valid without booting anything.
+      logMaintenance = this.maintainLogs();
+
       scanned = actions.length;
       killed = actions.filter((a) => a.action === "killed").length;
       spared = actions.filter((a) => a.action === "spared").length;
@@ -136,6 +180,8 @@ export class CleanupScheduler {
     } catch (err) {
       logger.error({ error: err, trigger }, "Cleanup cycle failed");
     }
+
+    return { scanned, killed, spared, logMaintenance };
   }
 
   /**
@@ -572,6 +618,136 @@ export class CleanupScheduler {
       // Best effort
     }
   }
+
+  private maintainLogs(): LogMaintenanceSummary {
+    const summary = emptyLogMaintenanceSummary();
+    const runtimePaths = getRuntimePaths();
+    const homerWebRoot = process.env.HOMER_WEB_ROOT ?? join(runtimePaths.homeDir, "homer-web");
+
+    const rotationTargets: RotationTarget[] = [
+      { path: join(runtimePaths.homerLogsDir, "cloudflared.log"), maxBytes: 10 * MIB, generations: 5 },
+      { path: join(runtimePaths.homerLogsDir, "hooks.log"), maxBytes: 2 * MIB, generations: 5 },
+      { path: join(runtimePaths.libraryLogsDir, "fatal.log"), maxBytes: 1 * MIB, generations: 5 },
+      { path: join(homerWebRoot, "logs", "stdout.log"), maxBytes: 10 * MIB, generations: 5 },
+      { path: join(homerWebRoot, "logs", "stderr.log"), maxBytes: 10 * MIB, generations: 5 },
+    ];
+
+    for (const target of rotationTargets) {
+      try {
+        if (rotateLogIfNeeded(target)) summary.rotated++;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        summary.errors.push(`${target.path}: ${message}`);
+        logger.warn({ err, path: target.path }, "Log rotation failed");
+      }
+    }
+
+    const retentionTargets: RetentionTarget[] = [
+      { dir: join(runtimePaths.homerLogsDir, "fallback"), maxAgeMs: LOG_RETENTION_AGE_MS, maxFiles: LOG_RETENTION_MAX_FILES },
+      { dir: join(runtimePaths.libraryLogsDir, "crash-reports"), maxAgeMs: LOG_RETENTION_AGE_MS, maxFiles: LOG_RETENTION_MAX_FILES },
+    ];
+
+    for (const target of retentionTargets) {
+      try {
+        summary.pruned += sweepRetainedFiles(target);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        summary.errors.push(`${target.dir}: ${message}`);
+        logger.warn({ err, dir: target.dir }, "Log retention sweep failed");
+      }
+    }
+
+    const retiredWatchdogLogs = [
+      "watchdog.log",
+      "watchdog.out.log",
+      "watchdog.err.log",
+      "watchdog-events.jsonl",
+    ];
+    for (const name of retiredWatchdogLogs) {
+      const filePath = join(runtimePaths.libraryLogsDir, name);
+      try {
+        if (!existsSync(filePath)) continue;
+        unlinkSync(filePath);
+        summary.deletedDeadLogs++;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        summary.errors.push(`${filePath}: ${message}`);
+        logger.warn({ err, path: filePath }, "Retired watchdog log deletion failed");
+      }
+    }
+
+    if (summary.rotated > 0 || summary.pruned > 0 || summary.deletedDeadLogs > 0) {
+      logger.info(summary, "Log lifecycle maintenance complete");
+    }
+
+    return summary;
+  }
+}
+
+function emptyLogMaintenanceSummary(): LogMaintenanceSummary {
+  return { rotated: 0, pruned: 0, deletedDeadLogs: 0, errors: [] };
+}
+
+function rotateLogIfNeeded(target: RotationTarget): boolean {
+  if (!existsSync(target.path)) return false;
+  const st = statSync(target.path);
+  if (!st.isFile() || st.size < target.maxBytes) return false;
+
+  const bzip2 = existsSync("/usr/bin/bzip2") ? "/usr/bin/bzip2" : "bzip2";
+  const tmpBase = join(dirname(target.path), `.${basename(target.path)}.${process.pid}.${Date.now()}.rotate`);
+  copyFileSync(target.path, tmpBase);
+  truncateSync(target.path, 0);
+
+  const result = spawnSync(bzip2, ["-f", tmpBase], { encoding: "utf-8", timeout: 120_000 });
+  if (result.error || result.status !== 0) {
+    const stderr = result.stderr?.trim();
+    throw new Error(stderr || result.error?.message || `bzip2 exited ${result.status}`);
+  }
+
+  shiftCompressedGenerations(target.path, target.generations);
+  renameSync(`${tmpBase}.bz2`, `${target.path}.0.bz2`);
+  logger.info(
+    { path: target.path, sizeBytes: st.size, maxBytes: target.maxBytes, generations: target.generations },
+    "Rotated log with copy-truncate"
+  );
+  return true;
+}
+
+function shiftCompressedGenerations(filePath: string, generations: number): void {
+  for (let i = generations - 1; i >= 0; i--) {
+    const from = `${filePath}.${i}.bz2`;
+    if (!existsSync(from)) continue;
+    if (i === generations - 1) {
+      rmSync(from, { force: true });
+      continue;
+    }
+    renameSync(from, `${filePath}.${i + 1}.bz2`);
+  }
+}
+
+function sweepRetainedFiles(target: RetentionTarget): number {
+  if (!existsSync(target.dir)) return 0;
+  const now = Date.now();
+  const entries = readdirSync(target.dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() || entry.isSymbolicLink())
+    .map((entry) => {
+      const path = join(target.dir, entry.name);
+      const st = statSync(path);
+      return { path, mtimeMs: st.mtimeMs };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  let pruned = 0;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (!entry) continue;
+    const tooOld = now - entry.mtimeMs > target.maxAgeMs;
+    const beyondCount = i >= target.maxFiles;
+    if (!tooOld && !beyondCount) continue;
+    rmSync(entry.path, { force: true });
+    pruned++;
+  }
+  return pruned;
 }
 
 /**

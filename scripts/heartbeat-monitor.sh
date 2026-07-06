@@ -16,6 +16,8 @@ HOMER_LABEL="${HOMER_LABEL:-com.homer.daemon}"
 LAUNCHD_DOMAIN="${LAUNCHD_DOMAIN:-gui/$(/usr/bin/id -u)}"
 LAUNCHD_TARGET="${LAUNCHD_DOMAIN}/${HOMER_LABEL}"
 DAEMON_PLIST="${DAEMON_PLIST:-$HOME/Library/LaunchAgents/com.homer.daemon.plist}"
+HOMER_ROOT="${HOMER_ROOT:-$HOME/homer}"
+ASSERT_BUILD_FRESH="${ASSERT_BUILD_FRESH:-$HOMER_ROOT/scripts/assert-build-fresh.sh}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:3000/health}"
 PORT="${PORT:-3000}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-2}"
@@ -96,6 +98,18 @@ active_cli_runs() {
   /usr/bin/sqlite3 "$DB_PATH" \
     "SELECT COUNT(*) FROM cli_runs WHERE status = 'running' AND started_at > (CAST(strftime('%s','now','-2 hours') AS INTEGER) * 1000);" \
     2>/dev/null || echo 999  # fail closed on query error
+}
+
+assert_build_fresh() {
+  if [[ ! -f "$ASSERT_BUILD_FRESH" ]]; then
+    log "restart request deferred; freshness gate missing: $ASSERT_BUILD_FRESH"
+    return 1
+  fi
+  if ! /bin/bash "$ASSERT_BUILD_FRESH" >> "$LOG_FILE" 2>&1; then
+    log "restart request deferred; build freshness check failed"
+    return 1
+  fi
+  return 0
 }
 
 # --- State management (atomic JSON via temp+mv) ---
@@ -250,6 +264,10 @@ handle_planned_restart() {
 
   if ! restart_allowed; then
     log "restart request deferred by cooldown/circuit-breaker"
+    return 0
+  fi
+
+  if ! assert_build_fresh; then
     return 0
   fi
 
