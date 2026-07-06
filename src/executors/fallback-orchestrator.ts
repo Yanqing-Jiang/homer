@@ -346,8 +346,11 @@ function normalizeDecision(
 
 export function buildRetryQuery(baseQuery: string, failure: FailureContext, instructions?: string): string {
   const guidance = instructions ? `\n\nRecovery instructions:\n${instructions}` : "";
+  const shortOutputGuidance = /Output too short/i.test(failure.errorSummary)
+    ? "\n\nShort-output recovery: emit the complete final deliverable directly. Do not include acknowledgements, status notes, tool observations, or meta-commentary. If this is an empty-state job, emit the configured canonical empty-state output exactly."
+    : "";
   const logRef = failure.logPath ? `\n\nLog file: ${failure.logPath}` : "";
-  return `${baseQuery}\n\nPrevious error:\n${failure.errorSummary}${logRef}${guidance}\n\nPlease fix the error and continue from the failed attempt.`;
+  return `${baseQuery}\n\nPrevious error:\n${failure.errorSummary}${logRef}${guidance}${shortOutputGuidance}\n\nPlease fix the error and continue from the failed attempt.`;
 }
 
 export function buildFallbackQuery(

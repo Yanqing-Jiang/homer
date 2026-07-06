@@ -14,6 +14,8 @@ import {
 } from "../commands/harness-catalog.js";
 import { createSqliteHarnessSelectionStore } from "../harness/resolution/store.js";
 
+const HEARTBEAT_JOBS = new Set(["reminder-check", "session-maintenance", "daemon-cleanup"]);
+
 export interface Session {
   id: string;
   lane: string;
@@ -672,6 +674,22 @@ export class StateManager {
     }
   }
 
+  deleteSuccessfulHeartbeatRun(runId: number, jobId: string): boolean {
+    if (!HEARTBEAT_JOBS.has(jobId)) return false;
+
+    const txn = this._db.transaction(() => {
+      this._db.prepare(
+        `UPDATE notification_events SET job_run_id = NULL WHERE job_run_id = ?`
+      ).run(runId);
+      const result = this._db.prepare(
+        `DELETE FROM scheduled_job_runs WHERE id = ? AND job_id = ? AND success = 1`
+      ).run(runId, jobId);
+      return result.changes;
+    });
+
+    return txn() > 0;
+  }
+
   /**
    * Update the next scheduled run time for a job
    */
@@ -855,6 +873,50 @@ export class StateManager {
       ).run(cutoffDate);
     });
     return txn().changes;
+  }
+
+  cleanupScheduledJobRunsOlderThan(days: number): number {
+    const modifier = `-${days} days`;
+    const txn = this._db.transaction(() => {
+      this._db.prepare(
+        `DELETE FROM failure_takeover_runs WHERE job_run_id IN
+         (SELECT id FROM scheduled_job_runs WHERE datetime(created_at) < datetime('now', ?))`
+      ).run(modifier);
+      this._db.prepare(
+        `DELETE FROM job_artifacts WHERE job_run_id IN
+         (SELECT id FROM scheduled_job_runs WHERE datetime(created_at) < datetime('now', ?))`
+      ).run(modifier);
+      this._db.prepare(
+        `UPDATE notification_events SET job_run_id = NULL WHERE job_run_id IN
+         (SELECT id FROM scheduled_job_runs WHERE datetime(created_at) < datetime('now', ?))`
+      ).run(modifier);
+      return this._db.prepare(
+        `DELETE FROM scheduled_job_runs WHERE datetime(created_at) < datetime('now', ?)`
+      ).run(modifier);
+    });
+    return txn().changes;
+  }
+
+  pruneScheduledJobStateExcept(activeJobIds: string[]): string[] {
+    const active = new Set(activeJobIds);
+    const rows = this._db.prepare(
+      `SELECT job_id as jobId FROM scheduled_job_state`
+    ).all() as Array<{ jobId: string }>;
+    const removed = rows
+      .map((row) => row.jobId)
+      .filter((jobId) => !active.has(jobId));
+    if (removed.length === 0) return [];
+
+    const stmt = this._db.prepare(
+      `DELETE FROM scheduled_job_state WHERE job_id = ?`
+    );
+    const tx = this._db.transaction(() => {
+      for (const jobId of removed) {
+        stmt.run(jobId);
+      }
+    });
+    tx();
+    return removed;
   }
 
   cleanupNotificationEvents(nowMs: number = Date.now()): NotificationEventCleanupResult {

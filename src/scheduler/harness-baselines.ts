@@ -97,12 +97,6 @@ export const INTERNAL_JOB_HARNESS_BASELINES = {
         cwdOverride: HOME_DIR,
         timeoutOverride: 600_000,
       },
-    },
-  },
-  "weekly-memory-cleanup": {
-    executor: "claude",
-    model: "opus[1m]",
-    stages: {
       cleanup: {
         executor: "claude",
         model: "opus[1m]",

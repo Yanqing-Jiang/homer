@@ -679,8 +679,10 @@ async function executeClaudeJob(
     // minOutputLength guard: prevents the "meta-comment as deliverable" silent
     // failure. Only flips success→failure; never the reverse.
     const isEmptyState = !!config.emptyStateMarker && output.includes(config.emptyStateMarker);
+    let failedMinOutputLength = false;
     if (success && config.minOutputLength && output.length < config.minOutputLength && !isEmptyState) {
       success = false;
+      failedMinOutputLength = true;
       errorMessage =
         `Output too short (${output.length} chars, expected ≥ ${config.minOutputLength}). ` +
         `Likely the executor returned a meta-comment instead of the deliverable.`;
@@ -723,7 +725,7 @@ async function executeClaudeJob(
       success,
       output: output || "(No output)",
       error: errorMessage,
-      exitCode: result.exitCode ?? 1,
+      exitCode: failedMinOutputLength && result.exitCode === 0 ? 1 : result.exitCode ?? 1,
       duration,
     };
   } catch (err) {

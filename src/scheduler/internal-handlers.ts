@@ -8,10 +8,11 @@ import { presentOvernightSummaries } from "../bot/handlers/overnight.js";
 import { ingestIdeasFromLegacy } from "../ideas/ingest.js";
 import { dedupeIdeasDir, expireStaleIdeas } from "../ideas/dedup.js";
 import { runWeeklyConsolidation } from "./jobs/weekly-consolidation.js";
-import { runWeeklyMemoryCleanup } from "./jobs/memory-cleanup.js";
 import { runMigrations } from "../state/migrations/index.js";
 import { logger } from "../utils/logger.js";
 import { CronUtils } from "../utils/cron.js";
+import { loadAllSchedules, getAllJobs } from "./loader.js";
+import { JOB_REGISTRY } from "./registry.js";
 import { getClaudeAuthStatus } from "../utils/claude-auth.js";
 import { buildInfoMatches, describeBuildInfo, getRuntimeBuildInfo, readDiskBuildInfo } from "../utils/build-info.js";
 import { checkGeminiAPIHealth } from "../executors/gemini.js";
@@ -206,7 +207,7 @@ async function sendHealthMessage(
 const RETRYABLE_HANDLERS = new Set([
   "ideas_explore", "nightly_memory", "session_harvester", "memory_embeddings", "memory_reindex", "morning_review",
   "homer_improvements", "weekly_consolidation",
-  "memory_cleanup", "content_scraper", "outcome_tracker",
+  "content_scraper", "outcome_tracker",
   "preference_updater", "idea_dedup", "idea_expiry", "nightly_code_push", "db_backup",
   "idea_synthesizer", "idea_deep_linker", "link_processor", "archive_verify", "health_check",
   "harness_auto_improve",
@@ -747,7 +748,7 @@ async function runHandler(
         );
       }
       case "weekly_consolidation": {
-        const result = await runWeeklyConsolidation(job, startedAt);
+        const result = await runWeeklyConsolidation(job, startedAt, 7, ctx.stateManager);
 
         // Lint findings are now surfaced in the nightly Memory Review batch (stale claims
         // flagged by flagClaimsStale() will be picked up by getStaleClaims() in the nightly handler)
@@ -755,17 +756,6 @@ async function runHandler(
           logger.info({ count: result.lintFindings.length }, "Lint findings flagged as stale — will appear in next nightly Memory Review");
         }
 
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          result.success ? { notificationIntent: "user_info" } : {}
-        );
-      }
-      case "memory_cleanup": {
-        const result = await runWeeklyMemoryCleanup(ctx.stateManager, job, startedAt);
         return buildResult(
           job,
           startedAt,
@@ -1109,11 +1099,27 @@ async function runHandler(
       }
       case "daemon_cleanup": {
         await cleanupScheduler.run("scheduled");
+        const cleanedRuns = ctx.stateManager.cleanupScheduledJobRunsOlderThan(60);
+        const schedules = await loadAllSchedules();
+        const activeJobIds = new Set([
+          ...getAllJobs(schedules).map((scheduledJob) => scheduledJob.id),
+          ...JOB_REGISTRY.map((entry) => entry.id),
+        ]);
+        const prunedStateRows = ctx.stateManager.pruneScheduledJobStateExcept([...activeJobIds]);
+        if (cleanedRuns > 0 || prunedStateRows.length > 0) {
+          logger.info(
+            { cleanedRuns, prunedStateRows },
+            "Daemon cleanup pruned scheduler history/state",
+          );
+        }
+        const outputParts = ["Daemon cleanup completed"];
+        if (cleanedRuns > 0) outputParts.push(`pruned ${cleanedRuns} run rows older than 60d`);
+        if (prunedStateRows.length > 0) outputParts.push(`pruned state rows: ${prunedStateRows.join(", ")}`);
         return buildResult(
           job,
           startedAt,
           true,
-          "Daemon cleanup completed",
+          outputParts.join("; "),
           undefined,
           { notificationIntent: "operational_status" }
         );
