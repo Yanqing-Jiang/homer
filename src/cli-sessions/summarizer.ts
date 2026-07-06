@@ -1,5 +1,6 @@
 import { stripSessionScaffolding, type ParsedMessage, type ParsedSession } from "./parsers.js";
 import { executeResolvedHarness } from "../harness/dispatch.js";
+import type { HarnessSelector } from "../harness/resolution/types.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -9,7 +10,11 @@ import { logger } from "../utils/logger.js";
  * - Sub-agent: skip (no summary)
  * Model/harness is controlled by the `global` harness_selection row, not pinned here.
  */
-export async function summarizeSession(session: ParsedSession, signal?: AbortSignal): Promise<string> {
+export async function summarizeSession(
+  session: ParsedSession,
+  signal?: AbortSignal,
+  explicit?: Partial<HarnessSelector> | null,
+): Promise<string> {
   const msgCount = session.messageCount;
 
   // Small sessions: template summary
@@ -19,7 +24,7 @@ export async function summarizeSession(session: ParsedSession, signal?: AbortSig
 
   // Medium/large sessions: global harness
   try {
-    return await harnessSummary(session, signal);
+    return await harnessSummary(session, signal, explicit);
   } catch (error) {
     logger.warn({ error, sessionId: session.sessionId }, "Session summary failed, falling back to template");
     return templateSummary(session);
@@ -45,7 +50,11 @@ function templateSummary(session: ParsedSession): string {
 /**
  * Global-harness summary for medium/large sessions
  */
-async function harnessSummary(session: ParsedSession, signal?: AbortSignal): Promise<string> {
+async function harnessSummary(
+  session: ParsedSession,
+  signal?: AbortSignal,
+  explicit?: Partial<HarnessSelector> | null,
+): Promise<string> {
   const targetTokens = session.messageCount > 50
     ? "250-300"
     : session.messageCount > 20
@@ -87,6 +96,7 @@ ${conversationText}`;
     prompt,
     timeoutMs: 900_000,
     signal,
+    explicit: explicit ?? undefined,
   });
 
   if (result.exitCode !== 0) {
