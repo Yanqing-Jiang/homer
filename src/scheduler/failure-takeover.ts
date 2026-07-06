@@ -7,6 +7,7 @@ import { executeScheduledJob } from "./executor.js";
 import type { RegisteredJob, JobExecutionResult } from "./types.js";
 import type { StateManager } from "../state/manager.js";
 import type { Bot } from "grammy";
+import { PATHS } from "../config/paths.js";
 
 // ============================================
 // Types
@@ -124,7 +125,7 @@ function getHandlerSource(handler: string): string | null {
   const relativePath = HANDLER_SOURCE_MAP[handler];
   if (!relativePath) return null;
 
-  const fullPath = join(process.env.HOME ?? "/Users/yj", "homer", relativePath);
+  const fullPath = join(PATHS.homerRoot, relativePath);
   if (!existsSync(fullPath)) return null;
 
   try {
@@ -138,7 +139,7 @@ function getDependencySource(handlerSource: string): string | null {
   // Check for model-swarm import
   const swarmImport = handlerSource.match(/from\s+["'].*model-swarm["']/);
   if (swarmImport) {
-    const swarmPath = join(process.env.HOME ?? "/Users/yj", "homer", "src/executors/model-swarm.ts");
+    const swarmPath = join(PATHS.homerRoot, "src/executors/model-swarm.ts");
     if (existsSync(swarmPath)) {
       try {
         return readFileSync(swarmPath, "utf-8");
@@ -149,7 +150,7 @@ function getDependencySource(handlerSource: string): string | null {
 }
 
 function getFallbackLogs(jobId: string): string {
-  const logDir = join(process.env.HOME ?? "/Users/yj", "homer", "logs", "fallback");
+  const logDir = join(PATHS.homerRoot, "logs", "fallback");
   if (!existsSync(logDir)) return "(no fallback logs)";
 
   try {

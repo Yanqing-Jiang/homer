@@ -13,6 +13,7 @@ import { processRegistry } from "./registry.js";
 import type { ProcessRecord, ProcessType } from "./registry.js";
 import { logger } from "../utils/logger.js";
 import { execFile } from "child_process";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 const CHECK_INTERVAL_MS = 30_000; // Check every 30s
 
@@ -38,6 +39,7 @@ const HARD_KILL_CEILING_MS = 45 * 60 * 1000; // 45 min
 // LLM triage circuit breaker
 const MAX_TRIAGE_PER_HOUR = 3;
 const TRIAGE_TIMEOUT_MS = 30_000; // 30s for LLM response
+const runtimePaths = getRuntimePaths();
 
 interface TriageDecision {
   action: "kill" | "extend" | "escalate";
@@ -232,7 +234,7 @@ Rules:
    */
   private callClaude(prompt: string): Promise<TriageDecision> {
     return new Promise((resolve) => {
-      const claudeBin = process.env.CLAUDE_BIN || process.env.CLAUDE_PATH || `${process.env.HOME ?? "/Users/yj"}/.local/bin/claude`;
+      const claudeBin = process.env.CLAUDE_BIN || process.env.CLAUDE_PATH || runtimePaths.claudeBinaryPath;
       const child = execFile(
         claudeBin,
         ["-p", prompt, "--output-format", "text", "-m", "sonnet"],

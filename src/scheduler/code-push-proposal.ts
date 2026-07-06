@@ -10,8 +10,9 @@ import { execSync } from "child_process";
 // @ts-ignore
 import type Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
+import { PATHS } from "../config/paths.js";
 
-export const PROJECT_DIR = "/Users/yj/homer";
+export const PROJECT_DIR = PATHS.homerRoot;
 const PROPOSAL_TTL_HOURS = 12;
 
 export interface CodePushProposal {

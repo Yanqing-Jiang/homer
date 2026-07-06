@@ -23,6 +23,7 @@ import { Scheduler } from "./scheduler/index.js";
 import { getMemoryIndexer, closeMemoryIndexer } from "./memory/indexer.js";
 import { CLIRunManager } from "./executors/cli-runner.js";
 import { runMigrations } from "./state/migrations/index.js";
+import { ensureMemoryScaffold } from "./memory/bootstrap.js";
 import { initConnectivityMonitor } from "./heartbeat/index.js";
 import { staleMapCleaner } from "./utils/stale-map-cleaner.js";
 import { processRegistry } from "./process/registry.js";
@@ -38,6 +39,7 @@ import {
   writeRuntimeBuildStamp,
 } from "./utils/build-info.js";
 import type { FastifyInstance } from "fastify";
+import type { Bot } from "grammy";
 import type { VoiceConfig } from "./voice/types.js";
 import { getRuntimePaths } from "./utils/runtime-paths.js";
 import fs from "fs";
@@ -83,6 +85,12 @@ async function main(): Promise<void> {
   // Run database migrations
   logger.info("Running database migrations...");
   runMigrations(stateManager.getDb());
+
+  try {
+    await ensureMemoryScaffold();
+  } catch (err) {
+    logger.warn({ err }, "Memory scaffold initialization failed (continuing)");
+  }
 
   // Seed internal-baseline job rows once (harness-independence cutover, B-semantics).
   // Idempotent + guarded by a marker so a switch-all is never undone by a restart.
@@ -157,8 +165,13 @@ async function main(): Promise<void> {
     logger.warn({ error }, "Failed to initialize memory indexer");
   }
 
-  // Create the bot
-  const bot = createBot(stateManager, cliRunManager);
+  // Create the bot only when Telegram credentials are configured.
+  let bot: Bot | null = null;
+  if (config.telegram.enabled) {
+    bot = createBot(stateManager, cliRunManager);
+  } else {
+    logger.warn("Telegram disabled: set TELEGRAM_BOT_TOKEN and ALLOWED_CHAT_ID to enable chat, reminders, and push notifications");
+  }
 
   // Initialize meeting manager
   const voiceConfigForMeetings: VoiceConfig = {
@@ -169,7 +182,7 @@ async function main(): Promise<void> {
   const meetingManager = new MeetingManager({
     stateManager,
     voiceConfig: voiceConfigForMeetings,
-    bot,
+    bot: bot ?? undefined,
   });
   await meetingManager.initialize();
   setMeetingManager(meetingManager);
@@ -189,9 +202,9 @@ async function main(): Promise<void> {
 
   // Initialize connectivity monitor (no self-ticking timer — called by health check job)
   const connectivityMonitor = initConnectivityMonitor({
-    bot,
-    chatId: config.telegram.allowedChatId,
-    alertOnFailure: true,
+    bot: bot ?? undefined,
+    chatId: config.telegram.enabled ? config.telegram.allowedChatId : undefined,
+    alertOnFailure: config.telegram.enabled,
   });
   // One-time initial connectivity check after startup
   connectivityMonitor.checkAll().catch((err) => {
@@ -302,7 +315,9 @@ async function main(): Promise<void> {
   });
   registerShutdownTask(async () => {
     logger.info("Phase 1: Stopping bot and telephony server...");
-    await bot.stop();
+    if (bot) {
+      await bot.stop();
+    }
     if (telephonyServer) {
       await stopTelephonyServer(telephonyServer);
     }
@@ -393,7 +408,11 @@ async function main(): Promise<void> {
     try { fs.unlinkSync(DRAIN_SENTINEL); } catch { /* already gone = fine */ }
   });
 
-  await startBot(bot);
+  if (bot) {
+    await startBot(bot);
+  } else {
+    logger.info("Homer daemon running without Telegram polling");
+  }
 }
 
 main().catch((error) => {

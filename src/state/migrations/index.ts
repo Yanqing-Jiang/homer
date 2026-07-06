@@ -1,10 +1,11 @@
-import { readFileSync, readdirSync } from "fs";
+import { readFileSync, readdirSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 // @ts-ignore
 // @ts-ignore
 import type Database from "better-sqlite3";
 import { logger } from "../../utils/logger.js";
+import { getRuntimePaths } from "../../utils/runtime-paths.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -18,6 +19,13 @@ const IGNORABLE_ERRORS = [
   "already exists",
   "table already exists",
 ];
+
+const ARCHIVED_JOB_HUNT_MIGRATIONS = new Set([
+  "022_job_hunt_lifecycle.sql",
+  "024_applications_updated_at.sql",
+  "025_job_hunt_scoring_fields.sql",
+  "033_applications_retry.sql",
+]);
 
 function isIgnorableError(msg: string): boolean {
   const lower = msg.toLowerCase();
@@ -89,6 +97,13 @@ function execStatementsLenient(db: Database.Database, sql: string): number {
   return skipped;
 }
 
+function tableExists(db: Database.Database, tableName: string): boolean {
+  const row = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(tableName);
+  return row !== undefined;
+}
+
 /**
  * Run all pending migrations
  */
@@ -119,10 +134,21 @@ export function runMigrations(db: Database.Database): void {
       continue;
     }
 
+    if (ARCHIVED_JOB_HUNT_MIGRATIONS.has(file) && !tableExists(db, "applications")) {
+      db.prepare("INSERT INTO _migrations (name) VALUES (?)").run(file);
+      logger.info(
+        { migration: file },
+        "Skipping archived job-hunt migration because applications table is absent",
+      );
+      continue;
+    }
+
     // Pre-migration backup for pipeline_dirty migration
     if (file === "052_pipeline_dirty.sql") {
       try {
-        const backupPath = join(dirname(__dirname), "..", "..", "data", `homer-pre-052-${Date.now()}.db`);
+        const backupDir = getRuntimePaths().homerDataDir;
+        mkdirSync(backupDir, { recursive: true });
+        const backupPath = join(backupDir, `homer-pre-052-${Date.now()}.db`);
         db.exec(`VACUUM INTO '${backupPath}'`);
         logger.info({ backupPath }, "Created pre-052 backup");
       } catch (backupErr) {
@@ -132,7 +158,18 @@ export function runMigrations(db: Database.Database): void {
 
     logger.info({ migration: file }, "Running migration");
 
-    const sql = readFileSync(join(__dirname, file), "utf-8");
+    let sql = readFileSync(join(__dirname, file), "utf-8");
+
+    if (file === "085_remove_life_context.sql" && !tableExists(db, "swarm_handoffs")) {
+      sql = sql.replace(
+        /^DELETE FROM swarm_handoffs\s+WHERE lane = 'life';$/m,
+        "-- skipped fresh-install cleanup: swarm_handoffs table is absent;",
+      );
+      logger.info(
+        { migration: file, table: "swarm_handoffs" },
+        "Skipping retired table cleanup because table is absent",
+      );
+    }
 
     try {
       // Try running the full migration in a transaction (fast path).

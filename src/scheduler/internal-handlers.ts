@@ -34,7 +34,7 @@ import { runInternalJobHarness } from "./executor.js";
 
 interface InternalJobContext {
   stateManager: StateManager;
-  bot: Bot;
+  bot: Bot | null;
   chatId: number;
   jobRunId?: number;
   /** AbortSignal from the scheduler hang-watchdog. Pass to LLM calls and batch loops. */
@@ -164,6 +164,7 @@ async function sendHealthMessage(
   options: { intent: NotificationIntent; sourceId: string }
 ): Promise<boolean> {
   const formattedMessage = formatScheduledTelegramHtml(message);
+  const bot = ctx.bot;
   const result = await routeTelegramNotification({
     db: ctx.stateManager.getDb(),
     sourceType: "scheduler_job",
@@ -172,13 +173,13 @@ async function sendHealthMessage(
     intent: options.intent,
     title: "Health Check",
     messageText: formattedMessage,
-    deliver: async () => {
+    deliver: bot ? async () => {
       let lastError: unknown;
 
       for (let attempt = 1; attempt <= HEALTH_ALERT_SEND_ATTEMPTS; attempt++) {
         try {
           return await sendChunkedTelegramMessage({
-            bot: ctx.bot,
+            bot,
             chatId: ctx.chatId,
             message: formattedMessage,
             parseMode: "HTML",
@@ -197,7 +198,7 @@ async function sendHealthMessage(
       throw lastError instanceof Error
         ? lastError
         : new Error("Failed to send health check notification");
-    },
+    } : undefined,
   });
 
   return result.decision === "sent";
@@ -635,6 +636,16 @@ async function runHandler(
   try {
     switch (job.config.handler) {
       case "ideas_review": {
+        if (!ctx.bot) {
+          return buildResult(
+            job,
+            startedAt,
+            true,
+            "Telegram disabled; idea review skipped",
+            undefined,
+            { notificationIntent: "operational_status" }
+          );
+        }
         const count = await sendBatchIdeasForReview(ctx.bot, ctx.chatId);
         return buildResult(
           job,
@@ -653,6 +664,16 @@ async function runHandler(
         );
       }
       case "overnight_review": {
+        if (!ctx.bot) {
+          return buildResult(
+            job,
+            startedAt,
+            true,
+            "Telegram disabled; overnight review skipped",
+            undefined,
+            { notificationIntent: "operational_status" }
+          );
+        }
         const count = await presentOvernightSummaries(ctx.bot, ctx.stateManager, ctx.chatId);
         const output = count > 0
           ? `Presented ${count} overnight task summaries`
@@ -732,9 +753,9 @@ async function runHandler(
             intent: "decision_request",
             title: "Idea auto-expiry review",
             messageText,
-            deliver: async () => {
+            deliver: ctx.bot ? async () => {
               return ctx.bot!.api.sendMessage(ctx.chatId!, messageText);
-            },
+            } : undefined,
           });
         }
 
@@ -861,6 +882,16 @@ async function runHandler(
         );
       }
       case "morning_review": {
+        if (!ctx.bot) {
+          return buildResult(
+            job,
+            startedAt,
+            true,
+            "Telegram disabled; morning review skipped",
+            undefined,
+            { notificationIntent: "operational_status" }
+          );
+        }
         // Consolidated 9 AM morning review — memory candidates, ideas, cleanup proposals, skills
         let parts: string[] = [];
 
@@ -923,7 +954,7 @@ async function runHandler(
 
       case "outcome_tracker": {
         const { runOutcomeTracker } = await import("./jobs/outcome-tracker.js");
-        const result = await runOutcomeTracker(ctx.stateManager.getDb(), ctx.bot, ctx.chatId, ctx.signal, job, startedAt);
+        const result = await runOutcomeTracker(ctx.stateManager.getDb(), ctx.bot ?? undefined, ctx.chatId, ctx.signal, job, startedAt);
         return buildResult(
           job,
           startedAt,
@@ -959,7 +990,7 @@ async function runHandler(
       case "nightly_code_push": {
         const { runNightlyCodePush } = await import("./jobs/nightly-code-push.js");
         const result = await runNightlyCodePush({
-          bot: ctx.bot,
+          bot: ctx.bot ?? undefined,
           chatId: ctx.chatId,
           stateManager: ctx.stateManager,
           job,
@@ -1186,6 +1217,18 @@ async function runHandler(
           );
         }
         const pending = reminderManager.getPendingDue();
+        if (!ctx.bot) {
+          return buildResult(
+            job,
+            startedAt,
+            true,
+            pending.length > 0
+              ? `Telegram disabled; ${pending.length} due reminder(s) left pending`
+              : "No due reminders",
+            undefined,
+            { notificationIntent: "operational_status" }
+          );
+        }
         let sent = 0;
         const failures: string[] = [];
         for (const reminder of pending) {

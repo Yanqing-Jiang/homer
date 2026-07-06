@@ -20,7 +20,7 @@ import { escapeHtml } from "../utils/telegram-format.js";
  * Uses HTML formatting for better compatibility
  */
 export async function notifyJobResult(
-  bot: Bot,
+  bot: Bot | null,
   chatId: number,
   db: Database.Database,
   result: JobExecutionResult,
@@ -81,13 +81,13 @@ export async function notifyJobResult(
     intent,
     title: job.config.name,
     messageText: message,
-    deliver: async () => sendChunkedTelegramMessage({
+      deliver: bot ? async () => sendChunkedTelegramMessage({
       bot,
       chatId,
       message,
       parseMode: "HTML",
       enableLinkPreview: isSuccess,
-    }),
+    }) : undefined,
   });
 }
 

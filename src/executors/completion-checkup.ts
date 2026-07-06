@@ -3,6 +3,9 @@ import { executeOpenCodeCLI } from "./opencode-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import type { ExecutorKind } from "./fallback-orchestrator.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
+
+const runtimePaths = getRuntimePaths();
 
 export interface CheckupResult {
   complete: boolean;
@@ -72,14 +75,14 @@ async function runCheckupWithExecutor(
     }
     if (executor === "claude") {
       const res = await executeClaudeCommand(prompt, {
-        cwd: process.env.HOME ?? "/Users/yj",
+        cwd: runtimePaths.homeDir,
         model: "sonnet",
       });
       return res.exitCode === 0 ? res.output : null;
     }
     if (executor === "codex") {
       const res = await executeCodexCLI(prompt, {
-        cwd: process.env.HOME ?? "/Users/yj",
+        cwd: runtimePaths.homeDir,
         timeout: 300000,
       });
       return res.exitCode === 0 ? res.output : null;
@@ -87,7 +90,7 @@ async function runCheckupWithExecutor(
     const res = await executeKimiCLI(prompt, "", {
       timeout: 300000,
       yolo: true,
-      workDir: process.env.HOME ?? "/Users/yj",
+      workDir: runtimePaths.homeDir,
     });
     return res.exitCode === 0 ? res.output : null;
   } catch {

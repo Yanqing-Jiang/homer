@@ -83,7 +83,7 @@ function countInternalHandlers(handlersContent: string): number {
 function getSqliteTableCount(): number {
   try {
     const result = execSync(
-      `sqlite3 "${HOMER_DIR}/data/homer.db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table';"`,
+      `sqlite3 "${PATHS.db}" "SELECT COUNT(*) FROM sqlite_master WHERE type='table';"`,
       { encoding: "utf-8", timeout: 5_000 }
     ).trim();
     return parseInt(result, 10) || 0;
@@ -114,8 +114,8 @@ export async function runArchitectureUpdater(): Promise<{
       ? readFileSync(ARCH_FILE, "utf-8")
       : "(not found)";
 
-    const scheduleContent = existsSync("/Users/yj/memory/schedule.json")
-      ? readFileSync("/Users/yj/memory/schedule.json", "utf-8")
+    const scheduleContent = existsSync(PATHS.schedule)
+      ? readFileSync(PATHS.schedule, "utf-8")
       : "{}";
 
     const handlersContent = existsSync(join(HOMER_DIR, "src/scheduler/internal-handlers.ts"))

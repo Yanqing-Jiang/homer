@@ -1,4 +1,6 @@
 import { PATHS } from "../config/paths.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
+import path from "path";
 import type { NotificationIntent } from "../notifications/types.js";
 
 /**
@@ -106,12 +108,16 @@ export type ProgressCallback = (event: ProgressEvent) => void;
 /**
  * Schedule locations for loading
  */
+const runtimePaths = getRuntimePaths();
+const WORK_ROOT = process.env.WORK_ROOT ?? path.join(runtimePaths.homeDir, "work");
+const TRADING_ROOT = process.env.TRADING_CWD ?? path.join(runtimePaths.homeDir, "trading");
+
 export const SCHEDULE_LOCATIONS = [
-  { path: "/Users/yj/work/schedule.json", lane: "work" as const },
+  { path: process.env.WORK_SCHEDULE_FILE ?? path.join(WORK_ROOT, "schedule.json"), lane: "work" as const },
   { path: PATHS.schedule, lane: "default" as const },
   ...(process.env.TRADING_SCHEDULE_ENABLED === "1"
     ? [{
-        path: process.env.TRADING_SCHEDULE_FILE ?? "/Users/yj/trading/config/schedule.json",
+        path: process.env.TRADING_SCHEDULE_FILE ?? path.join(TRADING_ROOT, "config", "schedule.json"),
         lane: "trading" as const,
       }]
     : []),
@@ -121,9 +127,9 @@ export const SCHEDULE_LOCATIONS = [
  * Lane to cwd mapping
  */
 export const LANE_CWD: Record<string, string> = {
-  work: "/Users/yj/work",
-  default: "/Users/yj",
-  trading: process.env.TRADING_CWD ?? "/Users/yj/trading",
+  work: WORK_ROOT,
+  default: runtimePaths.homeDir,
+  trading: TRADING_ROOT,
 };
 
 /**

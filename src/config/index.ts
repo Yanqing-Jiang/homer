@@ -22,8 +22,9 @@ const runtimePaths = getRuntimePaths();
 
 const configSchema = z.object({
   telegram: z.object({
-    botToken: z.string().min(1, "TELEGRAM_BOT_TOKEN is required"),
-    allowedChatId: z.number().int().positive("ALLOWED_CHAT_ID must be a positive integer"),
+    enabled: z.boolean().default(false),
+    botToken: z.string().default(""),
+    allowedChatId: z.number().int().nonnegative().default(0),
   }),
   session: z.object({
     ttlHours: z.number().int().positive().default(8),
@@ -80,12 +81,23 @@ const configSchema = z.object({
 
 export type Config = z.infer<typeof configSchema>;
 
+function parseInteger(rawValue: string | undefined, fallback: number): number {
+  const parsed = parseInt(rawValue ?? "", 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function loadConfig(): Config {
   const runtimePaths = getRuntimePaths();
+  const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN?.trim() ?? "";
+  const allowedChatId = parseInteger(
+    process.env.ALLOWED_CHAT_ID ?? process.env.TELEGRAM_CHAT_ID,
+    0,
+  );
   const rawConfig = {
     telegram: {
-      botToken: process.env.TELEGRAM_BOT_TOKEN ?? "",
-      allowedChatId: parseInt(process.env.ALLOWED_CHAT_ID ?? "0", 10),
+      enabled: telegramBotToken.length > 0 && allowedChatId > 0,
+      botToken: telegramBotToken,
+      allowedChatId,
     },
     session: {
       ttlHours: parseInt(process.env.SESSION_TTL_HOURS ?? "8", 10),

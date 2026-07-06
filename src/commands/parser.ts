@@ -8,8 +8,9 @@
  */
 
 import { getCommand, isDeprecated, type ExecutorType, type CommandDefinition } from "./registry.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 
-const HOME = process.env.HOME || "/Users/yj";
+const HOME = getRuntimePaths().homeDir;
 
 export interface ParsedCommand {
   /**

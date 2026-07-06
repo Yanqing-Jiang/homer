@@ -8,6 +8,8 @@ import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { buildConversationContext, CONTEXT_DEFAULTS } from "./context-builder.js";
 import type { StateManager } from "../state/manager.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
+import { PATHS } from "../config/paths.js";
 
 export type ExecutorKind = "claude" | "gemini" | "codex" | "kimi" | "opencode";
 export type ErrorType = "timeout" | "rate_limit" | "session_timeout" | "auth" | "unknown";
@@ -33,6 +35,7 @@ interface HealthState {
 }
 
 const HEALTH: Map<ExecutorKind, HealthState> = new Map();
+const runtimePaths = getRuntimePaths();
 
 export interface JobContext {
   id: string;
@@ -180,7 +183,7 @@ export async function writeLogBundle(
   failure: FailureContext,
   attempts: AttemptInfo[]
 ): Promise<string> {
-  const baseDir = join(process.env.HOME ?? "/Users/yj", "homer", "logs", "fallback");
+  const baseDir = join(PATHS.homerRoot, "logs", "fallback");
   await mkdir(baseDir, { recursive: true });
   const filename = `${job.id}-${Date.now()}-${failure.executor}.log`;
   const path = join(baseDir, filename);
@@ -272,7 +275,7 @@ async function runDiagnosis(
   try {
     if (executor === "claude") {
       const res = await executeClaudeCommand(prompt, {
-        cwd: process.env.HOME ?? "/Users/yj",
+        cwd: runtimePaths.homeDir,
         model: "sonnet",
       });
       return res.exitCode === 0 ? res.output : null;
@@ -288,7 +291,7 @@ async function runDiagnosis(
     }
     if (executor === "codex") {
       const res = await executeCodexCLI(prompt, {
-        cwd: process.env.HOME ?? "/Users/yj",
+        cwd: runtimePaths.homeDir,
         timeout: 300000,
       });
       return res.exitCode === 0 ? res.output : null;
@@ -296,7 +299,7 @@ async function runDiagnosis(
     const res = await executeKimiCLI(prompt, "", {
       timeout: 300000,
       yolo: true,
-      workDir: process.env.HOME ?? "/Users/yj",
+      workDir: runtimePaths.homeDir,
     });
     return res.exitCode === 0 ? res.output : null;
   } catch (error) {

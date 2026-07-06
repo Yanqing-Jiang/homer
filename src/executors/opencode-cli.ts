@@ -7,6 +7,7 @@ import { executeKimiCLI } from "./kimi-cli.js";
 import { executeClaudeCommand } from "./claude.js";
 import { executeGeminiCLIDirect, GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { processRegistry } from "../process/registry.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 // ============================================
 // TYPES
@@ -166,6 +167,7 @@ export async function executeOpenCodeCLI(
     resume,
     yolo = false,
   } = options;
+  const runtimeHome = getRuntimePaths().homeDir;
 
   // Normalize model name: callers may pass "gemini-3-flash-preview" without provider prefix.
   // When model is undefined, we omit -m entirely so opencode uses its own config default.
@@ -195,7 +197,7 @@ export async function executeOpenCodeCLI(
       model: geminiModel,
       timeout,
       signal,
-      cwd: cwd || (browserOnly ? "/tmp/homer-scrape" : process.env.HOME || "/Users/yj"),
+      cwd: cwd || (browserOnly ? "/tmp/homer-scrape" : runtimeHome),
       role: geminiRole,
       runId,
     });
@@ -217,7 +219,7 @@ export async function executeOpenCodeCLI(
   logger.debug({ model, promptLength: effectivePrompt.length, contextLength: context.length, researchOnly }, "Executing OpenCode CLI");
 
   // Sandbox browserOnly agents to /tmp to prevent file writes to home directory
-  const effectiveCwd = cwd || (browserOnly ? "/tmp/homer-scrape" : (process.env.HOME || "/Users/yj"));
+  const effectiveCwd = cwd || (browserOnly ? "/tmp/homer-scrape" : runtimeHome);
 
   return new Promise((resolve) => {
     // Build the full message: context + prompt combined via stdin if context exists
@@ -547,7 +549,7 @@ export async function executeOpenCodeWithFallback(
     try {
       const fullPrompt = context ? `${context}\n\n---\n\n${prompt}` : prompt;
       const sonnetResult = await executeClaudeCommand(fullPrompt, {
-        cwd: options.cwd ?? process.env.HOME ?? "/Users/yj",
+        cwd: options.cwd ?? getRuntimePaths().homeDir,
         model: "sonnet",
         timeout: options.timeout,
         signal: options.signal,
@@ -601,6 +603,7 @@ export async function* streamOpenCodeCLI(
     model = `google-aistudio/${GEMINI_CLI_FLASH_MODEL}`,
     cwd,
   } = options;
+  const runtimeHome = getRuntimePaths().homeDir;
 
   const fullMessage = context
     ? `${context}\n\n---\n\n${prompt}`
@@ -615,7 +618,7 @@ export async function* streamOpenCodeCLI(
 
   const child = spawn("opencode", args, {
     stdio: ["pipe", "pipe", "pipe"],
-    cwd: cwd || process.env.HOME || "/Users/yj",
+    cwd: cwd || runtimeHome,
     env: { ...process.env },
   });
 
