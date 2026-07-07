@@ -1,3 +1,10 @@
+-- OWNERSHIP: memory_entries, memory_entry_events, weekly_audit_sessions, and
+-- weekly_audit_session_entries are OWNED BY homer-web src/memory/canonical-audit.ts
+-- (the /api/review/canonical "Existing" tab) — do NOT drop them from homer;
+-- coordinate with homer-web first. Migration 111 wrongly dropped them as "dead"; this
+-- migration (112) restored them. Any future homer migration that touches these tables
+-- must be reviewed against homer-web ownership before landing.
+--
 -- Migration 111 misclassified live memory audit tables as dead; homer-web's canonical review API (/api/review/canonical) still depends on them for the Existing tab. This migration restores schema only for fresh DB replay; live data was replayed from archive/dead-memory-tables-2026-07-06.sql on 2026-07-06.
 
 CREATE TABLE IF NOT EXISTS memory_entries (

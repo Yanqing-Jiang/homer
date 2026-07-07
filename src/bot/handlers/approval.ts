@@ -874,12 +874,6 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
     }
   });
 
-  // Handle promote button on PACKETS — promotes to idea
-  // Legacy: packet promote — no longer rendered, kept for old messages
-  bot.callbackQuery(/^a:p:([^:]+):promote$/, async (ctx) => {
-    await ctx.answerCallbackQuery("This button is no longer active. Use Talk or Skip.");
-  });
-
   // Legacy: packet snooze — no longer rendered, kept for old messages
   bot.callbackQuery(/^a:p:([^:]+):snooze$/, async (ctx) => {
     await ctx.answerCallbackQuery("This button is no longer active. Use Talk or Skip.");
