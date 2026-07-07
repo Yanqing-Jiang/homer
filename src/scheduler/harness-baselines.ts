@@ -105,14 +105,6 @@ export const INTERNAL_JOB_HARNESS_BASELINES = {
       },
     },
   },
-  "overnight-youtube": {
-    executor: "opencode",
-    model: OPENCODE_FLASH_MODEL,
-    stages: {
-      classify: youtubeClassifyStage,
-      analyze: youtubeAnalyzeStage,
-    },
-  },
   "link-processor": {
     executor: "opencode",
     model: null,
@@ -133,24 +125,6 @@ export const INTERNAL_JOB_HARNESS_BASELINES = {
     stages: {
       // Single batched judgement (triage+synthesize+critique+enrich merged).
       harvest: codexStage(TMP_DIR, IDEA_STEP_TIMEOUT, "medium"),
-    },
-  },
-  "idea-dedup": {
-    executor: "opencode",
-    model: OPENCODE_FLASH_MODEL,
-    stages: {
-      dedupe: {
-        executor: "opencode",
-        model: OPENCODE_FLASH_MODEL,
-        cwdOverride: HOME_DIR,
-        timeoutOverride: 300_000,
-        executorOptions: {
-          opencode: {
-            forceOpenCode: true,
-            researchOnly: false,
-          },
-        },
-      },
     },
   },
   "nightly-code-push": {

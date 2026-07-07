@@ -15,8 +15,8 @@
  *  - Seed-once guard: a marker row in harness_selection_meta. The predicate is marker-EXISTENCE,
  *    so once seeded (or once switch-all has run), a daemon restart can never re-seed cleared rows.
  *
- * DEBT: per-stage harness divergence (overnight-youtube analyze=claude/sonnet under an opencode
- * job, link-processor youtube_analyze) is NOT modeled as job_stage rows here — it is currently
+ * DEBT: per-stage harness divergence (e.g. link-processor youtube_analyze on a different harness
+ * than the job pin) is NOT modeled as job_stage rows here — it is currently
  * dormant because every multi-stage job is pinned at the job level (all resolve to the job row).
  * Upgrade to a job_stage scope tier when a multi-stage job needs a stage on a different harness
  * than its job pin while NOT being job-level-pinned.

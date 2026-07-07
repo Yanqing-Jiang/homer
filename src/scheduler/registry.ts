@@ -69,7 +69,6 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
   { id: "nightly-code-push", name: "Nightly Code Push", kind: "internal", handler: "nightly_code_push", handlerFile: "nightly-code-push", expectedInSchedule: true, note: "preview-before-act (Phase 1.4)" },
   { id: "nightly-memory", name: "Nightly Memory", kind: "internal", handler: "nightly_memory", handlerFile: "nightly-memory", expectedInSchedule: true },
   { id: "outcome-tracker", name: "Outcome Tracker", kind: "internal", handler: "outcome_tracker", handlerFile: "outcome-tracker", expectedInSchedule: true },
-  { id: "overnight-youtube", name: "Overnight YouTube", kind: "internal", handler: "overnight_youtube", handlerFile: "overnight-youtube", expectedInSchedule: true },
   { id: "session-harvester", name: "Session Harvester", kind: "internal", handler: "session_harvester", handlerFile: "session-harvester", expectedInSchedule: true },
   { id: "telegram-registry-cleanup", name: "Telegram Registry Cleanup", kind: "internal", handler: "telegram_registry_cleanup", handlerFile: "telegram-registry-cleanup", expectedInSchedule: true, note: "prunes expired rows from telegram_messages replyable registry" },
 ];
@@ -90,7 +89,6 @@ const SCHEDULED_INLINE_ONLY: JobEntry[] = [
   { id: "daemon-cleanup", name: "Daemon Cleanup", kind: "internal", handler: "daemon_cleanup", expectedInSchedule: true },
   { id: "docker-restart-weekly", name: "Weekly Docker Desktop Restart", kind: "internal", handler: "docker_restart", expectedInSchedule: true, note: "Tue 5 AM — restarts Docker Desktop to reclaim leaked engine memory" },
   { id: "health-check", name: "Health Check", kind: "internal", handler: "health_check", expectedInSchedule: true },
-  { id: "idea-dedup", name: "Idea Dedup", kind: "internal", handler: "idea_dedup", expectedInSchedule: true },
   { id: "idea-expiry", name: "Idea Auto-Expiry", kind: "internal", handler: "idea_expiry", expectedInSchedule: true },
   { id: "idea-ingest", name: "Idea Ingest", kind: "internal", handler: "idea_ingest", expectedInSchedule: true },
   { id: "morning-review", name: "Morning Review", kind: "internal", handler: "morning_review", expectedInSchedule: true },

@@ -11,7 +11,7 @@
  *    auto-emit an approved `lesson` claim with title + notes as content.
  *    Dedup key: `source_url = todo:{id}:done`. The lesson flows through
  *    knowledge_claims_fts automatically and is picked up by the next
- *    memory_generate_embeddings run for vector recall.
+ *    memory_reindex embeddings pass for vector recall.
  */
 
 // @ts-ignore
