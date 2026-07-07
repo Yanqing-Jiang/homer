@@ -5,7 +5,7 @@ import type { StateManager } from "../state/manager.js";
 import { writeInternalTrace } from "../executors/trace-writer.js";
 import { sendBatchIdeasForReview } from "../bot/handlers/approval.js";
 import { ingestIdeasFromLegacy } from "../ideas/ingest.js";
-import { expireStaleIdeas } from "../ideas/dedup.js";
+import { expireStaleIdeas, expireStalePackets } from "../ideas/dedup.js";
 import { runWeeklyConsolidation } from "./jobs/weekly-consolidation.js";
 import { runMigrations } from "../state/migrations/index.js";
 import { logger } from "../utils/logger.js";
@@ -654,7 +654,9 @@ async function runHandler(
         );
       }
       case "idea_expiry": {
-        const result = expireStaleIdeas(ctx.stateManager.getDb(), 70);
+        const db = ctx.stateManager.getDb();
+        const result = expireStaleIdeas(db, 70);
+        const packetResult = expireStalePackets(db, 70);
 
         // High-volume rescue alert: >5 archives in one run gets a Telegram with row IDs.
         // <=5 is silent — the run log is enough. Honesty contract: cite IDs, not just titles.
@@ -672,7 +674,7 @@ async function runHandler(
             `${lines}${overflow}`;
 
           await routeTelegramNotification({
-            db: ctx.stateManager.getDb(),
+            db,
             sourceType: "scheduler_job",
             sourceId: job.config.id,
             jobRunId: ctx.jobRunId,
@@ -685,11 +687,39 @@ async function runHandler(
           });
         }
 
+        // Same rescue alert for packets: >5 review-stage packets archived in one run.
+        if (packetResult.archived.length > 5 && ctx.bot && ctx.chatId) {
+          const visible = packetResult.archived.slice(0, 25);
+          const lines = visible
+            .map((packet) => `- ${packet.id}: ${packet.title ?? "(untitled)"}`)
+            .join("\n");
+          const overflow = packetResult.archived.length > visible.length
+            ? `\n…and ${packetResult.archived.length - visible.length} more.`
+            : "";
+          const messageText =
+            `Packet auto-expiry archived ${packetResult.archived.length} source packets (>70d in review).\n` +
+            `Reversible: set status back to review to revive.\n\n` +
+            `${lines}${overflow}`;
+
+          await routeTelegramNotification({
+            db,
+            sourceType: "scheduler_job",
+            sourceId: job.config.id,
+            jobRunId: ctx.jobRunId,
+            intent: "decision_request",
+            title: "Packet auto-expiry review",
+            messageText,
+            deliver: ctx.bot ? async () => {
+              return ctx.bot!.api.sendMessage(ctx.chatId!, messageText);
+            } : undefined,
+          });
+        }
+
         return buildResult(
           job,
           startedAt,
           true,
-          result.output,
+          `${result.output} ${packetResult.output}`,
           undefined,
           { notificationIntent: "operational_status" }
         );
@@ -821,7 +851,7 @@ async function runHandler(
         // Consolidated 9 AM morning review — memory candidates, ideas, cleanup proposals, skills
         let parts: string[] = [];
 
-        // 1. Send morning review summary (memory + cleanup + skills + health)
+        // 1. Send morning review summary (memory + cleanup + skills)
         const { sendMorningReview } = await import("../bot/handlers/morning-review.js");
         let morningReviewSent = false;
         let morningReviewError: string | undefined;
