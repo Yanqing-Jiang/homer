@@ -4,7 +4,6 @@ import { DEFAULT_JOB_TIMEOUT } from "./types.js";
 import type { StateManager } from "../state/manager.js";
 import { writeInternalTrace } from "../executors/trace-writer.js";
 import { sendBatchIdeasForReview } from "../bot/handlers/approval.js";
-import { presentOvernightSummaries } from "../bot/handlers/overnight.js";
 import { ingestIdeasFromLegacy } from "../ideas/ingest.js";
 import { dedupeIdeasDir, expireStaleIdeas } from "../ideas/dedup.js";
 import { runWeeklyConsolidation } from "./jobs/weekly-consolidation.js";
@@ -210,7 +209,7 @@ const RETRYABLE_HANDLERS = new Set([
   "weekly_consolidation",
   "content_scraper", "outcome_tracker",
   "preference_updater", "idea_dedup", "idea_expiry", "nightly_code_push", "db_backup",
-  "idea_synthesizer", "idea_deep_linker", "link_processor", "archive_verify", "health_check",
+  "idea_synthesizer", "link_processor", "archive_verify", "health_check",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
   "candidate_expiry",
   "docker_restart",
@@ -635,65 +634,6 @@ async function runHandler(
 ): Promise<JobExecutionResult> {
   try {
     switch (job.config.handler) {
-      case "ideas_review": {
-        if (!ctx.bot) {
-          return buildResult(
-            job,
-            startedAt,
-            true,
-            "Telegram disabled; idea review skipped",
-            undefined,
-            { notificationIntent: "operational_status" }
-          );
-        }
-        const count = await sendBatchIdeasForReview(ctx.bot, ctx.chatId);
-        return buildResult(
-          job,
-          startedAt,
-          true,
-          count > 0 ? `Sent ${count} ideas for review` : "No new ideas to review",
-          undefined,
-          count > 0
-            ? {
-                notificationIntent: "decision_request",
-                sideEffectDelivered: true,
-              }
-            : {
-                notificationIntent: "operational_status",
-              }
-        );
-      }
-      case "overnight_review": {
-        if (!ctx.bot) {
-          return buildResult(
-            job,
-            startedAt,
-            true,
-            "Telegram disabled; overnight review skipped",
-            undefined,
-            { notificationIntent: "operational_status" }
-          );
-        }
-        const count = await presentOvernightSummaries(ctx.bot, ctx.stateManager, ctx.chatId);
-        const output = count > 0
-          ? `Presented ${count} overnight task summaries`
-          : "No overnight tasks ready for review";
-        return buildResult(
-          job,
-          startedAt,
-          true,
-          output,
-          undefined,
-          count > 0
-            ? {
-                notificationIntent: "decision_request",
-                sideEffectDelivered: true,
-              }
-            : {
-                notificationIntent: "operational_status",
-              }
-        );
-      }
       case "idea_ingest": {
         const result = await ingestIdeasFromLegacy(ctx.stateManager.getDb());
         const parts: string[] = [];
@@ -1040,10 +980,6 @@ async function runHandler(
           result.error,
           result.success ? { notificationIntent: "operational_status" } : {}
         );
-      }
-      case "idea_deep_linker": {
-        // Deep-linker removed — its work is now absorbed into idea-synthesizer v2 pipeline
-        return buildResult(job, startedAt, true, "Deep-linker disabled: absorbed into synthesizer v2 pipeline", "");
       }
       case "link_processor": {
         const { runLinkProcessor } = await import("./jobs/link-processor.js");

@@ -92,8 +92,6 @@ const HANDLER_SOURCE_MAP: Record<string, string> = {
   weekly_consolidation: "src/scheduler/jobs/weekly-consolidation.ts",
   idea_ingest: "src/ideas/ingest.ts",
   idea_dedup: "src/ideas/dedup.ts",
-  ideas_review: "src/bot/handlers/approval.ts",
-  overnight_review: "src/bot/handlers/overnight.ts",
   outcome_tracker: "src/scheduler/jobs/outcome-tracker.ts",
   preference_updater: "src/scheduler/jobs/preference-updater.ts",
   nightly_code_push: "src/scheduler/jobs/nightly-code-push.ts",
