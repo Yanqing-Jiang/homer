@@ -440,8 +440,6 @@ export class Scheduler {
     "idea-ingest": ["idea-synthesizer"],
     "ideas-explore": ["idea-synthesizer"],
     "content-scraper": ["idea-synthesizer"],
-    "idea-synthesizer": ["idea-dedup"],
-    "outcome-tracker": ["preference-updater"],
   };
 
   // System jobs — internal daemon tasks registered at boot and on hot reload

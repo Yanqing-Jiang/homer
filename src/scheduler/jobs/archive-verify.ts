@@ -120,14 +120,14 @@ export async function runArchiveVerify(db: Database.Database): Promise<{
       results.push({ check: "DB backup", status: "warn", detail: `Check failed: ${err}` });
     }
 
-    // 6. Job artifacts for recent synthesizer/improvements runs
+    // 6. Job artifacts for recent synthesizer runs
     try {
       const hasArtifactsTable = db.prepare(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_artifacts'"
       ).get();
 
       if (hasArtifactsTable) {
-        for (const jobName of ["idea-synthesizer", "homer-improvements"]) {
+        for (const jobName of ["idea-synthesizer"]) {
           const recentRuns = db.prepare(`
             SELECT id FROM scheduled_job_runs
             WHERE job_id = ? AND success = 1

@@ -107,7 +107,7 @@ function main() {
     });
     tx();
     console.log(`Inserted ${prepared.length} lesson claims.`);
-    console.log(`Next: run memory_generate_embeddings to vectorize new rows.`);
+    console.log(`Next: run memory_reindex with embeddings:true to vectorize new rows.`);
   } else {
     console.log(`Dry-run complete. Re-run with --apply to insert.`);
   }

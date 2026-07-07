@@ -5,7 +5,7 @@ import type { StateManager } from "../state/manager.js";
 import { writeInternalTrace } from "../executors/trace-writer.js";
 import { sendBatchIdeasForReview } from "../bot/handlers/approval.js";
 import { ingestIdeasFromLegacy } from "../ideas/ingest.js";
-import { dedupeIdeasDir, expireStaleIdeas } from "../ideas/dedup.js";
+import { expireStaleIdeas } from "../ideas/dedup.js";
 import { runWeeklyConsolidation } from "./jobs/weekly-consolidation.js";
 import { runMigrations } from "../state/migrations/index.js";
 import { logger } from "../utils/logger.js";
@@ -208,7 +208,7 @@ const RETRYABLE_HANDLERS = new Set([
   "ideas_explore", "nightly_memory", "session_harvester", "memory_embeddings", "memory_reindex", "morning_review",
   "weekly_consolidation",
   "content_scraper", "outcome_tracker",
-  "preference_updater", "idea_dedup", "idea_expiry", "nightly_code_push", "db_backup",
+  "preference_updater", "idea_expiry", "nightly_code_push", "db_backup",
   "idea_synthesizer", "link_processor", "archive_verify", "health_check",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
   "candidate_expiry",
@@ -653,20 +653,6 @@ async function runHandler(
           { notificationIntent: "operational_status" }
         );
       }
-      case "idea_dedup": {
-        const result = await dedupeIdeasDir(ctx.stateManager.getDb(), ctx.jobRunId, job, startedAt);
-        const output = result.deleted > 0
-          ? `Dedup complete: ${result.deleted} duplicates deleted, ${result.kept} ideas retained`
-          : `No duplicates found (${result.kept} ideas checked)`;
-        return buildResult(
-          job,
-          startedAt,
-          true,
-          output,
-          undefined,
-          { notificationIntent: "operational_status" }
-        );
-      }
       case "idea_expiry": {
         const result = expireStaleIdeas(ctx.stateManager.getDb(), 70);
 
@@ -984,18 +970,6 @@ async function runHandler(
       case "link_processor": {
         const { runLinkProcessor } = await import("./jobs/link-processor.js");
         const result = await runLinkProcessor(ctx.stateManager, ctx.jobRunId, job, startedAt);
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          result.success ? { notificationIntent: "operational_status" } : {}
-        );
-      }
-      case "overnight_youtube": {
-        const { runOvernightYoutube } = await import("./jobs/overnight-youtube.js");
-        const result = await runOvernightYoutube(ctx.stateManager, ctx.jobRunId, job, startedAt);
         return buildResult(
           job,
           startedAt,
