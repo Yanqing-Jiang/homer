@@ -321,11 +321,26 @@ export class Scheduler {
     // Unregister all existing jobs
     this.cronManager.unregisterAll();
 
-    // Register new jobs + system jobs
+    // Load new jobs + system jobs
     const jobs = getAllJobs(schedules);
     jobs.push(...Scheduler.SYSTEM_JOBS);
     validateAndLogRegistry({ loadedScheduledIds: jobs.map((j) => j.id) });
     await this.tombstoneRemovedJobs(jobs, "hot_reload");
+
+    // Seed DB rows for any new jobs, then merge DB-disabled state BEFORE
+    // registration so job:updated can persist nextRun and disabled jobs never
+    // briefly receive cron tasks.
+    this.stateManager.ensureJobStateRows(
+      jobs.map(j => ({ jobId: j.id, sourceFile: j.sourceFile, enabled: j.enabled }))
+    );
+    const dbStates = this.stateManager.getAllScheduledJobStates();
+    const dbDisabled = this.getDbDisabledJobIds(dbStates);
+    for (const job of jobs) {
+      if (dbDisabled.has(job.id) && job.enabled) {
+        logger.warn({ jobId: job.id }, "Job kept disabled from DB state (circuit breaker)");
+        job.enabled = false;
+      }
+    }
 
     for (const job of jobs) {
       this.cronManager.registerJob(job, job.sourceFile);
@@ -344,18 +359,6 @@ export class Scheduler {
       }
     }
 
-    // Seed DB rows for any new jobs, then merge DB-disabled state
-    this.stateManager.ensureJobStateRows(
-      jobs.map(j => ({ jobId: j.id, sourceFile: j.sourceFile, enabled: j.enabled }))
-    );
-    const dbStates = this.stateManager.getAllScheduledJobStates();
-    const dbDisabled = this.getDbDisabledJobIds(dbStates);
-    for (const job of jobs) {
-      if (dbDisabled.has(job.id) && job.enabled) {
-        job.enabled = false;
-        this.cronManager.disableJob(job.id);
-      }
-    }
     this.stateManager.syncScheduledJobEnabled(
       jobs.map(j => ({ jobId: j.id, enabled: j.enabled }))
     );

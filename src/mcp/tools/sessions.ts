@@ -35,7 +35,7 @@ export const definitions: ToolDefinition[] = [
   },
   {
     name: "outcome_check",
-    description: "Manually trigger an outcome check for a specific item.",
+    description: "Create a pending outcome-check record for a specific item. Create-only: this tool does not query existing checks.",
     inputSchema: {
       type: "object",
       properties: {

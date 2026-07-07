@@ -164,7 +164,6 @@ Registered against Claude Code over stdio:
 - `idea_add`, `idea_list`, `idea_update`
 - `todo_save`, `todo_list`, `todo_start_chat`
 - `blob_upload`, `blob_download`, `blob_list`, `blob_get_content`, `blob_properties`
-- `meeting_list`, `meeting_search`, `meeting_get`
 - `call_person`, `outcome_check`, `preference_query`, `thread_load`, `session_archive`
 
 ## Scheduled jobs

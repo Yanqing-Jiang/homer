@@ -1,6 +1,7 @@
 import { Cron } from "croner";
 import { EventEmitter } from "events";
 import { logger } from "../utils/logger.js";
+import { CronUtils } from "../utils/cron.js";
 import { recordFire, recordJobFire } from "./observability.js";
 import type { ScheduledJobConfig, RegisteredJob } from "./types.js";
 
@@ -32,7 +33,7 @@ export class CronManager extends EventEmitter {
     const registeredJob: RegisteredJob = {
       config,
       sourceFile,
-      nextRun: this.getNextRun(config.cron),
+      nextRun: config.enabled ? CronUtils.getNextRun(config.cron) : null,
       lastRun: null,
       lastSuccess: null,
       consecutiveFailures: 0,
@@ -126,7 +127,7 @@ export class CronManager extends EventEmitter {
     job.lastRun = new Date();
     // Use croner's native nextRun for accuracy
     const task = this.tasks.get(jobId);
-    job.nextRun = task ? (task.nextRun() ?? null) : this.getNextRun(job.config.cron);
+    job.nextRun = task ? (task.nextRun() ?? null) : null;
 
     if (success) {
       job.lastSuccess = new Date();
@@ -191,18 +192,6 @@ export class CronManager extends EventEmitter {
    */
   getCronTask(jobId: string): Cron | undefined {
     return this.tasks.get(jobId);
-  }
-
-  /**
-   * Calculate next run time for a cron expression
-   */
-  private getNextRun(cronExpr: string): Date | null {
-    try {
-      const job = new Cron(cronExpr, { paused: true });
-      return job.nextRun() ?? null;
-    } catch {
-      return null;
-    }
   }
 
   /**

@@ -102,8 +102,9 @@ const SCHEDULED_INLINE_ONLY: JobEntry[] = [
  * Jobs dispatched via external CLI (no internal handler needed).
  */
 const SCHEDULED_CLI_JOBS: JobEntry[] = [
-  { id: "morning-brief", name: "Morning Brief", kind: "cli", handler: "opencode", expectedInSchedule: true },
+  { id: "morning-brief", name: "Morning Brief", kind: "cli", handler: "claude", expectedInSchedule: true },
   { id: "morning-reads", name: "Morning Reads", kind: "cli", handler: "claude", expectedInSchedule: true },
+  { id: "home-cleanup", name: "Home Cleanup", kind: "cli", handler: "codex", expectedInSchedule: true },
 ];
 
 /**

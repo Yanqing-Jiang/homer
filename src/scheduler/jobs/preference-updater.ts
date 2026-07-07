@@ -12,7 +12,6 @@
 // @ts-ignore
 import type Database from "better-sqlite3";
 import { updatePreferences, type PreferenceSignal } from "../../preferences/engine.js";
-import * as ideaDao from "../../ideas/dao.js";
 import { logger } from "../../utils/logger.js";
 
 function extractIdeaSignals(db: Database.Database): PreferenceSignal[] {
@@ -39,9 +38,6 @@ function extractIdeaSignals(db: Database.Database): PreferenceSignal[] {
   } catch (err) {
     logger.debug({ error: err }, "Could not extract idea preference signals");
   }
-
-  // ideaDao kept imported for future signal types
-  void ideaDao;
   return signals;
 }
 
