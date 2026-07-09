@@ -2609,7 +2609,8 @@ export class StateManager {
        FROM session_summaries
        WHERE status = 'active'
          AND processed_for_promotion = 0
-       ORDER BY COALESCE(started_at, created_at) ASC
+       ORDER BY CASE WHEN agent IN ('claude','web','telegram') THEN 0 ELSE 1 END,
+                COALESCE(started_at, created_at) ASC
        LIMIT ?`
     ).all(limit) as SessionSummaryRow[];
   }

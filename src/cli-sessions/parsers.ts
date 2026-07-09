@@ -25,6 +25,8 @@ export interface ParsedSession {
   messageCount: number;
   tokenEstimate?: number;
   contentHash: string;
+  /** Codex rollout session_meta source ("exec" = one-shot codex exec run, always a sub-agent). */
+  sourceHint?: string;
 }
 
 const SCAFFOLDING_BLOCK_TAGS = [
@@ -34,9 +36,17 @@ const SCAFFOLDING_BLOCK_TAGS = [
   "command-args",
   "local-command-stdout",
   "system-reminder",
+  // Codex rollout scaffolding injected as leading "user" messages
+  "permissions instructions",
+  "apps_instructions",
+  "user_instructions",
+  "environment_context",
 ];
 
 export function stripSessionScaffolding(text: string): string {
+  // Codex injects AGENTS.md as a synthetic user message; treat it as scaffolding wholesale.
+  if (/^# AGENTS\.md instructions\b/.test(text.trimStart())) return "";
+
   let cleaned = text;
 
   for (const tag of SCAFFOLDING_BLOCK_TAGS) {
@@ -90,6 +100,8 @@ export function parseCodexSession(filePath: string): ParsedSession | null {
     const messages: ParsedMessage[] = [];
     let sessionId = "";
     let model = "";
+    let project = "";
+    let sourceHint = "";
     let startTime = "";
     let endTime = "";
 
@@ -99,9 +111,12 @@ export function parseCodexSession(filePath: string): ParsedSession | null {
 
         // Extract session metadata from first entry
         if (entry.type === "session_meta" && !sessionId) {
-          sessionId = entry.session_id || "";
-          model = entry.model_provider || "gpt-5.5";
-          startTime = entry.timestamp || "";
+          const payload = entry.payload || entry;
+          sessionId = payload.id || payload.session_id || entry.session_id || "";
+          model = payload.model || payload.model_provider || "gpt-5.5";
+          project = payload.cwd || "";
+          sourceHint = payload.source || (payload.originator === "codex_exec" ? "exec" : "");
+          startTime = payload.timestamp || entry.timestamp || "";
         }
 
         // Extract messages from response_item entries
@@ -171,6 +186,8 @@ export function parseCodexSession(filePath: string): ParsedSession | null {
       nativeFilePath: filePath,
       messages,
       model,
+      project: project || undefined,
+      sourceHint: sourceHint || undefined,
       startedAt: startTime || undefined,
       endedAt: endTime || undefined,
       messageCount: messages.length,

@@ -11,6 +11,7 @@ import {
   scanClaudeSessions,
   scanOpencodeSessions,
   scanThreadSessions,
+  stripSessionScaffolding,
 } from "./parsers.js";
 import { statSync } from "fs";
 import { createHash } from "crypto";
@@ -23,6 +24,7 @@ interface ImportOptions {
   sinceDays?: number;
   agent?: AgentType;
   dryRun?: boolean;
+  scanStartMs?: number;
   /** Per-agent cutoff epoch (ms). Overrides sinceDays for agents that have a watermark. */
   cutoffPerAgent?: Record<string, number>;
   /** AbortSignal from the scheduler watchdog — aborts mid-batch processing when timed out. */
@@ -39,14 +41,17 @@ interface ImportStats {
   aborted: boolean;
 }
 
-// Prompt patterns that indicate a sub-agent session
+// Prompt patterns that indicate a sub-agent session.
+// "Context:\n" was removed 2026-07-08: it false-positived on real plan-mode
+// sessions ("Implement the following plan: ... Context:") — silent data loss.
 const SUB_AGENT_PATTERNS = [
-  "OUTPUT INSTRUCTIONS:",
+  "OUTPUT INSTRUCTIONS",
   "RESEARCH_ONLY_PREFIX",
-  "Context:\n",
   "Write full analysis/results to:",
   "Return ONLY a brief summary",
 ];
+
+export const ACTIVE_SESSION_WINDOW_MS = 30 * 60 * 1000;
 
 const SCHEDULER_HEURISTIC_EXCLUDED_JOB_IDS = new Set([
   "reminder-check",
@@ -66,7 +71,11 @@ function hasTempProject(session: ParsedSession): boolean {
 }
 
 function hasSubAgentPrompt(session: ParsedSession): boolean {
-  const firstUser = session.messages.find((m) => m.role === "user");
+  // Codex prepends scaffolding "user" messages (<permissions instructions>,
+  // AGENTS.md) before the real prompt — match against the first substantive one.
+  const firstUser = session.messages.find(
+    (m) => m.role === "user" && stripSessionScaffolding(m.content)
+  );
   if (!firstUser) {
     return false;
   }
@@ -107,6 +116,13 @@ function findNearbySchedulerJob(session: ParsedSession, db: Database.Database): 
  * Detect if a session is a sub-agent (spawned by scheduler/swarm, not interactive)
  */
 function isSubAgent(session: ParsedSession, db: Database.Database): boolean {
+  // Structural signal: `codex exec` one-shot runs (rollout session_meta
+  // source="exec") are always daemon/sub-agent dispatches on this machine —
+  // interactive codex (TUI/desktop) reports a different source.
+  if (session.agent === "codex" && session.sourceHint === "exec") {
+    return true;
+  }
+
   // Strong signals: temp project, known sub-agent prompt wrapper, or bot-only thread.
   if (hasTempProject(session) || hasSubAgentPrompt(session) || isBotOnlyThread(session)) {
     return true;
@@ -143,6 +159,7 @@ export class CLISessionImporter {
    */
   async import(options: ImportOptions = {}): Promise<ImportStats> {
     const { sinceDays = 7, agent = "all", dryRun = false, cutoffPerAgent, signal } = options;
+    const scanStartMs = options.scanStartMs ?? Date.now();
 
     const stats: ImportStats = {
       scanned: 0,
@@ -196,6 +213,13 @@ export class CLISessionImporter {
         break;
       }
       try {
+        const statsForFile = statSync(path);
+        if (statsForFile.mtimeMs >= scanStartMs - ACTIVE_SESSION_WINDOW_MS) {
+          stats.skipped++;
+          logger.debug({ path, mtimeMs: statsForFile.mtimeMs }, "Skipping still-active session file");
+          continue;
+        }
+
         // Parse session
         let session: ParsedSession | null = null;
 
@@ -245,8 +269,14 @@ export class CLISessionImporter {
         }
 
         // Import session: summarize → INSERT session_summaries → record in cli_session_index
-        await this.importSession(session, signal);
-        stats.imported++;
+        const imported = await this.importSession(session, signal);
+        if (imported) {
+          stats.imported++;
+        } else {
+          stats.skipped++;
+          logger.debug({ sessionId: session.sessionId }, "Session skipped during import");
+          continue;
+        }
 
         logger.info(
           {
@@ -292,8 +322,13 @@ export class CLISessionImporter {
         }
 
         // Import: summarize → INSERT session_summaries
-        await this.importSession(session, signal);
-        stats.imported++;
+        const imported = await this.importSession(session, signal);
+        if (imported) {
+          stats.imported++;
+        } else {
+          stats.skipped++;
+          continue;
+        }
 
         // Update watermark for this thread
         const threadMeta = session as ParsedSession & { _lastMsgId?: string; _threadId?: string; _newCount?: number };
@@ -418,38 +453,81 @@ export class CLISessionImporter {
   /**
    * Import a single session: summarize → INSERT session_summaries → record in cli_session_index → archive transcript
    */
-  private async importSession(session: ParsedSession, signal?: AbortSignal): Promise<void> {
+  private async importSession(session: ParsedSession, signal?: AbortSignal): Promise<boolean> {
     const id = randomUUID();
     const logDate = getLogDate(session);
     const title = generateTitle(session);
     const rawExcerpt = buildRawExcerpt(session);
+    const isFileSession = !session.nativeFilePath.startsWith("thread:");
+    const existing = isFileSession
+      ? this.db
+        .prepare(
+          `SELECT id, message_count as messageCount
+           FROM session_summaries
+           WHERE agent = ? AND native_session_id = ?
+           LIMIT 1`
+        )
+        .get(session.agent, session.sessionId) as { id: string; messageCount: number | null } | undefined
+      : undefined;
+
+    if (existing && session.messageCount <= (existing.messageCount ?? 0)) {
+      return false;
+    }
 
     // Smart summarization (template for small, Gemini for larger)
     const summary = await summarizeSession(session, signal);
 
-    // INSERT into session_summaries (FTS5 auto-syncs via trigger)
-    this.db
-      .prepare(
-        `INSERT INTO session_summaries (
-          id, agent, native_session_id, started_at, ended_at,
-          model, project, title, message_count, summary,
-          raw_excerpt, is_sub_agent, content_hash, origin_device
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'mac-mini')`
-      )
-      .run(
-        id,
-        session.agent,
-        session.sessionId,
-        session.startedAt || null,
-        session.endedAt || null,
-        session.model || null,
-        session.project || null,
-        title,
-        session.messageCount,
-        summary,
-        rawExcerpt,
-        session.contentHash
-      );
+    if (existing) {
+      this.db
+        .prepare(
+          `UPDATE session_summaries
+           SET ended_at = ?,
+               model = ?,
+               project = ?,
+               title = ?,
+               message_count = ?,
+               summary = ?,
+               raw_excerpt = ?,
+               content_hash = ?,
+               processed_for_promotion = 0
+           WHERE id = ?`
+        )
+        .run(
+          session.endedAt || null,
+          session.model || null,
+          session.project || null,
+          title,
+          session.messageCount,
+          summary,
+          rawExcerpt,
+          session.contentHash,
+          existing.id
+        );
+    } else {
+      // INSERT into session_summaries (FTS5 auto-syncs via trigger)
+      this.db
+        .prepare(
+          `INSERT INTO session_summaries (
+            id, agent, native_session_id, started_at, ended_at,
+            model, project, title, message_count, summary,
+            raw_excerpt, is_sub_agent, content_hash, origin_device
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'mac-mini')`
+        )
+        .run(
+          id,
+          session.agent,
+          session.sessionId,
+          session.startedAt || null,
+          session.endedAt || null,
+          session.model || null,
+          session.project || null,
+          title,
+          session.messageCount,
+          summary,
+          rawExcerpt,
+          session.contentHash
+        );
+    }
 
     // Record in cli_session_index for dedup tracking
     this.db
@@ -496,6 +574,7 @@ export class CLISessionImporter {
 
     // Archive full transcript to session_transcripts (Phase 2)
     this.storeFullTranscript(session);
+    return true;
   }
 
   /**
