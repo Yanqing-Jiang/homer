@@ -248,7 +248,8 @@ function renderCodex(a: CanonicalAsset, aliases: AliasTable): RenderedFile[] {
     const fm = yamlFrontmatter({ name: a.id, description: desc });
     files.push({
       path: join(targetDir, "SKILL.md"),
-      content: `${BANNER(a.sourceRel)}\n${fm}\n\n${body}`,
+      // Codex requires YAML frontmatter on line 1, so the banner goes below it (unlike claude/opencode).
+      content: `${fm}\n\n${BANNER(a.sourceRel)}\n\n${body}`,
       installPath: join(installDir, "SKILL.md"),
     });
     if (a.kind === "skill") files.push(...renderResourceFiles(a, targetDir, installDir));
