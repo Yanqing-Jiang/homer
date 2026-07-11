@@ -21,8 +21,10 @@ export type ErrorType = "timeout" | "rate_limit" | "session_timeout" | "auth" | 
 // global default first (wired by the caller), then this order.
 // DEBT: derive fallback ranking from capability descriptors + per-job fallback data and delete
 // these named lists; upgrade when descriptors rank degradation targets without a hardcoded order.
-export const DEFAULT_FALLBACK_ORDER: ExecutorKind[] = ["claude", "codex", "gemini"];
-export const MEMORY_FALLBACK_ORDER: ExecutorKind[] = ["gemini", "claude", "codex"];
+// Claude Code CLI retired (cutover 2026-07) — removed from both orders so no fallback
+// ever tries to spawn the dead `claude` binary. opencode is the primary workhorse now.
+export const DEFAULT_FALLBACK_ORDER: ExecutorKind[] = ["opencode", "codex", "gemini"];
+export const MEMORY_FALLBACK_ORDER: ExecutorKind[] = ["gemini", "opencode", "codex"];
 
 export const FAILURE_DISABLE_THRESHOLD = 2;
 export const DISABLE_MS = 30 * 60 * 1000;

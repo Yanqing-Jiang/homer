@@ -429,8 +429,8 @@ export function makeRoutingDecision(request: RoutingRequest): RoutingDecision {
 
   // Build fallback chain: remove primary from chain, keep others
   const fallbackChain = defaultFallbackChain.filter(e => e !== executor);
-  if (!fallbackChain.includes("claude") && executor !== "claude") {
-    fallbackChain.unshift("claude"); // Always have Claude as fallback
+  if (!fallbackChain.includes("opencode") && executor !== "opencode") {
+    fallbackChain.unshift("opencode"); // Always have opencode as fallback (Claude CLI retired)
   }
 
   const decision: RoutingDecision = {

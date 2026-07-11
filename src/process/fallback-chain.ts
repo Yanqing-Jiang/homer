@@ -23,7 +23,6 @@ const MAX_PER_HOUR = 2;
 const KILL_GRACE_MS = 5_000;
 const runtimePaths = getRuntimePaths();
 const LOGS_DIR = join(runtimePaths.homerLogsDir, "investigations");
-const CLAUDE_PATH = runtimePaths.claudeBinaryPath;
 
 interface InvestigationContext {
   trigger: string;
@@ -124,21 +123,7 @@ async function runChain(context: InvestigationContext): Promise<InvestigationRes
 
   const prompt = buildPrompt(context);
 
-  // Try Claude Code CLI first
-  const claudeResult = await runExecutor("claude", CLAUDE_PATH, [
-    "--dangerously-skip-permissions",
-    "-p",
-    prompt,
-  ], logPath, INVESTIGATION_TIMEOUT_MS);
-
-  if (claudeResult.success) {
-    recordComplete(runId, "claude", true, logPath);
-    return claudeResult;
-  }
-
-  logger.info({ trigger: context.trigger }, "Claude CLI failed for investigation, trying Codex");
-
-  // Fallback to Codex CLI
+  // Claude Code CLI retired (cutover 2026-07) — Codex is the primary investigation executor.
   const codexResult = await runExecutor("codex", "codex", [
     "exec",
     "--json",
