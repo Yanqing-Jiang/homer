@@ -657,7 +657,7 @@ export class Scheduler {
             return;
           }
 
-          // Takeover didn't fix it — record as failure
+          // Takeover didn't fix it after retries — record as failure and ALWAYS alert.
           this.stateManager.recordScheduledJobComplete(
             runId, job.config.id, false,
             result.output, result.error, result.exitCode
@@ -665,19 +665,31 @@ export class Scheduler {
           this.cronManager.updateJobState(job.config.id, false);
           await this.checkCircuitBreaker(job.config.id, job.config.name);
 
-          const diagnosis = takeoverResult.decision.diagnosis;
-          const reportMsg = takeoverResult.decision.reportMessage;
-          if (job.config.notifyOnFailure !== false) {
-            try {
-              const diagSnippet = escapeHtml(diagnosis.slice(0, 300));
-              const reportSnippet = reportMsg ? `\n\n${escapeHtml(reportMsg.slice(0, 300))}` : "";
-              await bot.api.sendMessage(
-                this.chatId,
-                `<b>❌ ${escapeHtml(job.config.name)} failed</b>\n\nDiagnosis: ${diagSnippet}${reportSnippet}`,
-                { parse_mode: "HTML" }
-              );
-            } catch { /* notification best-effort */ }
-          }
+          // Escalation alert is unconditional (spec: always push the error on escalation).
+          try {
+            const esc = takeoverResult.escalation;
+            const lastErr = takeoverResult.retryResult?.error
+              ?? takeoverResult.retryResult?.output
+              ?? result.error ?? result.output ?? "(no error text)";
+            const errSnippet = escapeHtml(lastErr.slice(0, 500));
+            const diagSnippet = escapeHtml(takeoverResult.decision.diagnosis.slice(0, 300));
+
+            let suggestionLine = "";
+            if (esc?.action === "switch_harness" && esc.suggestedHarness) {
+              suggestionLine = `\n\n💡 Suggestion: switch harness → <b>${escapeHtml(esc.suggestedHarness)}</b> (advisory — apply via the job harness override)`;
+            } else if (esc?.action === "abandon") {
+              suggestionLine = `\n\n💡 Suggestion: abandon this job`;
+            }
+            if (esc?.reportMessage) {
+              suggestionLine += `\n${escapeHtml(esc.reportMessage.slice(0, 300))}`;
+            }
+
+            await bot.api.sendMessage(
+              this.chatId,
+              `<b>❌ ${escapeHtml(job.config.name)} failed after ${takeoverResult.retriesAttempted} ${takeoverResult.retriesAttempted === 1 ? "retry" : "retries"}</b>\n\nError: ${errSnippet}\n\nDiagnosis: ${diagSnippet}${suggestionLine}`,
+              { parse_mode: "HTML" }
+            );
+          } catch { /* notification best-effort */ }
           return;
 
         } catch (takeoverError) {

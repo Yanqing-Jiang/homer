@@ -64,6 +64,10 @@ const CATALOG: Record<CatalogExecutor, HarnessCatalogEntry> = {
       { id: "opencode-go-2/kimi-k2.7-code", label: "Kimi K2.7 Code (account 2)" },
       { id: "opencode-go/deepseek-v4-flash", label: "DeepSeek V4 Flash" },
       { id: "github-copilot/claude-opus-4.8", label: "Copilot Claude Opus 4.8" },
+      { id: "cursor/claude-opus-4-8-high", label: "Cursor Claude Opus 4.8 (high, 1M)" },
+      { id: "cursor/gpt-5.6-sol-high", label: "Cursor GPT-5.6 Sol (high, 1M)" },
+      { id: "cursor/gpt-5.6-sol-medium", label: "Cursor GPT-5.6 Sol (medium, 1M)" },
+      { id: "cursor/grok-4.5-high", label: "Cursor Grok 4.5 (high)" },
     ],
   },
   gemini: {

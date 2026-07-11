@@ -2,6 +2,7 @@ import { readFileSync, existsSync, mkdirSync, readdirSync } from "fs";
 import { join } from "path";
 import { logger } from "../utils/logger.js";
 import { executeResolvedHarness } from "../harness/dispatch.js";
+import type { CapabilityRequirement } from "../harness/types.js";
 import { executeInternalJob } from "./internal-handlers.js";
 import { executeScheduledJob } from "./executor.js";
 import type { RegisteredJob, JobExecutionResult } from "./types.js";
@@ -14,11 +15,15 @@ import { PATHS } from "../config/paths.js";
 // ============================================
 
 export interface TakeoverDecision {
-  action: "retry" | "fix_and_retry" | "report";
+  // retry/fix_and_retry/report are emitted during the retry loop.
+  // abandon/switch_harness are emitted only in escalation mode (after retries exhaust).
+  action: "retry" | "fix_and_retry" | "report" | "abandon" | "switch_harness";
   diagnosis: string;
   fixDescription?: string;
   retryModifications?: string;
   reportMessage?: string;
+  /** Escalation only: harness the LLM suggests switching to (advisory). */
+  suggestedHarness?: string;
   confidence: number;
 }
 
@@ -28,6 +33,10 @@ export interface TakeoverResult {
   retryResult?: JobExecutionResult;
   finalSuccess: boolean;
   duration: number;
+  /** Number of LLM-owned retries actually attempted (0-3). */
+  retriesAttempted: number;
+  /** Escalation-mode decision (abandon | switch_harness) when retries were exhausted. */
+  escalation?: TakeoverDecision;
 }
 
 // ============================================
@@ -42,6 +51,12 @@ const perJobCountToday = new Map<string, number>();
 const DAILY_LIMIT = 10;
 const CONCURRENT_LIMIT = 2;
 const MAX_PER_JOB_DAILY = 2;
+
+/** Hard cap on LLM-owned retries within a single takeover cycle. */
+const MAX_TAKEOVER_RETRIES = 3;
+
+/** Wall-clock ceiling for the whole retry loop — retries run outside executeJob's hang watchdog. */
+const TAKEOVER_WALL_CLOCK_MS = 30 * 60 * 1000; // 30 minutes
 
 /** Minimum backoff delay (ms) before retrying a job that has failed recently */
 const BASE_BACKOFF_MS = 30_000; // 30 seconds
@@ -60,8 +75,10 @@ function resetDailyCountIfNeeded(): void {
     if (_stateManagerRef) {
       try {
         const db = _stateManagerRef.getDb();
+        // Count DISTINCT job_run_id: one takeover cycle now writes multiple rows
+        // (one per retry + one escalation), but the guards count cycles, not rows.
         const rows = db.prepare(
-          `SELECT job_id, COUNT(*) as cnt FROM failure_takeover_runs
+          `SELECT job_id, COUNT(DISTINCT job_run_id) as cnt FROM failure_takeover_runs
            WHERE date(created_at) = ?
            GROUP BY job_id`
         ).all(today) as Array<{ job_id: string; cnt: number }>;
@@ -184,8 +201,14 @@ function buildTakeoverPrompt(params: {
   dependencySource?: string | null;
   fallbackLogs?: string;
   allowAutoFix: boolean;
+  /** 1-based retry attempt info shown to the LLM during the retry loop. */
+  retryAttempt?: { current: number; max: number };
+  /** When set, ask the LLM to escalate (abandon vs switch_harness) instead of retrying. */
+  escalationMode?: boolean;
+  /** Harnesses the LLM may suggest switching to (escalation mode). */
+  availableHarnesses?: string[];
 }): string {
-  const { job, failedResult, recentRuns, jobState, handlerSource, dependencySource, fallbackLogs, allowAutoFix } = params;
+  const { job, failedResult, recentRuns, jobState, handlerSource, dependencySource, fallbackLogs, allowAutoFix, retryAttempt, escalationMode, availableHarnesses } = params;
 
   let prompt = `<takeover_context>
 <role>
@@ -230,6 +253,42 @@ ${recentRuns}
     prompt += `\n\n<fallback_logs>\n${truncate(fallbackLogs, 2000)}\n</fallback_logs>`;
   }
 
+  if (retryAttempt) {
+    prompt += `\n\n<retry_attempt>${retryAttempt.current} of ${retryAttempt.max}</retry_attempt>`;
+  }
+
+  if (escalationMode) {
+    // Retries are exhausted (or the LLM chose to stop). Decide how to escalate.
+    const harnessList = (availableHarnesses && availableHarnesses.length > 0)
+      ? availableHarnesses.join(", ")
+      : "claude, codex, gemini, kimi, opencode";
+    prompt += `
+
+<instructions>
+The retry budget for this job is exhausted; it still fails. Do NOT retry again.
+Decide how to escalate. A Telegram alert with the raw error will be sent regardless.
+
+Available harnesses to suggest: ${harnessList}
+
+Return a fenced JSON decision block:
+\`\`\`json
+{
+  "action": "abandon | switch_harness",
+  "diagnosis": "1-3 sentence root cause",
+  "suggestedHarness": "one of the available harnesses (switch_harness only)",
+  "reportMessage": "human-readable recommendation for the user",
+  "confidence": 0.0-1.0
+}
+\`\`\`
+
+Rules:
+- "switch_harness" ONLY if the failure looks harness-specific (a different CLI would plausibly succeed); name the target in suggestedHarness. This is advisory — a human applies it via the job harness override.
+- "abandon" if the failure is systemic/data/config and no harness would help.
+</instructions>
+</takeover_context>`;
+    return prompt;
+  }
+
   const fixInstructions = allowAutoFix
     ? `ALLOWED: Edit files in ~/homer/src/scheduler/jobs/, ~/homer/data/, ~/memory/
 FORBIDDEN: index.ts, manager.ts, executor.ts, types.ts, internal-handlers.ts
@@ -258,8 +317,9 @@ Return a fenced JSON decision block:
 Rules:
 - "retry" for transient failures (timeout, rate limit, network)
 - "fix_and_retry" ONLY if allowAutoFix and you actually edited something
-- "report" if systemic, unfixable, or confidence < 0.5
+- "report" to stop retrying and hand off to escalation (systemic, unfixable, non-idempotent job, or confidence < 0.5)
 - If consecutive_failures >= 3, prefer "report" unless you have a clear fix
+- Prefer "report" early for jobs whose handler is NOT idempotent (re-running repeats side effects)
 </instructions>
 </takeover_context>`;
 
@@ -278,13 +338,14 @@ function parseDecision(output: string): TakeoverDecision | null {
     try {
       const parsed = JSON.parse(jsonText);
       const action = parsed.action as TakeoverDecision["action"];
-      if (action && ["retry", "fix_and_retry", "report"].includes(action)) {
+      if (action && ["retry", "fix_and_retry", "report", "abandon", "switch_harness"].includes(action)) {
         return {
           action,
           diagnosis: typeof parsed.diagnosis === "string" ? parsed.diagnosis : "Unknown",
           fixDescription: typeof parsed.fixDescription === "string" ? parsed.fixDescription : undefined,
           retryModifications: typeof parsed.retryModifications === "string" ? parsed.retryModifications : undefined,
           reportMessage: typeof parsed.reportMessage === "string" ? parsed.reportMessage : undefined,
+          suggestedHarness: typeof parsed.suggestedHarness === "string" ? parsed.suggestedHarness : undefined,
           confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.5,
         };
       }
@@ -303,7 +364,11 @@ function parseDecisionFromText(output: string): TakeoverDecision | null {
 
   // Detect action from keywords
   let action: TakeoverDecision["action"];
-  if (/\b(fix(?:ed)?(?:\s+and)?\s+retr|edited|patched|modified the)\b/.test(lower)) {
+  if (/\b(switch(?:ing)?\s+(?:to\s+)?(?:harness|another|a different)|different harness|another harness)\b/.test(lower)) {
+    action = "switch_harness";
+  } else if (/\b(abandon|disable this job|give up on this job)\b/.test(lower)) {
+    action = "abandon";
+  } else if (/\b(fix(?:ed)?(?:\s+and)?\s+retr|edited|patched|modified the)\b/.test(lower)) {
     action = "fix_and_retry";
   } else if (/\b(retr(?:y|ied)|re-run|rerun|cleared.*is_running|recommend(?:ed)?\s+retry)\b/.test(lower)) {
     action = "retry";
@@ -411,113 +476,54 @@ export async function runFailureTakeover(params: {
       fallbackLogs = getFallbackLogs(jobId);
     }
 
-    // Build prompt
-    const prompt = buildTakeoverPrompt({
-      job,
-      failedResult,
-      recentRuns,
-      jobState: {
-        consecutiveFailures,
-        lastSuccessAt: jobState?.lastSuccessAt ?? null,
-      },
-      handlerSource,
-      dependencySource,
-      fallbackLogs,
-      allowAutoFix,
-    });
-
-    // Ensure CWD exists
+    // Ensure CWD exists for takeover sessions
     const cwd = "/tmp/homer-takeover";
     mkdirSync(cwd, { recursive: true });
 
-    // Spawn a takeover session on the job's selected harness.
-    let claudeOutput: string;
-    try {
-      const result = await executeResolvedHarness({
-        source: "scheduler",
-        mode: "scheduler-job",
-        prompt,
-        scope: { jobId },
-        cwd,
-        requiredCapabilities: allowAutoFix
-          ? [
-              { capability: "code.edit", required: true, reason: "auto-fix failing job" },
-              { capability: "tools.files.write", required: true, reason: "edit source files" },
-              { capability: "tools.shell", required: true, reason: "run build/retry" },
-            ]
-          : [{ capability: "text.generate", required: true, reason: "diagnose-only report" }],
-      });
-      claudeOutput = result.output;
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      logger.error({ jobId, error: msg }, "Takeover session failed");
-      return null;
-    }
-
-    // Parse decision
-    const decision = parseDecision(claudeOutput);
-    if (!decision) {
-      logger.warn({ jobId, outputLength: claudeOutput.length }, "Could not parse takeover decision");
-      // Record the failed parse attempt
-      recordTakeoverRun(stateManager, {
-        jobRunId: runId,
-        jobId,
-        decision: "report",
-        diagnosis: "Takeover session did not produce a parseable decision",
-        takeoverOutput: truncate(claudeOutput, 10000),
-        retrySuccess: null,
-        durationMs: Date.now() - startTime,
-      });
-      return {
-        decision: {
-          action: "report",
-          diagnosis: "Takeover session did not produce a parseable decision",
-          reportMessage: "Claude Code takeover ran but could not produce a structured decision.",
-          confidence: 0,
-        },
-        takeoverSessionOutput: claudeOutput,
-        finalSuccess: false,
-        duration: Date.now() - startTime,
-      };
-    }
-
-    logger.info({ jobId, action: decision.action, confidence: decision.confidence, diagnosis: decision.diagnosis }, "Takeover decision");
-
-    // Execute decision
-    let retryResult: JobExecutionResult | undefined;
-    let finalSuccess = false;
-
-    if (decision.action === "retry" || decision.action === "fix_and_retry") {
-      try {
-        if (isInternal) {
-          retryResult = await executeInternalJob(job, {
-            stateManager,
-            bot,
-            chatId,
-            jobRunId: runId,
-            disableScheduledJob,
+    // Run one LLM decision session. Pinned to Codex; falls back to Claude if Codex is down.
+    const runDecisionSession = async (decisionPrompt: string, needsAutoFix: boolean): Promise<string | null> => {
+      const requiredCapabilities: CapabilityRequirement[] = needsAutoFix
+        ? [
+            { capability: "code.edit", required: true, reason: "auto-fix failing job" },
+            { capability: "tools.files.write", required: true, reason: "edit source files" },
+            { capability: "tools.shell", required: true, reason: "run build/retry" },
+          ]
+        : [{ capability: "text.generate", required: true, reason: "diagnose-only report" }];
+      for (const harness of ["codex", "claude"] as const) {
+        try {
+          const result = await executeResolvedHarness({
+            source: "scheduler",
+            mode: "scheduler-job",
+            prompt: decisionPrompt,
+            scope: { jobId },
+            cwd,
+            explicit: { harness },
+            requiredCapabilities,
           });
-        } else {
-          retryResult = await executeScheduledJob(job);
+          return result.output;
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          logger.error({ jobId, harness, error: msg }, "Takeover decision session failed");
         }
-        finalSuccess = retryResult.success;
+      }
+      return null;
+    };
+
+    // Re-run the failing job once; always releases the is_running lock afterwards.
+    const runJobRetry = async (): Promise<JobExecutionResult> => {
+      try {
+        return isInternal
+          ? await executeInternalJob(job, { stateManager, bot, chatId, jobRunId: runId, disableScheduledJob })
+          : await executeScheduledJob(job);
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         logger.error({ jobId, error: msg }, "Takeover retry execution failed");
-        retryResult = {
-          jobId,
-          jobName: job.config.name,
-          sourceFile: job.sourceFile,
-          startedAt: new Date(),
-          completedAt: new Date(),
-          success: false,
-          output: "",
-          error: msg,
-          exitCode: 1,
-          duration: 0,
+        return {
+          jobId, jobName: job.config.name, sourceFile: job.sourceFile,
+          startedAt: new Date(), completedAt: new Date(),
+          success: false, output: "", error: msg, exitCode: 1, duration: 0,
         };
       } finally {
-        // Always release is_running lock after takeover retry
         try {
           stateManager.getDb().prepare(
             "UPDATE scheduled_job_state SET is_running = 0 WHERE job_id = ?"
@@ -526,28 +532,137 @@ export async function runFailureTakeover(params: {
           // Table may not exist or job state row may be missing
         }
       }
+    };
+
+    // ---- Retry loop: the LLM decides retry vs. stop, hard-capped at MAX_TAKEOVER_RETRIES ----
+    let currentFailed = failedResult;
+    let lastDecision: TakeoverDecision | undefined;
+    let lastOutput = "";
+    let retryResult: JobExecutionResult | undefined;
+    let retriesAttempted = 0;
+
+    for (let attempt = 1; attempt <= MAX_TAKEOVER_RETRIES; attempt++) {
+      // Wall-clock guard — takeover retries run outside executeJob's hang watchdog.
+      if (Date.now() - startTime > TAKEOVER_WALL_CLOCK_MS) {
+        logger.warn({ jobId, attempt }, "Takeover wall-clock cap reached, escalating");
+        break;
+      }
+
+      const prompt = buildTakeoverPrompt({
+        job,
+        failedResult: currentFailed,
+        recentRuns,
+        jobState: { consecutiveFailures, lastSuccessAt: jobState?.lastSuccessAt ?? null },
+        handlerSource,
+        dependencySource,
+        fallbackLogs,
+        allowAutoFix,
+        retryAttempt: { current: attempt, max: MAX_TAKEOVER_RETRIES },
+      });
+
+      const output = await runDecisionSession(prompt, allowAutoFix);
+      if (output === null) {
+        logger.error({ jobId, attempt }, "Takeover decision session unavailable (codex + claude both failed)");
+        break; // fall through to escalation
+      }
+      lastOutput = output;
+
+      const decision = parseDecision(output);
+      if (!decision) {
+        logger.warn({ jobId, attempt, outputLength: output.length }, "Could not parse takeover decision");
+        break;
+      }
+      lastDecision = decision;
+      logger.info({ jobId, attempt, action: decision.action, confidence: decision.confidence, diagnosis: decision.diagnosis }, "Takeover decision");
+
+      // LLM chose to stop retrying → escalate
+      if (decision.action !== "retry" && decision.action !== "fix_and_retry") {
+        break;
+      }
+
+      // Inter-retry backoff before the 2nd/3rd attempt (30s, 60s)
+      if (attempt > 1) {
+        const backoffMs = Math.min(BASE_BACKOFF_MS * Math.pow(2, attempt - 2), 120_000);
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+      }
+
+      retriesAttempted += 1;
+      retryResult = await runJobRetry();
+      recordTakeoverRun(stateManager, {
+        jobRunId: runId,
+        jobId,
+        decision: decision.action,
+        diagnosis: decision.diagnosis,
+        fixDescription: decision.fixDescription,
+        takeoverOutput: truncate(output, 10000),
+        retrySuccess: retryResult.success ? 1 : 0,
+        attemptNumber: attempt,
+        durationMs: Date.now() - startTime,
+      });
+
+      if (retryResult.success) {
+        return {
+          decision,
+          takeoverSessionOutput: output,
+          retryResult,
+          finalSuccess: true,
+          duration: Date.now() - startTime,
+          retriesAttempted,
+        };
+      }
+
+      currentFailed = retryResult; // feed the latest failure into the next iteration
     }
 
-    const durationMs = Date.now() - startTime;
+    // ---- Escalation: retries exhausted or LLM stopped. Caller ALWAYS alerts. ----
+    const escalationPrompt = buildTakeoverPrompt({
+      job,
+      failedResult: currentFailed,
+      recentRuns,
+      jobState: { consecutiveFailures, lastSuccessAt: jobState?.lastSuccessAt ?? null },
+      handlerSource,
+      dependencySource,
+      fallbackLogs,
+      allowAutoFix: false,
+      escalationMode: true,
+      availableHarnesses: ["claude", "codex", "gemini", "kimi", "opencode"],
+    });
 
-    // Record in failure_takeover_runs
+    const escalationOutput = await runDecisionSession(escalationPrompt, false);
+    let escalation: TakeoverDecision | undefined;
+    if (escalationOutput) {
+      lastOutput = escalationOutput;
+      escalation = parseDecision(escalationOutput) ?? undefined;
+    }
+    if (!escalation) {
+      // Both LLMs unavailable/unparseable — synthesize so the caller still alerts with the raw error.
+      escalation = {
+        action: "abandon",
+        diagnosis: lastDecision?.diagnosis ?? "Takeover LLM unavailable; job still failing after retries.",
+        reportMessage: "Automatic recovery exhausted its retries and no harness suggestion could be produced.",
+        confidence: 0,
+      };
+    }
+
     recordTakeoverRun(stateManager, {
       jobRunId: runId,
       jobId,
-      decision: decision.action,
-      diagnosis: decision.diagnosis,
-      fixDescription: decision.fixDescription,
-      takeoverOutput: truncate(claudeOutput, 10000),
-      retrySuccess: decision.action === "report" ? null : (finalSuccess ? 1 : 0),
-      durationMs,
+      decision: escalation.action,
+      diagnosis: escalation.diagnosis,
+      takeoverOutput: truncate(lastOutput, 10000),
+      retrySuccess: null,
+      attemptNumber: retriesAttempted + 1,
+      durationMs: Date.now() - startTime,
     });
 
     return {
-      decision,
-      takeoverSessionOutput: claudeOutput,
+      decision: lastDecision ?? escalation,
+      takeoverSessionOutput: lastOutput,
       retryResult,
-      finalSuccess,
-      duration: durationMs,
+      finalSuccess: false,
+      duration: Date.now() - startTime,
+      retriesAttempted,
+      escalation,
     };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -571,13 +686,14 @@ function recordTakeoverRun(stateManager: StateManager, params: {
   fixDescription?: string;
   takeoverOutput: string;
   retrySuccess: number | null;
+  attemptNumber?: number;
   durationMs: number;
 }): void {
   try {
     stateManager.getDb().prepare(`
       INSERT INTO failure_takeover_runs
-        (job_run_id, job_id, decision, diagnosis, fix_description, takeover_output, retry_success, duration_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (job_run_id, job_id, decision, diagnosis, fix_description, takeover_output, retry_success, attempt_number, duration_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       params.jobRunId,
       params.jobId,
@@ -586,6 +702,7 @@ function recordTakeoverRun(stateManager: StateManager, params: {
       params.fixDescription ?? null,
       params.takeoverOutput,
       params.retrySuccess,
+      params.attemptNumber ?? 1,
       params.durationMs,
     );
   } catch (error) {

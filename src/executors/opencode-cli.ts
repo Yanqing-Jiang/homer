@@ -94,7 +94,10 @@ export type GeminiCLIResult = OpenCodeCLIResult;
 // ============================================
 
 export function isQuotaError(text: string): boolean {
-  return /exhausted.*quota|quota.*reset|\b429\b.*rate|rate.limit|capacity.*exhausted/i.test(text);
+  // Cursor/subscription gateways report the rolling cap as "5-hour usage limit reached.
+  // Resets in 4hr 9min" — none of the legacy matchers catch that wording, so a quota hit
+  // used to fall through as a generic failure and retry on the same exhausted subscription.
+  return /exhausted.*quota|quota.*reset|\b429\b.*rate|rate.limit|capacity.*exhausted|usage limit reached|\b\d+-hour usage limit|resets? in \d+\s*(hr|hour|min)/i.test(text);
 }
 
 export function isAuthError(text: string): boolean {
