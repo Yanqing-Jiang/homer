@@ -1730,26 +1730,26 @@ export class StateManager {
   }
 
   /**
-   * Read the global default harness (migration 104, one row id=1). Falls back to hard 'claude'
-   * safety if the row is somehow missing (the migration seeds opencode as the intended default;
-   * this is only the fail-safe floor). Not cached: a single indexed read, and the kill-switch
-   * must be visible across the daemon + MCP processes that share this DB.
+   * Read the global default harness (migration 104, one row id=1). Falls back to hard
+   * opencode/cursor/grok-4.5-high if the row is somehow missing (the migration seeds
+   * opencode as the intended default; this is only the fail-safe floor). Not cached:
+   * a single indexed read, and the kill-switch must be visible across the daemon + MCP
+   * processes that share this DB.
    */
   getHarnessDefault(): { executor: HarnessExecutor; model: string | null } {
     const row = this._db
       .prepare("SELECT executor, model FROM harness_default WHERE id = 1")
       .get() as { executor: string; model: string | null } | undefined;
-    // Hard 'claude' safety when the row is somehow missing (fresh DB pre-seed / corruption).
-    // The migration seeds opencode as the intended default; this is only the fail-safe floor.
+    // Fail-safe floor when the row is somehow missing (fresh DB pre-seed / corruption).
     if (!row || !isScheduledHarnessExecutor(row.executor)) {
-      return { executor: "claude", model: "opus[1m]" };
+      return { executor: "opencode", model: "cursor/grok-4.5-high" };
     }
     return { executor: row.executor, model: row.model };
   }
 
   /**
-   * Flip the global default harness. `setHarnessDefault('claude')` is the instant global
-   * kill-switch (no rebuild/restart); 'opencode' restores GLM-5.2.
+   * Flip the global default harness. `setHarnessDefault('opencode')` restores the
+   * OpenCode cursor default (Grok 4.5 High). Claude Code CLI is retired from defaults.
    */
   setHarnessDefault(executor: HarnessExecutor, model?: string | null): void {
     // Delegate to the single writer (harness_default is now a read-only view; migration 107).
@@ -1849,6 +1849,15 @@ export class StateManager {
         FROM harness_selection WHERE scope_type = ? AND scope_id = ?
       `).get(scopeType, scopeId) as { harness: HarnessExecutor; model: string | null; profileId: string | null } | undefined;
 
+      // Optional explicit previous tuple (live System-A) for accurate harness_audit.old_*.
+      const auditPrevious = input.previous !== undefined
+        ? {
+            harness: input.previous?.harness ?? null,
+            model: input.previous?.model ?? null,
+            profileId: input.previous?.profileId ?? null,
+          }
+        : (previous ?? null);
+
       this._db.prepare(`
         INSERT INTO harness_selection (
           scope_type, scope_id, harness, model, profile_id,
@@ -1876,7 +1885,7 @@ export class StateManager {
         )
         VALUES (?, 'switch', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(eventId, scopeType, scopeId,
-             previous?.harness ?? null, previous?.model ?? null, previous?.profileId ?? null,
+             auditPrevious?.harness ?? null, auditPrevious?.model ?? null, auditPrevious?.profileId ?? null,
              harness, model, profileId,
              input.source, input.updatedBy, input.reason ?? null, now);
 
@@ -2368,11 +2377,34 @@ export class StateManager {
   }
 
   /**
-   * Clear pending context after it has been used
+   * Clear pending context after it has been used.
+   * Prefer `popPendingContext` (atomic DELETE...RETURNING) for new code —
+   * this method is kept for callers that already peeked via getPendingContext.
    */
   clearPendingContext(lane: string): void {
     this._db.prepare("DELETE FROM pending_context WHERE lane = ?").run(lane);
     logger.debug({ lane }, "Cleared pending context");
+  }
+
+  /**
+   * Atomically pop pending context for a lane.
+   *
+   * The old peek+clear pattern (`getPendingContext` followed by `clearPendingContext`)
+   * had a race where two concurrent turns on the same lane could both see the same
+   * handoff payload and inject it twice. `popPendingContext` collapses peek+delete
+   * into a single SQLite DELETE...RETURNING statement so the payload is structurally
+   * consumable exactly once across all readers.
+   */
+  popPendingContext(lane: string): { context: string; sourceExecutor: string | null } | null {
+    const row = this._db.prepare(
+      `DELETE FROM pending_context
+       WHERE lane = ?
+       RETURNING context, source_executor AS sourceExecutor`,
+    ).get(lane) as { context: string; sourceExecutor: string | null } | undefined;
+    if (row) {
+      logger.debug({ lane, sourceExecutor: row.sourceExecutor }, "Popped pending context (atomic)");
+    }
+    return row ?? null;
   }
 
   /**
@@ -2945,6 +2977,16 @@ export interface SwitchHarnessInput {
   updatedBy: string;
   source: HarnessSwitchSource;
   reason?: string;
+  /**
+   * Optional live previous tuple (e.g. System-A executor_state ?? default) so
+   * harness_audit.old_* reflects the effective prior selection, not only the
+   * prior System-B harness_selection row (which may be null/stale).
+   */
+  previous?: {
+    harness: string | null;
+    model?: string | null;
+    profileId?: string | null;
+  } | null;
 }
 
 export interface SwitchHarnessResult {

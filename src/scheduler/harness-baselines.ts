@@ -11,8 +11,9 @@ export interface InternalJobHarnessBaseline extends HarnessSelection {
 
 const HOME_DIR = process.env.HOME ?? process.cwd();
 const TMP_DIR = "/tmp";
-const CODEX_MODEL = "gpt-5.5";
+const CODEX_MODEL = "gpt-5.6-sol";
 const OPENCODE_FLASH_MODEL = "google/gemini-3.5-flash";
+const OPENCODE_FAST_MODEL = "cursor/composer-2.5";
 const IDEA_STEP_TIMEOUT = 180_000;
 const LINK_PROCESS_TIMEOUT = 300_000;
 const PROJECT_DIR = PATHS.homerRoot;
@@ -23,8 +24,8 @@ function codexStage(
   reasoningEffort: "medium" | "high" | "xhigh" = "medium",
 ): InternalHarnessCallProfile {
   const model =
-    reasoningEffort === "medium" ? "gpt-5.5-medium" :
-    reasoningEffort === "xhigh" ? "gpt-5.5-xhigh" :
+    reasoningEffort === "medium" ? "gpt-5.6-sol-medium" :
+    reasoningEffort === "xhigh" ? "gpt-5.6-sol-xhigh" :
     CODEX_MODEL;
   return {
     executor: "codex",
@@ -51,13 +52,13 @@ const youtubeClassifyStage: InternalHarnessCallProfile = {
 };
 
 const youtubeAnalyzeStage: InternalHarnessCallProfile = {
-  executor: "claude",
-  model: "sonnet",
+  executor: "opencode",
+  model: OPENCODE_FAST_MODEL,
   cwdOverride: HOME_DIR,
   timeoutOverride: 180_000,
-  fallbackChain: ["opencode"],
+  fallbackChain: ["codex"],
   fallbackModels: {
-    opencode: OPENCODE_FLASH_MODEL,
+    codex: "gpt-5.6-sol-medium",
   },
   executorOptions: {
     opencode: {
@@ -76,30 +77,30 @@ export const INTERNAL_JOB_HARNESS_BASELINES = {
     },
   },
   "nightly-memory": {
-    executor: "claude",
-    model: "opus[1m]",
+    executor: "codex",
+    model: "gpt-5.6-sol-medium",
     stages: {
       extract: {
-        executor: "claude",
-        model: "opus[1m]",
+        executor: "codex",
+        model: "gpt-5.6-sol-medium",
         cwdOverride: HOME_DIR,
         timeoutOverride: 600_000,
       },
     },
   },
   "weekly-memory-consolidation": {
-    executor: "claude",
-    model: "opus[1m]",
+    executor: "codex",
+    model: "gpt-5.6-sol-medium",
     stages: {
       consolidate: {
-        executor: "claude",
-        model: "opus[1m]",
+        executor: "codex",
+        model: "gpt-5.6-sol-medium",
         cwdOverride: HOME_DIR,
         timeoutOverride: 600_000,
       },
       cleanup: {
-        executor: "claude",
-        model: "opus[1m]",
+        executor: "codex",
+        model: "gpt-5.6-sol-medium",
         cwdOverride: HOME_DIR,
         timeoutOverride: 600_000,
       },
@@ -107,11 +108,11 @@ export const INTERNAL_JOB_HARNESS_BASELINES = {
   },
   "link-processor": {
     executor: "opencode",
-    model: null,
+    model: OPENCODE_FAST_MODEL,
     stages: {
       article: {
         executor: "opencode",
-        model: null,
+        model: OPENCODE_FAST_MODEL,
         cwdOverride: TMP_DIR,
         timeoutOverride: LINK_PROCESS_TIMEOUT,
       },
@@ -149,12 +150,12 @@ export const INTERNAL_JOB_HARNESS_BASELINES = {
     },
   },
   "health-check": {
-    executor: "claude",
-    model: "sonnet",
+    executor: "opencode",
+    model: OPENCODE_FAST_MODEL,
     stages: {
       triage: {
-        executor: "claude",
-        model: "sonnet",
+        executor: "opencode",
+        model: OPENCODE_FAST_MODEL,
         timeoutOverride: 30_000,
       },
     },

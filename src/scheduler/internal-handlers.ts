@@ -24,6 +24,7 @@ import type { NotificationIntent } from "../notifications/types.js";
 import { createHash } from "crypto";
 import { execFile } from "child_process";
 import { promisify } from "node:util";
+import path from "node:path";
 import { getConnectivityMonitor } from "../heartbeat/index.js";
 import { processRegistry } from "../process/registry.js";
 import { cleanupScheduler } from "../process/cleanup-scheduler.js";
@@ -1082,25 +1083,125 @@ async function runHandler(
         );
       }
       case "docker_restart": {
-        // Weekly restart of Docker Desktop to reclaim the engine's leaked memory.
-        // DEBT: fixed 8s pause between quit and relaunch instead of polling for the
-        // app to actually exit, upgrade when a quit takes >8s and the relaunch no-ops.
+        // Weekly restart of Docker Desktop to reclaim leaked engine memory, then
+        // bring yanqing.app backend containers back so portfolio-api stays reachable.
+        // Quitting Docker Desktop alone leaves portfolio-backend/redis down until a
+        // later monitor cycle (~4h), so this handler waits for the daemon and runs
+        // `docker compose up -d` before reporting success.
         const exec = promisify(execFile);
+        const { getRuntimePaths } = await import("../utils/runtime-paths.js");
+        const portfolioDir = path.join(getRuntimePaths().homeDir, "ai-portfolio");
+        const localHealth = "http://localhost:8100/health";
+        const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+        const dockerReady = async (): Promise<boolean> => {
+          try {
+            await exec("docker", ["info"], { timeout: 10_000 });
+            return true;
+          } catch {
+            return false;
+          }
+        };
+        const waitUntil = async (
+          label: string,
+          check: () => Promise<boolean>,
+          attempts: number,
+          delayMs: number,
+        ): Promise<boolean> => {
+          for (let i = 0; i < attempts; i++) {
+            if (ctx.signal?.aborted) {
+              throw new Error(`aborted while waiting for ${label}`);
+            }
+            if (await check()) return true;
+            await sleep(delayMs);
+          }
+          return false;
+        };
+        const healthOk = async (url: string): Promise<boolean> => {
+          try {
+            const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+            if (!res.ok) return false;
+            const body = await res.text();
+            return /"status"\s*:\s*"ok"/.test(body);
+          } catch {
+            return false;
+          }
+        };
+        const steps: string[] = [];
         try {
           await exec("osascript", ["-e", 'quit app "Docker"'], { timeout: 30_000 });
-          await new Promise((r) => setTimeout(r, 8_000));
+          steps.push("quit Docker Desktop");
+          // Wait until the engine is actually gone before relaunching.
+          await waitUntil("docker exit", async () => !(await dockerReady()), 20, 2_000);
           await exec("open", ["-ga", "Docker"], { timeout: 30_000 });
+          steps.push("relaunch Docker Desktop");
+
+          const engineUp = await waitUntil("docker daemon", dockerReady, 60, 5_000);
+          if (!engineUp) {
+            return buildResult(
+              job,
+              startedAt,
+              false,
+              steps.join("; "),
+              "Docker Desktop relaunched but daemon never became ready",
+              { notificationIntent: "operational_status" },
+            );
+          }
+          steps.push("docker daemon ready");
+
+          try {
+            await exec("docker", ["compose", "up", "-d"], {
+              cwd: portfolioDir,
+              timeout: 180_000,
+            });
+            steps.push(`compose up -d (${portfolioDir})`);
+          } catch (composeErr) {
+            const composeMsg = composeErr instanceof Error ? composeErr.message : String(composeErr);
+            return buildResult(
+              job,
+              startedAt,
+              false,
+              steps.join("; "),
+              `docker compose up -d failed: ${composeMsg}`,
+              { notificationIntent: "operational_status" },
+            );
+          }
+
+          const backendUp = await waitUntil(
+            "portfolio-backend health",
+            () => healthOk(localHealth),
+            24,
+            5_000,
+          );
+          if (!backendUp) {
+            return buildResult(
+              job,
+              startedAt,
+              false,
+              steps.join("; "),
+              `containers started but ${localHealth} never returned status:ok`,
+              { notificationIntent: "operational_status" },
+            );
+          }
+          steps.push("portfolio-backend healthy");
+
           return buildResult(
             job,
             startedAt,
             true,
-            "Docker Desktop restarted",
+            `Docker Desktop restarted; yanqing.app backend restored (${steps.join(" → ")})`,
             undefined,
-            { notificationIntent: "operational_status" }
+            { notificationIntent: "operational_status" },
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          return buildResult(job, startedAt, false, "", `Docker restart failed: ${msg}`);
+          return buildResult(
+            job,
+            startedAt,
+            false,
+            steps.length > 0 ? steps.join("; ") : "",
+            `Docker restart failed: ${msg}`,
+            { notificationIntent: "operational_status" },
+          );
         }
       }
       case "session_maintenance": {

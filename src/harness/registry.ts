@@ -12,7 +12,10 @@ import { geminiAdapter } from "./adapters/gemini.js";
 import { kimiAdapter } from "./adapters/kimi.js";
 
 /** Stable registry order — also the deterministic tie-break for system-default selection. */
-export const HARNESS_IDS: readonly HarnessId[] = ["claude", "codex", "opencode", "gemini", "kimi"] as const;
+export const HARNESS_IDS: readonly HarnessId[] = ["opencode", "codex", "gemini", "kimi", "claude"] as const;
+
+/** Harnesses retired from unattended/default selection (kept only for explicit/manual use). */
+export const RETIRED_HARNESS_IDS: ReadonlySet<HarnessId> = new Set<HarnessId>(["claude"]);
 
 export const HARNESS_REGISTRY: Readonly<Record<HarnessId, HarnessAdapter>> = {
   claude: claudeAdapter,

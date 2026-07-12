@@ -182,7 +182,7 @@ Return a 2-sentence summary of what changed.`;
 
     // DELIBERATE PIN: architecture analysis is an event-triggered, quality-critical deep-reasoning
     // task that rewrites architecture.md. It is NOT in schedule.json, so it can't be managed from
-    // the Jobs tab — a seeded DB row would be an un-clearable hidden pin. We pin Codex/gpt-5.5
+    // the Jobs tab — a seeded DB row would be an un-clearable hidden pin. We pin Codex/gpt-5.6-sol
     // explicitly (visible, behavior-neutral) instead. This is the one job intentionally immune to
     // switch-all. DEBT: if architecture-updater becomes schedulable/UI-visible, replace this pin
     // with a seeded job row so switch-all can move it.
@@ -190,7 +190,7 @@ Return a 2-sentence summary of what changed.`;
       source: "scheduler",
       mode: "scheduler-job",
       prompt,
-      explicit: { harness: "codex", model: "gpt-5.5" },
+      explicit: { harness: "codex", model: "gpt-5.6-sol" },
       baselineProfile: {
         cwdOverride: HOMER_DIR,
         timeoutOverride: 1_200_000, // 20 min

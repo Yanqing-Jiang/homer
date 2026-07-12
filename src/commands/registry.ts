@@ -29,11 +29,11 @@ export interface CommandDefinition {
 }
 
 /**
- * Default opencode harness model (GLM-5.2 via the opencode-go/Zen provider) and the
+ * Default opencode harness model (Grok 4.5 High via the cursor provider) and the
  * Claude rollback alias. Single source of truth for the "main harness" switch — see
  * the harness_default table + resolveDefaultExecutor() for the runtime default.
  */
-export const OPENCODE_DEFAULT_MODEL = "opencode-go/glm-5.2";
+export const OPENCODE_DEFAULT_MODEL = "cursor/grok-4.5-high";
 export const CLAUDE_ROLLBACK_MODEL = "opus[1m]";
 
 /**
@@ -45,7 +45,7 @@ export const EXECUTOR_MODELS: Record<ExecutorType, string | undefined> = {
   gemini: GEMINI_CLI_FLASH_MODEL, // Fast, cheap
   kimi: "kimi-k2-5",                // Kimi K2.5 via NVIDIA NIM
   chatgpt: undefined,               // Uses Claude + browser skill to access ChatGPT
-  opencode: OPENCODE_DEFAULT_MODEL, // opencode-go/glm-5.2 — the main harness model
+  opencode: OPENCODE_DEFAULT_MODEL, // cursor/grok-4.5-high — the main harness model
 };
 
 /**
@@ -130,15 +130,23 @@ export const COMMANDS: CommandDefinition[] = [
     category: "executor",
     description: "Switch to opencode GLM-5.2 (edit harness)",
     executor: "opencode",
+    model: "opencode-go/glm-5.2",
+    aliases: ["/open_glm"],
+  },
+  {
+    name: "/opencode",
+    category: "executor",
+    description: "Switch to opencode (Grok 4.5 High via cursor)",
+    executor: "opencode",
     model: OPENCODE_DEFAULT_MODEL,
-    aliases: ["/opencode", "/open_glm"],
+    aliases: ["/grok"],
   },
   {
     name: "/open_opus",
     category: "executor",
-    description: "OpenCode with Claude Opus (GitHub Copilot)",
+    description: "OpenCode with Cursor Claude Opus 4.8 (high, 1M)",
     executor: "opencode",
-    model: "github-copilot/claude-opus-4.8",
+    model: "cursor/claude-opus-4-8-high",
   },
 
   // Search commands

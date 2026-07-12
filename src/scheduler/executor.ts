@@ -17,7 +17,7 @@ import {
 /**
  * Lazy read-only connection to read the global harness default (migration 104) without
  * spinning up a full StateManager (which would re-run migrations). Conservative: any
- * failure → "claude". Connection lives for the daemon lifetime.
+ * failure → "opencode". Connection lives for the daemon lifetime.
  */
 let _harnessDb: Database.Database | null = null;
 function harnessDefault(): { executor: ExecutorKind; model: string | null } {
@@ -29,9 +29,9 @@ function harnessDefault(): { executor: ExecutorKind; model: string | null } {
     if (row?.executor && isExecutorKind(row.executor)) {
       return { executor: row.executor, model: row.model };
     }
-    return { executor: "claude", model: "opus[1m]" };
+    return { executor: "opencode", model: "cursor/grok-4.5-high" };
   } catch {
-    return { executor: "claude", model: "opus[1m]" };
+    return { executor: "opencode", model: "cursor/grok-4.5-high" };
   }
 }
 
@@ -838,10 +838,10 @@ function resolveSchedulerPrimary(
   jobId: string,
   globalDefault: { executor: ExecutorKind; model: string | null },
 ): { primary: ExecutorKind; pinnedModel: string | null; modelPinnedExecutor: ExecutorKind | undefined; plan?: ResolvedHarnessPlan } {
-  // Legacy safety fallback (store unavailable / pre-108 DB): job override → global → hard claude.
+  // Legacy safety fallback (store unavailable / pre-108 DB): job override → global → hard opencode.
   const legacy = () => {
     const concrete = jobHarnessOverride(jobId) ?? globalDefault;
-    const primary = concrete?.executor ?? "claude";
+    const primary = concrete?.executor ?? "opencode";
     return {
       primary,
       pinnedModel: concrete?.model ?? null,
@@ -1064,7 +1064,7 @@ export async function runInternalJobHarness(
 export async function executeScheduledJob(
   job: RegisteredJob,
   onProgress?: ProgressCallback,
-  options?: { singleExecutor?: ExecutorKind; skipDiagnosis?: boolean; scheduledRunId?: number }
+  options?: { singleExecutor?: ExecutorKind; skipDiagnosis?: boolean; scheduledRunId?: number; signal?: AbortSignal }
 ): Promise<JobExecutionResult> {
   const startedAt = new Date();
   const { config } = job;
@@ -1127,6 +1127,7 @@ export async function executeScheduledJob(
     singleExecutor: options?.singleExecutor,
     skipDiagnosis: options?.skipDiagnosis,
     scheduledRunId: options?.scheduledRunId,
+    signal: options?.signal,
     memoryJob: isMemoryJob(job),
   });
 }

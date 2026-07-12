@@ -18,7 +18,7 @@
  */
 
 import { getHarnessDescriptor, missingCapabilities } from "./capabilities.js";
-import { HARNESS_IDS, HARNESS_REGISTRY } from "./registry.js";
+import { HARNESS_IDS, HARNESS_REGISTRY, RETIRED_HARNESS_IDS } from "./registry.js";
 import type {
   Capability,
   HarnessHealth,
@@ -89,8 +89,12 @@ function candidateOrder(primary: HarnessId, compatibilityOrder?: HarnessId[]): H
     }
   };
   push(primary);
-  for (const h of compatibilityOrder ?? []) push(h);
-  for (const h of HARNESS_IDS) push(h);
+  for (const h of compatibilityOrder ?? []) {
+    if (!RETIRED_HARNESS_IDS.has(h)) push(h);
+  }
+  for (const h of HARNESS_IDS) {
+    if (!RETIRED_HARNESS_IDS.has(h)) push(h);
+  }
   return ordered;
 }
 

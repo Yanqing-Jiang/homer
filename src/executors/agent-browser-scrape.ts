@@ -82,6 +82,10 @@ export interface RawBookmark {
   retweets?: number;
   created_at?: string;
   url: string;
+  content_type?: "tweet" | "article" | "card" | "quote" | "repost" | "photo";
+  article_title?: string | null;
+  external_urls?: string[];
+  needs_detail_fetch?: boolean;
 }
 
 export interface RawArticle {

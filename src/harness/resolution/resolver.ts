@@ -48,10 +48,10 @@ function scopeChain(scope: ResolveHarnessSelectionInput["scope"]): Array<{ type:
   return chain;
 }
 
-/** First registry harness that can generate text — the non-Claude-special system floor. */
+/** First registry harness that can generate text — OpenCode-first after Claude Code retirement. */
 function systemDefaultHarness(): HarnessId {
-  // First registry harness — "claude" today, but only as registry-order tie-break.
-  return HARNESS_IDS[0] ?? "claude";
+  // First non-retired registry harness — currently opencode.
+  return HARNESS_IDS[0] ?? "opencode";
 }
 
 export function resolveHarnessSelection(

@@ -584,6 +584,7 @@ export class Scheduler {
           : executeScheduledJob(job, onProgress, {
               ...(takeoverEnabled ? { skipDiagnosis: true } : {}),
               scheduledRunId: runId,
+              signal: controller.signal,
             });
         result = await Promise.race([execPromise, hangPromise]);
       } catch (hangError) {
