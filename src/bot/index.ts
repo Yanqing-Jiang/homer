@@ -47,7 +47,6 @@ import { CLIRunManager } from "../executors/cli-runner.js";
 import type { StreamStepEvent } from "../executors/claude.js";
 import { telegramLane } from "../utils/lanes.js";
 import { escapeHtml } from "../utils/telegram-format.js";
-import { buildConversationContext } from "../executors/context-builder.js";
 import { mkdirSync, existsSync } from "fs";
 import { writeFile } from "fs/promises";
 import { join, extname } from "path";
@@ -820,8 +819,11 @@ ${checksStr}`;
           // Handle executor switch in caption
           if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
             const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
-            runManager.closeLaneSession(lane, "executor switch");
-            stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
+            await runManager.switchThreadHarness(
+              lane,
+              { harness: parsed.newExecutor, model },
+              "telegram",
+            );
             addPendingAttachment(lane, filePath);
             await ctx.reply(`Switched to ${parsed.newExecutor}. Attachment saved.`);
             return;
@@ -840,8 +842,11 @@ ${checksStr}`;
           // Handle executor switch with query
           if (isExecutorSwitchWithQuery(parsed) && parsed.newExecutor) {
             const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
-            runManager.closeLaneSession(lane, "executor switch with query");
-            stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
+            await runManager.switchThreadHarness(
+              lane,
+              { harness: parsed.newExecutor, model },
+              "telegram",
+            );
           }
 
           const attachments = [...pending, filePath];
@@ -954,8 +959,11 @@ ${checksStr}`;
 
         if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
           const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
-          runManager.closeLaneSession(lane, "executor switch");
-          stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
+          await runManager.switchThreadHarness(
+            lane,
+            { harness: parsed.newExecutor, model },
+            "telegram",
+          );
           addPendingAttachment(lane, filePath);
           await ctx.reply(`Switched to ${parsed.newExecutor}. Photo saved.`);
           return;
@@ -972,8 +980,11 @@ ${checksStr}`;
 
         if (isExecutorSwitchWithQuery(parsed) && parsed.newExecutor) {
           const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
-          runManager.closeLaneSession(lane, "executor switch with query");
-          stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
+          await runManager.switchThreadHarness(
+            lane,
+            { harness: parsed.newExecutor, model },
+            "telegram",
+          );
         }
 
         const attachments = [...pending, filePath];
@@ -1090,8 +1101,11 @@ ${checksStr}`;
       if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
         const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
         const lane = telegramLane(ctx.chat.id);
-        runManager.closeLaneSession(lane, "voice executor switch");
-        stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
+        await runManager.switchThreadHarness(
+          lane,
+          { harness: parsed.newExecutor, model },
+          "telegram",
+        );
         await ctx.reply(`Switched to ${parsed.newExecutor}`);
         return;
       }
@@ -1300,31 +1314,11 @@ ${checksStr}`;
     // Handle pure executor switch (no query)
     if (isPureExecutorSwitch(parsed) && parsed.newExecutor) {
       const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
-      const currentState = stateManager.getCurrentExecutor(lane);
-      const previousExecutor = currentState?.executor ?? stateManager.resolveDefaultExecutor();
-
-      runManager.closeLaneSession(lane, "executor switch");
-
-      // Build and store conversation context for handoff (if switching to different executor)
-      let contextCarried = false;
-      if (previousExecutor !== parsed.newExecutor) {
-        try {
-          const context = await buildConversationContext(
-            stateManager,
-            { type: "lane", id: lane },
-            { maxMessages: 8, maxTokens: 1500 }
-          );
-          if (context.messageCount > 0) {
-            stateManager.setPendingContext(lane, context.formatted, previousExecutor);
-            contextCarried = true;
-            logger.debug({ lane, messageCount: context.messageCount }, "Built pending context for Telegram executor switch");
-          }
-        } catch (err) {
-          logger.warn({ err, lane }, "Failed to build context for Telegram executor switch");
-        }
-      }
-
-      stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
+      const { handoffBuilt: contextCarried } = await runManager.switchThreadHarness(
+        lane,
+        { harness: parsed.newExecutor, model },
+        "telegram",
+      );
 
       const contextNote = contextCarried ? "\n_(Conversation context carried over)_" : "";
       await ctx.reply(
@@ -1338,29 +1332,11 @@ ${checksStr}`;
     // Handle executor switch with query (e.g., "/gemini what's the weather")
     if (isExecutorSwitchWithQuery(parsed) && parsed.newExecutor) {
       const model = parsed.model ?? getExecutorModel(parsed.newExecutor);
-      const currentState = stateManager.getCurrentExecutor(lane);
-      const previousExecutor = currentState?.executor ?? stateManager.resolveDefaultExecutor();
-
-      runManager.closeLaneSession(lane, "executor switch with query");
-
-      // Build and store conversation context for handoff (if switching to different executor)
-      if (previousExecutor !== parsed.newExecutor) {
-        try {
-          const context = await buildConversationContext(
-            stateManager,
-            { type: "lane", id: lane },
-            { maxMessages: 8, maxTokens: 1500 }
-          );
-          if (context.messageCount > 0) {
-            stateManager.setPendingContext(lane, context.formatted, previousExecutor);
-            logger.debug({ lane, messageCount: context.messageCount }, "Built pending context for Telegram executor switch with query");
-          }
-        } catch (err) {
-          logger.warn({ err, lane }, "Failed to build context for Telegram executor switch");
-        }
-      }
-
-      stateManager.setCurrentExecutor(lane, parsed.newExecutor, model);
+      await runManager.switchThreadHarness(
+        lane,
+        { harness: parsed.newExecutor, model },
+        "telegram",
+      );
 
       // Execute the query with the new executor
       const attachments = consumePendingAttachments(lane);

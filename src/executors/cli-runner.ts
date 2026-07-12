@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import { readFileSync, existsSync } from "fs";
 import { logger } from "../utils/logger.js";
 import { acquireSlot } from "./concurrency.js";
-import { StateManager, type CLIRunStatus, type ExecutorStateType } from "../state/manager.js";
+import { StateManager, type CLIRunStatus, type ExecutorStateType, type HarnessSwitchSource } from "../state/manager.js";
 import { executeClaudeCommand } from "./claude.js";
 import { executePooledClaudeTurn, closePooledClaudeSession, closeAllPooledClaudeSessions } from "./claude-session-pool.js";
 import { executeOpenCodeCLI } from "./opencode-cli.js";
@@ -10,7 +10,7 @@ import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { runWithFallbackChain, DEFAULT_FALLBACK_ORDER, type ExecutorKind } from "./fallback-orchestrator.js";
 import { writeChainTrace } from "./trace-writer.js";
-import { getCatalogEntry, getClaudeDefaultModel } from "../commands/index.js";
+import { getCatalogEntry, getClaudeDefaultModel, validateHarnessSelection } from "../commands/index.js";
 import { buildConversationContext, CONTEXT_DEFAULTS, type ContextSource } from "./context-builder.js";
 
 export type CLIExecutor = "claude" | "gemini" | "codex" | "kimi" | "chatgpt" | "opencode";
@@ -289,6 +289,9 @@ export class CLIRunManager {
       if (params.suppressContext) return false;
       if (!contextSource) return false;
       if (executorKind !== executor) return true;
+      // F1: pending switch handoff must inject even when a native resume session exists
+      // (switch A→B→A: resume A's session AND patch B-era turns from pending_context).
+      if (this.stateManager.getPendingContext(params.lane)) return true;
       // A resumable session (for the resolved executor+model) already carries history.
       if (sessionId) return false;
       const sameExecutorRow = executorState?.executor === executor;
@@ -302,11 +305,9 @@ export class CLIRunManager {
       if (contextPromise) return contextPromise;
 
       contextPromise = (async () => {
-        // Check for pending context from executor switch (one-time use)
-        const pendingContext = this.stateManager.getPendingContext(params.lane);
+        // Atomic one-shot consumption (DELETE...RETURNING) — avoids peek+clear races.
+        const pendingContext = this.stateManager.popPendingContext(params.lane);
         if (pendingContext) {
-          // Clear pending context after retrieval (one-time use)
-          this.stateManager.clearPendingContext(params.lane);
           logger.debug({ lane: params.lane, sourceExecutor: pendingContext.sourceExecutor }, "Injecting pending context from executor switch");
 
           // Wrap pending context with handoff instructions
@@ -783,5 +784,111 @@ ${pendingContext.context}
     })();
 
     return runPromise;
+  }
+
+  /**
+   * Explicit mid-session harness/model switch for a chat lane.
+   * Cancels in-flight work, builds a one-time text handoff when the
+   * (executor, model) tuple changes, pins executor_state, and dual-writes
+   * harness_selection for audit / Stage-2 readiness.
+   */
+  async switchThreadHarness(
+    lane: string,
+    target: { harness: CLIExecutor; model?: string },
+    source: HarnessSwitchSource = "telegram",
+  ): Promise<{
+    previous: { harness: CLIExecutor; model: string | null };
+    current: { harness: CLIExecutor; model: string | null };
+    handoffBuilt: boolean;
+    nativeSessionExists: boolean;
+  }> {
+    // Validate first — reject invalid (harness, model) with zero side effects.
+    const validated = validateHarnessSelection({
+      executor: target.harness,
+      model: target.model ?? null,
+      scope: "telegram-chat",
+    });
+    if (!validated.ok) {
+      throw new Error(`switchThreadHarness: ${validated.message}`);
+    }
+
+    const currentState = this.stateManager.getCurrentExecutor(lane);
+    const previousHarness = (currentState?.executor ?? this.stateManager.resolveDefaultExecutor()) as CLIExecutor;
+    const previousModel = currentState?.model ?? null;
+    const nextHarness = validated.executor as CLIExecutor;
+    const nextModel = validated.model;
+
+    const normalizeModel = (executor: CLIExecutor, model: string | null): string | null =>
+      model ?? defaultModelFor(executor) ?? null;
+    const tupleChanged =
+      previousHarness !== nextHarness
+      || normalizeModel(previousHarness, previousModel) !== normalizeModel(nextHarness, nextModel);
+
+    // Always cancel in-flight run + close pooled Claude session (pool pins model).
+    this.closeLaneSession(lane, "harness switch");
+
+    let handoffBuilt = false;
+    if (tupleChanged) {
+      try {
+        const context = await buildConversationContext(
+          this.stateManager,
+          { type: "lane", id: lane },
+          { maxMessages: 20, maxTokens: 4000 },
+        );
+        if (context.messageCount > 0) {
+          this.stateManager.setPendingContext(lane, context.formatted, previousHarness);
+          handoffBuilt = true;
+          logger.debug(
+            { lane, messageCount: context.messageCount, previousHarness, nextHarness },
+            "Built pending context for harness switch",
+          );
+        }
+      } catch (err) {
+        logger.warn({ err, lane }, "Failed to build context for harness switch");
+      }
+    }
+
+    this.stateManager.setCurrentExecutor(lane, nextHarness as ExecutorStateType, nextModel ?? undefined);
+
+    // DEBT: dual-write executor_state + harness_selection, upgrade when Stage 2 moves _executeRun onto resolveHarnessSelection.
+    // DEBT: chatgpt excluded from harness_selection/audit (schema CHECK), upgrade when
+    // chatgpt is either added to the schema or removed from interactive switch targets.
+    if (nextHarness !== "chatgpt") {
+      try {
+        this.stateManager.switchHarness({
+          scope: { type: "conversation", id: lane },
+          harness: nextHarness as "claude" | "codex" | "opencode" | "gemini" | "kimi",
+          model: nextModel,
+          source,
+          updatedBy: source,
+          reason: "explicit mid-session harness switch",
+          // Live System-A effective tuple so harness_audit.old_* is never null/stale
+          // when a previous value exists (executor_state ?? default resolution).
+          previous: {
+            harness: previousHarness,
+            model: normalizeModel(previousHarness, previousModel),
+            profileId: null,
+          },
+        });
+      } catch (err) {
+        // System B is best-effort during Stage 1 — complete the legacy switch.
+        logger.warn({ err, lane, nextHarness, source }, "Dual-write harness_selection failed; legacy switch completed");
+      }
+    }
+
+    const nativeSessionExists = Boolean(
+      this.stateManager.getStoredExecutorSessionId(
+        lane,
+        nextHarness as ExecutorStateType,
+        nextModel,
+      ),
+    );
+
+    return {
+      previous: { harness: previousHarness, model: previousModel },
+      current: { harness: nextHarness, model: nextModel },
+      handoffBuilt,
+      nativeSessionExists,
+    };
   }
 }

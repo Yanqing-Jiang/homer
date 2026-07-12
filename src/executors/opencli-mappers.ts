@@ -53,25 +53,47 @@ export interface TwitterBookmark {
   likes?: number;
   retweets?: number;
   createdAt?: string;
+  contentType?: OpenCLIBookmark["content_type"];
+  articleTitle?: string | null;
+  needsDetailFetch?: boolean;
+}
+
+function bookmarkHasUsableContent(b: OpenCLIBookmark): boolean {
+  if (!b.id || !b.author) return false;
+  const text = (b.text || "").trim();
+  if (text.length >= 15) return true;
+  if (b.needs_detail_fetch) return true;
+  if (b.article_title) return true;
+  if (b.content_type && b.content_type !== "tweet") return true;
+  if (b.external_urls && b.external_urls.length > 0) return true;
+  return false;
 }
 
 export function mapOpenCLIBookmark(b: OpenCLIBookmark): TwitterBookmark {
+  const text = (b.text || "").trim();
+  const scrapedUrls = b.external_urls ?? [];
+  const textUrls = extractExternalUrls(text);
+  const urls = [...new Set([...scrapedUrls, ...textUrls])];
+  const title = b.article_title?.trim() || deriveTitle(text, b.author);
   return {
     id: b.id,
-    text: b.text,
+    text,
     author: b.author,
     authorName: b.name,
-    title: deriveTitle(b.text, b.author),
-    urls: extractExternalUrls(b.text),
+    title,
+    urls,
     likes: b.likes,
     retweets: b.retweets,
     createdAt: b.created_at,
+    contentType: b.content_type,
+    articleTitle: b.article_title,
+    needsDetailFetch: b.needs_detail_fetch ?? false,
   };
 }
 
 export function mapOpenCLIBookmarks(bookmarks: OpenCLIBookmark[]): TwitterBookmark[] {
   return bookmarks
-    .filter(b => b.id && b.text && b.text.length >= 15 && b.author)
+    .filter(bookmarkHasUsableContent)
     .map(mapOpenCLIBookmark);
 }
 

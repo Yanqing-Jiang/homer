@@ -6,7 +6,7 @@ import { processRegistry } from "../process/registry.js";
 
 const DEFAULT_TIMEOUT = 1800_000; // 30 minutes
 const KILL_GRACE_MS = 5_000;
-const CODEX_CLI_MODEL = "gpt-5.5";
+const CODEX_CLI_MODEL = "gpt-5.6-sol";
 
 function resolveCodexModelVariant(
   model: string | undefined,
@@ -17,10 +17,15 @@ function resolveCodexModelVariant(
     case "":
     case CODEX_CLI_MODEL:
       return { model: CODEX_CLI_MODEL, reasoningEffort: reasoningEffort ?? "high" };
+    // gpt-5.5-* retained as back-compat aliases for any stale selection rows/chains.
+    case "gpt-5.6-sol-medium":
     case "gpt-5.5-medium":
       return { model: CODEX_CLI_MODEL, reasoningEffort: "medium" };
+    case "gpt-5.6-sol-xhigh":
     case "gpt-5.5-xhigh":
       return { model: CODEX_CLI_MODEL, reasoningEffort: "xhigh" };
+    case "gpt-5.5":
+      return { model: CODEX_CLI_MODEL, reasoningEffort: reasoningEffort ?? "high" };
     default:
       return { model, reasoningEffort: reasoningEffort ?? "high" };
   }

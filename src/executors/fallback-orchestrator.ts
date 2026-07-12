@@ -514,21 +514,26 @@ export async function runWithFallbackChain<T extends ExecutorAttemptResult>(
       (result.duration ?? Infinity) < 2000 &&
       strippedError.length === 0;
 
-    // Rate limit (or fast empty failure): skip same-executor retry AND skip LLM
-    // diagnosis — immediately switch to the next executor.
-    if (errorType === "rate_limit" || isFastEmptyFailure) {
+    // Rate limit, timeout, or fast empty failure: skip same-executor retry AND
+    // skip LLM diagnosis — immediately switch to the next executor. A timeout
+    // means the executor ran the full wall-clock budget without returning;
+    // retrying the same slow executor just burns another full budget (and, on a
+    // hung CLI, another orphaned child) before falling over.
+    if (errorType === "rate_limit" || errorType === "timeout" || isFastEmptyFailure) {
       logger.info(
         { jobId: job.id, executor: current, errorType, fastEmpty: isFastEmptyFailure, durationMs: result.duration },
         isFastEmptyFailure
           ? "Fast empty failure — skipping retry and diagnosis, switching executor"
-          : "Rate limit detected — skipping retry and diagnosis, switching executor"
+          : errorType === "timeout"
+            ? "Timeout — skipping retry and diagnosis, switching executor"
+            : "Rate limit detected — skipping retry and diagnosis, switching executor"
       );
       const nextIdx: number = chain.indexOf(current) + 1;
       if (nextIdx < chain.length) {
         const nextExecutor: ExecutorKind = chain[nextIdx]!;
         if (!notifiedFallback && notify) {
           notifiedFallback = true;
-          const why = isFastEmptyFailure ? "failed instantly" : "rate-limited";
+          const why = isFastEmptyFailure ? "failed instantly" : errorType === "timeout" ? "timed out" : "rate-limited";
           await notify(`⚠️ ${current} ${why} for ${job.name}. Switching to ${nextExecutor}.`);
         }
         fallbackUsed = true;
