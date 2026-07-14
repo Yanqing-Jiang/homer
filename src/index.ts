@@ -233,13 +233,6 @@ async function main(): Promise<void> {
   } else {
     logger.warn("Failed to write runtime build stamp");
   }
-  const getRecentActiveCliRunCount = (): number => {
-    const cutoffMs = Date.now() - 2 * 60 * 60 * 1000;
-    const row = stateManager.getDb()
-      .prepare("SELECT COUNT(*) as count FROM cli_runs WHERE status = 'running' AND started_at > ?")
-      .get(cutoffMs) as { count: number } | undefined;
-    return row?.count ?? Number.POSITIVE_INFINITY;
-  };
   const stopBuildDriftGuard = startBuildDriftRestartGuard({
     service: "homer-daemon",
     reason: "build-drift",
@@ -252,32 +245,6 @@ async function main(): Promise<void> {
         },
         "Build drift detected; restart requested through heartbeat"
       );
-    },
-    selfExit: {
-      exitCode: 0,
-      getActiveWorkCount: getRecentActiveCliRunCount,
-      onExit: (drift, request, context) => {
-        logger.warn(
-          {
-            runtimeBuild: describeBuildInfo(drift.runtimeBuild),
-            diskBuild: describeBuildInfo(drift.diskBuild),
-            exitCode: context.exitCode,
-            restartRequest: request,
-            consecutiveChecks: context.consecutiveChecks,
-            diskBuildAgeMs: Math.round(context.diskBuildAgeMs),
-            processUptimeMs: Math.round(context.processUptimeMs),
-            activeCliRuns: context.activeWorkCount,
-          },
-          "Build drift stable; exiting so launchd restarts the daemon"
-        );
-        process.exitCode = context.exitCode;
-        try {
-          process.kill(process.pid, "SIGTERM");
-        } catch (err) {
-          logger.warn({ err, exitCode: context.exitCode }, "Failed to signal graceful shutdown; exiting directly");
-          process.exit(context.exitCode);
-        }
-      },
     },
   });
 

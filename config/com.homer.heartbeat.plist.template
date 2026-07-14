@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.homer.heartbeat</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__HOMER_DIR__/scripts/heartbeat-supervisor.sh</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Keep a resident loop instead of relying on StartInterval. macOS can put
+       GUI launchd domains into on-demand-only mode, where interval jobs stop
+       firing—the same condition this monitor must survive. -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOMER_HOME__</string>
+    <key>HOMER_ROOT</key>
+    <string>__HOMER_DIR__</string>
+    <key>HEARTBEAT_INTERVAL</key>
+    <string>20</string>
+    <key>PATH</key>
+    <string>__HOMER_PATH__</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__HOMER_HOME__/Library/Logs/homer/heartbeat.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOMER_HOME__/Library/Logs/homer/heartbeat.err.log</string>
+</dict>
+</plist>

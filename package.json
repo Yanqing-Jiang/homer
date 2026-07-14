@@ -56,10 +56,11 @@
     "app:service:status": "bash scripts/manage-app-service.sh status",
     "app:service:register": "bash scripts/manage-app-service.sh register",
     "app:service:unregister": "bash scripts/manage-app-service.sh unregister",
+    "heartbeat:install": "bash scripts/install-heartbeat.sh",
     "restart": "bash scripts/request-daemon-restart.sh manual-restart --now",
     "restart:force": "bash scripts/request-daemon-restart.sh manual-force-restart --force",
     "restart:force-stale": "bash scripts/request-daemon-restart.sh manual-force-stale-restart --force --force-stale",
-    "deploy": "npm run build && npm run app:build && node scripts/smoke-test.mjs && bash scripts/pre-restart-check.sh && npm run restart && node scripts/wait-runtime-build.mjs"
+    "deploy": "npm run build && npm run app:build && node scripts/smoke-test.mjs && bash scripts/pre-restart-check.sh && npm run heartbeat:install && npm run restart && node scripts/wait-runtime-build.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",

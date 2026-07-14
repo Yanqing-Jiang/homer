@@ -58,7 +58,7 @@ const CATALOG: Record<CatalogExecutor, HarnessCatalogEntry> = {
     models: [
       { id: "cursor/grok-4.5-high", label: "Cursor Grok 4.5 (high)", default: true },
       { id: "cursor/grok-4.5-medium", label: "Cursor Grok 4.5 (medium)" },
-      { id: "cursor/claude-opus-4-8-high", label: "Cursor Claude Opus 4.8 (high, 1M)" },
+      { id: "cursor/claude-opus-4-8-high", label: "Cursor Opus 4.8 (high, 1M)" },
       { id: "cursor/gpt-5.6-sol-medium", label: "Cursor GPT-5.6 Sol (medium, 1M)" },
       { id: "cursor/gpt-5.6-sol-high", label: "Cursor GPT-5.6 Sol (high, 1M)" },
       { id: "cursor/composer-2.5", label: "Cursor Composer 2.5 (fast/cheap)" },
@@ -69,7 +69,7 @@ const CATALOG: Record<CatalogExecutor, HarnessCatalogEntry> = {
       { id: "opencode-go/kimi-k2.7-code", label: "Kimi K2.7 Code" },
       { id: "opencode-go-2/kimi-k2.7-code", label: "Kimi K2.7 Code (account 2)" },
       { id: "opencode-go/deepseek-v4-flash", label: "DeepSeek V4 Flash" },
-      { id: "github-copilot/claude-opus-4.8", label: "Copilot Claude Opus 4.8" },
+      { id: "github-copilot/claude-opus-4.8", label: "GitHub Copilot Opus 4.8 (high)" },
     ],
   },
   gemini: {
