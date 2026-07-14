@@ -12,8 +12,8 @@ export interface InternalJobHarnessBaseline extends HarnessSelection {
 const HOME_DIR = process.env.HOME ?? process.cwd();
 const TMP_DIR = "/tmp";
 const CODEX_MODEL = "gpt-5.6-sol";
-const OPENCODE_FLASH_MODEL = "google/gemini-3.5-flash";
 const OPENCODE_FAST_MODEL = "cursor/composer-2.5";
+const CODEX_FALLBACK_MODEL = "gpt-5.6-sol-medium";
 const IDEA_STEP_TIMEOUT = 180_000;
 const LINK_PROCESS_TIMEOUT = 300_000;
 const PROJECT_DIR = PATHS.homerRoot;
@@ -38,35 +38,30 @@ function codexStage(
   };
 }
 
-const youtubeClassifyStage: InternalHarnessCallProfile = {
-  executor: "opencode",
-  model: OPENCODE_FLASH_MODEL,
-  cwdOverride: HOME_DIR,
-  timeoutOverride: 900_000,
-  executorOptions: {
-    opencode: {
-      forceOpenCode: true,
-      researchOnly: false,
+/** Shared OpenCode primary + Codex medium fallback for YouTube classify/analyze. */
+function youtubeStage(
+  timeoutOverride: number,
+): InternalHarnessCallProfile {
+  return {
+    executor: "opencode",
+    model: OPENCODE_FAST_MODEL,
+    cwdOverride: HOME_DIR,
+    timeoutOverride,
+    fallbackChain: ["codex"],
+    fallbackModels: {
+      codex: CODEX_FALLBACK_MODEL,
     },
-  },
-};
+    executorOptions: {
+      opencode: {
+        forceOpenCode: true,
+        researchOnly: false,
+      },
+    },
+  };
+}
 
-const youtubeAnalyzeStage: InternalHarnessCallProfile = {
-  executor: "opencode",
-  model: OPENCODE_FAST_MODEL,
-  cwdOverride: HOME_DIR,
-  timeoutOverride: 180_000,
-  fallbackChain: ["codex"],
-  fallbackModels: {
-    codex: "gpt-5.6-sol-medium",
-  },
-  executorOptions: {
-    opencode: {
-      forceOpenCode: true,
-      researchOnly: false,
-    },
-  },
-};
+const youtubeClassifyStage: InternalHarnessCallProfile = youtubeStage(900_000);
+const youtubeAnalyzeStage: InternalHarnessCallProfile = youtubeStage(300_000); // 5 min — Composer deep analysis
 
 export const INTERNAL_JOB_HARNESS_BASELINES = {
   "ideas-explore": {

@@ -150,6 +150,27 @@ os.replace(sys.argv[2], sys.argv[1])
 " "$STATE_FILE" "$tmp" 2>/dev/null || /bin/rm -f "$tmp"
 }
 
+# Record a lease on every invocation. This makes a missing or broken launchd
+# schedule observable even when Homer itself is healthy and no restart occurs.
+record_check() {
+  local status="${1:-checking}"
+  local tmp="${STATE_FILE}.tmp.$$"
+  /usr/bin/python3 -c "
+import json, os, sys, time
+state = {}
+if os.path.exists(sys.argv[1]):
+  try:
+    with open(sys.argv[1]) as f: state = json.load(f)
+  except Exception: pass
+state['last_check_epoch'] = int(time.time())
+state['last_status'] = sys.argv[3]
+with open(sys.argv[2], 'w') as f:
+  json.dump(state, f, indent=2)
+  f.write('\\n')
+os.replace(sys.argv[2], sys.argv[1])
+" "$STATE_FILE" "$tmp" "$status" 2>/dev/null || /bin/rm -f "$tmp"
+}
+
 # --- Circuit breaker ---
 restart_allowed() {
   local now last_restart cb_until
@@ -284,13 +305,17 @@ handle_planned_restart() {
 
 # --- Main ---
 main() {
+  record_check "checking"
+
   # Handle planned restarts first
   if handle_planned_restart; then
+    record_check "planned-restart-handled"
     exit 0
   fi
 
   # Health check
   if health_ok; then
+    record_check "healthy"
     exit 0
   fi
 
@@ -304,6 +329,7 @@ main() {
       /bin/rm -f "$DRAIN_SENTINEL"
     else
       log "daemon is draining (age=${sentinel_age}s); suppressing restart"
+      record_check "daemon-draining"
       exit 0
     fi
   fi
@@ -333,10 +359,12 @@ main() {
 
   if kickstart_daemon; then
     log "emergency restart succeeded"
+    record_check "emergency-restart-succeeded"
     exit 0
   fi
 
   log "emergency restart failed; deferring to watchdog"
+  record_check "emergency-restart-failed"
   exit 1
 }
 

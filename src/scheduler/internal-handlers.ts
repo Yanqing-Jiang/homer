@@ -25,12 +25,14 @@ import { createHash } from "crypto";
 import { execFile } from "child_process";
 import { promisify } from "node:util";
 import path from "node:path";
+import { readFileSync } from "node:fs";
 import { getConnectivityMonitor } from "../heartbeat/index.js";
 import { processRegistry } from "../process/registry.js";
 import { cleanupScheduler } from "../process/cleanup-scheduler.js";
 import { checkAndFlushExpiringSessions } from "../memory/flush.js";
 import { config } from "../config/index.js";
 import { runInternalJobHarness } from "./executor.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 interface InternalJobContext {
   stateManager: StateManager;
@@ -419,6 +421,30 @@ async function runHealthCheck(
     }
   } catch (err) {
     logger.warn({ error: err }, "Process monitoring in health handler failed");
+  }
+
+  // The hourly health job cannot detect Homer's absence while it is dead, but
+  // it can verify that the independent recovery supervisor is still checking.
+  // Four missed 20-second checks is enough to flag the recovery layer itself.
+  try {
+    const heartbeatStatePath = path.join(
+      getRuntimePaths().libraryApplicationSupportDir,
+      "Homer",
+      "heartbeat-state.json",
+    );
+    const heartbeatState = JSON.parse(readFileSync(heartbeatStatePath, "utf8")) as {
+      last_check_epoch?: unknown;
+      last_status?: unknown;
+    };
+    const lastCheckEpoch = Number(heartbeatState.last_check_epoch);
+    const ageMs = now - (lastCheckEpoch * 1000);
+    if (!Number.isFinite(lastCheckEpoch) || lastCheckEpoch <= 0 || ageMs > 90_000) {
+      const age = Number.isFinite(ageMs) ? `${Math.max(0, Math.round(ageMs / 1000))}s ago` : "unknown";
+      issues.push(`🔴 Recovery supervisor stale (last heartbeat: ${age})`);
+    }
+  } catch (err) {
+    issues.push("🔴 Recovery supervisor missing or unreadable");
+    logger.warn({ error: err }, "Recovery-supervisor lease check failed");
   }
 
   // Build drift: a fresh dist exists but the running process is still on an old
