@@ -42,6 +42,7 @@ const ORPHAN_PATTERNS = [
   "kimi --quiet",
   "gemini.*-(?:m|p)\\s",
 ];
+// DEBT: substring ORPHAN_PATTERNS + registry lacks protected-PID concept; upgrade when next cleanup false-positive is observed (see output/codex/outage-fixplan-review-2026-07-15-1425.md P1-4)
 
 // CDP scraping Chrome lifecycle. These are matched by a dedicated predicate
 // (isCdpChromeCmdline) rather than a bare ORPHAN_PATTERNS regex, because a loose
@@ -116,11 +117,27 @@ interface CdpState {
   trusted: boolean;
 }
 
+interface ProcessIdentity {
+  pid: number;
+  ppid: number;
+  pgid: number;
+  command: string;
+}
+
+interface ProtectedTopology {
+  ancestors: Set<number>;
+  pgids: Set<number>;
+}
+
+type GuardedSignalResult = "signaled" | "gone" | "pid-reuse" | "protected" | "failed";
+
 export class CleanupScheduler {
   private db: Database.Database | null = null;
   private enforce: boolean;
   /** CDP process/profile snapshot for the current run (rebuilt each cycle). */
   private cdp: CdpState = { listenerPids: new Set(), liveProfileDirs: new Set(), referencedProfileDirs: new Set(), trusted: false };
+  /** Daemon ancestry and process groups protected for the current cleanup cycle. */
+  private protectedTopology: ProtectedTopology | null = null;
 
   constructor() {
     // Enforcement ON by default; set PROCESS_CLEANUP_ENFORCE=0 to disable
@@ -142,6 +159,12 @@ export class CleanupScheduler {
     let logMaintenance = emptyLogMaintenanceSummary();
 
     try {
+      // Build the signal fence before any phase can decide to kill a process.
+      this.protectedTopology = this.buildProtectedTopology();
+      if (!this.protectedTopology) {
+        logger.warn("Skipping orphan-kill phase — daemon process topology could not be read");
+      }
+
       // Snapshot live CDP state once per cycle — used to spare the active :9222
       // session in both scans and to gate the /tmp profile-dir sweep.
       this.cdp = this.buildCdpState();
@@ -225,6 +248,10 @@ export class CleanupScheduler {
   private scanOrphans(): CleanupAction[] {
     const actions: CleanupAction[] = [];
 
+    // Fail closed: without a complete ancestry/PGID snapshot, no orphan can be
+    // proven independent of the daemon and its launchd supervisor.
+    if (!this.protectedTopology) return actions;
+
     try {
       // ps auxww (not aux): unlimited-width so long Chrome command lines aren't
       // truncated past the --user-data-dir flag the CDP predicate needs.
@@ -240,9 +267,11 @@ export class CleanupScheduler {
         const pid = parseInt(cols[1] ?? "", 10);
         if (isNaN(pid) || pid <= 1) continue;
         if (registeredPids.has(pid)) continue; // Known to registry
-        if (pid === process.pid) continue; // Self
+        if (pid === process.pid || this.protectedTopology.ancestors.has(pid)) continue;
 
-        const cmdline = cols.slice(10).join(" ");
+        const identity = this.readProcessIdentity(pid);
+        if (!identity) continue;
+        const cmdline = identity.command;
         const isCdpChrome = isCdpChromeCmdline(cmdline);
         const isHomerProcess = isCdpChrome || ORPHAN_PATTERNS.some((p) => new RegExp(p).test(cmdline));
         if (!isHomerProcess) continue;
@@ -265,7 +294,7 @@ export class CleanupScheduler {
         }
 
         // Safety: Check parent PID
-        if (!this.isSafeToKillOrphan(pid, cmdline)) {
+        if (!this.isSafeToKillOrphan(identity)) {
           actions.push({
             pid,
             command: cmdline.slice(0, 100),
@@ -276,7 +305,7 @@ export class CleanupScheduler {
         }
 
         actions.push(
-          this.handleOrphan(pid, cmdline.slice(0, 100))
+          this.handleOrphan(identity, cmdline.slice(0, 100))
         );
       }
     } catch (err) {
@@ -464,6 +493,11 @@ export class CleanupScheduler {
       return { pid: record.pid, command: record.command, action: "spared", reason: "live cdp listener" };
     }
 
+    const identity = this.readProcessIdentity(record.pid);
+    if (!identity) {
+      return { pid: record.pid, command: record.command, action: "spared", reason: "process no longer exists" };
+    }
+
     // Layer 2: Check cli_runs for active status
     if (this.db && record.runId != null) {
       try {
@@ -498,12 +532,18 @@ export class CleanupScheduler {
 
     // All checks passed — kill (or log in monitor mode)
     if (this.enforce) {
-      processRegistry.killProcess(record, "SIGTERM");
+      const groupPgid = record.pgid === identity.pgid ? identity.pgid : undefined;
+      const result = this.guardedSignal(identity, "SIGTERM", groupPgid);
+      if (result !== "signaled") {
+        return {
+          pid: record.pid,
+          command: record.command,
+          action: "spared",
+          reason: result === "pid-reuse" ? "pid-reuse guard" : `signal guard: ${result}`,
+        };
+      }
       setTimeout(() => {
-        try {
-          process.kill(record.pid, 0);
-          processRegistry.killProcess(record, "SIGKILL");
-        } catch { /* already dead */ }
+        this.guardedSignal(identity, "SIGKILL", groupPgid);
         processRegistry.unregister(record.pid);
       }, 5000);
       return { pid: record.pid, command: record.command, action: "killed", reason };
@@ -522,16 +562,15 @@ export class CleanupScheduler {
    * - TTY-attached `claude` where etime > 6h AND TTY idle > 6h → kill (process group)
    * - otherwise spare
    */
-  private isSafeToKillOrphan(pid: number, cmdline: string): boolean {
+  private isSafeToKillOrphan(identity: ProcessIdentity): boolean {
+    const { pid, ppid, pgid, command: cmdline } = identity;
     if (pid <= 1 || pid === process.pid) return false;
 
     try {
-      const info = execSync(`ps -o ppid=,pgid=,tty=,etime= -p ${pid}`, { encoding: "utf-8", timeout: 2000 }).trim();
+      const info = execSync(`ps -o tty=,etime= -p ${pid}`, { encoding: "utf-8", timeout: 2000 }).trim();
       const parts = info.split(/\s+/);
-      const ppid = parseInt(parts[0] ?? "", 10);
-      const pgid = parseInt(parts[1] ?? "", 10);
-      const tty = parts[2] ?? "";
-      const etime = parts[3] ?? "";
+      const tty = parts[0] ?? "";
+      const etime = parts[1] ?? "";
       const ageMs = parseEtime(etime);
 
       if (tty && tty !== "?" && tty !== "??") {
@@ -553,9 +592,6 @@ export class CleanupScheduler {
         return true;
       }
 
-      // Always safe to kill tty-less if parent is init (1) or our daemon
-      if (ppid === 1 || ppid === process.pid) return true;
-
       // Age-based: kill any tty-less HOMER process older than 6 hours regardless of parent
       if (ageMs > ORPHAN_AGE_KILL_MS) {
         logger.info(
@@ -572,24 +608,26 @@ export class CleanupScheduler {
     }
   }
 
-  private handleOrphan(pid: number, command: string): CleanupAction {
+  private handleOrphan(identity: ProcessIdentity, command: string): CleanupAction {
+    const { pid } = identity;
     if (this.enforce) {
-      try {
-        // If PID is its own process-group leader, signal the whole group so
-        // MCP/tool children (mcp-remote, notebooklm-mcp, tsserver, etc.) die too.
-        // Otherwise fall back to PID-only to avoid hitting the wrong group.
-        const target = isProcessGroupLeader(pid) ? -pid : pid;
-        process.kill(target, "SIGTERM");
+      // PID-only is the default. A process-group leader is the sole exception,
+      // and the central guard still proves its PGID does not intersect the
+      // daemon/ancestor protected PGID set immediately before each signal.
+      const groupPgid = identity.pgid === pid ? identity.pgid : undefined;
+      const result = this.guardedSignal(identity, "SIGTERM", groupPgid);
+      if (result === "signaled") {
         setTimeout(() => {
-          try {
-            process.kill(target, 0);
-            process.kill(target, "SIGKILL");
-          } catch { /* already dead */ }
+          this.guardedSignal(identity, "SIGKILL", groupPgid);
         }, 5000);
         return { pid, command, action: "killed", reason: "orphan: not in registry" };
-      } catch {
-        return { pid, command, action: "spared", reason: "orphan: kill failed" };
       }
+      return {
+        pid,
+        command,
+        action: "spared",
+        reason: result === "pid-reuse" ? "pid-reuse guard" : `orphan: signal guard ${result}`,
+      };
     }
 
     logger.warn(
@@ -597,6 +635,126 @@ export class CleanupScheduler {
       "MONITOR: Would kill orphan process (cleanup enforcement disabled)"
     );
     return { pid, command, action: "spared", reason: "monitor-only: orphan" };
+  }
+
+  /**
+   * Snapshot the daemon's complete ancestor chain and every PGID containing the
+   * daemon or an ancestor. Any unreadable/malformed link makes the fence unusable.
+   */
+  private buildProtectedTopology(): ProtectedTopology | null {
+    const ancestors = new Set<number>();
+    const pgids = new Set<number>();
+    const visited = new Set<number>();
+    let pid = process.pid;
+
+    while (pid > 0) {
+      if (visited.has(pid)) return null;
+      visited.add(pid);
+
+      try {
+        const raw = execSync(`ps -o ppid=,pgid= -p ${pid}`, {
+          encoding: "utf-8",
+          timeout: 2000,
+        }).trim();
+        const [ppidRaw, pgidRaw] = raw.split(/\s+/);
+        const ppid = Number(ppidRaw);
+        const pgid = Number(pgidRaw);
+        if (!Number.isInteger(ppid) || ppid < 0 || !Number.isInteger(pgid) || pgid < 1) return null;
+
+        pgids.add(pgid);
+        if (pid !== process.pid) ancestors.add(pid);
+        if (pid === 1) break;
+        if (ppid <= 0) return null;
+        pid = ppid;
+      } catch (err) {
+        logger.warn({ err, pid }, "Failed to read daemon process topology");
+        return null;
+      }
+    }
+
+    return ancestors.has(1) ? { ancestors, pgids } : null;
+  }
+
+  /** Read the identity fields that must remain stable between scan and signal. */
+  private readProcessIdentity(pid: number): ProcessIdentity | null {
+    try {
+      const raw = execSync(`ps -ww -o ppid=,pgid=,command= -p ${pid}`, {
+        encoding: "utf-8",
+        timeout: 2000,
+      }).trim();
+      const match = raw.match(/^(\d+)\s+(\d+)\s+([\s\S]+)$/);
+      if (!match) return null;
+      const ppid = Number(match[1]);
+      const pgid = Number(match[2]);
+      const command = match[3] ?? "";
+      if (!Number.isInteger(ppid) || ppid < 0 || !Number.isInteger(pgid) || pgid < 1 || !command) return null;
+      return { pid, ppid, pgid, command };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The only process.kill call in this module. Re-check identity and topology
+   * immediately before every PID or process-group signal, including escalation.
+   */
+  private guardedSignal(
+    expected: ProcessIdentity,
+    signal: NodeJS.Signals,
+    groupPgid?: number
+  ): GuardedSignalResult {
+    const topology = this.protectedTopology;
+    if (
+      !topology ||
+      expected.pid <= 1 ||
+      expected.pid === process.pid ||
+      topology.ancestors.has(expected.pid)
+    ) {
+      logger.warn({ pid: expected.pid, signal }, "Cleanup signal guard blocked protected PID");
+      return "protected";
+    }
+
+    const current = this.readProcessIdentity(expected.pid);
+    if (!current) return "gone";
+    if (
+      current.command !== expected.command ||
+      current.ppid !== expected.ppid ||
+      current.pgid !== expected.pgid
+    ) {
+      logger.warn(
+        { pid: expected.pid, signal, expected, current },
+        "pid-reuse guard"
+      );
+      return "pid-reuse";
+    }
+
+    if (topology.pgids.has(current.pgid)) {
+      logger.warn(
+        { pid: current.pid, pgid: current.pgid, signal },
+        "Cleanup signal guard blocked protected PGID"
+      );
+      return "protected";
+    }
+
+    if (groupPgid !== undefined && (groupPgid <= 1 || groupPgid !== current.pgid)) {
+      logger.warn(
+        { pid: current.pid, expectedPgid: groupPgid, actualPgid: current.pgid, signal },
+        "Cleanup signal guard could not prove process-group identity"
+      );
+      return "protected";
+    }
+
+    try {
+      process.kill(groupPgid === undefined ? current.pid : -groupPgid, signal);
+      return "signaled";
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ESRCH") return "gone";
+      logger.warn(
+        { err, pid: current.pid, pgid: groupPgid, signal },
+        "Cleanup signal failed"
+      );
+      return "failed";
+    }
   }
 
   private logRun(
@@ -786,18 +944,6 @@ function getTtyIdleMs(tty: string): number {
     return Date.now() - Math.max(s.atimeMs, s.mtimeMs);
   } catch {
     return 0; // unreadable → treat as active (spare)
-  }
-}
-
-function isProcessGroupLeader(pid: number): boolean {
-  try {
-    const pgid = parseInt(
-      execSync(`ps -o pgid= -p ${pid}`, { encoding: "utf-8", timeout: 2000 }).trim(),
-      10
-    );
-    return pgid === pid;
-  } catch {
-    return false;
   }
 }
 
