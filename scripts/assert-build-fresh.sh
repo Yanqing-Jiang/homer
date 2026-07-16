@@ -2,8 +2,8 @@
 #
 # Refuse a daemon restart when compiled dist is older than source — the exact
 # incident where an edit "ships" via a plain restart without a rebuild. Run
-# before any human/agent-initiated restart; recovery paths (heartbeat/watchdog
-# restarting a CRASHED process) are intentionally exempt.
+# before any human/agent-initiated restart. Automatic crash recovery is handled
+# directly by the resident supervisor and never invokes this script.
 #
 # Escape hatch (intentional stale restart, e.g. crash recovery):
 #   assert-build-fresh.sh --force-stale   OR   HOMER_ALLOW_STALE_RESTART=1

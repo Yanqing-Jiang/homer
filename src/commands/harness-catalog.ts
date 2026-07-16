@@ -46,6 +46,7 @@ const CATALOG: Record<CatalogExecutor, HarnessCatalogEntry> = {
     defaultModel: "opus[1m]",
     models: [
       { id: "opus[1m]", label: "Opus 1M", default: true },
+      { id: "opus[high]", label: "Opus (high effort)" },
       { id: "sonnet[1m]", label: "Sonnet 1M" },
     ],
   },

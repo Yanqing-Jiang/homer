@@ -13,7 +13,7 @@ import { CronUtils } from "../utils/cron.js";
 import { loadAllSchedules, getAllJobs } from "./loader.js";
 import { JOB_REGISTRY } from "./registry.js";
 import { getClaudeAuthStatus } from "../utils/claude-auth.js";
-import { buildInfoMatches, describeBuildInfo, getRuntimeBuildInfo, readDiskBuildInfo, requestBuildDriftRestart } from "../utils/build-info.js";
+import { buildInfoMatches, describeBuildInfo, getRuntimeBuildInfo, readDiskBuildInfo } from "../utils/build-info.js";
 import { checkGeminiAPIHealth } from "../executors/gemini.js";
 import {
   formatScheduledTelegramHtml,
@@ -25,14 +25,12 @@ import { createHash } from "crypto";
 import { execFile } from "child_process";
 import { promisify } from "node:util";
 import path from "node:path";
-import { readFileSync } from "node:fs";
 import { getConnectivityMonitor } from "../heartbeat/index.js";
 import { processRegistry } from "../process/registry.js";
 import { cleanupScheduler } from "../process/cleanup-scheduler.js";
 import { checkAndFlushExpiringSessions } from "../memory/flush.js";
 import { config } from "../config/index.js";
 import { runInternalJobHarness } from "./executor.js";
-import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 interface InternalJobContext {
   stateManager: StateManager;
@@ -423,28 +421,11 @@ async function runHealthCheck(
     logger.warn({ error: err }, "Process monitoring in health handler failed");
   }
 
-  // The hourly health job cannot detect Homer's absence while it is dead, but
-  // it can verify that the independent recovery supervisor is still checking.
-  // Four missed 20-second checks is enough to flag the recovery layer itself.
-  try {
-    const heartbeatStatePath = path.join(
-      getRuntimePaths().libraryApplicationSupportDir,
-      "Homer",
-      "heartbeat-state.json",
-    );
-    const heartbeatState = JSON.parse(readFileSync(heartbeatStatePath, "utf8")) as {
-      last_check_epoch?: unknown;
-      last_status?: unknown;
-    };
-    const lastCheckEpoch = Number(heartbeatState.last_check_epoch);
-    const ageMs = now - (lastCheckEpoch * 1000);
-    if (!Number.isFinite(lastCheckEpoch) || lastCheckEpoch <= 0 || ageMs > 90_000) {
-      const age = Number.isFinite(ageMs) ? `${Math.max(0, Math.round(ageMs / 1000))}s ago` : "unknown";
-      issues.push(`🔴 Recovery supervisor stale (last heartbeat: ${age})`);
-    }
-  } catch (err) {
-    issues.push("🔴 Recovery supervisor missing or unreadable");
-    logger.warn({ error: err }, "Recovery-supervisor lease check failed");
+  // In production Homer must remain a child of the resident supervisor. If the
+  // parent dies macOS reparents Homer to PID 1, making supervisor loss visible.
+  if (process.env.NODE_ENV === "production" &&
+      (process.env.HOMER_SUPERVISED !== "1" || process.ppid === 1)) {
+    issues.push("🔴 Homer is not owned by its supervisor");
   }
 
   // Build drift: a fresh dist exists but the running process is still on an old
@@ -455,9 +436,8 @@ async function runHealthCheck(
     const runtimeBuild = getRuntimeBuildInfo();
     const diskBuild = readDiskBuildInfo();
     if (runtimeBuild && diskBuild && !buildInfoMatches(runtimeBuild, diskBuild)) {
-      const restartRequest = requestBuildDriftRestart("homer-daemon", "build-drift");
       issues.push(
-        `🟡 Build drift: running ${describeBuildInfo(runtimeBuild)} but dist is ${describeBuildInfo(diskBuild)} — restart ${restartRequest?.status ?? "request failed"}`,
+        `🟡 Build drift: running ${describeBuildInfo(runtimeBuild)} but dist is ${describeBuildInfo(diskBuild)} — deploy required`,
       );
     }
   } catch (err) {

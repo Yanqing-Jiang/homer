@@ -5,12 +5,10 @@
   <key>Label</key>
   <string>com.homer.daemon</string>
 
-  <key>BundleProgram</key>
-  <string>Contents/MacOS/Homer</string>
-
   <key>ProgramArguments</key>
   <array>
-    <string>Homer</string>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/yj/homer/scripts/daemon-supervisor.mjs</string>
     <string>/opt/homebrew/bin/node</string>
     <string>/Users/yj/homer/dist/index.js</string>
   </array>
@@ -53,8 +51,7 @@
     <string>/Users/yj/Library/Logs/homer</string>
   </dict>
 
-  <!-- KeepAlive: always restart after any exit. ThrottleInterval bounds crash loops.
-       To stop the daemon for maintenance, use `launchctl bootout`, not `kill`. -->
+  <!-- launchd owns the stable supervisor; the supervisor owns Homer. -->
   <key>KeepAlive</key>
   <true/>
 
@@ -62,7 +59,7 @@
   <integer>360</integer>
 
   <key>ThrottleInterval</key>
-  <integer>60</integer>
+  <integer>10</integer>
 
   <key>ProcessType</key>
   <string>Background</string>
