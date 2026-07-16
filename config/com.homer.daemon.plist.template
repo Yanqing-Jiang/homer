@@ -20,7 +20,8 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>__HOMER_APP_BIN__</string>
+    <string>__NODE_BIN__</string>
+    <string>__HOMER_DIR__/scripts/daemon-supervisor.mjs</string>
     <string>__NODE_BIN__</string>
     <string>__HOMER_DIR__/dist/index.js</string>
   </array>
@@ -68,8 +69,7 @@
     <string>__HOMER_HOME__/Library/Logs/homer</string>
   </dict>
 
-  <!-- KeepAlive: always restart after any exit. ThrottleInterval bounds crash loops.
-       To stop the daemon for maintenance, use `launchctl bootout`, not `kill`. -->
+  <!-- launchd owns the stable supervisor; the supervisor owns Homer. -->
   <key>KeepAlive</key>
   <true/>
 
@@ -77,7 +77,7 @@
   <integer>360</integer>
 
   <key>ThrottleInterval</key>
-  <integer>60</integer>
+  <integer>10</integer>
 
   <key>ProcessType</key>
   <string>Background</string>

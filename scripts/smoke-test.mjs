@@ -19,7 +19,6 @@ const modules = [
   "dist/executors/gemini.js",
   "dist/scheduler/jobs/ideas-explore.js",
   "dist/scheduler/jobs/nightly-memory.js",
-  "dist/scheduler/jobs/homer-improvements.js",
   "dist/scheduler/jobs/session-harvester.js",
   "dist/scheduler/jobs/memory-embeddings.js",
   "dist/scheduler/jobs/memory-reindex.js",

@@ -155,6 +155,23 @@ export function extractTextContent(content: string | ContentBlock[] | undefined)
   return "";
 }
 
+/**
+ * Map catalog model ids onto the Claude CLI base model + optional reasoning effort.
+ * The CLI takes `--model <name>` and a *separate* `--effort <level>` flag, so catalog
+ * ids that bundle effort (e.g. `opus[high]`) must be split at spawn time.
+ * - `<base>[<level>]` → { model: "<base>", effort: "<level>" }
+ * - every other id passes through unchanged with no effort flag (e.g. `opus[1m]`).
+ */
+export function resolveClaudeModelVariant(
+  model: string | undefined
+): { model: string; effort?: string } {
+  const m = model?.match(/^(fable|opus|sonnet)\[(low|medium|high|xhigh|max)\]$/);
+  if (m) {
+    return { model: m[1]!, effort: m[2]! };
+  }
+  return { model: model ?? "" };
+}
+
 export async function executeClaudeCommand(
   query: string,
   options: ClaudeExecutorOptions
@@ -178,8 +195,10 @@ export async function executeClaudeCommand(
 
   // Add model override if specified
   if (model) {
-    args.push("--model", model);
-    logger.debug({ model }, "Using model override");
+    const resolved = resolveClaudeModelVariant(model);
+    args.push("--model", resolved.model);
+    if (resolved.effort) args.push("--effort", resolved.effort);
+    logger.debug({ model, resolved }, "Using model override");
   }
 
   if (claudeSessionId) {

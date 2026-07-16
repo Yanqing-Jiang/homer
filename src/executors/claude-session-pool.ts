@@ -6,6 +6,7 @@ import { getRuntimePaths } from "../utils/runtime-paths.js";
 import {
   buildToolLabel,
   extractTextContent,
+  resolveClaudeModelVariant,
   type ClaudeExecutorResult,
   type ContentBlock,
   type StreamEvent,
@@ -273,7 +274,11 @@ function spawnSession(params: {
     "stream-json",
     "--dangerously-skip-permissions",
   ];
-  if (model) args.push("--model", model);
+  if (model) {
+    const resolved = resolveClaudeModelVariant(model);
+    args.push("--model", resolved.model);
+    if (resolved.effort) args.push("--effort", resolved.effort);
+  }
   if (resumeSessionId) args.push("--resume", resumeSessionId);
 
   const claudeBin = resolveClaudePath();
