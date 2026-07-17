@@ -29,9 +29,9 @@ function harnessDefault(): { executor: ExecutorKind; model: string | null } {
     if (row?.executor && isExecutorKind(row.executor)) {
       return { executor: row.executor, model: row.model };
     }
-    return { executor: "opencode", model: "cursor/grok-4.5-high" };
+    return { executor: "opencode", model: "cursor/grok-4.5-xhigh" };
   } catch {
-    return { executor: "opencode", model: "cursor/grok-4.5-high" };
+    return { executor: "opencode", model: "cursor/grok-4.5-xhigh" };
   }
 }
 

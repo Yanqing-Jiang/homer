@@ -29,11 +29,11 @@ export interface CommandDefinition {
 }
 
 /**
- * Default opencode harness model (Grok 4.5 High via the cursor provider) and the
+ * Default opencode harness model (Grok 4.5 xhigh via the cursor provider) and the
  * Claude rollback alias. Single source of truth for the "main harness" switch — see
  * the harness_default table + resolveDefaultExecutor() for the runtime default.
  */
-export const OPENCODE_DEFAULT_MODEL = "cursor/grok-4.5-high";
+export const OPENCODE_DEFAULT_MODEL = "cursor/grok-4.5-xhigh";
 export const CLAUDE_ROLLBACK_MODEL = "opus[1m]";
 
 /**
@@ -45,7 +45,7 @@ export const EXECUTOR_MODELS: Record<ExecutorType, string | undefined> = {
   gemini: GEMINI_CLI_FLASH_MODEL, // Fast, cheap
   kimi: "kimi-k2-5",                // Kimi K2.5 via NVIDIA NIM
   chatgpt: undefined,               // Uses Claude + browser skill to access ChatGPT
-  opencode: OPENCODE_DEFAULT_MODEL, // cursor/grok-4.5-high — the main harness model
+  opencode: OPENCODE_DEFAULT_MODEL, // cursor/grok-4.5-xhigh — the main harness model
 };
 
 /**
@@ -136,10 +136,18 @@ export const COMMANDS: CommandDefinition[] = [
   {
     name: "/opencode",
     category: "executor",
-    description: "Switch to opencode (Grok 4.5 High via cursor)",
+    description: "Switch to opencode (Grok 4.5 xhigh via cursor)",
     executor: "opencode",
     model: OPENCODE_DEFAULT_MODEL,
     aliases: ["/grok"],
+  },
+  {
+    name: "/grok_high",
+    category: "executor",
+    description: "OpenCode with Cursor Grok 4.5 (high)",
+    executor: "opencode",
+    model: "cursor/grok-4.5-high",
+    aliases: ["/grok-high"],
   },
   {
     name: "/open_opus",

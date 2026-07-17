@@ -57,7 +57,8 @@ const CATALOG: Record<CatalogExecutor, HarnessCatalogEntry> = {
     modelMode: "catalog",
     defaultModel: OPENCODE_DEFAULT_MODEL,
     models: [
-      { id: "cursor/grok-4.5-high", label: "Cursor Grok 4.5 (high)", default: true },
+      { id: "cursor/grok-4.5-xhigh", label: "Cursor Grok 4.5 (xhigh)", default: true },
+      { id: "cursor/grok-4.5-high", label: "Cursor Grok 4.5 (high)" },
       { id: "cursor/grok-4.5-medium", label: "Cursor Grok 4.5 (medium)" },
       { id: "cursor/claude-opus-4-8-high", label: "Cursor Opus 4.8 (high, 1M)" },
       { id: "cursor/gpt-5.6-sol-medium", label: "Cursor GPT-5.6 Sol (medium, 1M)" },
