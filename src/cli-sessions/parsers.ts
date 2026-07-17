@@ -1,5 +1,5 @@
 import { readFileSync, readdirSync, statSync, existsSync } from "fs";
-import { join } from "path";
+import { basename, join } from "path";
 import { createHash } from "crypto";
 // @ts-ignore
 import Database from "better-sqlite3";
@@ -942,11 +942,45 @@ export function scanThreadSessions(
           thread.chat_session_id === "tg:system" ? "telegram" : "web";
 
         // Build ParsedSession messages
-        const messages: ParsedMessage[] = substantiveMessages.map((m) => ({
-          role: m.role as "user" | "assistant",
-          content: m.content,
-          timestamp: m.created_at,
-        }));
+        const messages: ParsedMessage[] = substantiveMessages.map((m) => {
+          let content = m.content;
+          if (m.metadata) {
+            try {
+              const metadata = JSON.parse(m.metadata);
+              if (Array.isArray(metadata.attachments) && metadata.attachments.length > 0) {
+                const attachments = metadata.attachments.flatMap((attachment: unknown) => {
+                  const fields: Record<string, unknown> = typeof attachment === "string"
+                    ? { path: attachment }
+                    : attachment && typeof attachment === "object"
+                      ? attachment as Record<string, unknown>
+                      : {};
+                  const path = typeof fields.path === "string" ? fields.path : undefined;
+                  const filename = typeof fields.filename === "string" && fields.filename
+                    ? fields.filename
+                    : path ? basename(path) : undefined;
+                  const mimeType = typeof fields.mimeType === "string" ? fields.mimeType : undefined;
+                  const size = typeof fields.size === "number" ? fields.size : undefined;
+                  if (!filename && !path && !mimeType && typeof size !== "number") return [];
+
+                  const details: string[] = [];
+                  if (mimeType) details.push(mimeType);
+                  if (typeof size === "number") details.push(`${size} bytes`);
+                  if (path) details.push(path);
+                  const label = filename || path || "attachment";
+                  return [details.length > 0 ? `${label} (${details.join(", ")})` : label];
+                });
+                if (attachments.length > 0) {
+                  content += `\n[Attached files: ${attachments.join("; ")}]`;
+                }
+              }
+            } catch { /* ignore */ }
+          }
+          return {
+            role: m.role as "user" | "assistant",
+            content,
+            timestamp: m.created_at,
+          };
+        });
 
         // Content hash based on new messages only
         const normalizedContent = messages
