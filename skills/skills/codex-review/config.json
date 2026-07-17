@@ -1,6 +1,0 @@
-{
-  "description": "Run Codex completeness/soundness review on changed files. Trigger on 'review code', 'codex review', 'quality check', 'is this ready to merge', 'completeness check'.",
-  "default_effort": "high",
-  "max_build_fix_cycles": 3,
-  "auto_fix_severity": ["CRITICAL", "HIGH"]
-}
