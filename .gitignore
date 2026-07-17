@@ -136,6 +136,7 @@ workspaces/
 /src/scheduler/jobs/ideas-explore.ts
 /src/scheduler/jobs/content-scraper.ts
 /src/scheduler/jobs/link-processor.ts
+/src/scheduler/jobs/upload-email-ingest.ts
 /src/scheduler/jobs/overnight-youtube.ts
 /src/scheduler/jobs/mentor-layer.ts
 /src/scheduler/jobs/outcome-tracker.ts

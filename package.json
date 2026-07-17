@@ -70,6 +70,7 @@
     "@google/generative-ai": "^0.24.1",
     "@grammyjs/auto-retry": "^2.0.2",
     "@grammyjs/transformer-throttler": "^1.2.1",
+    "@kenjiuno/msgreader": "^1.28.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@mozilla/readability": "^0.6.0",
     "@types/fs-ext": "^2.0.3",
@@ -87,6 +88,7 @@
     "pino": "^9.4.0",
     "pino-pretty": "^11.2.2",
     "playwright": "^1.40.0",
+    "postal-mime": "^2.7.5",
     "yaml": "^2.9.0",
     "zod": "^3.23.8"
   },
