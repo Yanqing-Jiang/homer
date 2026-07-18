@@ -12,7 +12,7 @@ MONITOR="$HOMER_DIR/scripts/heartbeat-monitor.sh"
 SUPERVISOR="$HOMER_DIR/scripts/heartbeat-supervisor.sh"
 DEST="$HOMER_HOME/Library/LaunchAgents/com.homer.heartbeat.plist"
 TARGET="gui/$(id -u)/com.homer.heartbeat"
-STATE_FILE="$HOMER_HOME/Library/Application Support/Homer/heartbeat-state.json"
+STATE_FILE="$HOMER_HOME/Library/Application Support/Homer/heartbeat-presence.state"
 
 [[ -f "$TEMPLATE" ]] || { echo "Missing heartbeat template: $TEMPLATE" >&2; exit 1; }
 [[ -f "$MONITOR" ]] || { echo "Missing heartbeat monitor: $MONITOR" >&2; exit 1; }
@@ -49,16 +49,17 @@ launchctl bootstrap "gui/$(id -u)" "$DEST"
 launchctl enable "$TARGET"
 launchctl kickstart "$TARGET"
 
-# Verify both the resident process and a fresh monitor lease.
-for _ in 1 2 3 4 5; do
+# Verify the resident process and a fresh presence-state write. The monitor
+# runs one pass immediately at load, so the state file should appear quickly.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
   if ! launchctl print "$TARGET" 2>/dev/null | grep -q 'state = running'; then
     sleep 1
     continue
   fi
-  last_check="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("last_check_epoch",0))' "$STATE_FILE" 2>/dev/null || echo 0)"
+  mtime="$(/usr/bin/stat -f %m "$STATE_FILE" 2>/dev/null || echo 0)"
   now="$(date +%s)"
-  if [[ "$last_check" =~ ^[0-9]+$ ]] && (( now - last_check <= 30 )); then
-    echo "Heartbeat installed and verified (last check ${last_check})."
+  if [[ "$mtime" =~ ^[0-9]+$ ]] && (( now - mtime <= 90 )); then
+    echo "Heartbeat installed and verified (presence state written ${mtime})."
     exit 0
   fi
   sleep 1

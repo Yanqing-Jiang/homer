@@ -30,7 +30,7 @@
     <key>HOMER_ROOT</key>
     <string>__HOMER_DIR__</string>
     <key>HEARTBEAT_INTERVAL</key>
-    <string>20</string>
+    <string>60</string>
     <key>PATH</key>
     <string>__HOMER_PATH__</string>
   </dict>

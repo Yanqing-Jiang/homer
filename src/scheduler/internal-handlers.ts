@@ -1070,9 +1070,6 @@ async function runHandler(
         const logParts: string[] = [];
         if (cleanup.logMaintenance.rotated > 0) logParts.push(`rotated ${cleanup.logMaintenance.rotated} log(s)`);
         if (cleanup.logMaintenance.pruned > 0) logParts.push(`pruned ${cleanup.logMaintenance.pruned} retained log(s)`);
-        if (cleanup.logMaintenance.deletedDeadLogs > 0) {
-          logParts.push(`deleted ${cleanup.logMaintenance.deletedDeadLogs} retired watchdog log(s)`);
-        }
         if (cleanup.logMaintenance.errors.length > 0) {
           logParts.push(`${cleanup.logMaintenance.errors.length} log maintenance error(s)`);
         }

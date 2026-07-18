@@ -18,7 +18,6 @@ import {
   rmSync,
   statSync,
   truncateSync,
-  unlinkSync,
 } from "fs";
 import { basename, dirname, join } from "path";
 import { processRegistry } from "./registry.js";
@@ -82,7 +81,6 @@ interface CleanupAction {
 interface LogMaintenanceSummary {
   rotated: number;
   pruned: number;
-  deletedDeadLogs: number;
   errors: string[];
 }
 
@@ -269,12 +267,21 @@ export class CleanupScheduler {
         if (registeredPids.has(pid)) continue; // Known to registry
         if (pid === process.pid || this.protectedTopology.ancestors.has(pid)) continue;
 
+        // Pre-filter on the snapshot cmdline so the per-PID `ps` identity read
+        // only runs for actual candidates — one execSync per PID across ~700
+        // processes blocks the event loop ~15s, which the heartbeat probe
+        // converts into an emergency restart (2026-07-18 restart storm).
+        const snapshotCmdline = cols.slice(10).join(" ");
+        const matchesHomer = (cmd: string) =>
+          isCdpChromeCmdline(cmd) || ORPHAN_PATTERNS.some((p) => new RegExp(p).test(cmd));
+        if (!matchesHomer(snapshotCmdline)) continue;
+
         const identity = this.readProcessIdentity(pid);
         if (!identity) continue;
         const cmdline = identity.command;
+        // Fail closed on PID reuse: the authoritative identity must still match.
+        if (!matchesHomer(cmdline)) continue;
         const isCdpChrome = isCdpChromeCmdline(cmdline);
-        const isHomerProcess = isCdpChrome || ORPHAN_PATTERNS.some((p) => new RegExp(p).test(cmdline));
-        if (!isHomerProcess) continue;
 
         // Never reap a CDP Chrome unless we have TRUSTED state proving it is not
         // the live :9222 session. If listener discovery failed this cycle
@@ -815,26 +822,7 @@ export class CleanupScheduler {
       }
     }
 
-    const retiredWatchdogLogs = [
-      "watchdog.log",
-      "watchdog.out.log",
-      "watchdog.err.log",
-      "watchdog-events.jsonl",
-    ];
-    for (const name of retiredWatchdogLogs) {
-      const filePath = join(runtimePaths.libraryLogsDir, name);
-      try {
-        if (!existsSync(filePath)) continue;
-        unlinkSync(filePath);
-        summary.deletedDeadLogs++;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        summary.errors.push(`${filePath}: ${message}`);
-        logger.warn({ err, path: filePath }, "Retired watchdog log deletion failed");
-      }
-    }
-
-    if (summary.rotated > 0 || summary.pruned > 0 || summary.deletedDeadLogs > 0) {
+    if (summary.rotated > 0 || summary.pruned > 0) {
       logger.info(summary, "Log lifecycle maintenance complete");
     }
 
@@ -843,7 +831,7 @@ export class CleanupScheduler {
 }
 
 function emptyLogMaintenanceSummary(): LogMaintenanceSummary {
-  return { rotated: 0, pruned: 0, deletedDeadLogs: 0, errors: [] };
+  return { rotated: 0, pruned: 0, errors: [] };
 }
 
 function rotateLogIfNeeded(target: RotationTarget): boolean {
