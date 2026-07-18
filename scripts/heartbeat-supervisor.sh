@@ -8,10 +8,10 @@ set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MONITOR="$SCRIPT_DIR/heartbeat-monitor.sh"
-INTERVAL="${HEARTBEAT_INTERVAL:-20}"
+INTERVAL="${HEARTBEAT_INTERVAL:-60}"
 
 case "$INTERVAL" in
-  ''|*[!0-9]*) INTERVAL=20 ;;
+  ''|*[!0-9]*) INTERVAL=60 ;;
 esac
 (( INTERVAL >= 5 )) || INTERVAL=5
 

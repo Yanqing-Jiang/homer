@@ -12,12 +12,6 @@ let heartbeatJob: Cron | null = null;
 let watchdogJob: Cron | null = null;
 let eld: ReturnType<typeof monitorEventLoopDelay> | null = null;
 
-// Self-exit hang detector: launchd restarts the daemon after process.exit.
-// Threshold: 3 consecutive heartbeats with p99 event-loop lag > 5000ms.
-const HANG_LAG_MS = 5000;
-const HANG_CONSECUTIVE = 3;
-let hangCount = 0;
-
 /**
  * Record a cron fire (global counter)
  */
@@ -67,20 +61,6 @@ export function startHeartbeat(cronManager: CronManager): void {
         { eventLoopLagP99Ms: p99Ms },
         "Event loop lag critically high — cron fires at risk"
       );
-    }
-
-    // Hang detector: self-exit so launchd restarts a wedged daemon.
-    if (p99Ms > HANG_LAG_MS) {
-      hangCount++;
-      if (hangCount >= HANG_CONSECUTIVE) {
-        logger.fatal(
-          { eventLoopLagP99Ms: p99Ms, hangCount },
-          "Event loop wedged — exiting so launchd restarts the daemon"
-        );
-        process.exit(1);
-      }
-    } else {
-      hangCount = 0;
     }
 
     // Reset ELD histogram for fresh window

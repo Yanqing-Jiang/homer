@@ -56,7 +56,13 @@ if (!diskBuild) {
 while (Date.now() - start < timeoutMs) {
   const stamp = readJson(path.join(root, "run", "daemon-build.json"));
   if (stamp && sameBuild(stamp.build, diskBuild) && pidAlive(stamp.pid)) {
-    console.log(`runtime build matched: pid ${stamp.pid}`);
+    console.log(`activated: runtime build matched pid ${stamp.pid}`);
+    process.exit(0);
+  }
+  const request = readJson(process.env.HOMER_RESTART_REQUEST
+    ?? path.join(process.env.HOME ?? root, "Library", "Application Support", "Homer", "restart.request"));
+  if (request?.version === 1 && sameBuild(request.targetBuild, diskBuild)) {
+    console.log("pending-idle: build completed and restart request remains queued for a safe idle window");
     process.exit(0);
   }
   await new Promise((resolve) => setTimeout(resolve, pollMs));

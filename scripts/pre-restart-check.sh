@@ -1,98 +1,102 @@
 #!/usr/bin/env bash
-#
-# Pre-restart safety check — warns if active CLI runs are in progress.
-# Called by `npm run deploy` before restarting the daemon.
-#
-# Exit codes:
-#   0 — safe to restart (no active processes, or user confirmed)
-#   1 — abort restart (active processes, user declined)
-#
+# Shared, noninteractive restart policy. The supervisor is the only caller that
+# may turn an "allow" result into a child restart.
 
 set -u
+set -o pipefail
 
-HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:3000/health}"
-# Resolve repo root from script location so this works regardless of clone path.
-HOMER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOMER_DIR="${HOMER_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 DB_PATH="${HOMER_DB_PATH:-$HOMER_DIR/data/homer.db}"
-MAX_WAIT="${MAX_WAIT:-300}"  # Max 5 minutes wait for drain
+RUNTIME_STAMP="${HOMER_RUNTIME_STAMP:-$HOMER_DIR/run/daemon-build.json}"
+DISK_BUILD="${HOMER_DISK_BUILD:-$HOMER_DIR/dist/.build-version}"
+MODE="${1:-planned}"
+HUMAN=0
+[[ "${2:-}" == "--human" || "${1:-}" == "--human" ]] && HUMAN=1
+[[ "$MODE" == "--human" ]] && MODE="planned"
 
-# Check for active CLI runs via SQLite (more reliable than health endpoint)
-check_active_runs() {
-  if ! command -v sqlite3 &>/dev/null; then
-    echo 999  # fail closed: can't check, assume active
-    return
+# Stable contract: allow=0, defer=10, noop_same_build=11, policy_error=20.
+emit() {
+  local result="$1" code="$2" reason="$3"
+  printf '{"version":1,"mode":"%s","result":"%s","reason":"%s","blockers":{"cli_runs":%d,"scheduled_jobs":%d,"job_queue":%d,"managed_processes":%d}}\n' \
+    "$MODE" "$result" "$reason" "$cli_count" "$scheduled_count" "$queue_count" "$managed_count"
+  if (( HUMAN )); then
+    printf 'Restart policy: %s (%s); blockers cli=%d scheduled=%d queue=%d managed=%d\n' \
+      "$result" "$reason" "$cli_count" "$scheduled_count" "$queue_count" "$managed_count" >&2
   fi
-  if [ ! -f "$DB_PATH" ]; then
-    echo 999  # fail closed: DB missing
-    return
-  fi
-
-  local count
-  count=$(sqlite3 "$DB_PATH" \
-    "SELECT COUNT(*) FROM cli_runs WHERE status = 'running' AND started_at > (CAST(strftime('%s','now','-2 hours') AS INTEGER) * 1000);" \
-    2>/dev/null || echo "999")
-  echo "$count"
+  exit "$code"
 }
 
-active=$(check_active_runs)
+cli_count=0
+scheduled_count=0
+queue_count=0
+managed_count=0
 
-if [ "$active" -eq 0 ] 2>/dev/null; then
-  echo "No active CLI runs. Safe to restart."
-  exit 0
+case "$MODE" in
+  planned|unhealthy|force) ;;
+  *) emit policy_error 20 invalid_mode ;;
+esac
+
+if ! command -v sqlite3 >/dev/null 2>&1 || [[ ! -f "$DB_PATH" ]]; then
+  emit policy_error 20 database_unavailable
 fi
 
-echo ""
-echo "  WARNING: ${active} active CLI run(s) in progress."
-echo ""
+db_query() {
+  sqlite3 -readonly -cmd '.timeout 5000' "$DB_PATH" "$1" 2>/dev/null
+}
 
-if [ "${HOMER_DEPLOY_POLICY:-}" = "force" ]; then
-  echo "  Force deploy policy enabled. Restart will proceed despite active runs."
-  exit 0
+cli_count="$(db_query "SELECT COUNT(*) FROM cli_runs WHERE status='running';")" || emit policy_error 20 database_query_failed
+scheduled_count="$(db_query "SELECT COUNT(*) FROM scheduled_job_state WHERE is_running=1;")" || emit policy_error 20 database_query_failed
+queue_count="$(db_query "SELECT COUNT(*) FROM job_queue WHERE status='running';")" || emit policy_error 20 database_query_failed
+for count in "$cli_count" "$scheduled_count" "$queue_count"; do
+  [[ "$count" =~ ^[0-9]+$ ]] || emit policy_error 20 database_query_failed
+done
+
+# A registry row blocks only while its PID is live and the recorded command
+# still identifies that PID. This avoids treating dead rows or PID reuse as work.
+managed_rows="$(db_query "SELECT pid || char(9) || command FROM managed_processes WHERE settled=0;")" || emit policy_error 20 database_query_failed
+while IFS=$'\t' read -r pid command; do
+  [[ "$pid" =~ ^[0-9]+$ ]] || continue
+  if kill -0 "$pid" 2>/dev/null; then
+    actual="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    if [[ -n "$actual" && -n "$command" && "$actual" == *"$command"* ]]; then
+      managed_count=$((managed_count + 1))
+    fi
+  fi
+done <<< "$managed_rows"
+
+if [[ "$MODE" == "planned" || "$MODE" == "force" ]]; then
+  if [[ "${HOMER_ALLOW_STALE_RESTART:-0}" != "1" ]]; then
+    freshness_output="$(bash "$HOMER_DIR/scripts/assert-build-fresh.sh" 2>&1)" || {
+      (( HUMAN )) && printf '%s\n' "$freshness_output" >&2
+      emit defer 10 stale_or_unbuilt
+    }
+  fi
+
+  build_result="$(node - "$DISK_BUILD" "$RUNTIME_STAMP" "${HOMER_CURRENT_CHILD_PID:-}" <<'NODE'
+const fs = require("node:fs");
+const [diskPath, runtimePath, childPid] = process.argv.slice(2);
+const read = (file) => { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; } };
+const comparable = (value) => value && typeof value === "object" ? {
+  sha: value.sha ?? null,
+  dirty: typeof value.dirty === "boolean" ? value.dirty : null,
+  builtAt: value.builtAt ?? null,
+  sourceFingerprint: value.sourceFingerprint ?? null,
+  maxSourceMtimeMs: typeof value.maxSourceMtimeMs === "number" ? value.maxSourceMtimeMs : null,
+} : null;
+const disk = comparable(read(diskPath));
+const stamp = read(runtimePath);
+const runtime = comparable(stamp?.build);
+if (!disk || !runtime || (childPid && Number(childPid) !== stamp?.pid)) process.stdout.write("invalid");
+else process.stdout.write(JSON.stringify(disk) === JSON.stringify(runtime) ? "same" : "changed");
+NODE
+)" || emit policy_error 20 build_compare_failed
+  [[ "$build_result" != "invalid" ]] || emit policy_error 20 runtime_stamp_invalid
+  [[ "$build_result" != "same" ]] || emit noop_same_build 11 runtime_matches_dist
 fi
 
-# Check if running interactively
-if [ -t 0 ]; then
-  echo "  Options:"
-  echo "    [w] Wait for them to complete (max ${MAX_WAIT}s)"
-  echo "    [f] Force restart anyway (will kill active processes)"
-  echo "    [a] Abort deploy"
-  echo ""
-  read -rp "  Choice [w/f/a]: " choice
-
-  case "$choice" in
-    w|W)
-      echo "  Waiting for active runs to complete..."
-      elapsed=0
-      while [ "$elapsed" -lt "$MAX_WAIT" ]; do
-        active=$(check_active_runs)
-        if [ "$active" -eq 0 ] 2>/dev/null; then
-          echo "  All runs completed. Safe to restart."
-          exit 0
-        fi
-        sleep 5
-        elapsed=$((elapsed + 5))
-        printf "\r  Still waiting... %d active run(s), %ds elapsed" "$active" "$elapsed"
-      done
-      echo ""
-      echo "  Timeout reached. ${active} run(s) still active."
-      read -rp "  Force restart? [y/N]: " force
-      if [ "$force" = "y" ] || [ "$force" = "Y" ]; then
-        exit 0
-      fi
-      echo "  Deploy aborted."
-      exit 1
-      ;;
-    f|F)
-      echo "  Forcing restart (active processes will be killed)."
-      exit 0
-      ;;
-    *)
-      echo "  Deploy aborted."
-      exit 1
-      ;;
-  esac
-else
-  # Non-interactive (e.g., called from scheduled job) — abort if active
-  echo "  Non-interactive mode: aborting restart to protect active processes."
-  exit 1
+total_blockers=$((cli_count + scheduled_count + queue_count + managed_count))
+if (( total_blockers > 0 )) && [[ "$MODE" != "force" ]]; then
+  emit defer 10 active_work
 fi
+
+emit allow 0 "$([[ "$MODE" == "force" ]] && echo forced || echo idle)"
