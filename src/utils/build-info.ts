@@ -115,7 +115,6 @@ function comparableBuild(info: BuildInfo | null): Record<string, unknown> | null
   return {
     sha: info.sha,
     dirty: info.dirty,
-    builtAt: info.builtAt,
     sourceFingerprint: info.sourceFingerprint,
     maxSourceMtimeMs: info.maxSourceMtimeMs,
   };

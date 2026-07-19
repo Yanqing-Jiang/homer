@@ -1,7 +1,8 @@
 import { existsSync } from "fs";
+import { homedir } from "os";
 import { z } from "zod";
 import { config as dotenvConfig } from "dotenv";
-import { resolve } from "path";
+import { join, resolve } from "path";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 // Load .env from project root, with HOMER_ROOT support for helper-managed launches.
@@ -63,6 +64,7 @@ const configSchema = z.object({
     elevenLabsVoiceId: z.string().default("21m00Tcm4TlvDq8ikWAM"),
     elevenLabsModel: z.string().default("eleven_multilingual_v2"),
     elevenLabsWebhookSecret: z.string().default(""),
+    voiceIdModelPath: z.string().default(""),
   }),
   search: z.object({
     embeddingModel: z.string().default("text-embedding-3-small"),
@@ -84,6 +86,13 @@ export type Config = z.infer<typeof configSchema>;
 function parseInteger(rawValue: string | undefined, fallback: number): number {
   const parsed = parseInt(rawValue ?? "", 10);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+/** Local speaker-embedding model path; VOICE_ID_MODEL_PATH overrides, `~` expands. */
+function resolveVoiceIdModelPath(): string {
+  const raw = process.env.VOICE_ID_MODEL_PATH?.trim();
+  if (!raw) return join(homedir(), "homer", "models", "voice", "nemo_en_titanet_large.onnx");
+  return raw.startsWith("~") ? join(homedir(), raw.slice(1)) : raw;
 }
 
 function loadConfig(): Config {
@@ -137,6 +146,7 @@ function loadConfig(): Config {
       elevenLabsVoiceId: process.env.ELEVEN_LABS_VOICE_ID ?? "21m00Tcm4TlvDq8ikWAM",
       elevenLabsModel: process.env.ELEVEN_LABS_MODEL ?? "eleven_multilingual_v2",
       elevenLabsWebhookSecret: process.env.ELEVENLABS_WEBHOOK_SECRET ?? "",
+      voiceIdModelPath: resolveVoiceIdModelPath(),
     },
     search: {
       embeddingModel: process.env.EMBEDDING_MODEL ?? "text-embedding-3-small",

@@ -174,6 +174,7 @@ async function main(): Promise<void> {
     elevenLabsApiKey: config.voice.elevenLabsApiKey,
     elevenLabsVoiceId: config.voice.elevenLabsVoiceId,
     elevenLabsModel: config.voice.elevenLabsModel,
+    voiceIdModelPath: config.voice.voiceIdModelPath,
   };
   const meetingManager = new MeetingManager({
     stateManager,

@@ -84,6 +84,8 @@ export interface VoiceConfig {
   elevenLabsVoiceId?: string;
   /** ElevenLabs TTS model */
   elevenLabsModel?: string;
+  /** Path to the local sherpa-onnx speaker-embedding model for cross-meeting speaker ID */
+  voiceIdModelPath?: string;
   /** @deprecated - no longer used, STT now uses ElevenLabs Scribe */
   openaiApiKey?: string;
 }
