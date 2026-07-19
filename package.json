@@ -14,6 +14,10 @@
       "types": "./dist/voice/*.d.ts",
       "import": "./dist/voice/*.js"
     },
+    "./meetings/index.js": {
+      "types": "./dist/meetings/index.d.ts",
+      "import": "./dist/meetings/index.js"
+    },
     "./harness/resolution/resolver.js": {
       "types": "./dist/harness/resolution/resolver.d.ts",
       "import": "./dist/harness/resolution/resolver.js"
@@ -89,6 +93,7 @@
     "pino-pretty": "^11.2.2",
     "playwright": "^1.40.0",
     "postal-mime": "^2.7.5",
+    "sherpa-onnx-node": "^1.13.4",
     "yaml": "^2.9.0",
     "zod": "^3.23.8"
   },

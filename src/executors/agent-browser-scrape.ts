@@ -248,7 +248,27 @@ function parseAgentBrowserJson(stdout: string): unknown {
   }
   if (startIdx === -1) return null;
   const candidate = trimmed.slice(startIdx);
-  return JSON.parse(candidate);
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    // LLM output may append prose after the JSON — trim to the balanced closing bracket.
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < candidate.length; i++) {
+      const c = candidate[i];
+      if (escaped) { escaped = false; continue; }
+      if (c === "\\") { escaped = inString; continue; }
+      if (c === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (c === "[" || c === "{") depth++;
+      else if (c === "]" || c === "}") {
+        depth--;
+        if (depth === 0) return JSON.parse(candidate.slice(0, i + 1));
+      }
+    }
+    throw new Error("no balanced JSON payload found in agent-browser output");
+  }
 }
 
 // ============================================

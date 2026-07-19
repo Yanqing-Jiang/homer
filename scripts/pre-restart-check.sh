@@ -79,7 +79,6 @@ const read = (file) => { try { return JSON.parse(fs.readFileSync(file, "utf8"));
 const comparable = (value) => value && typeof value === "object" ? {
   sha: value.sha ?? null,
   dirty: typeof value.dirty === "boolean" ? value.dirty : null,
-  builtAt: value.builtAt ?? null,
   sourceFingerprint: value.sourceFingerprint ?? null,
   maxSourceMtimeMs: typeof value.maxSourceMtimeMs === "number" ? value.maxSourceMtimeMs : null,
 } : null;

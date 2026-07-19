@@ -27,7 +27,6 @@ function comparable(build) {
   return {
     sha: build.sha ?? null,
     dirty: typeof build.dirty === "boolean" ? build.dirty : null,
-    builtAt: build.builtAt ?? null,
     sourceFingerprint: build.sourceFingerprint ?? null,
     maxSourceMtimeMs: typeof build.maxSourceMtimeMs === "number" ? build.maxSourceMtimeMs : null,
   };
