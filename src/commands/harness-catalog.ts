@@ -60,6 +60,7 @@ const CATALOG: Record<CatalogExecutor, HarnessCatalogEntry> = {
       { id: "cursor/grok-4.5-xhigh", label: "Cursor Grok 4.5 (xhigh)", default: true },
       { id: "cursor/grok-4.5-high", label: "Cursor Grok 4.5 (high)" },
       { id: "cursor/grok-4.5-medium", label: "Cursor Grok 4.5 (medium)" },
+      { id: "cursor/grok-4.5-fast-xhigh", label: "Cursor Grok 4.5 Fast (xhigh)" },
       { id: "cursor/claude-opus-4-8-high", label: "Cursor Opus 4.8 (high, 1M)" },
       { id: "cursor/gpt-5.6-sol-medium", label: "Cursor GPT-5.6 Sol (medium, 1M)" },
       { id: "cursor/gpt-5.6-sol-high", label: "Cursor GPT-5.6 Sol (high, 1M)" },

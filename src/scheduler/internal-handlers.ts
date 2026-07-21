@@ -992,6 +992,29 @@ async function runHandler(
           result.success ? { notificationIntent: "operational_status" } : {}
         );
       }
+      case "abvp_refresh": {
+        const { runAbvpRefresh } = await import("./jobs/abvp-refresh.js");
+        const result = await runAbvpRefresh({
+          db: ctx.stateManager.getDb(),
+          bot: ctx.bot,
+          chatId: ctx.chatId,
+          jobRunId: ctx.jobRunId,
+          signal: ctx.signal,
+          job,
+          startedAt,
+        });
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          {
+            notificationIntent: result.notificationIntent,
+            sideEffectDelivered: result.sideEffectDelivered,
+          },
+        );
+      }
       case "idea_synthesizer": {
         const { runIdeaSynthesizer } = await import("./jobs/idea-synthesizer.js");
         const result = await runIdeaSynthesizer(ctx.stateManager.getDb(), ctx.jobRunId, ctx.signal, job, startedAt);
