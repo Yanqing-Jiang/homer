@@ -172,7 +172,8 @@ export interface ScrapeOptions {
 // `open` / `eval` calls race on the same browser tab. Serialize all scrapes.
 let scrapeChain: Promise<unknown> = Promise.resolve();
 
-function withScrapeLock<T>(fn: () => Promise<T>): Promise<T> {
+/** Serialize all agent-browser / shared CDP usage across scrapers and jobs. */
+export function withScrapeLock<T>(fn: () => Promise<T>): Promise<T> {
   const next = scrapeChain.then(() => fn(), () => fn());
   // Don't let an error in this scrape poison the chain.
   scrapeChain = next.catch(() => undefined);

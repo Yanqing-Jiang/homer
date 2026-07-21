@@ -1,0 +1,1406 @@
+/**
+ * ABVP fortnightly refresh — deterministic internal handler.
+ *
+ * Contract: ~/memory/ABVP raw/skills.md
+ * Stages: cadence → lock → inventory (28d) → sequential DL → place → ingest → verify → notify
+ */
+
+import { createHash, randomBytes } from "node:crypto";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { createWriteStream, promises as fs } from "node:fs";
+import { openSync, closeSync, mkdirSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, basename, dirname } from "node:path";
+import { promisify } from "node:util";
+import { flockSync, fcntlSync, constants as fsExtConstants } from "fs-ext";
+import type { Bot } from "grammy";
+// @ts-ignore better-sqlite3 default export typing
+import type Database from "better-sqlite3";
+import { ensureCDP } from "../../scraping/chrome-launcher.js";
+import {
+  formatScheduledTelegramHtml,
+  routeTelegramNotification,
+  sendChunkedTelegramMessage,
+} from "../../notifications/telegram-router.js";
+import type { NotificationIntent } from "../../notifications/types.js";
+import type { RegisteredJob } from "../types.js";
+import { logger } from "../../utils/logger.js";
+
+const execFileAsync = promisify(execFile);
+
+const ABVP_ROOT = join(homedir(), "memory", "ABVP raw");
+const RUNS_DIR = join(ABVP_ROOT, ".abvp-runs");
+const CADENCE_PATH = join(RUNS_DIR, "cadence.json");
+const ACTIVE_PATH = join(RUNS_DIR, "active.json");
+const LOCK_PATH = join(ABVP_ROOT, ".abvp.lock");
+const DOWNLOADS_DIR = join(ABVP_ROOT, "downloads");
+const DOWNLOADS_SR_DIR = join(ABVP_ROOT, "downloads_sr");
+const QUARANTINE_DIR = join(ABVP_ROOT, "quarantine");
+const INGEST_LOGS_DIR = join(ABVP_ROOT, "ingest_logs");
+const LANDING_ROOTS = [
+  join(homedir(), "Downloads", "amazon-advertising-reports"),
+  join(homedir(), "Downloads"),
+];
+
+const PORTAL_URL = "https://advertising.amazon.com/bv#/ABVP/PNG_US/reports";
+const AGENT_BROWSER = "agent-browser";
+const SESSION = "abvp";
+const CDP_PORT = "9222";
+const LOOKBACK_DAYS = 28;
+const AUTH_WAIT_MS = 45 * 60 * 1000;
+const AUTH_POLL_MS = 20_000;
+const TELEGRAM_RETRY = 3;
+const INGEST_START_CUTOFF_MS = 90 * 60 * 1000;
+const TZ = "America/Los_Angeles";
+
+type ReportType = "Brand" | "ASIN" | "SR";
+type AuthKind =
+  | "auth_required"
+  | "mfa_required"
+  | "registration_required"
+  | "bot_challenge"
+  | "bot_blocked"
+  | "portal_contract_failure";
+
+interface CadenceState {
+  next_due_at: string;
+  last_success_at?: string | null;
+  last_run_id?: string | null;
+}
+
+interface PortalRow {
+  i: number;
+  label: string;
+  date: string;
+  status: string;
+  advertiser: string;
+}
+
+interface RunItem {
+  id: string;
+  type: ReportType;
+  portal_date: string;
+  portal_label: string;
+  portal_index: number;
+  canonical_path: string;
+  ledger_file_path: string;
+  required_sources: string[];
+  stage: string;
+  staging_path: string | null;
+  size_bytes: number;
+  sha256: string | null;
+  zip_valid: boolean;
+  place_action: string;
+  ingest: Record<string, { status: string; row_count: number | null }>;
+  attempts: { download: number; ingest: number };
+  error: string | null;
+}
+
+interface RunState {
+  schema_version: 1;
+  run_id: string;
+  attempt: number;
+  status: string;
+  stage: string;
+  created_at: string;
+  updated_at: string;
+  today_local: string;
+  lookback_start: string;
+  next_due_at_before: string;
+  inventory: {
+    portal_url: string;
+    marketplace: string;
+    contract_verified: boolean;
+    coverage_complete: boolean;
+    row_count: number;
+    sealed_at: string | null;
+  };
+  items: RunItem[];
+  child: { pid: number | null; pgid: number | null; type: string | null; started_at: string | null };
+  auth: { kind: AuthKind | null; detected_at: string | null; deadline: string | null; current_url: string | null };
+  notification: {
+    intent: string | null;
+    status: "none" | "pending" | "sent" | "failed";
+    telegram_message_id: number | null;
+  };
+  cadence_advanced_at: string | null;
+  last_error: string | null;
+}
+
+export interface AbvpRefreshContext {
+  db: Database.Database;
+  bot: Bot | null;
+  chatId: number;
+  jobRunId?: number;
+  signal?: AbortSignal;
+  job: RegisteredJob;
+  startedAt: Date;
+}
+
+export interface AbvpRefreshResult {
+  success: boolean;
+  output: string;
+  error?: string;
+  notificationIntent?: NotificationIntent;
+  sideEffectDelivered?: boolean;
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function localToday(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+function addDaysLocal(isoDate: string, days: number): string {
+  const [y, m, d] = isoDate.split("-").map(Number);
+  const dt = new Date(Date.UTC(y!, m! - 1, d!));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
+}
+
+function parseLocalDate(isoDate: string): Date {
+  const [y, m, d] = isoDate.split("-").map(Number);
+  return new Date(Date.UTC(y!, m! - 1, d!));
+}
+
+function normalizePortalDate(raw: string): string | null {
+  const m = raw.trim().match(/(\d{4}-\d{2}-\d{2})/);
+  if (m) return m[1]!;
+  const m2 = raw.trim().match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m2) {
+    const mm = m2[1]!.padStart(2, "0");
+    const dd = m2[2]!.padStart(2, "0");
+    return `${m2[3]}-${mm}-${dd}`;
+  }
+  return null;
+}
+
+function labelToType(label: string): ReportType | null {
+  const t = label.trim();
+  if (/^Zip\s*\(\s*Brand Metrics\s*\)/i.test(t)) return "Brand";
+  if (/^Zip\s*\(\s*ASIN Metrics\s*\)/i.test(t)) return "ASIN";
+  if (/^Search Report$/i.test(t)) return "SR";
+  return null;
+}
+
+function canonicalFor(type: ReportType, portalDate: string): { abs: string; ledger: string; sources: string[] } {
+  if (type === "Brand") {
+    const name = `Brand_${portalDate}.zip`;
+    return { abs: join(DOWNLOADS_DIR, name), ledger: `downloads/${name}`, sources: ["brand_metrics"] };
+  }
+  if (type === "ASIN") {
+    const name = `ASIN_${portalDate}.zip`;
+    return { abs: join(DOWNLOADS_DIR, name), ledger: `downloads/${name}`, sources: ["asin_grain"] };
+  }
+  const name = `SR_${portalDate}.zip`;
+  return {
+    abs: join(DOWNLOADS_SR_DIR, name),
+    ledger: `downloads_sr/${name}`,
+    sources: ["sr_asin_rank", "sr_keyword_share"],
+  };
+}
+
+async function atomicWriteJson(path: string, data: unknown): Promise<void> {
+  const dir = dirname(path);
+  await fs.mkdir(dir, { recursive: true });
+  const tmp = `${path}.tmp.${process.pid}`;
+  const body = JSON.stringify(data, null, 2) + "\n";
+  await fs.writeFile(tmp, body, "utf8");
+  const fh = await fs.open(tmp, "r+");
+  try {
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  await fs.rename(tmp, path);
+  try {
+    const dh = await fs.open(dir, "r");
+    try {
+      await dh.sync();
+    } finally {
+      await dh.close();
+    }
+  } catch {
+    /* best-effort dir fsync */
+  }
+}
+
+async function readJson<T>(path: string): Promise<T | null> {
+  try {
+    const raw = await fs.readFile(path, "utf8");
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function ensureDirs(): Promise<void> {
+  for (const d of [RUNS_DIR, DOWNLOADS_DIR, DOWNLOADS_SR_DIR, QUARANTINE_DIR, INGEST_LOGS_DIR, ...LANDING_ROOTS]) {
+    await fs.mkdir(d, { recursive: true });
+  }
+}
+
+async function loadCadence(): Promise<CadenceState> {
+  const existing = await readJson<CadenceState>(CADENCE_PATH);
+  if (existing?.next_due_at) return existing;
+  // Seed: Tuesday 2026-08-04 07:00 PT (two weeks from 2026-07-20)
+  const seeded: CadenceState = {
+    next_due_at: "2026-08-04T07:00:00-07:00",
+    last_success_at: null,
+    last_run_id: null,
+  };
+  await atomicWriteJson(CADENCE_PATH, seeded);
+  return seeded;
+}
+
+function isDue(nextDueAt: string, now = new Date()): boolean {
+  const due = Date.parse(nextDueAt);
+  return Number.isFinite(due) && now.getTime() >= due;
+}
+
+function advanceDue(fromIso: string): string {
+  const base = Date.parse(fromIso);
+  const start = Number.isFinite(base) ? new Date(base) : new Date();
+  // Advance 14 days, keep 07:00 America/Los_Angeles wall time.
+  const next = new Date(start.getTime() + 14 * 24 * 60 * 60 * 1000);
+  const local = new Intl.DateTimeFormat("en-CA", {
+    timeZone: TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(next);
+  // Determine offset for that local date at 07:00
+  const probe = new Date(`${local}T14:00:00Z`); // noonish UTC probe
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: TZ,
+    timeZoneName: "shortOffset",
+  }).formatToParts(probe);
+  const tzName = parts.find((p) => p.type === "timeZoneName")?.value ?? "GMT-7";
+  const m = tzName.match(/GMT([+-]\d+)(?::(\d+))?/);
+  const hourOff = m ? Number(m[1]) : -7;
+  const minOff = m && m[2] ? Number(m[2]) : 0;
+  const sign = hourOff <= 0 ? "-" : "+";
+  const absH = String(Math.abs(hourOff)).padStart(2, "0");
+  const absM = String(minOff).padStart(2, "0");
+  return `${local}T07:00:00${sign}${absH}:${absM}`;
+}
+
+class PipelineLock {
+  private fd: number | null = null;
+
+  acquire(): boolean {
+    mkdirSync(ABVP_ROOT, { recursive: true });
+    this.fd = openSync(LOCK_PATH, "a");
+    try {
+      fcntlSync(this.fd, "setfd", fsExtConstants.FD_CLOEXEC);
+    } catch {
+      /* ignore */
+    }
+    try {
+      flockSync(this.fd, "exnb");
+      return true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EWOULDBLOCK" || code === "EAGAIN") {
+        closeSync(this.fd);
+        this.fd = null;
+        return false;
+      }
+      closeSync(this.fd);
+      this.fd = null;
+      throw err;
+    }
+  }
+
+  release(): void {
+    if (this.fd == null) return;
+    try {
+      flockSync(this.fd, "un");
+    } catch {
+      /* ignore */
+    }
+    try {
+      closeSync(this.fd);
+    } catch {
+      /* ignore */
+    }
+    this.fd = null;
+  }
+}
+
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  const fh = await fs.open(path, "r");
+  try {
+    const stream = fh.createReadStream();
+    for await (const chunk of stream) {
+      hash.update(chunk as Buffer);
+    }
+  } finally {
+    await fh.close();
+  }
+  return hash.digest("hex");
+}
+
+async function validateZip(path: string, type: ReportType): Promise<{ ok: boolean; members: string[]; error?: string }> {
+  try {
+    const { stdout } = await execFileAsync("python3", [
+      "-c",
+      `
+import json, zipfile, sys
+p = sys.argv[1]; t = sys.argv[2]
+with zipfile.ZipFile(p) as zf:
+    bad = zf.testzip()
+    names = zf.namelist()
+    if bad:
+        print(json.dumps({"ok": False, "members": names, "error": f"bad member {bad}"})); raise SystemExit(0)
+    ok = False
+    if t == "Brand":
+        ok = any(n.lower().endswith("metrics.csv") for n in names)
+    elif t == "ASIN":
+        ok = any(n.lower().endswith(".csv") for n in names)
+    else:
+        a = any("DATASET_A" in n and n.endswith(".csv.gz") for n in names)
+        b = any("DATASET_B" in n and n.endswith(".csv.gz") for n in names)
+        ok = a and b
+    print(json.dumps({"ok": ok, "members": names, "error": None if ok else "missing expected members"}))
+`,
+      path,
+      type,
+    ], { timeout: 120_000, maxBuffer: 8 * 1024 * 1024 });
+    const parsed = JSON.parse(stdout.trim()) as { ok: boolean; members: string[]; error?: string };
+    return parsed;
+  } catch (err) {
+    return { ok: false, members: [], error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function diskFreeBytes(path: string): Promise<number> {
+  const { stdout } = await execFileAsync("df", ["-k", path]);
+  const lines = stdout.trim().split("\n");
+  const cols = lines[lines.length - 1]!.split(/\s+/);
+  // Available KB is typically column 4
+  return Number(cols[3]) * 1024;
+}
+
+async function abvpBrowser(
+  args: string[],
+  opts: { timeoutMs?: number; signal?: AbortSignal; env?: Record<string, string> } = {},
+): Promise<string> {
+  const full = ["--session", SESSION, ...args];
+  const { stdout, stderr } = await execFileAsync(AGENT_BROWSER, full, {
+    timeout: opts.timeoutMs ?? 120_000,
+    maxBuffer: 32 * 1024 * 1024,
+    signal: opts.signal,
+    env: { ...process.env, AGENT_BROWSER_HEADED: "1", ...opts.env },
+  });
+  if (stderr?.trim()) {
+    logger.debug({ stderr: stderr.slice(0, 500) }, "agent-browser stderr");
+  }
+  return (stdout || "").trim();
+}
+
+function parseEvalJson<T>(stdout: string): T {
+  let out = stdout.trim();
+  if (out.startsWith('"') && out.endsWith('"')) {
+    try {
+      out = JSON.parse(out) as string;
+    } catch {
+      /* keep */
+    }
+  }
+  const start = out.search(/[\[{]/);
+  if (start === -1) throw new Error(`no JSON in agent-browser output: ${out.slice(0, 200)}`);
+  return JSON.parse(out.slice(start)) as T;
+}
+
+async function ensureBrowserReady(signal?: AbortSignal): Promise<void> {
+  await ensureCDP({ headed: true });
+  try {
+    await abvpBrowser(["connect", CDP_PORT], { timeoutMs: 30_000, signal });
+  } catch (err) {
+    logger.warn({ err }, "abvp connect failed; retrying once");
+    await abvpBrowser(["connect", CDP_PORT], { timeoutMs: 30_000, signal });
+  }
+}
+
+function classifyAuth(url: string, bodyText: string): AuthKind | null {
+  const u = url.toLowerCase();
+  const body = bodyText.toLowerCase();
+  if (/\/register|\/registration|\/onboarding/.test(u) || /create your amazon account|advertiser.?setup/.test(body)) {
+    return "registration_required";
+  }
+  if (/\/ap\/signin|\/signin|\/login|\/challenge/.test(u) || /sign in|password|authenticate/.test(body)) {
+    if (/one time password|otp|two-step|mfa|enter.?code|approval/.test(body) || /\/challenge/.test(u)) {
+      return "mfa_required";
+    }
+    return "auth_required";
+  }
+  if (/captcha|verify you are human|robot check/.test(body)) return "bot_challenge";
+  if (/access denied|403|rate.?limit/.test(body) && !/png_us|brand view|reports/.test(body)) return "bot_blocked";
+  return null;
+}
+
+const INVENTORY_JS = `(() => {
+  const url = location.href;
+  const body = (document.body && document.body.innerText || "").slice(0, 4000);
+  const authish = /\\/ap\\/signin|\\/signin|\\/login|\\/challenge|\\/register/.test(url)
+    || /sign in|password|one time password|captcha|verify you are human/i.test(body);
+  const buttons = Array.from(document.querySelectorAll("button, a")).filter((el) => {
+    const t = (el.innerText || el.textContent || "").trim().replace(/\\s+/g, " ");
+    return /^(Search Report|EXCEL|Zip \\(Brand Metrics\\)|Zip \\(ASIN Metrics\\)|Download)/i.test(t);
+  });
+  const rows = buttons.map((btn, i) => {
+    const row = btn.closest("tr") || btn.closest("[role=row]");
+    let date = "", status = "", advertiser = "";
+    if (row) {
+      const cells = Array.from(row.querySelectorAll("td, [role=cell]")).map((c) => (c.innerText || "").trim());
+      advertiser = cells[0] || "";
+      status = cells[2] || "";
+      date = cells[3] || "";
+    }
+    const label = (btn.innerText || btn.textContent || "").trim().replace(/\\s+/g, " ");
+    return { i, label, date, status, advertiser };
+  });
+  const hasTable = !!(document.querySelector("table") || document.querySelector("[role=table]"));
+  const title = document.title || "";
+  return JSON.stringify({
+    url, title, authish, hasTable, count: rows.length, rows, bodySample: body.slice(0, 500)
+  });
+})()`;
+
+const CLICK_JS = (index: number) => `(() => {
+  const btns = Array.from(document.querySelectorAll("button")).filter((b) =>
+    /^(Search Report|EXCEL|Zip)/.test((b.innerText || "").trim())
+  );
+  if (!btns[${index}]) return JSON.stringify({ ok: false, error: "missing:" + btns.length });
+  btns[${index}].scrollIntoView({ block: "center" });
+  btns[${index}].click();
+  return JSON.stringify({
+    ok: true,
+    label: (btns[${index}].innerText || "").trim(),
+    count: btns.length,
+    url: location.href
+  });
+})()`;
+
+async function openReportsPage(signal?: AbortSignal): Promise<{ url: string; auth: AuthKind | null; body: string }> {
+  await abvpBrowser(["open", PORTAL_URL], { timeoutMs: 90_000, signal });
+  await abvpBrowser(["wait", "4000"], { timeoutMs: 15_000, signal }).catch(() => undefined);
+  const url = await abvpBrowser(["get", "url"], { timeoutMs: 15_000, signal });
+  let body = "";
+  try {
+    const raw = await abvpBrowser(
+      ["eval", "((document.body&&document.body.innerText)||\"\").slice(0,2000)"],
+      { timeoutMs: 20_000, signal },
+    );
+    body = raw.replace(/^"|"$/g, "");
+  } catch {
+    body = "";
+  }
+  return { url, auth: classifyAuth(url, body), body };
+}
+
+async function inventoryPortal(signal?: AbortSignal): Promise<{
+  auth: AuthKind | null;
+  url: string;
+  rows: PortalRow[];
+  contractOk: boolean;
+}> {
+  // Expand virtualized table by scrolling
+  for (let i = 0; i < 12; i++) {
+    await abvpBrowser(
+      ["eval", "window.scrollTo(0, document.body.scrollHeight); document.querySelector('[role=row], table')?.scrollIntoView?.(); 'ok'"],
+      { timeoutMs: 15_000, signal },
+    ).catch(() => undefined);
+    await abvpBrowser(["wait", "800"], { timeoutMs: 5_000, signal }).catch(() => undefined);
+  }
+  const raw = await abvpBrowser(["eval", INVENTORY_JS], { timeoutMs: 60_000, signal });
+  const data = parseEvalJson<{
+    url: string;
+    title: string;
+    authish: boolean;
+    hasTable: boolean;
+    count: number;
+    rows: PortalRow[];
+    bodySample: string;
+  }>(raw);
+
+  const auth = classifyAuth(data.url, data.bodySample || "");
+  if (auth) return { auth, url: data.url, rows: [], contractOk: false };
+
+  const contractOk = data.url.includes("ABVP/PNG_US/reports") || data.url.includes("advertising.amazon.com/bv");
+  if (!contractOk || (!data.hasTable && data.count === 0)) {
+    return { auth: "portal_contract_failure", url: data.url, rows: [], contractOk: false };
+  }
+  return { auth: null, url: data.url, rows: data.rows || [], contractOk: true };
+}
+
+async function listLandingFiles(): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (const root of LANDING_ROOTS) {
+    try {
+      const entries = await fs.readdir(root);
+      for (const name of entries) {
+        if (name.startsWith(".")) continue;
+        if (name.endsWith(".crdownload") || name.endsWith(".tmp") || name.endsWith(".download")) continue;
+        if (name.startsWith(".com.google.Chrome.")) continue;
+        if (name === "amazon-advertising-reports") continue;
+        const abs = join(root, name);
+        try {
+          const st = await fs.stat(abs);
+          if (st.isFile()) out.add(abs);
+        } catch {
+          /* race */
+        }
+      }
+    } catch {
+      /* missing root */
+    }
+  }
+  return out;
+}
+
+async function waitForNewDownload(
+  before: Set<string>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (signal?.aborted) throw new Error("aborted");
+    let partial = false;
+    for (const root of LANDING_ROOTS) {
+      try {
+        const entries = await fs.readdir(root);
+        if (entries.some((n) =>
+          n.endsWith(".crdownload") || n.endsWith(".tmp") || n.endsWith(".download") || n.startsWith(".com.google.Chrome."),
+        )) {
+          partial = true;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    const now = await listLandingFiles();
+    const added = [...now].filter((p) => !before.has(p));
+    if (added.length && !partial) {
+      const sizes1 = await Promise.all(added.map(async (p) => (await fs.stat(p)).size));
+      await new Promise((r) => setTimeout(r, 1200));
+      try {
+        const sizes2 = await Promise.all(added.map(async (p) => (await fs.stat(p)).size));
+        if (sizes1.every((s, i) => s === sizes2[i] && s > 0)) {
+          // Prefer zip matching portal types
+          const zip = added.find((p) => p.toLowerCase().endsWith(".zip")) || added[0]!;
+          return zip;
+        }
+      } catch {
+        /* file vanished; continue */
+      }
+    }
+    await new Promise((r) => setTimeout(r, 700));
+  }
+  return null;
+}
+
+async function queryLedger(
+  dbPath: string,
+  ledgerPath: string,
+  sources: string[],
+): Promise<Record<string, { status: string; row_count: number }>> {
+  const srcList = sources.map((s) => `'${s.replace(/'/g, "''")}'`).join(",");
+  const sql = `
+SELECT source_file, status, COALESCE(row_count,0) AS row_count
+FROM ingestion_drop
+WHERE file_path = '${ledgerPath.replace(/'/g, "''")}'
+  AND source_file IN (${srcList});
+`;
+  try {
+    const { stdout } = await execFileAsync(
+      "sqlite3",
+      ["-json", dbPath, sql],
+      { timeout: 30_000, maxBuffer: 2 * 1024 * 1024 },
+    );
+    const rows = stdout.trim() ? (JSON.parse(stdout) as Array<{ source_file: string; status: string; row_count: number }>) : [];
+    const out: Record<string, { status: string; row_count: number }> = {};
+    for (const r of rows) out[r.source_file] = { status: r.status, row_count: r.row_count };
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function sourcesComplete(
+  ledger: Record<string, { status: string; row_count: number }>,
+  required: string[],
+): boolean {
+  return required.every((s) => ledger[s]?.status === "completed" && (ledger[s]?.row_count ?? 0) > 0);
+}
+
+async function placeCanonical(
+  stagingPath: string,
+  canonicalPath: string,
+  runId: string,
+): Promise<{ action: "placed" | "same_hash_skip" | "quarantined"; sha256: string; quarantinePath?: string }> {
+  const sha = await sha256File(stagingPath);
+  if (existsSync(canonicalPath)) {
+    const existing = await sha256File(canonicalPath);
+    if (existing === sha) {
+      await fs.unlink(stagingPath).catch(() => undefined);
+      return { action: "same_hash_skip", sha256: sha };
+    }
+    const qName = `${basename(canonicalPath, ".zip")}__conflict__${sha.slice(0, 12)}__${runId}.zip`;
+    const qPath = join(QUARANTINE_DIR, qName);
+    await fs.rename(stagingPath, qPath);
+    return { action: "quarantined", sha256: sha, quarantinePath: qPath };
+  }
+  const partial = `${canonicalPath}.partial.${runId}`;
+  await fs.copyFile(stagingPath, partial);
+  await fs.rename(partial, canonicalPath);
+  await fs.unlink(stagingPath).catch(() => undefined);
+  return { action: "placed", sha256: sha };
+}
+
+async function sendTelegramDecision(
+  ctx: AbvpRefreshContext,
+  state: RunState,
+  kind: AuthKind,
+  url: string,
+): Promise<{ sent: boolean; messageId?: number }> {
+  if (!ctx.bot) return { sent: false };
+  const deadline = new Date(Date.now() + AUTH_WAIT_MS).toLocaleString("en-US", { timeZone: TZ });
+  const message =
+    `ABVP refresh needs Amazon Ads login action. Run ${state.run_id} hit ${kind} at ${url} ` +
+    `before canonical placement or ingest. Open the already-headed Chrome window, complete login/MFA, ` +
+    `and return to PNG_US Reports by ${deadline} PT. Homer will poll for 45 minutes; otherwise this run exits ` +
+    `and the next due tick retries. next_due_at remains ${state.next_due_at_before}. No canonical or DB writes were made.`;
+  const formatted = formatScheduledTelegramHtml(message);
+
+  for (let attempt = 1; attempt <= TELEGRAM_RETRY; attempt++) {
+    try {
+      const result = await routeTelegramNotification({
+        db: ctx.db,
+        sourceType: "scheduler_job",
+        sourceId: "abvp-refresh",
+        jobRunId: ctx.jobRunId,
+        intent: "decision_request",
+        title: "ABVP refresh — Amazon Ads login",
+        messageText: formatted,
+        deliver: async () =>
+          sendChunkedTelegramMessage({
+            bot: ctx.bot!,
+            chatId: ctx.chatId,
+            message: formatted,
+            parseMode: "HTML",
+            enableLinkPreview: false,
+          }),
+      });
+      if (result.decision === "sent" && result.telegramMessageId != null) {
+        return { sent: true, messageId: result.telegramMessageId };
+      }
+    } catch (err) {
+      logger.warn({ err, attempt }, "ABVP auth Telegram send failed");
+    }
+    await new Promise((r) => setTimeout(r, attempt * 1500));
+  }
+  return { sent: false };
+}
+
+async function sendSummary(
+  ctx: AbvpRefreshContext,
+  text: string,
+  intent: NotificationIntent,
+): Promise<boolean> {
+  if (!ctx.bot) return false;
+  const formatted = formatScheduledTelegramHtml(text);
+  try {
+    const result = await routeTelegramNotification({
+      db: ctx.db,
+      sourceType: "scheduler_job",
+      sourceId: "abvp-refresh",
+      jobRunId: ctx.jobRunId,
+      intent,
+      title: "ABVP refresh",
+      messageText: formatted,
+      deliver: async () =>
+        sendChunkedTelegramMessage({
+          bot: ctx.bot!,
+          chatId: ctx.chatId,
+          message: formatted,
+          parseMode: "HTML",
+          enableLinkPreview: false,
+        }),
+    });
+    return result.decision === "sent";
+  } catch (err) {
+    logger.warn({ err }, "ABVP summary Telegram failed");
+    return false;
+  }
+}
+
+async function runPythonIngest(
+  state: RunState,
+  statePath: string,
+  args: string[],
+  logName: string,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; output: string }> {
+  const logPath = join(INGEST_LOGS_DIR, `${logName}_${state.run_id}.log`);
+  await fs.mkdir(INGEST_LOGS_DIR, { recursive: true });
+  const outStream = createWriteStream(logPath, { flags: "a" });
+
+  return new Promise((resolve) => {
+    const child = spawn("python3", ["-u", ...args], {
+      cwd: ABVP_ROOT,
+      env: process.env,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    }) as ChildProcess;
+
+    const pgid = child.pid ?? null;
+    state.child = {
+      pid: child.pid ?? null,
+      pgid,
+      type: args[0] || null,
+      started_at: nowIso(),
+    };
+    void atomicWriteJson(statePath, state);
+
+    let output = "";
+    child.stdout?.on("data", (buf: Buffer) => {
+      const s = buf.toString();
+      output += s;
+      outStream.write(s);
+    });
+    child.stderr?.on("data", (buf: Buffer) => {
+      const s = buf.toString();
+      output += s;
+      outStream.write(s);
+    });
+
+    const onAbort = () => {
+      if (pgid != null) {
+        try {
+          process.kill(-pgid, "SIGTERM");
+        } catch {
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            /* ignore */
+          }
+        }
+        setTimeout(() => {
+          try {
+            process.kill(-pgid, "SIGKILL");
+          } catch {
+            /* ignore */
+          }
+        }, 30_000).unref();
+      }
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    child.on("close", (code) => {
+      signal?.removeEventListener("abort", onAbort);
+      outStream.end();
+      state.child = { pid: null, pgid: null, type: null, started_at: null };
+      void atomicWriteJson(statePath, state);
+      resolve({ ok: code === 0, output: output.slice(-8000) });
+    });
+  });
+}
+
+function newRunState(cadence: CadenceState): RunState {
+  const today = localToday();
+  const runId = `abvp-${today.replace(/-/g, "")}T${new Date()
+    .toISOString()
+    .slice(11, 19)
+    .replace(/:/g, "")}-${randomBytes(3).toString("hex")}`;
+  return {
+    schema_version: 1,
+    run_id: runId,
+    attempt: 1,
+    status: "inventory",
+    stage: "cadence",
+    created_at: nowIso(),
+    updated_at: nowIso(),
+    today_local: today,
+    lookback_start: addDaysLocal(today, -LOOKBACK_DAYS),
+    next_due_at_before: cadence.next_due_at,
+    inventory: {
+      portal_url: PORTAL_URL,
+      marketplace: "PNG_US",
+      contract_verified: false,
+      coverage_complete: false,
+      row_count: 0,
+      sealed_at: null,
+    },
+    items: [],
+    child: { pid: null, pgid: null, type: null, started_at: null },
+    auth: { kind: null, detected_at: null, deadline: null, current_url: null },
+    notification: { intent: null, status: "none", telegram_message_id: null },
+    cadence_advanced_at: null,
+    last_error: null,
+  };
+}
+
+function buildItems(rows: PortalRow[], lookbackStart: string): RunItem[] {
+  const selected: RunItem[] = [];
+  for (const row of rows) {
+    const type = labelToType(row.label);
+    if (!type) continue; // skip EXCEL / unknown
+    const portalDate = normalizePortalDate(row.date);
+    if (!portalDate) continue;
+    if (parseLocalDate(portalDate) < parseLocalDate(lookbackStart)) continue;
+    const canon = canonicalFor(type, portalDate);
+    selected.push({
+      id: `${type}:${portalDate}:${row.i}`,
+      type,
+      portal_date: portalDate,
+      portal_label: row.label,
+      portal_index: row.i,
+      canonical_path: canon.abs,
+      ledger_file_path: canon.ledger,
+      required_sources: canon.sources,
+      stage: "selected",
+      staging_path: null,
+      size_bytes: 0,
+      sha256: null,
+      zip_valid: false,
+      place_action: "pending",
+      ingest: Object.fromEntries(canon.sources.map((s) => [s, { status: "pending", row_count: null }])),
+      attempts: { download: 0, ingest: 0 },
+      error: null,
+    });
+  }
+  selected.sort((a, b) => {
+    if (a.portal_date !== b.portal_date) return a.portal_date < b.portal_date ? -1 : 1;
+    const order = { Brand: 0, ASIN: 1, SR: 2 } as const;
+    if (order[a.type] !== order[b.type]) return order[a.type] - order[b.type];
+    return a.portal_index - b.portal_index;
+  });
+  return selected;
+}
+
+export async function runAbvpRefresh(ctx: AbvpRefreshContext): Promise<AbvpRefreshResult> {
+  await ensureDirs();
+  const cadence = await loadCadence();
+
+  if (!isDue(cadence.next_due_at)) {
+    return {
+      success: true,
+      output: `ABVP refresh off-cycle (next_due_at=${cadence.next_due_at})`,
+      notificationIntent: "operational_status",
+    };
+  }
+
+  const lock = new PipelineLock();
+  if (!lock.acquire()) {
+    return {
+      success: false,
+      output: "",
+      error: "ABVP pipeline lock busy (.abvp.lock)",
+      notificationIntent: "failure_alert",
+    };
+  }
+
+  let state = newRunState(cadence);
+  const runDir = join(RUNS_DIR, state.run_id);
+  const stagingDir = join(runDir, "staging");
+  const statePath = join(runDir, "state.json");
+  await fs.mkdir(stagingDir, { recursive: true });
+
+  // Resume prior nonterminal run if present
+  const active = await readJson<{ run_id: string; state_path: string }>(ACTIVE_PATH);
+  if (active?.state_path) {
+    const prior = await readJson<RunState>(active.state_path);
+    if (prior && !["completed", "failed", "auth_timeout", "auth_unnotified"].includes(prior.status)) {
+      state = prior;
+      state.attempt += 1;
+      state.updated_at = nowIso();
+      logger.info({ runId: state.run_id, attempt: state.attempt }, "Resuming ABVP run");
+    }
+  }
+
+  await atomicWriteJson(statePath, state);
+  await atomicWriteJson(ACTIVE_PATH, { run_id: state.run_id, state_path: statePath });
+
+  const dbPath = join(ABVP_ROOT, "abvp.db");
+  const started = ctx.startedAt.getTime();
+
+  const persist = async () => {
+    state.updated_at = nowIso();
+    await atomicWriteJson(statePath, state);
+  };
+
+  try {
+    // Disk floor
+    const free = await diskFreeBytes(ABVP_ROOT);
+    const dbSize = existsSync(dbPath) ? (await fs.stat(dbPath)).size : 0;
+    const floor = Math.max(25 * 1024 ** 3, Math.floor(dbSize * 0.5));
+    if (free < floor) {
+      state.status = "failed";
+      state.last_error = `low disk: free=${free} floor=${floor}`;
+      await persist();
+      await sendSummary(ctx, `ABVP refresh stopped — low disk (free ${Math.round(free / 1024 ** 3)} GiB)`, "failure_alert");
+      return { success: false, output: state.last_error, error: state.last_error, notificationIntent: "failure_alert", sideEffectDelivered: true };
+    }
+
+    state.stage = "preflight";
+    await persist();
+    await ensureBrowserReady(ctx.signal);
+
+    state.stage = "inventory";
+    await persist();
+
+    // Open + inventory, with bounded auth wait that resumes in-process when login succeeds.
+    let inv: Awaited<ReturnType<typeof inventoryPortal>> | null = null;
+    for (let authRound = 0; authRound < 2; authRound++) {
+      const opened = await openReportsPage(ctx.signal);
+      if (opened.auth) {
+        const wait = await handleAuthWait(ctx, state, statePath, opened.auth, opened.url);
+        if (!wait.restored) return wait.result!;
+        continue;
+      }
+      inv = await inventoryPortal(ctx.signal);
+      if (inv.auth && inv.auth !== "portal_contract_failure") {
+        const wait = await handleAuthWait(ctx, state, statePath, inv.auth, inv.url);
+        if (!wait.restored) return wait.result!;
+        continue;
+      }
+      break;
+    }
+    if (!inv) {
+      state.status = "failed";
+      state.last_error = "portal inventory unavailable after auth wait";
+      await persist();
+      return { success: false, output: state.last_error, error: state.last_error, notificationIntent: "failure_alert" };
+    }
+    if (inv.auth === "portal_contract_failure") {
+      state.status = "failed";
+      state.last_error = `portal_contract_failure at ${inv.url}`;
+      await persist();
+      await sendSummary(ctx, `ABVP refresh failed — portal contract drift at ${inv.url}`, "failure_alert");
+      return { success: false, output: state.last_error, error: state.last_error, notificationIntent: "failure_alert", sideEffectDelivered: true };
+    }
+
+    // Always rebuild selection from fresh inventory; reconcile prior item stages by id
+    const freshItems = buildItems(inv.rows, state.lookback_start);
+    const priorById = new Map(state.items.map((i) => [i.id, i]));
+    state.items = freshItems.map((item) => {
+      const prev = priorById.get(item.id);
+      if (!prev) return item;
+      return {
+        ...item,
+        stage: prev.stage,
+        staging_path: prev.staging_path,
+        size_bytes: prev.size_bytes,
+        sha256: prev.sha256,
+        zip_valid: prev.zip_valid,
+        place_action: prev.place_action,
+        ingest: prev.ingest,
+        attempts: prev.attempts,
+        error: prev.error,
+      };
+    });
+    state.inventory = {
+      portal_url: inv.url,
+      marketplace: "PNG_US",
+      contract_verified: true,
+      coverage_complete: true,
+      row_count: inv.rows.length,
+      sealed_at: nowIso(),
+    };
+    state.status = "downloading";
+    state.stage = "download";
+    await persist();
+
+    // Download phase (index loop so auth-restore can retry the same item)
+    for (let di = 0; di < state.items.length; di++) {
+      const item = state.items[di]!;
+      if (ctx.signal?.aborted) throw new Error("aborted");
+
+      // Skip click if valid canonical already present
+      if (existsSync(item.canonical_path)) {
+        const v = await validateZip(item.canonical_path, item.type);
+        if (v.ok) {
+          item.zip_valid = true;
+          item.sha256 = item.sha256 || (await sha256File(item.canonical_path));
+          item.size_bytes = (await fs.stat(item.canonical_path)).size;
+          item.stage = "click_skipped";
+          item.place_action = "same_hash_skip";
+          await persist();
+          continue;
+        }
+      }
+
+      if (["validated", "placed", "same_hash_skip", "verified"].includes(item.stage) && item.staging_path && existsSync(item.staging_path)) {
+        continue;
+      }
+
+      item.attempts.download += 1;
+      item.stage = "downloading";
+      await persist();
+
+      const before = await listLandingFiles();
+      const clickRaw = await abvpBrowser(["eval", CLICK_JS(item.portal_index)], { timeoutMs: 30_000, signal: ctx.signal });
+      const click = parseEvalJson<{ ok: boolean; error?: string; url?: string }>(clickRaw);
+      if (!click.ok) {
+        const url = click.url || (await abvpBrowser(["get", "url"], { timeoutMs: 10_000, signal: ctx.signal }));
+        const auth = classifyAuth(url, "");
+        if (auth) {
+          const wait = await handleAuthWait(ctx, state, statePath, auth, url);
+          if (!wait.restored) return wait.result!;
+          await openReportsPage(ctx.signal);
+          item.attempts.download -= 1;
+          di -= 1; // retry same item
+          continue;
+        }
+        item.error = click.error || "click failed";
+        item.stage = "failed";
+        state.status = "failed";
+        state.last_error = `download click failed for ${item.id}: ${item.error}`;
+        await persist();
+        await sendSummary(ctx, `ABVP refresh failed — ${state.last_error}`, "failure_alert");
+        return { success: false, output: state.last_error, error: state.last_error, notificationIntent: "failure_alert", sideEffectDelivered: true };
+      }
+
+      const landed = await waitForNewDownload(before, 360_000, ctx.signal);
+      if (!landed) {
+        const url = await abvpBrowser(["get", "url"], { timeoutMs: 10_000, signal: ctx.signal });
+        const auth = classifyAuth(url, "");
+        if (auth) {
+          const wait = await handleAuthWait(ctx, state, statePath, auth, url);
+          if (!wait.restored) return wait.result!;
+          await openReportsPage(ctx.signal);
+          item.attempts.download -= 1;
+          di -= 1;
+          continue;
+        }
+        item.error = "download timeout";
+        item.stage = "failed";
+        state.status = "failed";
+        state.last_error = `download timeout for ${item.id}`;
+        await persist();
+        await sendSummary(ctx, `ABVP refresh failed — ${state.last_error}`, "failure_alert");
+        return { success: false, output: state.last_error, error: state.last_error, notificationIntent: "failure_alert", sideEffectDelivered: true };
+      }
+
+      const stagingPath = join(stagingDir, `${item.type}_${item.portal_date}__${basename(landed)}`);
+      await fs.copyFile(landed, stagingPath);
+      await fs.unlink(landed).catch(() => undefined);
+
+      const v = await validateZip(stagingPath, item.type);
+      if (!v.ok) {
+        const q = join(QUARANTINE_DIR, `${basename(stagingPath)}.bad.zip`);
+        await fs.rename(stagingPath, q).catch(() => undefined);
+        item.error = v.error || "invalid zip";
+        item.stage = "quarantined";
+        state.status = "failed";
+        state.last_error = `invalid zip for ${item.id}: ${item.error}`;
+        await persist();
+        await sendSummary(ctx, `ABVP refresh failed — ${state.last_error}`, "failure_alert");
+        return { success: false, output: state.last_error, error: state.last_error, notificationIntent: "failure_alert", sideEffectDelivered: true };
+      }
+
+      item.staging_path = stagingPath;
+      item.sha256 = await sha256File(stagingPath);
+      item.size_bytes = (await fs.stat(stagingPath)).size;
+      item.zip_valid = true;
+      item.stage = "validated";
+      await persist();
+    }
+
+    // Place phase
+    state.status = "placing";
+    state.stage = "place";
+    await persist();
+    for (const item of state.items) {
+      if (item.place_action === "same_hash_skip" && existsSync(item.canonical_path)) {
+        item.stage = "placed";
+        continue;
+      }
+      if (!item.staging_path || !existsSync(item.staging_path)) {
+        if (existsSync(item.canonical_path) && item.zip_valid) {
+          item.place_action = "same_hash_skip";
+          item.stage = "placed";
+          continue;
+        }
+        item.error = "missing staging for place";
+        item.stage = "failed";
+        state.status = "failed";
+        state.last_error = item.error;
+        await persist();
+        return { success: false, output: item.error, error: item.error, notificationIntent: "failure_alert" };
+      }
+      const placed = await placeCanonical(item.staging_path, item.canonical_path, state.run_id);
+      item.sha256 = placed.sha256;
+      item.place_action = placed.action;
+      if (placed.action === "quarantined") {
+        item.stage = "quarantined";
+        item.error = `hash conflict → ${placed.quarantinePath}`;
+        state.status = "failed";
+        state.last_error = item.error;
+        await persist();
+        await sendSummary(ctx, `ABVP refresh failed — hash conflict on ${basename(item.canonical_path)}`, "failure_alert");
+        return { success: false, output: item.error, error: item.error, notificationIntent: "failure_alert", sideEffectDelivered: true };
+      }
+      item.staging_path = null;
+      item.stage = "placed";
+      await persist();
+    }
+
+    // Ingest phase
+    state.status = "ingesting";
+    const needBrand: string[] = [];
+    const needAsin: string[] = [];
+    const needSr: string[] = [];
+    for (const item of state.items) {
+      const ledger = await queryLedger(dbPath, item.ledger_file_path, item.required_sources);
+      if (sourcesComplete(ledger, item.required_sources)) {
+        for (const s of item.required_sources) {
+          item.ingest[s] = { status: "verified", row_count: ledger[s]!.row_count };
+        }
+        item.stage = "verified";
+        continue;
+      }
+      if (item.type === "Brand") needBrand.push(item.canonical_path);
+      else if (item.type === "ASIN") needAsin.push(item.canonical_path);
+      else needSr.push(item.canonical_path);
+    }
+    await persist();
+
+    const maybeIngest = async (files: string[], mode: "brand" | "asin" | "sr", script: string[]) => {
+      if (!files.length) return { ok: true, output: "nothing to ingest" };
+      if (Date.now() - started > INGEST_START_CUTOFF_MS) {
+        state.status = "interrupted";
+        state.last_error = "90-minute ingest start cutoff reached; cadence left due";
+        await persist();
+        return { ok: false, output: state.last_error };
+      }
+      state.stage = mode === "brand" ? "ingest_brand" : mode === "asin" ? "ingest_asin" : "ingest_sr";
+      await persist();
+      return runPythonIngest(state, statePath, [...script, "--files", ...files], `ingest_${mode}`, ctx.signal);
+    };
+
+    if (needBrand.length) {
+      const r = await maybeIngest(needBrand, "brand", ["batch_ingest.py", "brand"]);
+      if (!r.ok) {
+        state.status = state.status === "interrupted" ? "interrupted" : "failed";
+        state.last_error = state.last_error || `brand ingest failed: ${r.output.slice(-500)}`;
+        await persist();
+        await sendSummary(ctx, `ABVP refresh incomplete — ${state.last_error}`, "failure_alert");
+        return { success: false, output: state.last_error, error: state.last_error, notificationIntent: "failure_alert", sideEffectDelivered: true };
+      }
+    }
+    if (needAsin.length) {
+      const r = await maybeIngest(needAsin, "asin", ["batch_ingest.py", "asin"]);
+      if (!r.ok) {
+        state.status = state.status === "interrupted" ? "interrupted" : "failed";
+        state.last_error = state.last_error || `asin ingest failed: ${r.output.slice(-500)}`;
+        await persist();
+        await sendSummary(ctx, `ABVP refresh incomplete — ${state.last_error}`, "failure_alert");
+        return { success: false, output: state.last_error, error: state.last_error, notificationIntent: "failure_alert", sideEffectDelivered: true };
+      }
+    }
+    if (needSr.length) {
+      const r = await maybeIngest(needSr, "sr", ["ingest_sr.py"]);
+      if (!r.ok) {
+        state.status = state.status === "interrupted" ? "interrupted" : "failed";
+        state.last_error = state.last_error || `sr ingest failed: ${r.output.slice(-500)}`;
+        await persist();
+        await sendSummary(ctx, `ABVP refresh incomplete — ${state.last_error}`, "failure_alert");
+        return { success: false, output: state.last_error, error: state.last_error, notificationIntent: "failure_alert", sideEffectDelivered: true };
+      }
+    }
+
+    // Verify
+    state.status = "verifying";
+    state.stage = "verify";
+    await persist();
+    const missing: string[] = [];
+    for (const item of state.items) {
+      const ledger = await queryLedger(dbPath, item.ledger_file_path, item.required_sources);
+      if (!sourcesComplete(ledger, item.required_sources)) {
+        missing.push(item.id);
+        item.stage = "failed";
+        item.error = "ledger incomplete after ingest";
+      } else {
+        for (const s of item.required_sources) {
+          item.ingest[s] = { status: "verified", row_count: ledger[s]!.row_count };
+        }
+        item.stage = "verified";
+      }
+    }
+    await persist();
+
+    if (missing.length) {
+      state.status = "failed";
+      state.last_error = `verify failed for: ${missing.join(", ")}`;
+      await persist();
+      await sendSummary(ctx, `ABVP refresh failed verify — ${missing.length} item(s)`, "failure_alert");
+      return { success: false, output: state.last_error, error: state.last_error, notificationIntent: "failure_alert", sideEffectDelivered: true };
+    }
+
+    // Checkpoint WAL (best-effort)
+    try {
+      await execFileAsync("sqlite3", [dbPath, "PRAGMA wal_checkpoint(TRUNCATE);"], { timeout: 120_000 });
+    } catch (err) {
+      logger.warn({ err }, "ABVP wal_checkpoint warning");
+    }
+
+    // Advance cadence
+    state.stage = "cadence_advance";
+    const nextDue = advanceDue(cadence.next_due_at);
+    const newCadence: CadenceState = {
+      next_due_at: nextDue,
+      last_success_at: nowIso(),
+      last_run_id: state.run_id,
+    };
+    await atomicWriteJson(CADENCE_PATH, newCadence);
+    state.cadence_advanced_at = nowIso();
+    state.status = "completed";
+    state.stage = "notify";
+    await persist();
+
+    const downloaded = state.items.filter((i) => i.place_action === "placed").length;
+    const skipped = state.items.filter((i) => i.stage === "verified" && i.place_action === "same_hash_skip").length;
+    const summary =
+      `ABVP refresh OK (${state.run_id})\n` +
+      `Window ${state.lookback_start} → ${state.today_local}: ${state.items.length} Brand/ASIN/SR rows\n` +
+      `Placed ${downloaded}, local-skip ${skipped}, all ledger rows verified\n` +
+      `next_due_at → ${nextDue}`;
+
+    const sent = await sendSummary(ctx, summary, "user_info");
+    return {
+      success: true,
+      output: summary.replace(/\n/g, "; "),
+      notificationIntent: "user_info",
+      sideEffectDelivered: sent,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    state.status = ctx.signal?.aborted ? "interrupted" : "failed";
+    state.last_error = message;
+    await atomicWriteJson(statePath, state).catch(() => undefined);
+    logger.error({ err, runId: state.run_id }, "ABVP refresh failed");
+    await sendSummary(ctx, `ABVP refresh ${state.status}: ${message}`, "failure_alert").catch(() => false);
+    return {
+      success: false,
+      output: "",
+      error: message,
+      notificationIntent: "failure_alert",
+      sideEffectDelivered: true,
+    };
+  } finally {
+    // Kill any lingering child
+    if (state.child.pgid != null) {
+      try {
+        process.kill(-state.child.pgid, "SIGTERM");
+      } catch {
+        /* ignore */
+      }
+    }
+    lock.release();
+  }
+}
+
+async function handleAuthWait(
+  ctx: AbvpRefreshContext,
+  state: RunState,
+  statePath: string,
+  kind: AuthKind,
+  url: string,
+): Promise<{ restored: boolean; result?: AbvpRefreshResult }> {
+  state.status = "auth_wait";
+  state.stage = "inventory";
+  state.auth = {
+    kind,
+    detected_at: nowIso(),
+    deadline: new Date(Date.now() + AUTH_WAIT_MS).toISOString(),
+    current_url: url,
+  };
+  state.notification = { intent: "decision_request", status: "pending", telegram_message_id: null };
+  await atomicWriteJson(statePath, state);
+
+  if (kind === "bot_blocked" || kind === "portal_contract_failure") {
+    state.status = "failed";
+    state.last_error = kind;
+    await atomicWriteJson(statePath, state);
+    await sendSummary(ctx, `ABVP refresh failed — ${kind} at ${url}`, "failure_alert");
+    return {
+      restored: false,
+      result: {
+        success: false,
+        output: kind,
+        error: kind,
+        notificationIntent: "failure_alert",
+        sideEffectDelivered: true,
+      },
+    };
+  }
+
+  const delivered = await sendTelegramDecision(ctx, state, kind, url);
+  if (!delivered.sent) {
+    state.status = "auth_unnotified";
+    state.notification.status = "failed";
+    state.last_error = "Telegram decision_request failed; not parking for auth";
+    await atomicWriteJson(statePath, state);
+    return {
+      restored: false,
+      result: {
+        success: false,
+        output: state.last_error,
+        error: state.last_error,
+        notificationIntent: "failure_alert",
+        sideEffectDelivered: false,
+      },
+    };
+  }
+
+  state.notification.status = "sent";
+  state.notification.telegram_message_id = delivered.messageId ?? null;
+  await atomicWriteJson(statePath, state);
+
+  const deadline = Date.now() + AUTH_WAIT_MS;
+  while (Date.now() < deadline) {
+    if (ctx.signal?.aborted) break;
+    await new Promise((r) => setTimeout(r, AUTH_POLL_MS));
+    try {
+      const opened = await openReportsPage(ctx.signal);
+      if (!opened.auth) {
+        const inv = await inventoryPortal(ctx.signal);
+        if (!inv.auth && inv.contractOk) {
+          state.status = "inventory";
+          state.auth = { kind: null, detected_at: null, deadline: null, current_url: null };
+          await atomicWriteJson(statePath, state);
+          return { restored: true };
+        }
+      }
+    } catch (err) {
+      logger.warn({ err }, "ABVP auth poll error");
+    }
+  }
+
+  state.status = "auth_timeout";
+  state.last_error = `Auth/MFA not completed within 45m (${kind})`;
+  await atomicWriteJson(statePath, state);
+  await sendSummary(ctx, `ABVP refresh auth timeout — ${kind}. next_due_at unchanged.`, "failure_alert");
+  return {
+    restored: false,
+    result: {
+      success: false,
+      output: state.last_error,
+      error: state.last_error,
+      notificationIntent: "failure_alert",
+      sideEffectDelivered: true,
+    },
+  };
+}

@@ -230,6 +230,8 @@ export class Scheduler {
 
         const job = this.cronManager.getJob(dueJob.jobId);
         if (!job || !job.config.enabled) continue;
+        // Honor explicit opt-out; default remains false per loader.
+        if (job.config.autoCompensate === false) continue;
 
         logger.warn({ jobId: dueJob.jobId }, "DB catch-up: compensating missed fire");
         this.stateManager.recordCompensationTrigger(dueJob.jobId);
@@ -255,6 +257,7 @@ export class Scheduler {
 
       const job = this.cronManager.getJob(jobId);
       if (!job || !job.config.enabled) continue;
+      if (job.config.autoCompensate === false) continue;
 
       // Dedup: skip if triggered recently
       const state = this.stateManager.getScheduledJobState(jobId);
@@ -353,6 +356,8 @@ export class Scheduler {
       const now = Date.now();
       for (const [jobId, nextExpected] of snapshots) {
         if (nextExpected.getTime() <= now && nextExpected.getTime() >= reloadStart) {
+          const job = this.cronManager.getJob(jobId);
+          if (!job || !job.config.enabled || job.config.autoCompensate === false) continue;
           logger.warn({ jobId, reloadDurationMs: reloadDuration }, "Hot-reload gap: compensating missed fire");
           this.cronManager.triggerJob(jobId, false);
         }

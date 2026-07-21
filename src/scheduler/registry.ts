@@ -58,6 +58,7 @@ export interface JobEntry {
  * Handler file name is derived from id unless noted.
  */
 const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
+  { id: "abvp-refresh", name: "ABVP + Search Rank Fortnightly Refresh", kind: "internal", handler: "abvp_refresh", handlerFile: "abvp-refresh", expectedInSchedule: true, note: "Tue 7 AM cadence + next_due_at fortnightly; 28-day portal window" },
   { id: "archive-verify", name: "Archive Verify", kind: "internal", handler: "archive_verify", handlerFile: "archive-verify", expectedInSchedule: true },
   { id: "content-scraper", name: "Content Scraper", kind: "internal", handler: "content_scraper", handlerFile: "content-scraper", expectedInSchedule: true },
   { id: "db-backup", name: "DB Backup", kind: "internal", handler: "db_backup", handlerFile: "db-backup", expectedInSchedule: true },
