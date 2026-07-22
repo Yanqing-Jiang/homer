@@ -1154,12 +1154,8 @@ async function runHandler(
         };
         const steps: string[] = [];
         try {
-          await exec("osascript", ["-e", 'quit app "Docker"'], { timeout: 30_000 });
-          steps.push("quit Docker Desktop");
-          // Wait until the engine is actually gone before relaunching.
-          await waitUntil("docker exit", async () => !(await dockerReady()), 20, 2_000);
-          await exec("open", ["-ga", "Docker"], { timeout: 30_000 });
-          steps.push("relaunch Docker Desktop");
+          await exec("docker", ["desktop", "restart"], { timeout: 180_000 });
+          steps.push("restart Docker Desktop");
 
           const engineUp = await waitUntil("docker daemon", dockerReady, 60, 5_000);
           if (!engineUp) {
@@ -1168,7 +1164,7 @@ async function runHandler(
               startedAt,
               false,
               steps.join("; "),
-              "Docker Desktop relaunched but daemon never became ready",
+              "Docker Desktop restart command succeeded but daemon never became ready",
               { notificationIntent: "operational_status" },
             );
           }
