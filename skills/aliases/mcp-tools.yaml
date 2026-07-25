@@ -11,12 +11,14 @@ logicalTools:
       claude: { tool: mcp__homer-memory__memory_search }
       opencode: { tool: memory_search, mcpServer: homer-memory }
       codex: { tool: memory_search, mcpServer: homer-memory }
+  # Whole-file reads merged into memory_search (mode='fetch'); alias kept because
+  # skills and the capability matrix address it by name.
   memory.read:
     capability: memory.read
     harness:
-      claude: { tool: mcp__homer-memory__memory_read }
-      opencode: { tool: memory_read, mcpServer: homer-memory }
-      codex: { tool: memory_read, mcpServer: homer-memory }
+      claude: { tool: mcp__homer-memory__memory_search }
+      opencode: { tool: memory_search, mcpServer: homer-memory }
+      codex: { tool: memory_search, mcpServer: homer-memory }
   memory.context:
     capability: memory.read
     harness:
