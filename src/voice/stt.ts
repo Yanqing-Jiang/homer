@@ -27,6 +27,26 @@ interface ScribeResponse {
   transcription_id?: string;
 }
 
+const UNSUPPORTED_KEYTERM_CHARACTERS = /[<>{}\[\]\\]/g;
+
+export function sanitizeKeyterms(keyterms: string[]): string[] {
+  const sanitized = keyterms
+    .flatMap((keyterm) => {
+      const normalized = keyterm.normalize("NFKC");
+      const parenthetical = [...normalized.matchAll(/\(([^()]*)\)/g)]
+        .map((match) => match[1] ?? "");
+      return [normalized.replace(/\([^()]*\)/g, " "), ...parenthetical];
+    })
+    .map((keyterm) =>
+      keyterm.replace(UNSUPPORTED_KEYTERM_CHARACTERS, " ").replace(/\s+/g, " ").trim()
+    )
+    .filter((keyterm) => keyterm.length > 0)
+    .filter((keyterm) => [...keyterm].length < 50)
+    .filter((keyterm) => keyterm.split(/\s+/).length <= 5);
+
+  return [...new Set(sanitized)].slice(0, 100);
+}
+
 /**
  * Transcribe audio using ElevenLabs Scribe v2 API
  *
@@ -84,8 +104,9 @@ export async function transcribeAudio(
 
   // Keyterms for custom vocabulary (brand names, technical terms)
   if (options.keyterms && options.keyterms.length > 0) {
-    // API expects keyterms as a JSON array string
-    formData.append("keyterms", JSON.stringify(options.keyterms.slice(0, 100)));
+    for (const keyterm of sanitizeKeyterms(options.keyterms)) {
+      formData.append("keyterms", keyterm);
+    }
   }
 
   const response = await fetch(
