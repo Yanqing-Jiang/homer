@@ -101,7 +101,8 @@ export function initMcpState(dbPath: string = PATHS.db): void {
 const RESULT_SIZE_BUDGET = {
   maxCharsPerResult: 100_000,
   previewSize: 1_500,
-  exempt: new Set(["memory_read", "memory_context"]),
+  // memory_search needs no exemption: mode='fetch' self-caps at 96 KB, under maxCharsPerResult.
+  exempt: new Set(["memory_context"]),
 };
 
 function applyResultBudget(

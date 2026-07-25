@@ -29,7 +29,7 @@ export interface RemotePolicy {
   originDevice?: string;
   /** Clamp memory_suggest confidence to at most this (keeps it below auto-approve). */
   maxSuggestConfidence?: number;
-  /** If set, memory_read may only read these canonical file keys (no daily/archive). */
+  /** If set, memory_search mode='fetch' may only read these canonical file keys (no daily/archive). */
   readableFiles?: string[];
   /**
    * When true, memory_search returns ONLY durable memory (md chunks) + approved

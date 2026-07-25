@@ -14,9 +14,9 @@
       "types": "./dist/voice/*.d.ts",
       "import": "./dist/voice/*.js"
     },
-    "./meetings/index.js": {
-      "types": "./dist/meetings/index.d.ts",
-      "import": "./dist/meetings/index.js"
+    "./meetings/*.js": {
+      "types": "./dist/meetings/*.d.ts",
+      "import": "./dist/meetings/*.js"
     },
     "./harness/resolution/resolver.js": {
       "types": "./dist/harness/resolution/resolver.d.ts",
