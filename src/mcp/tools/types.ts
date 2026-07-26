@@ -33,7 +33,7 @@ export interface RemotePolicy {
   readableFiles?: string[];
   /**
    * When true, memory_search returns ONLY durable memory (md chunks) + approved
-   * knowledge_claims — no session summaries, threads, takeovers, scrapes, ideas,
+   * knowledge_claims — no session summaries, threads, takeovers, scrapes,
    * YouTube, transcripts, candidate/archived claims. Keeps operational/personal
    * stores off an untrusted (e.g. corp-inspected) remote path.
    */

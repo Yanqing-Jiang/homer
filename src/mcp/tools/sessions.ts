@@ -39,7 +39,7 @@ export const definitions: ToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        source_type: { type: "string", enum: ["idea", "plan", "application", "promotion", "improvement"], description: "Type of item to check" },
+        source_type: { type: "string", enum: ["plan", "application", "promotion", "improvement"], description: "Type of item to check" },
         source_id: { type: "string", description: "ID of the item" },
         source_title: { type: "string", description: "Title/description of the item" },
         check_days: { type: "number", description: "Days from now to schedule the check (default: 14)" },

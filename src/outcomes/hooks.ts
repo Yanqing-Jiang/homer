@@ -1,7 +1,7 @@
 /**
  * Outcome tracking hooks — auto-create outcome_checks from events.
  *
- * Call these after significant state changes in ideas, applications,
+ * Call these after significant state changes in applications,
  * promotions, and improvements. Each creates a future check.
  */
 
@@ -27,28 +27,6 @@ function insertOutcomeCheck(
     // Table may not exist yet — gracefully degrade
     logger.debug({ error: err }, "Could not create outcome check (table may not exist)");
   }
-}
-
-/**
- * When an idea transitions to discussion/planning → 14-day check
- */
-export function trackIdeaProgress(
-  db: Database.Database,
-  ideaId: string,
-  ideaTitle: string,
-): void {
-  insertOutcomeCheck(db, "idea", ideaId, ideaTitle, 14);
-}
-
-/**
- * When an idea is archived → 30-day check ("did it resurface?")
- */
-export function trackIdeaArchived(
-  db: Database.Database,
-  ideaId: string,
-  ideaTitle: string,
-): void {
-  insertOutcomeCheck(db, "idea", ideaId, ideaTitle, 30);
 }
 
 /**

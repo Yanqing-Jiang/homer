@@ -2,7 +2,7 @@
  * Telegram Approval Flow for HOMER's Proposal System
  *
  * Handles discovery proposals with inline buttons and quick commands.
- * Integrates with ideas and plans systems for lifecycle management.
+ * Integrates with the plans system for lifecycle management.
  */
 
 // @ts-ignore
@@ -84,7 +84,7 @@ export function formatApprovalConfirmation(proposal: Proposal, planId?: string):
     text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, "\\$&");
 
   let msg = `✅ *Approved: ${escape(proposal.title)}*\n\n`;
-  msg += `_Idea archived\\. Creating implementation plan\\.\\.\\._`;
+  msg += `_Creating implementation plan\\.\\.\\._`;
 
   if (planId) {
     msg += `\n\nPlan ID: \`${planId}\``;
@@ -205,20 +205,11 @@ export async function handleApprovalCallback(
       logger.info({ proposalId, from: proposal.stage, to: nextStage }, "Proposal stage advanced");
     }
 
-    // Legacy: Also try to archive from ideas table
-    const archiveResult = await archiveIdea(proposalId, stateManager);
-
-    // Create a plan record if we have idea data
-    const planId = archiveResult.idea
-      ? await createPlan(proposalId, archiveResult.idea, stateManager)
-      : undefined;
-
-    logger.info({ proposalId, planId }, "Proposal approved");
+    logger.info({ proposalId }, "Proposal approved");
 
     return {
       success: true,
-      message: `Approved: ${proposal?.title || archiveResult.idea?.title || proposalId}`,
-      planId,
+      message: `Approved: ${proposal?.title || proposalId}`,
     };
   } catch (error) {
     logger.error({ error, proposalId }, "Failed to approve proposal");
@@ -304,92 +295,6 @@ export async function handleRejectionCallback(
 // generateWebLink + generateProposalToken removed when web UI was split out.
 // Backward-compat handling for older Telegram messages lives in the
 // `proposal:details:*` callback below (shows a "moved" alert).
-
-// =============================================================================
-// Integration with Proposal Lifecycle
-// =============================================================================
-
-interface ArchivedIdea {
-  id: string;
-  title: string;
-  content: string;
-  source: string;
-  link?: string;
-}
-
-/**
- * Archive an idea after approval
- */
-async function archiveIdea(
-  proposalId: string,
-  stateManager: StateManager
-): Promise<{ success: boolean; message: string; idea?: ArchivedIdea }> {
-  try {
-    // Get proposal/idea from database
-    const idea = stateManager.db.prepare(`
-      SELECT id, title, content, source, link
-      FROM ideas
-      WHERE id = ? OR id LIKE ?
-    `).get(proposalId, `${proposalId}%`) as ArchivedIdea | undefined;
-
-    if (!idea) {
-      return { success: false, message: `Idea not found: ${proposalId}` };
-    }
-
-    // Update status to archived
-    stateManager.db.prepare(`
-      UPDATE ideas
-      SET status = 'archived', updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(idea.id);
-
-    return { success: true, message: "Archived", idea };
-  } catch (error) {
-    logger.error({ error, proposalId }, "Failed to archive idea");
-    return {
-      success: false,
-      message: error instanceof Error ? error.message : "Archive failed",
-    };
-  }
-}
-
-/**
- * Create a plan record from an approved proposal
- */
-async function createPlan(
-  proposalId: string,
-  idea: ArchivedIdea | undefined,
-  stateManager: StateManager
-): Promise<string> {
-  const planId = `plan_${Date.now().toString(36)}`;
-
-  if (!idea) {
-    logger.warn({ proposalId }, "No idea data for plan creation");
-    return planId;
-  }
-
-  try {
-    // Insert plan into database
-    stateManager.db.prepare(`
-      INSERT INTO plans (id, title, description, status, source_idea_id, created_at)
-      VALUES (?, ?, ?, 'planning', ?, CURRENT_TIMESTAMP)
-    `).run(planId, idea.title, idea.content, idea.id);
-
-    // Link plan to original idea
-    stateManager.db.prepare(`
-      UPDATE ideas
-      SET linked_plan_id = ?
-      WHERE id = ?
-    `).run(planId, idea.id);
-
-    logger.info({ planId, ideaId: idea.id }, "Plan created from approved proposal");
-  } catch (error) {
-    // Tables might not exist yet - log and continue
-    logger.warn({ error, planId }, "Could not persist plan to database");
-  }
-
-  return planId;
-}
 
 /**
  * Log rejection to deny history for preference learning

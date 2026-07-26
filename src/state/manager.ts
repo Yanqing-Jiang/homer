@@ -556,36 +556,6 @@ export class StateManager {
     return result.changes;
   }
 
-  // ============================================
-  // Idea Review State (Daily Limits)
-  // ============================================
-
-  private getLocalDateKey(date?: Date): string {
-    const d = date ?? new Date();
-    // en-CA yields YYYY-MM-DD
-    return new Intl.DateTimeFormat("en-CA").format(d);
-  }
-
-  getIdeaReviewCount(date?: Date): number {
-    const key = this.getLocalDateKey(date);
-    const row = this._db.prepare(
-      "SELECT sent_count as sentCount FROM idea_review_state WHERE date = ?"
-    ).get(key) as { sentCount?: number } | undefined;
-    return row?.sentCount ?? 0;
-  }
-
-  incrementIdeaReviewCount(delta: number = 1, date?: Date): number {
-    const key = this.getLocalDateKey(date);
-    this._db.prepare(
-      `INSERT INTO idea_review_state (date, sent_count, updated_at)
-       VALUES (?, ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(date) DO UPDATE SET sent_count = sent_count + excluded.sent_count,
-       updated_at = CURRENT_TIMESTAMP`
-    ).run(key, delta);
-
-    return this.getIdeaReviewCount(date);
-  }
-
   // Scheduled job methods
   recordScheduledJobStart(jobId: string, jobName: string, sourceFile: string): number | null {
     const txn = this._db.transaction(() => {

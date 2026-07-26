@@ -28,7 +28,6 @@ export const PATHS = {
   sessionBootstrap: `${mem}/session-bootstrap.md`,
 
   // Memory subdirectories
-  ideas: `${mem}/ideas`,
   daily: `${mem}/daily`,
   meetings: `${mem}/meetings`,
   plans: `${mem}/plans`,
@@ -38,7 +37,6 @@ export const PATHS = {
   youtubeMemory: `${mem}/youtube`,
 
   // Legacy files (may be removed)
-  ideasMd: `${mem}/ideas.md`,
   schedule: `${mem}/schedule.json`,
 
   // ── Claude dir ──────────────────────────────────────────────

@@ -113,9 +113,9 @@ export const RESEARCH_ONLY_PREFIX = `CRITICAL CONSTRAINTS - You MUST follow thes
 
 ALLOWED:
 - READ any files for context and analysis
-- CREATE or UPDATE .md (markdown) files for reports, ideas, summaries, digests
+- CREATE or UPDATE .md (markdown) files for reports, summaries, digests
 - CREATE or UPDATE .json files in ~/memory/ for data storage
-- Use MCP tools for memory operations (memory_promote, memory_suggest, idea_add)
+- Use MCP tools for memory operations (memory_promote, memory_suggest, todo_save)
 - Web searches and API calls for research
 
 PROHIBITED:

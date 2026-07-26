@@ -122,7 +122,6 @@ workspaces/
 /src/meetings/
 /src/telephony/
 /src/discovery/
-/src/ideas/
 /src/scraping/
 /src/overnight/
 /src/youtube/
@@ -132,7 +131,6 @@ workspaces/
 /src/scheduler/jobs/job-hunt-followup.ts
 /src/scheduler/jobs/job-hunt-report.ts
 /src/scheduler/jobs/career-truth.ts
-/src/scheduler/jobs/idea-synthesizer.ts
 /src/scheduler/jobs/ideas-explore.ts
 /src/scheduler/jobs/content-scraper.ts
 /src/scheduler/jobs/link-processor.ts
@@ -146,9 +144,7 @@ workspaces/
 /src/scheduler/jobs/memory-embeddings.ts
 /src/scheduler/jobs/session-harvester.ts
 /src/scheduler/jobs/weekly-consolidation.ts
-/src/scheduler/jobs/prompts/idea-synthesizer.ts
 /src/mcp/tools/memory.ts
-/src/mcp/tools/ideas.ts
 /src/mcp/tools/meetings.ts
 /src/mcp/tools/calls.ts
 /src/state/migrations/002_ideas_plans_index.sql

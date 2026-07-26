@@ -189,7 +189,6 @@ function createNew(db: Database.Database, input: SaveTodoInput): TodoRow {
       row.created_at, row.updated_at, row.completed_at, row.archived_at,
     );
 
-    if (row.source_idea_id) linkIdea(db, row.source_idea_id, id);
   })();
 
   emitCommitmentIfP1(db, row);
@@ -340,14 +339,6 @@ function validateChecklist(input: unknown): ChecklistItem[] {
 }
 
 function mapRow(raw: any): TodoRow { return { ...raw, checklist: parseChecklist(raw.checklist) }; }
-
-function linkIdea(db: Database.Database, ideaId: string, todoId: string): void {
-  try {
-    db.prepare("UPDATE ideas SET linked_todo_id = ? WHERE id = ?").run(todoId, ideaId);
-  } catch (e) {
-    logger.warn({ ideaId, error: e }, "Idea linked_todo_id update failed");
-  }
-}
 
 /** Minimum notes length to qualify a done todo as a lesson worth indexing. */
 const LESSON_MIN_NOTES_LEN = 80;

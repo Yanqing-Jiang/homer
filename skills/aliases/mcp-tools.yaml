@@ -38,18 +38,6 @@ logicalTools:
       claude: { tool: mcp__homer-memory__memory_promote }
       opencode: { tool: memory_promote, mcpServer: homer-memory }
       codex: { tool: memory_promote, mcpServer: homer-memory }
-  idea.list:
-    capability: idea.read
-    harness:
-      claude: { tool: mcp__homer-memory__idea_list }
-      opencode: { tool: idea_list, mcpServer: homer-memory }
-      codex: { tool: idea_list, mcpServer: homer-memory }
-  idea.update:
-    capability: idea.write
-    harness:
-      claude: { tool: mcp__homer-memory__idea_update }
-      opencode: { tool: idea_update, mcpServer: homer-memory }
-      codex: { tool: idea_update, mcpServer: homer-memory }
   blob.upload:
     capability: blob.write
     harness:

@@ -4,7 +4,6 @@ import { DEFAULT_JOB_TIMEOUT } from "./types.js";
 import type { StateManager } from "../state/manager.js";
 import { writeInternalTrace } from "../executors/trace-writer.js";
 import { ingestBookmarks } from "../scraping/bookmark-ingest.js";
-import { expireStaleIdeas, expireStalePackets } from "../ideas/dedup.js";
 import { runWeeklyConsolidation } from "./jobs/weekly-consolidation.js";
 import { runMigrations } from "../state/migrations/index.js";
 import { logger } from "../utils/logger.js";
@@ -208,11 +207,12 @@ const RETRYABLE_HANDLERS = new Set([
   "ideas_explore", "nightly_memory", "session_harvester", "memory_embeddings", "memory_reindex", "morning_review",
   "weekly_consolidation",
   "content_scraper", "outcome_tracker",
-  "preference_updater", "idea_expiry", "nightly_code_push", "db_backup",
+  "preference_updater", "nightly_code_push", "db_backup",
   "link_processor", "archive_verify", "health_check",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
   "candidate_expiry",
   "docker_restart",
+  "delta_upgrade_watch",
 ]);
 
 const TRANSIENT_PATTERNS = [
@@ -658,77 +658,6 @@ async function runHandler(
           { notificationIntent: "operational_status" }
         );
       }
-      case "idea_expiry": {
-        const db = ctx.stateManager.getDb();
-        const result = expireStaleIdeas(db, 70);
-        const packetResult = expireStalePackets(db, 70);
-
-        // High-volume rescue alert: >5 archives in one run gets a Telegram with row IDs.
-        // <=5 is silent — the run log is enough. Honesty contract: cite IDs, not just titles.
-        if (result.archived.length > 5 && ctx.bot && ctx.chatId) {
-          const visible = result.archived.slice(0, 25);
-          const lines = visible
-            .map((idea) => `- ${idea.id}: ${idea.title}`)
-            .join("\n");
-          const overflow = result.archived.length > visible.length
-            ? `\n…and ${result.archived.length - visible.length} more.`
-            : "";
-          const messageText =
-            `Idea auto-expiry archived ${result.archived.length} ideas (>70d untouched).\n` +
-            `Reversible: set status back to draft to revive.\n\n` +
-            `${lines}${overflow}`;
-
-          await routeTelegramNotification({
-            db,
-            sourceType: "scheduler_job",
-            sourceId: job.config.id,
-            jobRunId: ctx.jobRunId,
-            intent: "decision_request",
-            title: "Idea auto-expiry review",
-            messageText,
-            deliver: ctx.bot ? async () => {
-              return ctx.bot!.api.sendMessage(ctx.chatId!, messageText);
-            } : undefined,
-          });
-        }
-
-        // Same rescue alert for packets: >5 review-stage packets archived in one run.
-        if (packetResult.archived.length > 5 && ctx.bot && ctx.chatId) {
-          const visible = packetResult.archived.slice(0, 25);
-          const lines = visible
-            .map((packet) => `- ${packet.id}: ${packet.title ?? "(untitled)"}`)
-            .join("\n");
-          const overflow = packetResult.archived.length > visible.length
-            ? `\n…and ${packetResult.archived.length - visible.length} more.`
-            : "";
-          const messageText =
-            `Packet auto-expiry archived ${packetResult.archived.length} source packets (>70d in review).\n` +
-            `Reversible: set status back to review to revive.\n\n` +
-            `${lines}${overflow}`;
-
-          await routeTelegramNotification({
-            db,
-            sourceType: "scheduler_job",
-            sourceId: job.config.id,
-            jobRunId: ctx.jobRunId,
-            intent: "decision_request",
-            title: "Packet auto-expiry review",
-            messageText,
-            deliver: ctx.bot ? async () => {
-              return ctx.bot!.api.sendMessage(ctx.chatId!, messageText);
-            } : undefined,
-          });
-        }
-
-        return buildResult(
-          job,
-          startedAt,
-          true,
-          `${result.output} ${packetResult.output}`,
-          undefined,
-          { notificationIntent: "operational_status" }
-        );
-      }
       case "weekly_consolidation": {
         const result = await runWeeklyConsolidation(job, startedAt, 7, ctx.stateManager);
 
@@ -974,6 +903,18 @@ async function runHandler(
           result.success ? { notificationIntent: "operational_status" } : {}
         );
       }
+      case "delta_upgrade_watch": {
+        const { runDeltaUpgradeWatch } = await import("./jobs/delta-upgrade-watch.js");
+        const result = await runDeltaUpgradeWatch();
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          { notificationIntent: result.notificationIntent ?? (result.success ? "operational_status" : "failure_alert") },
+        );
+      }
       case "abvp_refresh": {
         const { runAbvpRefresh } = await import("./jobs/abvp-refresh.js");
         const result = await runAbvpRefresh({
@@ -997,9 +938,8 @@ async function runHandler(
           },
         );
       }
-      // idea_synthesizer retired 2026-07-26 — scrapes are the corpus, nothing
-      // synthesizes them into source_packets. Job source still on disk; Phase 3
-      // of the memory/ideas streamline deletes it.
+      // idea_synthesizer and idea_expiry were deleted 2026-07-26 with the rest
+      // of the idea subsystem. The scrapes corpus is the reading material now.
       case "link_processor": {
         const { runLinkProcessor } = await import("./jobs/link-processor.js");
         const result = await runLinkProcessor(ctx.stateManager, ctx.jobRunId, job, startedAt);

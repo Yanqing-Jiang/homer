@@ -439,10 +439,10 @@ export class Scheduler {
 
   // Dependency triggers — extracted to constant
   // Memory chains removed: session-harvester→memory-reindex, memory-reindex→memory-embeddings,
-  // nightly-memory→memory-embeddings/git-commit, idea-dedup→memory-embeddings.
+  // nightly-memory→memory-embeddings/git-commit.
   // These are now handled by dirty flags + debounced reactive triggers.
-  // idea-synthesizer edges removed 2026-07-26: scraping jobs are terminal now,
-  // their rows land in `scrapes` and morning-reads reads them directly.
+  // Scraping jobs are terminal: their rows land in `scrapes` and morning-reads
+  // reads them directly.
   private static readonly DEPENDENCY_TRIGGERS: Record<string, string[]> = {};
 
   // System jobs — internal daemon tasks registered at boot and on hot reload
