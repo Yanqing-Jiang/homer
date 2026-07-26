@@ -22,7 +22,6 @@ import { handleCallRequest } from "./handlers/phone-call.js";
 import { handleSmsRequest } from "./handlers/sms.js";
 import { registerCallFollowupHandlers } from "./handlers/call-followup.js";
 import { registerSmsReplyHandlers } from "./handlers/sms-reply.js";
-import { registerMemoryReviewHandlers } from "./handlers/memory-review.js";
 import { registerMorningReviewCallbacks } from "./handlers/morning-review.js";
 import { registerCodePushApprovalHandlers } from "./handlers/code-push-approval.js";
 import { chunkMessage } from "../utils/chunker.js";
@@ -169,9 +168,6 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
   // Register call follow-up and SMS reply inline button callbacks
   registerCallFollowupHandlers(bot);
   registerSmsReplyHandlers(bot);
-
-  // Register memory review handlers (human-gated memory curation)
-  registerMemoryReviewHandlers(bot, stateManager);
 
   // Register morning review callbacks (consolidated 9 AM approval session)
   registerMorningReviewCallbacks(bot, config.telegram.allowedChatId, stateManager);
