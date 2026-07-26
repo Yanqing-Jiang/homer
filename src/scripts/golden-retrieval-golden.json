@@ -1,0 +1,134 @@
+[
+  {
+    "query": "existing solution for agent long-term memory storage",
+    "category": "existing-solution",
+    "expected": { "table": "scrape", "id": "tweet_2078283110077415442" },
+    "notes": "SQLite + FAISS vs alternatives comparison bookmark"
+  },
+  {
+    "query": "sqlite vector search database",
+    "category": "existing-solution",
+    "expected": { "table": "scrape", "id": "med_zvec-reimagining-vector-databa_4f227e38" },
+    "notes": "Zvec — SQLite-style vector DB. raw_content is title-only (165 chars), ineligible for Phase 1 embedding"
+  },
+  {
+    "query": "how to cut cost of an LLM RAG operation",
+    "category": "existing-solution",
+    "expected": { "table": "scrape", "id": "scrape_yj_li_a1fe8a1f3b" }
+  },
+  {
+    "query": "prompt caching KV cache explained",
+    "category": "existing-solution",
+    "expected": { "table": "scrape", "id": "tweet_2034902650534187503" }
+  },
+  {
+    "query": "agentic hybrid RAG implementation code walkthrough",
+    "category": "existing-solution",
+    "expected": { "table": "scrape", "id": "med_part-2-implementing-agentic-hy_fef9cfd3" }
+  },
+  {
+    "query": "speech to text transcription tool comparison",
+    "category": "existing-solution",
+    "expected": { "table": "scrape", "id": "med_speech-to-text-on-windows-a-pr_5c705026" },
+    "notes": "raw_content 119 chars — ineligible for Phase 1 embedding"
+  },
+  {
+    "query": "agent browser scraping automation harness",
+    "category": "existing-solution",
+    "expected": { "table": "scrape", "id": "gh_1776583852861_browser_use_browser_harness" }
+  },
+  {
+    "query": "resume job matching internship tool",
+    "category": "existing-solution",
+    "expected": { "table": "scrape", "id": "gh_1779435025201_LiuMengxuan04_shushu_internshi" }
+  },
+  {
+    "query": "open source PPT slide generation skill",
+    "category": "existing-solution",
+    "expected": { "table": "scrape", "id": "tweet_2078035119563235625" }
+  },
+  {
+    "query": "codex model router multi model switching",
+    "category": "existing-solution",
+    "expected": { "table": "scrape", "id": "gh_1784964632015_duolahypercho_codex_router" }
+  },
+  {
+    "query": "AI memory benchmark measures recall not usage",
+    "category": "existing-solution",
+    "expected": { "table": "scrape", "id": "tweet_2079040348203147573" }
+  },
+  {
+    "query": "agent memory techniques repository",
+    "category": "existing-solution",
+    "expected": { "table": "scrape", "id": "gh_1778484661448_NirDiamant_Agent_Memory_Techni" }
+  },
+  {
+    "query": "fast context management library for agents",
+    "category": "existing-solution",
+    "expected": { "table": "scrape", "id": "gh_1784705425008_yc_duan_fastctx" }
+  },
+  {
+    "query": "ai website cloner template trending project",
+    "category": "existing-solution",
+    "expected": { "table": "scrape", "id": "tweet_2078502555454460041" }
+  },
+  {
+    "query": "open source autonomous worker agent framework",
+    "category": "existing-solution",
+    "expected": { "table": "scrape", "id": "gh_1784878225391_andrewyng_openworker" },
+    "notes": "raw_content 166 chars — ineligible for Phase 1 embedding"
+  },
+  {
+    "query": "what is the default model for Homer right now",
+    "category": "stale-memory",
+    "expected": { "table": "claim", "id": "kc_ms055ygl_w9ne81y2" },
+    "notes": "Conflicts with kc_mrephbf1_7nlp05jz (harness_default flipped to opencode) and kc_mrg4ylxj_wbg7rftv (move to OpenCode GLM-5.2). Newest claim must win."
+  },
+  {
+    "query": "which model does Telegram use by default",
+    "category": "stale-memory",
+    "expected": { "table": "claim", "id": "kc_ms1kim7a_6qgtpe26" }
+  },
+  {
+    "query": "which scraper should I use for browser automation",
+    "category": "stale-memory",
+    "expected": { "table": "claim", "id": "kc_mpnu36k7_0mmed3qb" },
+    "notes": "agent-browser over opencli; competes with scrape rows about browser-use"
+  },
+  {
+    "query": "codex default model and reasoning effort",
+    "category": "stale-memory",
+    "expected": { "table": "claim", "id": "kc_mrhkch1i_4j4t8yu1" }
+  },
+  {
+    "query": "current status of the Next-Gen Analytics Copilot project",
+    "category": "stale-memory",
+    "expected": { "table": "claim", "id": "kc_mpjjra68_aov2m2u7" },
+    "notes": "confidence 0.8 — below the Phase 4 injectable threshold"
+  },
+  {
+    "query": "where is the OKC wedding ceremony venue",
+    "category": "stale-memory",
+    "expected": { "table": "claim", "id": "kc_moygv9xo_ruvmvqb2" }
+  },
+  {
+    "query": "how does yanqing.app deploy frontend and backend",
+    "category": "stale-memory",
+    "expected": { "table": "claim", "id": "kc_mra1sg8d_4abmx36w" }
+  },
+  {
+    "query": "is cost optimization a priority for Homer features",
+    "category": "stale-memory",
+    "expected": { "table": "claim", "id": "kc_mr2upj3l_q2s4r0k9" }
+  },
+  {
+    "query": "which sub-agent should I use for research fan-out",
+    "category": "stale-memory",
+    "expected": { "table": "claim", "id": "kc_mqlci0tt_duj9hhv8" }
+  },
+  {
+    "query": "what tooling did the Growth Analysts upskilling program standardize on",
+    "category": "stale-memory",
+    "expected": { "table": "claim", "id": "kc_mrhkcgmt_lnpalf8h" }
+  }
+]
