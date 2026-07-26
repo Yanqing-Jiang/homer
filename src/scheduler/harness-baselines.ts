@@ -14,7 +14,6 @@ const TMP_DIR = "/tmp";
 const CODEX_MODEL = "gpt-5.6-sol";
 const OPENCODE_FAST_MODEL = "cursor/grok-4.5-high";
 const CODEX_FALLBACK_MODEL = "gpt-5.6-sol-medium";
-const IDEA_STEP_TIMEOUT = 180_000;
 const LINK_PROCESS_TIMEOUT = 300_000;
 const PROJECT_DIR = PATHS.homerRoot;
 
@@ -113,14 +112,6 @@ export const INTERNAL_JOB_HARNESS_BASELINES = {
       },
       youtube_classify: youtubeClassifyStage,
       youtube_analyze: youtubeAnalyzeStage,
-    },
-  },
-  "idea-synthesizer": {
-    executor: "codex",
-    model: CODEX_MODEL,
-    stages: {
-      // Single batched judgement (triage+synthesize+critique+enrich merged).
-      harvest: codexStage(TMP_DIR, IDEA_STEP_TIMEOUT, "medium"),
     },
   },
   "nightly-code-push": {

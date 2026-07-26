@@ -27,7 +27,6 @@ import { runMigrations } from "../state/migrations/index.js";
 
 // Tool modules
 import * as memoryTools from "./tools/memory.js";
-import * as ideaTools from "./tools/ideas.js";
 import * as todoTools from "./tools/todos.js";
 import * as blobTools from "./tools/blob.js";
 import * as sessionTools from "./tools/sessions.js";
@@ -35,7 +34,7 @@ import * as callTools from "./tools/calls.js";
 
 // All tool modules in dispatch order
 const toolModules: ToolModule[] = [
-  memoryTools, ideaTools, todoTools, blobTools, sessionTools, callTools,
+  memoryTools, todoTools, blobTools, sessionTools, callTools,
 ];
 
 export interface HomerMcpServerOptions {

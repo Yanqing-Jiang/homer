@@ -53,7 +53,6 @@
     "mcp": "tsx src/mcp/index.ts",
     "typecheck": "npx tsc --noEmit",
     "migrate": "tsx scripts/run-migrations.ts",
-    "migrate:ideas": "tsx scripts/migrate-ideas.ts",
     "migrate:plans": "tsx scripts/migrate-plans.ts",
     "memory:generate-bootstrap": "tsx src/memory/session-bootstrap.ts",
     "app:build": "bash scripts/build-homer-app.sh \"${HOME}/Applications/Homer.app\"",

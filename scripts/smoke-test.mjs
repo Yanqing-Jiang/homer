@@ -37,7 +37,6 @@ const modules = [
   "dist/bot/handlers/call-followup.js",
   "dist/bot/handlers/sms-reply.js",
   "dist/scraping/scrape-store.js",
-  "dist/scheduler/jobs/idea-synthesizer.js",
   "dist/feedback/events.js",
 ];
 

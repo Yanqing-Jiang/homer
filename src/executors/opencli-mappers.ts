@@ -6,7 +6,7 @@
  */
 
 import type { OpenCLIBookmark, OpenCLILinkedInPost, OpenCLIMediumPost, OpenCLIArticle } from "./agent-browser-scrape.js";
-import { sanitizeExtractedUrl } from "../ideas/canonical-url.js";
+import { sanitizeExtractedUrl } from "../scraping/canonical-url.js";
 
 // ============================================
 // URL EXTRACTION (shared)

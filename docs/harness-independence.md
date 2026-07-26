@@ -122,7 +122,7 @@ scheduler injects as `contextFiles` for any harness.
 
 Each harness has its own config, but they register the **same** `homer-memory` MCP server binary
 (`dist/mcp/index.js`) — so Claude, OpenCode, and Codex all call `memory_context`, `todo_save`,
-`idea_add`, etc. **natively**. For harnesses without native MCP (gemini, kimi → `memory.read: sidecar`),
+`todo_save`, etc. **natively**. For harnesses without native MCP (gemini, kimi → `memory.read: sidecar`),
 Homer's Node layer retrieves memory and **injects it as text** (`# Retrieved memory`) into the prompt.
 Same logical memory reaches every harness — live MCP where supported, sidecar text where not.
 

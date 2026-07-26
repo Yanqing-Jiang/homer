@@ -4,7 +4,7 @@
 
 Homer is a personal AI assistant daemon — a 24/7 process that turns Claude Code, Codex, Gemini, and Kimi into a single addressable agent with persistent memory, scheduled jobs, multi-channel input (Telegram, telephony, MCP), and an opinionated retrieval system. It is the personal automation harness of a single user, published as reference for anyone building similar systems.
 
-> ⚠️ **This is a personal repository, not a product.** It runs on one Mac mini against one human's memory, calendar, inbox, and tools. The public snapshot deliberately excludes the personal subsystems (memory extraction, ideas pipeline, scraping/YouTube, meetings, several scheduler jobs — see the "Personal subsystems" block in `.gitignore`), so **a clone of this public repo will not compile as-is**; treat it as reference for building your own. On a complete copy of the tree, the Quick Start below is verified end-to-end and is written so an LLM agent (Claude Code, Codex) can execute it step by step: fresh SQLite DB, fresh `~/memory` scaffold, and a clean no-credential first boot. Integrations such as Telegram, model providers, Azure, Twilio, and ElevenLabs are optional and only activate once you supply credentials. Some one-off maintenance scripts under `scripts/macos/` and `scripts/backfill-*.ts` contain personal absolute paths and are not part of the install path.
+> ⚠️ **This is a personal repository, not a product.** It runs on one Mac mini against one human's memory, calendar, inbox, and tools. The public snapshot deliberately excludes the personal subsystems (memory extraction, scraping/YouTube, meetings, several scheduler jobs — see the "Personal subsystems" block in `.gitignore`), so **a clone of this public repo will not compile as-is**; treat it as reference for building your own. On a complete copy of the tree, the Quick Start below is verified end-to-end and is written so an LLM agent (Claude Code, Codex) can execute it step by step: fresh SQLite DB, fresh `~/memory` scaffold, and a clean no-credential first boot. Integrations such as Telegram, model providers, Azure, Twilio, and ElevenLabs are optional and only activate once you supply credentials. Some one-off maintenance scripts under `scripts/macos/` and `scripts/backfill-*.ts` contain personal absolute paths and are not part of the install path.
 
 The web UI lives in a separate private repository; this repo ships only the headless daemon plus the telephony webhook server.
 
@@ -12,10 +12,10 @@ The web UI lives in a separate private repository; this repo ships only the head
 
 - Runs as a launchd daemon on macOS (`gui/$(id -u)/com.homer.daemon`) with a single-instance flock and crash-safe restart.
 - Exposes the agent through three entry points — Telegram bot (Grammy), telephony webhooks (Twilio SMS + ElevenLabs Conversational AI), and an MCP stdio server for Claude Code.
-- Schedules cron jobs (idea exploration, morning brief, memory rollup, planning checkups) with hot-reloadable `schedule.json` files.
+- Schedules cron jobs (source exploration, morning brief, memory rollup, planning checkups) with hot-reloadable `schedule.json` files.
 - Stores all operational claims (facts, decisions, lessons, commitments) in a SQLite + FTS5 + vector knowledge store with a 2-tier memory model (canonical DB + live `~/memory/*.md`).
 - Routes deep reasoning to Codex CLI, web-search research to Gemini (`agy`), long-context to Kimi, and everything else to Claude.
-- Captures links from chat, processes them nightly through model-appropriate extractors (yt-dlp, Mozilla Readability, paywall bypass), and feeds them into an idea → plan → execution pipeline.
+- Captures links from chat, processes them nightly through model-appropriate extractors (yt-dlp, Mozilla Readability, paywall bypass), and files them into the searchable `scrapes` corpus.
 
 ## Stack
 
@@ -24,7 +24,7 @@ The web UI lives in a separate private repository; this repo ships only the head
 - **Storage:** Azure Blob for media; macOS Keychain for OAuth
 - **LLMs:** Anthropic SDK, OpenAI SDK, Google Generative AI; CLI wrappers around `claude`, `codex`, `agy`, `kimi`
 - **Browser:** Playwright for SPA scraping and job-application flows
-- **MCP:** `@modelcontextprotocol/sdk` stdio server registering memory, blob, idea, plan, and todo tools
+- **MCP:** `@modelcontextprotocol/sdk` stdio server registering memory, blob, session, call, and todo tools
 - **Telephony:** ElevenLabs Conversational AI + Twilio phone number, fronted by Cloudflare Tunnel (see [`docs/telephony.md`](docs/telephony.md))
 
 ## Repository layout
@@ -34,8 +34,7 @@ src/
 ├── bot/             # Telegram handlers
 ├── cli-sessions/    # Bridge Claude Code sessions into the daemon
 ├── executors/       # Wrappers around Claude / Codex / Gemini / Kimi CLIs
-├── ideas/           # Capture → review → promote → plan pipeline
-├── mcp/             # MCP stdio server (memory, blobs, ideas, plans, todos)
+├── mcp/             # MCP stdio server (memory, blobs, todos, sessions, calls)
 ├── memory/          # 2-tier memory: claims DB + markdown surface
 ├── scheduler/       # Cron jobs with hot reload
 ├── scraping/        # yt-dlp, Readability, agent-browser (CDP) helpers
@@ -161,7 +160,6 @@ Operational claims (fact / decision / question / insight / commitment / lesson /
 Registered against Claude Code over stdio:
 
 - `memory_context`, `memory_read`, `memory_search`, `memory_promote`, `memory_remove`, `memory_suggest`
-- `idea_add`, `idea_list`, `idea_update`
 - `todo_save`, `todo_list`, `todo_start_chat`
 - `blob_upload`, `blob_download`, `blob_list`, `blob_get_content`, `blob_properties`
 - `call_person`, `outcome_check`, `preference_query`, `thread_load`, `session_archive`
@@ -173,9 +171,8 @@ Registered against Claude Code over stdio:
 | When | Job | What it does |
 |---|---|---|
 | `0 1 * * *` | `nightly-memory` | Classify the day's daily log, suggest promotions |
-| `0 6 * * *` | `morning-brief` | Weather, news, calendar, pending todos, idea suggestions |
-| `0 7 * * *` | `daily-ideas-review` | Send draft ideas to Telegram for HITL review |
-| `0 23 * * *` | `link-processor` | Process the day's queued URLs into ideas |
+| `0 6 * * *` | `morning-brief` | Weather, news, calendar, pending todos |
+| `0 23 * * *` | `link-processor` | Process the day's queued URLs into the scrapes corpus |
 | `0 */2 * * *` | `ideas-explore` | Pull from bookmarks, GitHub, RSS |
 | `0 9 * * *` | `planning-reminder` | Surface stalled plans and pending decisions |
 

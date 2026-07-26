@@ -27,8 +27,7 @@ export type InvocationMode =
   | "router"
   | "diagnostic"
   | "completion-checkup"
-  | "browser-scrape"
-  | "idea-analysis";
+  | "browser-scrape";
 
 export interface InvocationProfile {
   mode: InvocationMode;

@@ -3,7 +3,6 @@
  * from the last 24h of activity and updates the preference model.
  *
  * Signal sources (no LLM needed — pure data):
- * - Idea transitions (discussion/planning = positive, archived = negative)
  * - Session summaries (per-project activity)
  * - Outcome check results (yes = positive, no = negative)
  * - Deny history entries (negative signal)
@@ -13,33 +12,6 @@
 import type Database from "better-sqlite3";
 import { updatePreferences, type PreferenceSignal } from "../../preferences/engine.js";
 import { logger } from "../../utils/logger.js";
-
-function extractIdeaSignals(db: Database.Database): PreferenceSignal[] {
-  const signals: PreferenceSignal[] = [];
-
-  // Active ideas updated in the last 24h emit positive preference signals.
-  // The DAO returns ParsedIdea but we filter by updated_at via raw query.
-  try {
-    const rows = db.prepare(`
-      SELECT id, source, tags, status
-      FROM ideas
-      WHERE status IN ('discussion','planning','execution')
-        AND updated_at > datetime('now', '-24 hours')
-    `).all() as Array<{ id: string; source: string | null; tags: string | null; status: string }>;
-
-    for (const row of rows) {
-      const tags: string[] = row.tags ? JSON.parse(row.tags) : [];
-      const source = row.source || "unknown";
-      for (const tag of tags) {
-        signals.push({ dimension: `topic:${tag}`, delta: 0.05 });
-      }
-      signals.push({ dimension: `source:${source}`, delta: 0.05 });
-    }
-  } catch (err) {
-    logger.debug({ error: err }, "Could not extract idea preference signals");
-  }
-  return signals;
-}
 
 function extractSessionSignals(db: Database.Database): PreferenceSignal[] {
   const signals: PreferenceSignal[] = [];
@@ -115,7 +87,6 @@ export async function runPreferenceUpdater(
 ): Promise<{ success: boolean; output: string; error?: string }> {
   try {
     const allSignals: PreferenceSignal[] = [
-      ...extractIdeaSignals(db),
       ...extractSessionSignals(db),
       ...extractOutcomeSignals(db),
       ...extractDenySignals(db),

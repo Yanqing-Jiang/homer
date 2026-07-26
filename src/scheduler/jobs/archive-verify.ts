@@ -120,41 +120,6 @@ export async function runArchiveVerify(db: Database.Database): Promise<{
       results.push({ check: "DB backup", status: "warn", detail: `Check failed: ${err}` });
     }
 
-    // 6. Job artifacts for recent synthesizer runs
-    try {
-      const hasArtifactsTable = db.prepare(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_artifacts'"
-      ).get();
-
-      if (hasArtifactsTable) {
-        for (const jobName of ["idea-synthesizer"]) {
-          const recentRuns = db.prepare(`
-            SELECT id FROM scheduled_job_runs
-            WHERE job_id = ? AND success = 1
-            AND completed_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')
-            ORDER BY id DESC LIMIT 3
-          `).all(jobName) as Array<{ id: number }>;
-
-          if (recentRuns.length === 0) continue;
-
-          const runsWithArtifacts = recentRuns.filter(run => {
-            const artifacts = db.prepare(
-              "SELECT 1 FROM job_artifacts WHERE job_run_id = ? LIMIT 1"
-            ).get(run.id);
-            return !!artifacts;
-          });
-
-          results.push({
-            check: `${jobName} artifacts`,
-            status: runsWithArtifacts.length === 0 ? "warn" : "ok",
-            detail: `${runsWithArtifacts.length}/${recentRuns.length} recent runs have artifacts`,
-          });
-        }
-      }
-    } catch (err) {
-      results.push({ check: "Job artifacts", status: "warn", detail: `Check failed: ${err}` });
-    }
-
     // Build output
     const failures = results.filter(r => r.status === "fail");
     const warnings = results.filter(r => r.status === "warn");

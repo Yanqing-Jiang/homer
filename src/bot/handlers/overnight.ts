@@ -29,8 +29,6 @@ import { MorningPresenter } from "../../overnight/morning-presenter.js";
 import { decodeCallbackData, type OvernightTaskType, type YouTubeSummaryMetadata } from "../../overnight/types.js";
 import type { ApproachLabel } from "../../overnight/types.js";
 import { markSummaryReviewedV2, summaryFileExists, getYouTubeVideoFromDb } from "../../youtube/summarizer.js";
-import { type ParsedIdea } from "../../ideas/parser.js";
-import * as dao from "../../ideas/dao.js";
 import { readFileSync } from "fs";
 import {
   recordFeedback,
@@ -378,7 +376,7 @@ export function registerOvernightCallbacks(bot: Bot): void {
     await handleTalk(ctx, data.taskId);
   });
 
-  // YouTube: Save to Ideas
+  // YouTube: Keep (marks reviewed + records a positive preference signal)
   bot.callbackQuery(/^yt:save:/, async (ctx) => {
     const taskId = ctx.callbackQuery.data.replace("yt:save:", "");
     await handleYouTubeSave(ctx, taskId);
@@ -854,7 +852,7 @@ async function presentYouTubeSummary(
   }
 
   const keyboard = new InlineKeyboard();
-  keyboard.text("💡 保存为想法", `yt:save:${task.id}`);
+  keyboard.text("👍 收藏", `yt:save:${task.id}`);
   keyboard.text("🗑 忽略", `yt:dismiss:${task.id}`);
 
   try {
@@ -899,7 +897,7 @@ async function handleYouTubeSave(ctx: Context, taskId: string): Promise<void> {
     return;
   }
 
-  await ctx.answerCallbackQuery({ text: "Saving to ideas..." });
+  await ctx.answerCallbackQuery({ text: "Saving..." });
 
   const task = taskStore.getTask(taskId);
   if (!task) {
@@ -915,54 +913,17 @@ async function handleYouTubeSave(ctx: Context, taskId: string): Promise<void> {
   }
 
   const videoId = metadata?.videoId ?? "";
-  const videoUrl = metadata?.videoUrl ?? "";
   const videoTitle = metadata?.videoTitle ?? "YouTube Video";
-
-  // Read summary — DB first, file fallback
-  const saveDb = overnightStateManager?.getDb();
-  const dbVid = saveDb ? getYouTubeVideoFromDb(saveDb, videoId) : null;
-  let summaryContent = "";
-  if (dbVid?.summary) {
-    summaryContent = dbVid.summary;
-  } else {
-    const summaryPath = summaryFileExists(videoId);
-    if (summaryPath) {
-      try {
-        const raw = readFileSync(summaryPath, "utf-8");
-        // Strip YAML frontmatter
-        const bodyMatch = raw.match(/---[\s\S]*?---\n([\s\S]*)/);
-        summaryContent = bodyMatch ? bodyMatch[1]!.trim() : raw;
-      } catch {
-        // ignore
-      }
-    }
-  }
-
-  // Create idea file
-  const now = new Date();
-  const timestamp = `${now.toISOString().slice(0, 10)} ${now.toISOString().slice(11, 16)}`;
-
-  const idea: ParsedIdea = {
-    id: `yt_${videoId.slice(0, 11)}`,
-    title: `YouTube: ${videoTitle}`,
-    status: "draft",
-    source: "youtube-telegram",
-    content: summaryContent || `Video: ${videoUrl}`,
-    link: videoUrl,
-    tags: ["youtube", "overnight-summary"],
-    timestamp,
-  };
 
   try {
     const db = overnightStateManager?.getDb();
     if (!db) {
       throw new Error("handleYouTubeSave invoked before state manager was wired");
     }
-    dao.createIdea(db, idea);
     markSummaryReviewedV2(videoId, db ?? undefined);
     taskStore.updateTaskStatus(taskId, "selected");
-    await ctx.editMessageText(`💡 Saved to ideas: ${videoTitle}`);
-    logger.info({ taskId, videoId, ideaId: idea.id }, "YouTube summary saved to ideas");
+    await ctx.editMessageText(`👍 已收藏: ${videoTitle}`);
+    logger.info({ taskId, videoId }, "YouTube summary kept");
 
     // Record feedback event + YouTube preference signals
     if (db) {
@@ -987,8 +948,8 @@ async function handleYouTubeSave(ctx: Context, taskId: string): Promise<void> {
       } catch { /* best-effort */ }
     }
   } catch (error) {
-    logger.error({ taskId, error }, "Failed to save YouTube summary to ideas");
-    await ctx.editMessageText("❌ Failed to save to ideas.");
+    logger.error({ taskId, error }, "Failed to record YouTube keep");
+    await ctx.editMessageText("❌ Failed to save.");
   }
 }
 

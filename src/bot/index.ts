@@ -15,7 +15,6 @@ import {
   type ParsedCommand,
 } from "../commands/index.js";
 import { registerApprovalHandlers, registerPlanApprovalHandlers, registerPlanApprovalCallbacks, registerPlanReviewCallbacks } from "./handlers/approval.js";
-import { registerIdeaCommands, registerIdeaCallbacks } from "./handlers/idea.js";
 import { registerQuickCommands, registerProposalCallbacks } from "./handlers/proposal-approval.js";
 import { registerOvernightCommands, handleOvernightMessage } from "./handlers/overnight.js";
 import { handleYouTubeUrl, initializeYouTubeHandler } from "./handlers/youtube.js";
@@ -164,10 +163,6 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
   registerQuickCommands(bot, stateManager);
   registerProposalCallbacks(bot, stateManager);
 
-  // Register /idea command and inline button callbacks
-  registerIdeaCommands(bot, stateManager);
-  registerIdeaCallbacks(bot);
-
   // Register overnight work commands (/overnight) and inline button callbacks
   registerOvernightCommands(bot, stateManager);
 
@@ -216,8 +211,6 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
         "/remind <time> <msg>\n" +
         "/reminders - List\n" +
         "/cancel <id>\n\n" +
-        "*Ideas:*\n" +
-        "/idea - List/add/update/archive ideas\n\n" +
         "*Search:*\n" +
         "/search <query>\n\n" +
         "*Overnight Work:*\n" +
