@@ -148,10 +148,68 @@ Now proceed:
 `;
 
 // ============================================
+// CURSOR PROXY STALL TUNING
+// ============================================
+
+/** Cursor-provider models (`cursor/...`), or omit-`-m` (opencode.json default is cursor/*). */
+function usesCursorProvider(model?: string): boolean {
+  return !model || model.startsWith("cursor/");
+}
+
+/**
+ * Env for opencode children. Cursor stall knobs apply ONLY to Cursor-provider
+ * runs (`cursor/*` or omit-`-m`). Non-Cursor models (opencode-go, google,
+ * github-copilot, …) strip those vars so daemon/.zshrc values cannot affect
+ * other providers — the plugin only reads them, but we keep inheritance clean.
+ *
+ * Initial stall cut-off is 10s for fast hung-stream retry; post-tool stays
+ * longer (forced recovery disabled there). Wait-notice stays off (0).
+ */
+function opencodeChildEnv(model?: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  if (!usesCursorProvider(model)) {
+    delete env.OPENCODE_CURSOR_STALL_TIMEOUT_MS;
+    delete env.OPENCODE_CURSOR_STALL_TIMEOUT_POST_TOOL_MS;
+    delete env.OPENCODE_CURSOR_STALL_WAIT_NOTICE_MS;
+    return env;
+  }
+  return {
+    ...env,
+    OPENCODE_CURSOR_STALL_TIMEOUT_MS:
+      process.env.OPENCODE_CURSOR_STALL_TIMEOUT_MS ?? "10000",
+    OPENCODE_CURSOR_STALL_TIMEOUT_POST_TOOL_MS:
+      process.env.OPENCODE_CURSOR_STALL_TIMEOUT_POST_TOOL_MS ?? "600000",
+    OPENCODE_CURSOR_STALL_WAIT_NOTICE_MS:
+      process.env.OPENCODE_CURSOR_STALL_WAIT_NOTICE_MS ?? "0",
+  };
+}
+
+/** Proxy exhausted forced recovery (esp. post-tool) and closed the SSE stream. */
+export function isCursorStreamStall(text: string): boolean {
+  return /\[Error:\s*stream stalled;\s*retrying\.\.\.\]/i.test(text);
+}
+
+export function stripCursorStallMarkers(text: string): string {
+  return text
+    .replace(/\n?\[Error:\s*stream stalled;\s*retrying\.\.\.\]/gi, "")
+    .replace(/\n?\[Info:\s*Cursor is still processing;\s*waiting for response\.\.\.\]/gi, "")
+    .trimEnd();
+}
+
+const CURSOR_STALL_CONTINUE_PROMPT =
+  "Your previous response was cut off by a Cursor stream stall (`[Error: stream stalled; retrying...]`). Continue from where you left off. Do not restart the task or repeat work already completed.";
+
+function cursorHarnessStallRetries(): number {
+  const raw = Number(process.env.OPENCODE_CURSOR_HARNESS_STALL_RETRIES ?? 2);
+  if (!Number.isFinite(raw) || raw < 0) return 2;
+  return Math.min(Math.floor(raw), 5);
+}
+
+// ============================================
 // MAIN EXECUTOR
 // ============================================
 
-export async function executeOpenCodeCLI(
+async function executeOpenCodeCLIOnce(
   prompt: string,
   context: string = "",
   options: OpenCodeCLIOptions = {}
@@ -254,6 +312,7 @@ export async function executeOpenCodeCLI(
       stdio: ["pipe", "pipe", "pipe"],
       cwd: effectiveCwd,
       detached: true, // own process group so SIGTERM kills all children
+      env: opencodeChildEnv(model),
     });
 
     // Register with process lifecycle management
@@ -526,6 +585,100 @@ export async function executeOpenCodeCLI(
   });
 }
 
+/**
+ * Public OpenCode entrypoint. For Cursor-provider models only: if the Cursor
+ * proxy closes with `[Error: stream stalled; retrying...]` (common after tools,
+ * where forced proxy recovery is disabled), resume the same session with a
+ * short continue prompt up to OPENCODE_CURSOR_HARNESS_STALL_RETRIES (default 2).
+ * Non-Cursor models are unchanged.
+ */
+export async function executeOpenCodeCLI(
+  prompt: string,
+  context: string = "",
+  options: OpenCodeCLIOptions = {}
+): Promise<OpenCodeCLIResult> {
+  const normalizedModel = options.model
+    ? (options.model.includes("/") ? options.model : `google/${options.model}`)
+    : undefined;
+
+  let result = await executeOpenCodeCLIOnce(prompt, context, options);
+  if (!usesCursorProvider(normalizedModel)) return result;
+
+  const maxRetries = cursorHarnessStallRetries();
+  let attempt = 0;
+  let stalled = isCursorStreamStall(result.output);
+  const baseOnPartial = options.onPartial;
+
+  // Stalled with no session id: cannot resume; surface as failure instead of exit 0.
+  if (stalled && !result.sessionId) {
+    const cleaned = stripCursorStallMarkers(result.output);
+    return {
+      ...result,
+      output: cleaned
+        ? `${cleaned}\n\n[Error: Cursor stream stalled; no session to resume]`
+        : "[Error: Cursor stream stalled; no session to resume]",
+      exitCode: result.exitCode === 0 ? 1 : result.exitCode,
+    };
+  }
+
+  while (
+    attempt < maxRetries &&
+    stalled &&
+    !!result.sessionId &&
+    !options.signal?.aborted
+  ) {
+    attempt++;
+    const prior = stripCursorStallMarkers(result.output);
+    logger.warn(
+      { sessionId: result.sessionId, attempt, maxRetries, model: normalizedModel },
+      "Cursor stream stalled; harness resume retry"
+    );
+
+    const onPartial = baseOnPartial
+      ? (text: string) => {
+          const piece = stripCursorStallMarkers(text);
+          baseOnPartial(prior ? `${prior}\n${piece}` : piece);
+        }
+      : undefined;
+
+    const retry = await executeOpenCodeCLIOnce(CURSOR_STALL_CONTINUE_PROMPT, "", {
+      ...options,
+      resume: result.sessionId,
+      onPartial,
+    });
+
+    stalled = isCursorStreamStall(retry.output);
+    const merged = [prior, stripCursorStallMarkers(retry.output)].filter(Boolean).join("\n").trim();
+    result = {
+      ...retry,
+      output: merged,
+      duration: result.duration + retry.duration,
+      sessionId: retry.sessionId || result.sessionId,
+      stats: retry.stats
+        ? {
+            ...retry.stats,
+            duration_ms: (result.stats?.duration_ms ?? result.duration) + retry.duration,
+          }
+        : result.stats,
+      metrics: retry.metrics ?? result.metrics,
+    };
+  }
+
+  if (stalled) {
+    const cleaned = stripCursorStallMarkers(result.output);
+    return {
+      ...result,
+      output: cleaned
+        ? `${cleaned}\n\n[Error: Cursor stream stalled after ${attempt} harness resume attempt(s)]`
+        : `[Error: Cursor stream stalled after ${attempt} harness resume attempt(s)]`,
+      // Fail the turn so fallback/orchestrator can act — proxy marker alone used to look like success.
+      exitCode: result.exitCode === 0 ? 1 : result.exitCode,
+    };
+  }
+
+  return attempt > 0 ? { ...result, output: stripCursorStallMarkers(result.output) } : result;
+}
+
 // ============================================
 // WITH RETRY + FALLBACK CHAIN
 // ============================================
@@ -622,7 +775,7 @@ export async function* streamOpenCodeCLI(
   const child = spawn("opencode", args, {
     stdio: ["pipe", "pipe", "pipe"],
     cwd: cwd || runtimeHome,
-    env: { ...process.env },
+    env: opencodeChildEnv(model),
   });
 
   // Register with process lifecycle management

@@ -12,7 +12,7 @@ export interface InternalJobHarnessBaseline extends HarnessSelection {
 const HOME_DIR = process.env.HOME ?? process.cwd();
 const TMP_DIR = "/tmp";
 const CODEX_MODEL = "gpt-5.6-sol";
-const OPENCODE_FAST_MODEL = "cursor/composer-2.5";
+const OPENCODE_FAST_MODEL = "cursor/grok-4.5-high";
 const CODEX_FALLBACK_MODEL = "gpt-5.6-sol-medium";
 const IDEA_STEP_TIMEOUT = 180_000;
 const LINK_PROCESS_TIMEOUT = 300_000;
@@ -61,7 +61,7 @@ function youtubeStage(
 }
 
 const youtubeClassifyStage: InternalHarnessCallProfile = youtubeStage(900_000);
-const youtubeAnalyzeStage: InternalHarnessCallProfile = youtubeStage(300_000); // 5 min — Composer deep analysis
+const youtubeAnalyzeStage: InternalHarnessCallProfile = youtubeStage(300_000); // 5 min — Grok 4.5 High deep analysis
 
 export const INTERNAL_JOB_HARNESS_BASELINES = {
   "ideas-explore": {

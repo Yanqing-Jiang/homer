@@ -14,7 +14,7 @@ The web UI lives in a separate private repository; this repo ships only the head
 - Exposes the agent through three entry points — Telegram bot (Grammy), telephony webhooks (Twilio SMS + ElevenLabs Conversational AI), and an MCP stdio server for Claude Code.
 - Schedules cron jobs (idea exploration, morning brief, memory rollup, planning checkups) with hot-reloadable `schedule.json` files.
 - Stores all operational claims (facts, decisions, lessons, commitments) in a SQLite + FTS5 + vector knowledge store with a 2-tier memory model (canonical DB + live `~/memory/*.md`).
-- Routes deep reasoning to Codex CLI, web-search research to Gemini (`agy-rotate`), long-context to Kimi, and everything else to Claude.
+- Routes deep reasoning to Codex CLI, web-search research to Gemini (`agy`), long-context to Kimi, and everything else to Claude.
 - Captures links from chat, processes them nightly through model-appropriate extractors (yt-dlp, Mozilla Readability, paywall bypass), and feeds them into an idea → plan → execution pipeline.
 
 ## Stack
