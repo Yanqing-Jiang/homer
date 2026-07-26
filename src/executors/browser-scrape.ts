@@ -78,15 +78,16 @@ export async function executeBrowserScrape(
     logger.warn({ err: msg }, "Browser scrape: Claude failed, falling back to Gemini Flash");
   }
 
-  // ── Fallback: Gemini Flash 3.0 (with remaining budget) ──────────────────
+  // ── Fallback: opencode (caller may override the model; Flash by default) ──
   const elapsed = Date.now() - startTime;
   const remainingTimeout = Math.max(60_000, timeout - elapsed); // at least 60s for fallback
-  logger.info({ remainingMs: remainingTimeout }, "Browser scrape: using Gemini Flash 3.0 fallback");
+  const fallbackModel = options.model ?? FLASH_FALLBACK_MODEL;
+  logger.info({ remainingMs: remainingTimeout, model: fallbackModel }, "Browser scrape: using opencode fallback");
 
   const geminiResult = await executeOpenCodeCLI(constrainedPrompt, _context, {
     ...options,
     timeout: remainingTimeout,
-    model: FLASH_FALLBACK_MODEL,
+    model: fallbackModel,
     forceOpenCode: true,
     browserOnly: true,
   });

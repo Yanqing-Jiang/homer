@@ -6,6 +6,7 @@
  */
 
 import type { OpenCLIBookmark, OpenCLILinkedInPost, OpenCLIMediumPost, OpenCLIArticle } from "./agent-browser-scrape.js";
+import { sanitizeExtractedUrl } from "../ideas/canonical-url.js";
 
 // ============================================
 // URL EXTRACTION (shared)
@@ -17,14 +18,21 @@ const SKIP_DOMAINS = new Set(["x.com", "twitter.com", "linkedin.com", "instagram
 
 function extractExternalUrls(text: string): string[] {
   const urls = text.match(URL_REGEX) || [];
-  return urls.filter(u => {
+  const cleaned: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of urls) {
+    const u = sanitizeExtractedUrl(raw);
+    if (!u || seen.has(u)) continue;
     try {
       const host = new URL(u).hostname;
-      return !SKIP_DOMAINS.has(host) && !host.endsWith(".jpg") && !host.endsWith(".png");
+      if (SKIP_DOMAINS.has(host) || host.endsWith(".jpg") || host.endsWith(".png")) continue;
+      seen.add(u);
+      cleaned.push(u);
     } catch {
-      return false;
+      continue;
     }
-  });
+  }
+  return cleaned;
 }
 
 function deriveTitle(text: string, author: string): string {
@@ -71,7 +79,9 @@ function bookmarkHasUsableContent(b: OpenCLIBookmark): boolean {
 
 export function mapOpenCLIBookmark(b: OpenCLIBookmark): TwitterBookmark {
   const text = (b.text || "").trim();
-  const scrapedUrls = b.external_urls ?? [];
+  const scrapedUrls = (b.external_urls ?? [])
+    .map((u) => sanitizeExtractedUrl(u))
+    .filter((u): u is string => !!u);
   const textUrls = extractExternalUrls(text);
   const urls = [...new Set([...scrapedUrls, ...textUrls])];
   const title = b.article_title?.trim() || deriveTitle(text, b.author);

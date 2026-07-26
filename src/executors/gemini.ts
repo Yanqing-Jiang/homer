@@ -264,8 +264,8 @@ export async function executeGeminiAPI(
 // ============================================
 
 /**
- * Route Flash text generation directly through Antigravity CLI.
- * Uses multi-account rotation for rate limit resilience.
+ * Route Flash text generation directly through Antigravity CLI (`agy`).
+ * Single-account keychain auth (yanqing.app@gmail.com); rotation removed.
  *
  * Compatible return type with executeGeminiAPI for easy swapping.
  */

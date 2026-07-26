@@ -1,7 +1,7 @@
 #!/usr/bin/env npx tsx
 /**
  * One-off: run YouTube summarizer for a single URL via link-processor stages
- * (Composer 2.5 primary, Codex sol-medium fallback).
+ * (Grok 4.5 High primary, Codex sol-medium fallback).
  */
 import Database from "better-sqlite3";
 import { summarizeYouTubeVideo } from "../src/youtube/summarizer.js";

@@ -313,6 +313,41 @@ experience:
         added_via: fit-analysis
         added_date: "2026-06-16"
         parent_bullet: pg-amazon-growth-analytics
+      - id: pg-amazon-semantic-ontology
+        claim: "Defined and governed the business ontology behind P&G's Amazon analytics platform — canonical product/brand/category hierarchies, a business glossary mapping standardized business terms to physical tables and columns, and metric definitions mapped to business workflows — as the single source of truth across Product, Finance, and Sales-leadership consumption."
+        metrics: []
+        skills: [business ontology, taxonomy, data semantics, business glossary, controlled vocabulary, product hierarchy, brand hierarchy, category hierarchy, term-to-table mapping, metric definitions, business workflow mapping, semantic layer, single source of truth, information architecture]
+        added_via: fit-analysis
+        added_date: "2026-07-24"
+        parent_bullet: pg-amazon-data-modeling
+      - id: pg-amazon-timbr-atlan
+        claim: "Integrated Timbr's ontology-based SQL semantic layer and Atlan's data catalog into production on the Amazon analytics platform — wiring semantic definitions to catalog metadata and lineage so BI, analytics, and AI consumers query governed business entities instead of raw tables."
+        metrics: []
+        skills: [Timbr, ontology-driven semantic layer, semantic knowledge graph, ontology, Atlan, data catalog, metadata, data lineage, discoverability, governed business entities, semantic layer integration, vendor integration]
+        added_via: fit-analysis
+        added_date: "2026-07-24"
+        parent_bullet: pg-amazon-semantic-ontology
+      - id: pg-amazon-unity-catalog
+        claim: "Governs metadata, access, and end-to-end lineage on the Azure Databricks lakehouse through Unity Catalog across the medallion layers backing the Amazon analytics platform."
+        metrics: []
+        skills: [Unity Catalog, Databricks, metadata management, data lineage, access governance, schema governance, lakehouse governance, discoverability, data governance]
+        added_via: fit-analysis
+        added_date: "2026-07-24"
+        parent_bullet: pg-amazon-medallion
+      - id: pg-amazon-metric-authority
+        claim: "Holds definition authority over the Amazon analytics platform's metric layer — metric-definition changes route through review before downstream consumers see them, holding one consistent definition across dbt models, gold-layer tables, and Power BI and Tableau semantic models."
+        metrics: []
+        skills: [metric governance, definition authority, change control, data stewardship, semantic consistency, dbt metrics, Power BI semantic models, Tableau published data sources, metrics platform, KPI framework]
+        added_via: fit-analysis
+        added_date: "2026-07-24"
+        parent_bullet: pg-amazon-semantic-ontology
+      - id: pg-amazon-data-products
+        claim: "Publishes governed domain data products from the Amazon analytics platform's gold layer that other teams self-serve from under defined SLAs, rather than fulfilling one-off extract requests."
+        metrics: []
+        skills: [data products, data mesh, domain ownership, self-service analytics, federated data model, SLAs, governed datasets, platform adoption]
+        added_via: fit-analysis
+        added_date: "2026-07-24"
+        parent_bullet: pg-amazon-medallion
       - id: pg-amazon-revenue-pl-forecast
         claim: "Built revenue and margin forecasting models feeding P&G's Amazon business P&L, projecting sales and profitability to guide growth-investment and budget decisions for sales leadership."
         metrics: []
@@ -616,6 +651,20 @@ personal_projects:
         added_via: fit-analysis
         added_date: "2026-06-02"
         parent_bullet: homer-overview
+      - id: homer-context-graph
+        claim: "Designed Homer's context layer as a typed entity-relationship model — a controlled vocabulary of claim types, domain and canonical-path taxonomy, hierarchical goal entities, and weighted link tables joining goals, intents, and threads — so agents retrieve contextual relationships, not just documents."
+        metrics: []
+        skills: [context modeling, entity-relationship modeling, typed relationships, controlled vocabulary, taxonomy, hierarchies, semantic retrieval, graph-shaped context, agent context engineering, knowledge representation]
+        added_via: fit-analysis
+        added_date: "2026-07-24"
+        parent_bullet: homer-architecture-deep
+      - id: homer-genai-semantics
+        claim: "Built the LLM extraction pipeline that populates Homer's context layer — Claude classifies conversation into typed claims, assigns domain and confidence, routes them to canonical destinations, and queues conflicts for human review before they enter the canonical store."
+        metrics: []
+        skills: [generative AI for metadata, LLM extraction, automated classification, taxonomy assignment, confidence scoring, human-in-the-loop governance, context engineering, semantic enrichment]
+        added_via: fit-analysis
+        added_date: "2026-07-24"
+        parent_bullet: homer-context-graph
 
   - id: ai-portfolio
     name: AI Portfolio
