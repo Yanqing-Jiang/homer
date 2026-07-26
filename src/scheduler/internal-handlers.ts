@@ -3,8 +3,7 @@ import type { RegisteredJob, JobExecutionResult } from "./types.js";
 import { DEFAULT_JOB_TIMEOUT } from "./types.js";
 import type { StateManager } from "../state/manager.js";
 import { writeInternalTrace } from "../executors/trace-writer.js";
-import { sendBatchIdeasForReview } from "../bot/handlers/approval.js";
-import { ingestIdeasFromLegacy } from "../ideas/ingest.js";
+import { ingestBookmarks } from "../scraping/bookmark-ingest.js";
 import { expireStaleIdeas, expireStalePackets } from "../ideas/dedup.js";
 import { runWeeklyConsolidation } from "./jobs/weekly-consolidation.js";
 import { runMigrations } from "../state/migrations/index.js";
@@ -210,7 +209,7 @@ const RETRYABLE_HANDLERS = new Set([
   "weekly_consolidation",
   "content_scraper", "outcome_tracker",
   "preference_updater", "idea_expiry", "nightly_code_push", "db_backup",
-  "idea_synthesizer", "link_processor", "archive_verify", "health_check",
+  "link_processor", "archive_verify", "health_check",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
   "candidate_expiry",
   "docker_restart",
@@ -641,16 +640,15 @@ async function runHandler(
 ): Promise<JobExecutionResult> {
   try {
     switch (job.config.handler) {
-      case "idea_ingest": {
-        const result = await ingestIdeasFromLegacy(ctx.stateManager.getDb());
+      case "bookmark_ingest": {
+        const result = await ingestBookmarks(ctx.stateManager.getDb());
         const parts: string[] = [];
         if (result.ingested > 0) {
-          parts.push(`Ingested ${result.ingested} ideas`);
+          parts.push(`Ingested ${result.ingested} bookmarks`);
           if (result.fromTwitter > 0) parts.push(`${result.fromTwitter} from X`);
-          if (result.enriched > 0) parts.push(`${result.enriched} enriched`);
         }
         if (result.skipped > 0) parts.push(`${result.skipped} skipped`);
-        const output = parts.length > 0 ? parts.join(", ") : "No new ideas found";
+        const output = parts.length > 0 ? parts.join(", ") : "No new bookmarks found";
         return buildResult(
           job,
           startedAt,
@@ -855,8 +853,9 @@ async function runHandler(
             { notificationIntent: "operational_status" }
           );
         }
-        // Consolidated 9 AM morning review — memory candidates, ideas, cleanup proposals, skills
-        let parts: string[] = [];
+        // Consolidated 9 AM morning review — memory candidates, cleanup proposals, skills.
+        // The "3 ideas/day" 新发现审阅 batch was removed 2026-07-26 along with idea generation.
+        const parts: string[] = [];
 
         // 1. Send morning review summary (memory + cleanup + skills)
         const { sendMorningReview } = await import("../bot/handlers/morning-review.js");
@@ -885,23 +884,6 @@ async function runHandler(
             morningReviewError,
             { notificationIntent: "failure_alert" }
           );
-        }
-
-        // 2. Send ideas for review (previously at 7 AM, now consolidated)
-        // Gated to every other day — scrapers keep running daily, but the
-        // 新发现审阅 digest only fires on even-parity days-since-epoch.
-        // Set HOMER_PACKET_REVIEW_FORCE=1 to override (manual trigger / testing).
-        const daysSinceEpoch = Math.floor(Date.now() / 86_400_000);
-        const isPacketReviewDay = daysSinceEpoch % 2 === 0;
-        if (isPacketReviewDay || process.env.HOMER_PACKET_REVIEW_FORCE === "1") {
-          try {
-            const ideaCount = await sendBatchIdeasForReview(ctx.bot, ctx.chatId);
-            if (ideaCount > 0) parts.push(`${ideaCount} ideas sent`);
-          } catch (err) {
-            logger.debug({ error: err }, "Ideas review skipped");
-          }
-        } else {
-          parts.push("packet review skipped (off-day)");
         }
 
         const output = parts.length > 0
@@ -1015,18 +997,9 @@ async function runHandler(
           },
         );
       }
-      case "idea_synthesizer": {
-        const { runIdeaSynthesizer } = await import("./jobs/idea-synthesizer.js");
-        const result = await runIdeaSynthesizer(ctx.stateManager.getDb(), ctx.jobRunId, ctx.signal, job, startedAt);
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          result.success ? { notificationIntent: "operational_status" } : {}
-        );
-      }
+      // idea_synthesizer retired 2026-07-26 — scrapes are the corpus, nothing
+      // synthesizes them into source_packets. Job source still on disk; Phase 3
+      // of the memory/ideas streamline deletes it.
       case "link_processor": {
         const { runLinkProcessor } = await import("./jobs/link-processor.js");
         const result = await runLinkProcessor(ctx.stateManager, ctx.jobRunId, job, startedAt);
