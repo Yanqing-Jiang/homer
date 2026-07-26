@@ -210,7 +210,6 @@ const RETRYABLE_HANDLERS = new Set([
   "preference_updater", "nightly_code_push", "db_backup",
   "link_processor", "archive_verify", "health_check",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
-  "candidate_expiry",
   "docker_restart",
   "delta_upgrade_watch",
 ]);
@@ -661,10 +660,10 @@ async function runHandler(
       case "weekly_consolidation": {
         const result = await runWeeklyConsolidation(job, startedAt, 7, ctx.stateManager);
 
-        // Lint findings are now surfaced in the nightly Memory Review batch (stale claims
-        // flagged by flagClaimsStale() will be picked up by getStaleClaims() in the nightly handler)
+        // Lint findings demote their matching claims to the passive tier — still
+        // searchable, no longer injectable, and no review is delivered.
         if (result.success && result.lintFindings && result.lintFindings.length > 0) {
-          logger.info({ count: result.lintFindings.length }, "Lint findings flagged as stale — will appear in next nightly Memory Review");
+          logger.info({ count: result.lintFindings.length }, "Lint findings demoted matching claims to the passive tier");
         }
 
         return buildResult(
@@ -690,16 +689,9 @@ async function runHandler(
       }
       case "nightly_memory": {
         const { runNightlyMemory } = await import("./jobs/nightly-memory.js");
+        // Claims land in a trust tier inside the job itself — nothing is delivered
+        // for review afterwards (Phase 4, 2026-07-26).
         const result = await runNightlyMemory(ctx.stateManager, job, startedAt);
-
-        // Memory review delivery deferred to 9 AM morning review job.
-        // Claims accumulate silently overnight; morning-review handler sends them all at once.
-        if (result.success) {
-          const { getPendingCandidates } = await import("../memory/claims.js");
-          const db = ctx.stateManager.getDb();
-          const pending = getPendingCandidates(db, 1).length;
-          logger.info({ pending }, "Nightly memory complete — candidates queued for 9 AM morning review");
-        }
 
         return buildResult(
           job,
@@ -709,19 +701,6 @@ async function runHandler(
           result.error,
           result.success ? { notificationIntent: "operational_status" } : {}
         );
-      }
-      case "candidate_expiry": {
-        try {
-          const { expireStaleCandidates, getClaimMetrics } = await import("../memory/claims.js");
-          const db = ctx.stateManager.getDb();
-          const expired = expireStaleCandidates(db, 7);
-          const metrics = getClaimMetrics(db);
-          const output = `Expired ${expired} stale candidates. Queue: ${metrics.candidate} pending, ${metrics.approved} approved, ${metrics.rejected} rejected.`;
-          return buildResult(job, startedAt, true, output, undefined, { notificationIntent: "operational_status" });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          return buildResult(job, startedAt, false, "", msg);
-        }
       }
       case "session_harvester": {
         const { runSessionHarvester } = await import("./jobs/session-harvester.js");
@@ -782,11 +761,12 @@ async function runHandler(
             { notificationIntent: "operational_status" }
           );
         }
-        // Consolidated 9 AM morning review — memory candidates, cleanup proposals, skills.
-        // The "3 ideas/day" 新发现审阅 batch was removed 2026-07-26 along with idea generation.
+        // Consolidated 9 AM morning review — cleanup proposals + skill drafts only.
+        // The "3 ideas/day" 新发现审阅 batch was removed 2026-07-26 along with idea
+        // generation; memory candidates left with the HITL review boundary (Phase 4).
         const parts: string[] = [];
 
-        // 1. Send morning review summary (memory + cleanup + skills)
+        // 1. Send morning review summary (cleanup + skills)
         const { sendMorningReview } = await import("../bot/handlers/morning-review.js");
         let morningReviewSent = false;
         let morningReviewError: string | undefined;

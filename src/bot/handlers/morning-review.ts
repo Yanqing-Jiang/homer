@@ -1,12 +1,15 @@
 /**
  * Morning Review Orchestrator — "things awaiting your decision".
  *
- * Surfaces pending memory candidates and skill drafts (with a pointer to the web
- * Review tab). Health/system signals are intentionally NOT shown here — they live
- * in morning-brief (6:00) and the hourly health-check.
+ * Phase 4 (2026-07-26) removed memory review from this surface entirely: extracted
+ * claims now land in a trust tier automatically (active if Yanqing said it, passive
+ * otherwise) and are never queued for a human. What remains is work that genuinely
+ * cannot be auto-applied — file cleanup proposals and skill drafts. Code-push
+ * approvals keep their own flow in code-push-approval.ts.
  *
- * Callback namespace: mr:skip (Review Later). Per-item actions reuse m:* callbacks
- * from memory-review.ts.
+ * Health/system signals live in morning-brief (6:00) and the hourly health-check.
+ *
+ * Callback namespace: mr:skip (Review Later).
  */
 
 import { Bot } from "grammy";
@@ -16,15 +19,12 @@ import {
   getPendingCandidates,
   type KnowledgeClaim,
 } from "../../memory/claims.js";
-// Memory/skill candidate review moved to the web Review tab (homer-web).
-// sendMemoryMoments is intentionally no longer called from here; its button
-// handlers stay registered in bot/index.ts so historical Telegram cards still work.
 
 // ── Types ──────────────────────────────────────────────────
 
 export interface MorningReviewSummary {
   dateLabel: string;
-  memoryCandidates: KnowledgeClaim[];
+  cleanupProposals: KnowledgeClaim[];
   skillCandidates: KnowledgeClaim[];
   totalItems: number;
 }
@@ -32,7 +32,9 @@ export interface MorningReviewSummary {
 // ── Summary Assembly ───────────────────────────────────────
 
 /**
- * Gather all pending review items from the database.
+ * Gather the items that still need a human: cleanup proposals (whole-file edits
+ * staged by weekly consolidation) and skill drafts. Ordinary memory claims are
+ * deliberately excluded — they are no longer reviewable.
  */
 export function gatherPendingItems(sm: StateManager): MorningReviewSummary {
   const db = sm.getDb();
@@ -40,11 +42,10 @@ export function gatherPendingItems(sm: StateManager): MorningReviewSummary {
   // All pending candidates (capped for morning review)
   const allCandidates = getPendingCandidates(db, 30);
 
-  // Memory candidates = everything except cleanup + skill. Cleanup is rarely pending
-  // and renders poorly inline (it's a whole-file rewrite), so keep it out of the
-  // morning inline feed — user reviews cleanup proposals via dedicated flow.
-  const memoryCandidates = allCandidates.filter(
-    c => !["cleanup", "skill"].includes(c.claimType)
+  // Cleanup proposals are replace/remove claims staged under section='cleanup'
+  // by weekly-consolidation — a whole-file rewrite nobody should auto-apply.
+  const cleanupProposals = allCandidates.filter(
+    c => c.section === "cleanup" && ["replace", "remove"].includes(c.claimType)
   );
   const skillCandidates = allCandidates.filter(c => c.claimType === "skill");
 
@@ -54,9 +55,9 @@ export function gatherPendingItems(sm: StateManager): MorningReviewSummary {
     day: "numeric",
   });
 
-  const totalItems = memoryCandidates.length + skillCandidates.length;
+  const totalItems = cleanupProposals.length + skillCandidates.length;
 
-  return { dateLabel, memoryCandidates, skillCandidates, totalItems };
+  return { dateLabel, cleanupProposals, skillCandidates, totalItems };
 }
 
 // ── Telegram Rendering ─────────────────────────────────────
@@ -66,9 +67,9 @@ function escapeHtml(s: string): string {
 }
 
 /**
- * Send the morning review: pending memory + skill candidates awaiting a decision.
- * Review itself now lives on the web Review tab (homer-web), so items are surfaced
- * here only as a count + pointer — not as interactive Telegram cards.
+ * Send the morning review: cleanup proposals + skill drafts awaiting a decision.
+ * Listed inline with their claim IDs — there is no review UI left to link to, so
+ * the message has to carry enough for Yanqing to act on it in chat.
  */
 export async function sendMorningReview(
   bot: Bot,
@@ -84,7 +85,7 @@ export async function sendMorningReview(
 
   const headerSuffix = `— ${summary.dateLabel}`;
   const counts: string[] = [];
-  if (summary.memoryCandidates.length > 0) counts.push(`${summary.memoryCandidates.length} memory`);
+  if (summary.cleanupProposals.length > 0) counts.push(`${summary.cleanupProposals.length} cleanup`);
   if (summary.skillCandidates.length > 0) counts.push(`${summary.skillCandidates.length} skill`);
   const countLine = counts.join(" • ");
 
@@ -93,10 +94,23 @@ export async function sendMorningReview(
     `<i>${escapeHtml(countLine)}</i>`,
   ];
 
-  // Memory + skill candidates: pointer to the web Review tab (no inline cards).
-  const reviewCount = summary.memoryCandidates.length + summary.skillCandidates.length;
-  if (reviewCount > 0) {
-    lines.push("", `📥 <b>${reviewCount}</b> item${reviewCount === 1 ? "" : "s"} to review → web Review tab`);
+  const firstLine = (c: KnowledgeClaim): string =>
+    escapeHtml(c.content.split("\n").find(l => l.trim().length > 0)?.trim().slice(0, 90) ?? "(empty)");
+
+  if (summary.cleanupProposals.length > 0) {
+    lines.push("", "🧹 <b>Cleanup proposals</b>");
+    for (const c of summary.cleanupProposals.slice(0, 5)) {
+      lines.push(`• ${firstLine(c)} <code>${escapeHtml(c.id)}</code>`);
+    }
+    if (summary.cleanupProposals.length > 5) lines.push(`<i>…and ${summary.cleanupProposals.length - 5} more</i>`);
+  }
+
+  if (summary.skillCandidates.length > 0) {
+    lines.push("", "🛠 <b>Skill drafts</b>");
+    for (const c of summary.skillCandidates.slice(0, 5)) {
+      lines.push(`• ${firstLine(c)} <code>${escapeHtml(c.id)}</code>`);
+    }
+    if (summary.skillCandidates.length > 5) lines.push(`<i>…and ${summary.skillCandidates.length - 5} more</i>`);
   }
 
   try {
@@ -107,15 +121,14 @@ export async function sendMorningReview(
   }
 
   logger.info({
-    memory: summary.memoryCandidates.length,
+    cleanup: summary.cleanupProposals.length,
     skills: summary.skillCandidates.length,
     total: summary.totalItems,
-  }, "Sent morning review (memory review on web)");
+  }, "Sent morning review (cleanup + skills only)");
 }
 
 /**
- * Register morning review callbacks. Only mr:skip (Review Later) remains —
- * per-item actions route through m:* callbacks registered by memory-review.ts.
+ * Register morning review callbacks. Only mr:skip (Review Later) remains.
  */
 export function registerMorningReviewCallbacks(
   bot: Bot,
