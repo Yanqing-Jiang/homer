@@ -107,7 +107,7 @@ const HANDLER_SOURCE_MAP: Record<string, string> = {
   memory_embeddings: "src/scheduler/jobs/memory-embeddings.ts",
   memory_reindex: "src/scheduler/jobs/memory-reindex.ts",
   weekly_consolidation: "src/scheduler/jobs/weekly-consolidation.ts",
-  idea_ingest: "src/ideas/ingest.ts",
+  bookmark_ingest: "src/scraping/bookmark-ingest.ts",
   outcome_tracker: "src/scheduler/jobs/outcome-tracker.ts",
   preference_updater: "src/scheduler/jobs/preference-updater.ts",
   nightly_code_push: "src/scheduler/jobs/nightly-code-push.ts",

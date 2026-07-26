@@ -5,12 +5,7 @@ import { existsSync } from "fs";
 import type { StateManager } from "../../state/manager.js";
 import { updatePreferences, type PreferenceSignal } from "../../preferences/engine.js";
 import { trackIdeaArchived } from "../../outcomes/hooks.js";
-import {
-  recordFeedback,
-  createReviewSession,
-  completeReviewSession,
-  recordImpression,
-} from "../../feedback/events.js";
+import { recordFeedback } from "../../feedback/events.js";
 import {
   parseIdeasMd,
   type ParsedIdea,
@@ -1127,106 +1122,6 @@ export function registerApprovalHandlers(bot: Bot, stateManager: StateManager): 
   });
 
   logger.info("Approval handlers registered");
-}
-
-/**
- * Send a batch of draft ideas for review (up to daily limit).
- * Sends all ideas simultaneously as separate messages with Talk+Archive buttons.
- * Returns the number of ideas sent.
- */
-
-export async function sendBatchIdeasForReview(bot: Bot, chatId: number, dailyLimit: number = 3): Promise<number> {
-  // Check remaining daily quota
-  let remaining = dailyLimit;
-  if (stateManagerRef) {
-    const sentCount = stateManagerRef.getIdeaReviewCount();
-    remaining = dailyLimit - sentCount;
-    if (remaining <= 0) {
-      logger.info({ sentCount, dailyLimit }, "Daily idea review limit reached");
-      return 0;
-    }
-  }
-
-  const db = stateManagerRef?.getDb();
-  let sent = 0;
-
-  // ========================================
-  // PHASE 1: Send queued source packets first (new pipeline)
-  // ========================================
-  if (db) {
-    const packets = packetDao.getReviewQueue(db, remaining);
-    if (packets.length > 0) {
-      // Create review session
-      let reviewSessionId: string | undefined;
-      try {
-        reviewSessionId = createReviewSession(db, "packet_review", packets.length);
-      } catch (err) {
-        logger.warn({ error: err }, "Failed to create review session");
-      }
-
-      await bot.api.sendMessage(
-        chatId,
-        formatScheduledTelegramHtml(`📋 <b>新发现审阅</b> (${packets.length})`),
-        { parse_mode: "HTML" }
-      );
-
-      for (let i = 0; i < packets.length; i++) {
-        const packet = packets[i]!;
-        const message = formatPacketForTelegram(packet, i);
-        const keyboard = createPacketKeyboard(packet.id);
-
-        try {
-          await bot.api.sendMessage(chatId, message, {
-            parse_mode: "HTML",
-            reply_markup: keyboard,
-          });
-          sent++;
-
-          // Record impression
-          if (reviewSessionId) {
-            try {
-              const impressionId = recordImpression(db, {
-                sessionId: reviewSessionId,
-                contentType: "packet",
-                contentId: packet.id,
-                position: i,
-                scoreAtDisplay: packet.enrichment?.candidate?.confidence,
-              });
-              pendingImpressions.set(packet.id, { impressionId, displayedAt: Date.now() });
-            } catch (err) {
-              logger.warn({ error: err, packetId: packet.id }, "Failed to record impression");
-            }
-          }
-
-          // Mark packet as under review
-          packetDao.updatePacket(db, packet.id, { status: "review" });
-        } catch (error) {
-          logger.error({ error, packetId: packet.id }, "Failed to send packet for review");
-        }
-
-        if (i < packets.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-      }
-
-      if (reviewSessionId) {
-        try { completeReviewSession(db, reviewSessionId); } catch { /* best-effort */ }
-      }
-
-      remaining -= sent;
-      logger.info({ count: sent, ids: packets.map(p => p.id) }, "Sent source packets for review");
-    }
-  }
-
-  // Legacy Phase 2 removed — morning review is packets-only now.
-  // Ideas are only created via explicit Promote action.
-
-  if (stateManagerRef && sent > 0) {
-    stateManagerRef.incrementIdeaReviewCount(sent);
-  }
-
-  logger.info({ count: sent }, "Morning review complete (packets + ideas)");
-  return sent;
 }
 
 // ============================================

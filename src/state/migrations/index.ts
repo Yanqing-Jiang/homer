@@ -27,6 +27,17 @@ const ARCHIVED_JOB_HUNT_MIGRATIONS = new Set([
   "033_applications_retry.sql",
 ]);
 
+/**
+ * Table-rebuild migrations that must run with foreign keys disabled.
+ * SQLite cannot drop a table that is both a child and a parent without
+ * tripping FK enforcement, and deferred violations cannot be cleared by
+ * re-creating the parent. Row ids are preserved, so references stay valid.
+ * `PRAGMA foreign_keys` is a no-op inside a transaction — toggle before BEGIN.
+ */
+const FK_REBUILD_MIGRATIONS = new Set([
+  "114_review_impressions_open_types.sql",
+]);
+
 function isIgnorableError(msg: string): boolean {
   const lower = msg.toLowerCase();
   return IGNORABLE_ERRORS.some((e) => lower.includes(e));
@@ -169,6 +180,25 @@ export function runMigrations(db: Database.Database): void {
         { migration: file, table: "swarm_handoffs" },
         "Skipping retired table cleanup because table is absent",
       );
+    }
+
+    if (FK_REBUILD_MIGRATIONS.has(file)) {
+      const fkWasOn = db.pragma("foreign_keys", { simple: true }) === 1;
+      if (fkWasOn) db.pragma("foreign_keys = OFF");
+      try {
+        db.exec("BEGIN TRANSACTION");
+        db.exec(sql);
+        db.prepare("INSERT INTO _migrations (name) VALUES (?)").run(file);
+        db.exec("COMMIT");
+        logger.info({ migration: file }, "Migration completed (FK rebuild)");
+      } catch (error) {
+        try { db.exec("ROLLBACK"); } catch { /* already rolled back or no txn */ }
+        logger.error({ migration: file, error }, "FK-rebuild migration failed");
+        throw error;
+      } finally {
+        if (fkWasOn) db.pragma("foreign_keys = ON");
+      }
+      continue;
     }
 
     try {
