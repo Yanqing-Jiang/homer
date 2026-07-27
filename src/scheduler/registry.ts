@@ -99,9 +99,9 @@ const SCHEDULED_INLINE_ONLY: JobEntry[] = [
  * Jobs dispatched via external CLI (no internal handler needed).
  */
 const SCHEDULED_CLI_JOBS: JobEntry[] = [
-  { id: "morning-brief", name: "Morning Brief", kind: "cli", handler: "claude", expectedInSchedule: true },
-  { id: "morning-reads", name: "Morning Reads", kind: "cli", handler: "claude", expectedInSchedule: true },
-  { id: "home-cleanup", name: "Home Cleanup", kind: "cli", handler: "codex", expectedInSchedule: true },
+  { id: "morning-brief", name: "Morning Brief", kind: "cli", handler: "codex", expectedInSchedule: true },
+  { id: "morning-reads", name: "Morning Reads", kind: "cli", handler: "codex", expectedInSchedule: true },
+  { id: "home-cleanup", name: "Home Cleanup", kind: "cli", handler: "opencode", expectedInSchedule: true },
 ];
 
 /**
@@ -112,6 +112,7 @@ const UNSCHEDULED_HANDLER_FILES: JobEntry[] = [
   { id: "architecture-updater", name: "Architecture Updater", kind: "event", handler: "architecture_updater", handlerFile: "architecture-updater", expectedInSchedule: false, note: "event-triggered by commits/diffs" },
   { id: "preference-updater", name: "Preference Updater", kind: "event", handler: "preference_updater", handlerFile: "preference-updater", expectedInSchedule: false, note: "event-triggered from nightly-memory" },
   { id: "artifact-store", name: "Artifact Store (helper)", kind: "helper", handlerFile: "artifact-store", expectedInSchedule: false, note: "helper module, NOT a job — retire from portfolio vocabulary in Phase 4" },
+  { id: "upload-email-ingest", name: "Upload Email Ingest (helper)", kind: "helper", handlerFile: "upload-email-ingest", expectedInSchedule: false, note: "helper module, NOT a job — called by link-processor" },
 ];
 
 export const JOB_REGISTRY: readonly JobEntry[] = Object.freeze([

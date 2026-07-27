@@ -1,17 +1,15 @@
 /**
  * Homer Memory MCP — shared server factory.
  *
- * Builds the MCP `Server` (tool list + dispatch + result budgeting) used by BOTH
- * transports:
- *   - local stdio (src/mcp/index.ts) — full toolset, no allowlist, no remote policy.
- *   - remote HTTP (homer-web /mcp route) — narrow allowlist + RemotePolicy.
+ * Builds the MCP `Server` (tool list + dispatch + result budgeting) for the one
+ * transport that exists: local stdio (src/mcp/index.ts), full toolset. The HTTP
+ * transport and its allowlist/RemotePolicy machinery were deleted with the
+ * work-laptop path — no remote caller reaches this server.
  *
  * The heavy deps (StateManager, MemoryIndexer, CanonicalMemoryService) are built
  * once as module singletons and shared across every server instance, so creating
- * a fresh Server per HTTP request (stateless Streamable HTTP) is cheap. Callers
- * pass only options; they never construct Homer's concrete types — that keeps the
- * cross-repo boundary (homer-web importing this factory via `file:../homer`) free
- * of nominal-type friction.
+ * a fresh Server stays cheap. Callers pass only options; they never construct
+ * Homer's concrete types.
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
@@ -21,7 +19,7 @@ import {
 import { getMemoryIndexer } from "../memory/indexer.js";
 import { StateManager } from "../state/manager.js";
 import { PATHS } from "../config/paths.js";
-import type { ToolDeps, ToolModule, RemotePolicy } from "./tools/types.js";
+import type { ToolDeps, ToolModule } from "./tools/types.js";
 import { getCanonicalMemoryService } from "../memory/canonical-service.js";
 import { runMigrations } from "../state/migrations/index.js";
 
@@ -39,18 +37,10 @@ const toolModules: ToolModule[] = [
 
 export interface HomerMcpServerOptions {
   /**
-   * If set, only these tool names are listed and callable. Enforced at BOTH
-   * tools/list and tools/call (hiding from list alone is not sufficient).
-   * Undefined = expose every tool (local stdio default).
-   */
-  allowTools?: Set<string>;
-  /** Per-connection remote policy threaded into tool deps. Undefined = local. */
-  remotePolicy?: RemotePolicy;
-  /**
-   * Explicit SQLite path. REQUIRED when hosting inside another process (e.g.
-   * homer-web) whose HOMER_ROOT differs from homer's — otherwise homer's PATHS.db
-   * resolves relative to the host's root and opens the wrong DB. Defaults to
-   * PATHS.db (correct for the local stdio server running under homer's own root).
+   * Explicit SQLite path. REQUIRED when hosting inside another process whose
+   * HOMER_ROOT differs from homer's — otherwise homer's PATHS.db resolves
+   * relative to the host's root and opens the wrong DB. Defaults to PATHS.db
+   * (correct for the local stdio server running under homer's own root).
    */
   dbPath?: string;
   /** Server identity advertised over MCP. */
@@ -72,12 +62,11 @@ async function getAzureBlob() {
 }
 
 // ── Shared deps singletons, keyed by DB path ─────────────────────────────────
-// Built once per DB path and reused across all server instances on that path,
-// so creating a fresh Server per HTTP request (stateless) stays cheap. Keying by
-// path lets the local stdio server (PATHS.db) and an embedded host (explicit
-// canonical path) coexist without clobbering each other.
-const depsByPath = new Map<string, Omit<ToolDeps, "remotePolicy">>();
-function getSharedDepsBase(dbPath: string): Omit<ToolDeps, "remotePolicy"> {
+// Built once per DB path and reused across all server instances on that path.
+// Keying by path lets the local stdio server (PATHS.db) and an embedded host
+// (explicit canonical path) coexist without clobbering each other.
+const depsByPath = new Map<string, ToolDeps>();
+function getSharedDeps(dbPath: string): ToolDeps {
   let base = depsByPath.get(dbPath);
   if (!base) {
     const stateManager = new StateManager(dbPath);
@@ -93,7 +82,7 @@ function getSharedDepsBase(dbPath: string): Omit<ToolDeps, "remotePolicy"> {
 
 /** Eagerly initialise shared state (DB dir + schema) before serving. */
 export function initMcpState(dbPath: string = PATHS.db): void {
-  getSharedDepsBase(dbPath);
+  getSharedDeps(dbPath);
 }
 
 // ── Result size budgeting ────────────────────────────────────────────────────
@@ -120,15 +109,12 @@ function applyResultBudget(
 }
 
 /**
- * Build an MCP Server wired to the shared Homer tool modules. Safe to call
- * per-request (stateless HTTP) — only the lightweight Server object is created;
- * the DB/indexer deps are shared singletons.
+ * Build an MCP Server wired to the shared Homer tool modules. Cheap to call —
+ * only the lightweight Server object is created; the DB/indexer deps are shared
+ * singletons.
  */
 export function createHomerMcpServer(options: HomerMcpServerOptions = {}): Server {
-  const { allowTools, remotePolicy, dbPath = PATHS.db } = options;
-  const deps: ToolDeps = { ...getSharedDepsBase(dbPath), remotePolicy };
-
-  const isAllowed = (name: string): boolean => !allowTools || allowTools.has(name);
+  const deps = getSharedDeps(options.dbPath ?? PATHS.db);
 
   const server = new Server(
     { name: options.name ?? "homer-memory", version: options.version ?? "1.0.0" },
@@ -136,19 +122,11 @@ export function createHomerMcpServer(options: HomerMcpServerOptions = {}): Serve
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: toolModules.flatMap(m => m.definitions).filter(d => isAllowed(d.name)),
+    tools: toolModules.flatMap(m => m.definitions),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-
-    // Allowlist enforced before dispatch — never trust the client to honor it.
-    if (!isAllowed(name)) {
-      return {
-        content: [{ type: "text", text: `Tool not allowed on this connection: ${name}` }],
-        isError: true,
-      };
-    }
 
     try {
       for (const mod of toolModules) {
