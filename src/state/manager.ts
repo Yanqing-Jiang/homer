@@ -2783,9 +2783,12 @@ export class StateManager {
     const ts = Date.now().toString(36);
     const rand = Math.random().toString(36).slice(2, 10);
     const id = `kc_${ts}_${rand}`;
+    // user_explicit=1: this ledger row only ever shadows a promotion that already
+    // passed the approveCandidate provenance gate, so it belongs to the same tier.
+    // Keeps the invariant "status='approved' implies user_explicit=1" total.
     this._db.prepare(
-      `INSERT INTO knowledge_claims (id, content, content_hash, target_file, section, claim_type, confidence, status, decided_at, decided_by, created_at)
-       VALUES (?, ?, ?, ?, ?, 'fact', 1.0, 'approved', datetime('now'), ?, datetime('now'))`
+      `INSERT INTO knowledge_claims (id, content, content_hash, target_file, section, claim_type, confidence, status, user_explicit, decided_at, decided_by, created_at)
+       VALUES (?, ?, ?, ?, ?, 'fact', 1.0, 'approved', 1, datetime('now'), ?, datetime('now'))`
     ).run(id, content, hash, normalizedFile, section, source);
   }
 

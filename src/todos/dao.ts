@@ -367,13 +367,16 @@ function emitLessonOnDone(db: Database.Database, row: TodoRow): void {
     const contentHash = createHash("md5").update(`${content}\n${targetFile}\nLessons`).digest("hex");
     const id = `claim_${randomBytes(8).toString("hex")}`;
 
+    // Passive tier ('candidate'): a todo-derived claim is assembled by this hook,
+    // not stated by Yanqing, so it stays searchable but never injectable. Only
+    // approved + user_explicit=1 rows reach memory_context.
     db.prepare(`
       INSERT INTO knowledge_claims (
         id, content, content_hash, target_file, section,
         claim_type, confidence, status, source_url, origin_channel, created_at
       ) VALUES (
         ?, ?, ?, ?, 'Lessons',
-        'lesson', 0.85, 'approved', ?, 'todo', datetime('now')
+        'lesson', 0.85, 'candidate', ?, 'todo', datetime('now')
       )
     `).run(id, content, contentHash, targetFile, sourceUrl);
     logger.info({ todoId: row.id, claimId: id, notesLen: notes.length }, "Auto-emitted done todo lesson claim");
@@ -399,13 +402,16 @@ function emitCommitmentIfP1(db: Database.Database, row: TodoRow): void {
     const contentHash = createHash("md5").update(`${content}\n${targetFile}\nTo-Dos`).digest("hex");
     const id = `claim_${randomBytes(8).toString("hex")}`;
 
+    // Passive tier ('candidate'): a todo-derived claim is assembled by this hook,
+    // not stated by Yanqing, so it stays searchable but never injectable. Only
+    // approved + user_explicit=1 rows reach memory_context.
     db.prepare(`
       INSERT INTO knowledge_claims (
         id, content, content_hash, target_file, section,
         claim_type, confidence, status, source_url, origin_channel, created_at
       ) VALUES (
         ?, ?, ?, ?, 'To-Dos',
-        'commitment', 0.95, 'approved', ?, 'todo', datetime('now')
+        'commitment', 0.95, 'candidate', ?, 'todo', datetime('now')
       )
     `).run(id, content, contentHash, targetFile, sourceUrl);
     logger.info({ todoId: row.id, claimId: id }, "Auto-emitted P1 commitment claim");
