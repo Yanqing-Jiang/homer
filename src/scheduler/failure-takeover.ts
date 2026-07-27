@@ -113,6 +113,7 @@ const HANDLER_SOURCE_MAP: Record<string, string> = {
   nightly_code_push: "src/scheduler/jobs/nightly-code-push.ts",
   db_backup: "src/scheduler/jobs/db-backup.ts",
   content_scraper: "src/scheduler/jobs/content-scraper.ts",
+  delta_upgrade_watch: "src/scheduler/jobs/delta-upgrade-watch.ts",
 };
 
 // ============================================
