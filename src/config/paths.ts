@@ -28,14 +28,14 @@ export const PATHS = {
   tools: `${mem}/tools.md`,
   patterns: `${mem}/patterns.md`,
 
-  // Memory subdirectories
-  daily: `${mem}/daily`,
+  // Memory subdirectories with a live writer. Phase 6 retired the rest:
+  // daily/, plans/, backups/ and youtube/ are archived under
+  // ~/homer/backups/phase6-md-final/ and their content is DB-authoritative
+  // (session_summaries, memory_documents, youtube_videos). The folders the
+  // indexer still scans are declared in MEMORY_SCAN_DIRS (src/memory/indexer.ts).
   meetings: `${mem}/meetings`,
-  plans: `${mem}/plans`,
   scrapes: `${mem}/scrapes`,
-  backups: `${mem}/backups`,
   skills: `${mem}/skills`,
-  youtubeMemory: `${mem}/youtube`,
 
   // Legacy files (may be removed)
   schedule: `${mem}/schedule.json`,
