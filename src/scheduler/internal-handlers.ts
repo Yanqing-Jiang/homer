@@ -873,7 +873,7 @@ async function runHandler(
       }
       case "content_scraper": {
         const { runContentScraper } = await import("./jobs/content-scraper.js");
-        const result = await runContentScraper(ctx.stateManager.getDb(), job, startedAt);
+        const result = await runContentScraper(ctx.stateManager, job, startedAt);
         return buildResult(
           job,
           startedAt,

@@ -13,16 +13,18 @@ import { existsSync } from "fs";
 import { StateManager, type SessionSummaryRow } from "../state/manager.js";
 import { PATHS } from "../config/paths.js";
 import { getCurrentFocus } from "../memory/session-bootstrap.js";
+import { readDocumentStandalone } from "../memory/documents.js";
 import { logger } from "../utils/logger.js";
 
 // Re-export for backward compatibility (function lives in job-outputs.ts)
 export { getRecentJobOutputs } from "./job-outputs.js";
 
-const CONTEXT_FILES: Array<{ path: string; label: string }> = [
-  { path: PATHS.me, label: "me.md (Identity, Goals, Ambition)" },
-  { path: PATHS.work, label: "work.md (Career, Projects, Org)" },
-  { path: PATHS.tools, label: "tools.md (Tool Configs, Subscriptions)" },
-  { path: PATHS.preferences, label: "preferences.md (Communication & Technical Preferences)" },
+/** Canonical documents injected into every scheduler system prompt. */
+const CONTEXT_DOCUMENTS: Array<{ key: string; label: string }> = [
+  { key: "me", label: "me (Identity, Goals, Ambition)" },
+  { key: "work", label: "work (Career, Projects, Org)" },
+  { key: "tools", label: "tools (Tool Configs, Subscriptions)" },
+  { key: "preferences", label: "preferences (Communication & Technical Preferences)" },
 ];
 
 async function readFileIfExists(path: string): Promise<string | null> {
@@ -103,7 +105,7 @@ export interface SchedulerContextOptions {
   dailyLogDays?: number;
   /** Max lines per daily log (default: 200) */
   dailyLogMaxLines?: number;
-  /** Include preferences.md (default: true) */
+  /** Include the preferences document (default: true) */
   includePreferences?: boolean;
   /** Extra context sections to append (e.g. cross-reference for cleanup) */
   extraSections?: string;
@@ -141,10 +143,10 @@ export async function buildSchedulerContext(
 
 ${claudeMd}`);
 
-  // Memory files
-  for (const { path, label } of CONTEXT_FILES) {
-    if (!includePreferences && path.endsWith("preferences.md")) continue;
-    const content = await readFileIfExists(path);
+  // Canonical memory documents (memory_documents, not files)
+  for (const { key, label } of CONTEXT_DOCUMENTS) {
+    if (!includePreferences && key === "preferences") continue;
+    const content = readDocumentStandalone(key);
     if (content) {
       sections.push(`# ${label}\n\n${content}`);
     }
@@ -197,7 +199,7 @@ export async function extractCurrentGoals(): Promise<string> {
       lines.push("\n### Paused (do not surface as current goals)");
       focus.paused.forEach((p) => lines.push(`- ${p}`));
     }
-    return lines.length > 0 ? lines.join("\n") : "(No goals parsed from me.md)";
+    return lines.length > 0 ? lines.join("\n") : "(No goals parsed from the me document)";
   } catch (err) {
     return `(Goals unavailable: ${err instanceof Error ? err.message : String(err)})`;
   }
@@ -206,13 +208,13 @@ export async function extractCurrentGoals(): Promise<string> {
 /**
  * Render active work projects (paused entries filtered out).
  *
- * Uses getCurrentFocus() so a `**Status:** paused` block in work.md is never
+ * Uses getCurrentFocus() so a `**Status:** paused` block in the work document is never
  * treated as an active project by downstream prompts.
  */
 export async function extractActiveProjects(): Promise<string> {
   try {
     const focus = await getCurrentFocus();
-    if (focus.activeProjects.length === 0) return "(No active projects parsed from work.md)";
+    if (focus.activeProjects.length === 0) return "(No active projects parsed from the work document)";
     const lines = focus.activeProjects.map((p) => `- ${p}`);
     if (focus.pausedProjects.length > 0) {
       lines.push("", "### Paused (context only)");
@@ -237,8 +239,8 @@ export async function buildCondensedContext(): Promise<string> {
     extractActiveProjects(),
   ]);
 
-  // Extract role from me.md first line or ## Career section
-  const meMd = await readFileIfExists(PATHS.me);
+  // Extract role from the me document's first line or ## Career section
+  const meMd = readDocumentStandalone("me");
   let roleSnippet = "Yanqing Jiang";
   if (meMd) {
     const roleMatch = meMd.match(/(?:^|\n)(.+?(?:Senior|Director|Manager|Engineer|Lead).+?)(?:\n|$)/i);
@@ -246,7 +248,7 @@ export async function buildCondensedContext(): Promise<string> {
   }
 
   // Extract key preferences
-  const prefsMd = await readFileIfExists(PATHS.preferences);
+  const prefsMd = readDocumentStandalone("preferences");
   let prefsSnippet = "";
   if (prefsMd) {
     const techPrefs = prefsMd.match(/## Technical[^\n]*\n([\s\S]*?)(?=\n## |$)/);
