@@ -3,9 +3,9 @@
  * Homer Memory MCP Server — local stdio transport.
  *
  * Thin wrapper over the shared factory in ./server.ts. The full toolset is
- * exposed with no allowlist and no remote policy (this is the trusted local
- * Mac mini surface). The remote HTTP surface lives in homer-web's /mcp route,
- * which calls the same factory with a narrow allowlist + RemotePolicy.
+ * exposed (this is the trusted local Mac mini surface). There is no remote MCP
+ * transport — the HTTP route and its allowlist/policy were deleted with the
+ * work-laptop path.
  */
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createHomerMcpServer, initMcpState } from "./server.js";

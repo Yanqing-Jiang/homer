@@ -12,7 +12,7 @@
 
 import { execSync } from "child_process";
 import { createHash } from "crypto";
-import { existsSync, mkdirSync, readdirSync, unlinkSync, readFileSync, statSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, unlinkSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import { logger } from "../../utils/logger.js";
 import { StateManager } from "../../state/manager.js";
@@ -56,7 +56,10 @@ export async function runDbBackup(): Promise<{
       return { success: false, output: "", error: "homer.db not found" };
     }
 
-    mkdirSync(BACKUP_DIR, { recursive: true });
+    // 0700/0600 throughout: a backup is a byte-identical copy of the live DB,
+    // so anything readable here is the whole personal memory store readable.
+    mkdirSync(BACKUP_DIR, { recursive: true, mode: 0o700 });
+    chmodSync(BACKUP_DIR, 0o700);
 
     const now = new Date();
     const date = now.toISOString().slice(0, 10);
@@ -74,6 +77,8 @@ export async function runDbBackup(): Promise<{
     execSync(`sqlite3 "${DB_PATH}" "VACUUM INTO '${backupFile}'"`, {
       timeout: 120_000,
     });
+
+    chmodSync(backupFile, 0o600);
 
     // Integrity check on the backup
     let integrityResult = "unknown";
@@ -98,6 +103,8 @@ export async function runDbBackup(): Promise<{
     } else {
       execSync(`gzip -f "${backupFile}"`, { timeout: 900_000 });
     }
+
+    chmodSync(compressedFile, 0o600);
 
     // SHA256 checksum
     const checksum = computeSha256(compressedFile);
