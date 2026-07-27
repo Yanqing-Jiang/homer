@@ -19,13 +19,14 @@ export const PATHS = {
   // ── Memory root ─────────────────────────────────────────────
   memory: mem,
 
-  // Core memory files
+  // Legacy canonical-memory file locations. Phase 5 moved the content into
+  // memory_documents; these paths survive only as the `source_ref` recorded on
+  // each document and as the seed path for a fresh install.
   me: `${mem}/me.md`,
   work: `${mem}/work.md`,
   preferences: `${mem}/preferences.md`,
   tools: `${mem}/tools.md`,
   patterns: `${mem}/patterns.md`,
-  sessionBootstrap: `${mem}/session-bootstrap.md`,
 
   // Memory subdirectories
   daily: `${mem}/daily`,

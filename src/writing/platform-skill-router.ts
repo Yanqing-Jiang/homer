@@ -1,18 +1,18 @@
 /**
- * Platform skill router — injects current virality patterns from patterns.md
- * into the relevant write-{platform}/SKILL.md at call time.
+ * Platform skill router — injects current virality patterns from the `patterns`
+ * canonical document into the relevant write-{platform}/SKILL.md at call time.
  *
- * Dynamic injection (no SKILL.md mutation): patterns are read from disk
- * and appended to the skill content in memory. SKILL.md stays clean.
+ * Dynamic injection (no SKILL.md mutation): patterns are read from
+ * memory_documents and appended to the skill content in memory. SKILL.md stays
+ * clean.
  */
 
 import { existsSync, readFileSync } from "fs";
-import { PATHS } from "../config/paths.js";
+import { readDocumentStandalone } from "../memory/documents.js";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 export type WritingPlatform = "medium" | "linkedin" | "x";
 
-const PATTERNS_PATH = PATHS.patterns;
 const HOME = getRuntimePaths().homeDir;
 
 const SKILL_PATHS: Record<WritingPlatform, string> = {
@@ -32,16 +32,16 @@ function extractPlatformSection(markdown: string, platform: WritingPlatform): st
 }
 
 /**
- * Reads patterns.md and appends the platform-specific virality table to skillContent.
- * Does NOT mutate any file. Safe to call in any context.
+ * Reads the patterns document and appends the platform-specific virality table
+ * to skillContent. Does NOT mutate anything. Safe to call in any context.
  */
 export function injectPlatformPatterns(
   platform: WritingPlatform,
   skillContent: string,
 ): string {
-  if (!existsSync(PATTERNS_PATH)) return skillContent;
+  const patternsMd = readDocumentStandalone("patterns");
+  if (!patternsMd) return skillContent;
 
-  const patternsMd = readFileSync(PATTERNS_PATH, "utf-8");
   const section = extractPlatformSection(patternsMd, platform);
   if (!section) return skillContent;
 

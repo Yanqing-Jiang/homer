@@ -17,6 +17,6 @@ rm -f "$MARKER_FILE"
 # "session-harvester" cron picks up the ended session at the next tick instead.
 # Re-enable here only if/when an internal-API surface is added to the daemon.
 
-# Regenerate session-bootstrap.md so the next session boots with fresh focus state.
-# Non-blocking — failures are logged and don't impact session shutdown.
-(cd "$HOME/homer" && npm run -s memory:generate-bootstrap >> "$LOG_FILE" 2>&1) &
+# Session-bootstrap regeneration removed (Phase 5): the projection is rendered
+# per session from the me/work documents in memory_documents, so there is no
+# file to refresh at shutdown.

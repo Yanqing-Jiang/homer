@@ -83,7 +83,7 @@ async function main(): Promise<void> {
   runMigrations(stateManager.getDb());
 
   try {
-    await ensureMemoryScaffold();
+    await ensureMemoryScaffold(stateManager.getDb());
   } catch (err) {
     logger.warn({ err }, "Memory scaffold initialization failed (continuing)");
   }
