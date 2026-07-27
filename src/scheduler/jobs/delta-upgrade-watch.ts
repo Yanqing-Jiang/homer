@@ -6,6 +6,8 @@
  * and surfaces a Telegram decision_request when cash ≤ alert threshold or
  * drops ≥ dropPctVs7dMedian vs 7-day median.
  *
+ * If the Delta session expired, re-logins via Chrome autofill (username +
+ * password already saved in the CDP profile) — never stores credentials in code.
  * Never clicks UPGRADE / purchases.
  */
 
@@ -187,7 +189,16 @@ function escapeHtml(s: string): string {
 }
 
 function writeBriefSnippet(offer: OfferSnapshot, cfg: WatchConfig, prev: OfferSnapshot | null): void {
+  // On scrape failure, keep the last good snippet so morning-brief still has a price
+  // (skill only includes the section when mtime < 24h).
   if (!offer.available || offer.cashUsdPerPax == null) {
+    if (existsSync(BRIEF_SNIPPET_PATH) && prev?.available && prev.cashUsdPerPax != null) {
+      logger.warn(
+        { err: offer.error ?? "offer_unavailable" },
+        "delta-upgrade-watch scrape failed — preserving prior brief-snippet",
+      );
+      return;
+    }
     writeFileSync(
       BRIEF_SNIPPET_PATH,
       `<b>✈️ Delta D1 升舱</b>\n━━━━━━━━━━━━\n${escapeHtml(cfg.pnr)} ${escapeHtml(cfg.route)}：今日无升舱报价或抓取失败\n`,
@@ -265,6 +276,85 @@ const EXTRACT_OFFER_JS = `(() => {
   };
 })()`;
 
+/**
+ * Re-establish Delta session using Chrome saved credentials (username + password
+ * autofill in the CDP profile). Never reads/stores the password in code — focuses
+ * the password field to trigger autofill, then clicks Log In.
+ */
+async function ensureDeltaLogin(returnUrl: string): Promise<boolean> {
+  const loginUrl =
+    `https://www.delta.com/login/loginPage?returnUrl=${encodeURIComponent(returnUrl)}`;
+  logger.info("delta-upgrade-watch attempting autofill re-login");
+  await execAb(["open", loginUrl], 60_000);
+
+  // Wait for username prefill, then focus password to trigger Chrome autofill.
+  let filled = false;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    await sleep(attempt === 0 ? 2500 : 1500);
+    const snap = await execAb(["snapshot"], 30_000);
+    if (!/Log In To Delta|SkyMiles Number or Username/i.test(snap)) {
+      // Already redirected / logged in
+      break;
+    }
+    const passRef = snap.match(/textbox "Password" \[ref=(e\d+)\]/i)?.[1];
+    const loginRef = snap.match(/button "Log In" \[ref=(e\d+)\]/i)?.[1];
+    if (passRef) {
+      await execAb(["click", `@${passRef}`], 15_000);
+      await sleep(800);
+    }
+    const probeRaw = await execAb(
+      [
+        "eval",
+        `(() => {
+          const user = document.querySelector('input:not([type=password]):not([type=hidden]):not([type=checkbox])');
+          const pass = document.querySelector('input[type=password]');
+          return {
+            userLen: (user && user.value || '').length,
+            passLen: (pass && pass.value || '').length,
+            url: location.href,
+          };
+        })()`,
+      ],
+      15_000,
+    );
+    const probe = parseAgentJson(probeRaw) as { userLen?: number; passLen?: number } | null;
+    if ((probe?.userLen ?? 0) >= 4 && (probe?.passLen ?? 0) >= 4 && loginRef) {
+      await execAb(["click", `@${loginRef}`], 30_000);
+      filled = true;
+      break;
+    }
+  }
+
+  if (!filled) {
+    logger.warn("delta-upgrade-watch autofill re-login: credentials not prefilled");
+    return false;
+  }
+
+  // Poll for logged-in My Trips (or homepage redirect then navigate).
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await sleep(attempt === 0 ? 4000 : 2000);
+    const hrefRaw = await execAb(
+      ["eval", `(() => ({ href: location.href, text: (document.body&&document.body.innerText||'').slice(0,300) }))()`],
+      15_000,
+    );
+    const page = parseAgentJson(hrefRaw) as { href?: string; text?: string } | null;
+    const text = page?.text ?? "";
+    const loggedIn =
+      /Yanqing|Log Out|Sign Out|MILES AVAILABLE|SkyMiles #/i.test(text) &&
+      !/Log In To Delta/i.test(text);
+    if (loggedIn) {
+      if (!/upcoming-trips/i.test(page?.href ?? "")) {
+        await execAb(["open", returnUrl], 60_000);
+        await sleep(3000);
+      }
+      logger.info("delta-upgrade-watch autofill re-login ok");
+      return true;
+    }
+  }
+  logger.warn("delta-upgrade-watch autofill re-login did not reach logged-in state");
+  return false;
+}
+
 async function scrapeOffer(cfg: WatchConfig): Promise<OfferSnapshot> {
   const ts = new Date().toISOString();
   const base: OfferSnapshot = {
@@ -314,6 +404,20 @@ async function scrapeOffer(cfg: WatchConfig): Promise<OfferSnapshot> {
     list = parseAgentJson(listRaw) as ListProbe | null;
     if (list?.loginOk && list.hasPnr) break;
     if (list && !list.loginOk) break;
+  }
+
+  if (!list?.loginOk) {
+    const relogged = await ensureDeltaLogin(cfg.upcomingTripsUrl);
+    if (relogged) {
+      list = null;
+      for (let attempt = 0; attempt < 6; attempt++) {
+        await sleep(attempt === 0 ? 3000 : 2000);
+        const listRaw = await execAb(["eval", listEval], 30_000);
+        list = parseAgentJson(listRaw) as ListProbe | null;
+        if (list?.loginOk && list.hasPnr) break;
+        if (list && !list.loginOk) break;
+      }
+    }
   }
 
   if (!list?.loginOk) {
