@@ -552,13 +552,16 @@ export class Scheduler {
       const takeoverEnabled = job.config.failureTakeover !== false && bot !== null;
 
       // Execute the job (internal handler or CLI executor) with hang watchdog.
-      // Default: 25 min (covers LLM reasoning tasks); minimum 10 min enforced for all jobs.
+      // An explicitly configured timeout is AUTHORITATIVE (+30s cleanup grace); the
+      // 25-min default applies only when a job declares no budget. There is no
+      // universal floor: it silently turned nightly-code-push's 120s budget into
+      // 10 minutes of uncancelled work before takeover (2026-07-27 cascade).
       const DEFAULT_HANG_TIMEOUT_MS = 25 * 60 * 1000;
-      const MIN_HANG_TIMEOUT_MS = 10 * 60 * 1000;
-      const configuredTimeout = typeof job.config.timeout === "number" && job.config.timeout > 0
+      // Bounded window for an aborted handler to unwind before we give up on it.
+      const SETTLE_GRACE_MS = 30_000;
+      const HANG_TIMEOUT_MS = typeof job.config.timeout === "number" && job.config.timeout > 0
         ? job.config.timeout + 30_000
         : DEFAULT_HANG_TIMEOUT_MS;
-      const HANG_TIMEOUT_MS = Math.max(configuredTimeout, MIN_HANG_TIMEOUT_MS);
       const hangTimeoutMinutes = Math.round(HANG_TIMEOUT_MS / 60_000);
 
       // AbortController for cooperative cancellation of internal jobs.
@@ -574,8 +577,13 @@ export class Scheduler {
       });
 
       let result: JobExecutionResult;
+      // Set once the original execution actually settles. If the watchdog fires and
+      // this stays false past the grace window, the handler ignored the abort and is
+      // STILL RUNNING — retrying on top of it is what produced overlapping runs.
+      let settled = false;
+      let execPromise: Promise<JobExecutionResult> | undefined;
       try {
-        const execPromise = isInternal
+        execPromise = (isInternal
           ? executeInternalJob(job, {
               stateManager: this.stateManager,
               bot,
@@ -588,11 +596,20 @@ export class Scheduler {
               ...(takeoverEnabled ? { skipDiagnosis: true } : {}),
               scheduledRunId: runId,
               signal: controller.signal,
-            });
+            })
+        ).finally(() => { settled = true; });
         result = await Promise.race([execPromise, hangPromise]);
       } catch (hangError) {
         const msg = hangError instanceof Error ? hangError.message : String(hangError);
         logger.warn({ jobId: job.config.id, jobName: job.config.name }, msg);
+        // Timeout must mean cancellation: the controller is already aborted, so give
+        // the handler a bounded grace to unwind before declaring the run dead.
+        if (execPromise && !settled) {
+          await Promise.race([
+            execPromise.catch(() => undefined),
+            new Promise((resolve) => setTimeout(resolve, SETTLE_GRACE_MS)),
+          ]);
+        }
         result = {
           jobId: job.config.id,
           jobName: job.config.name,
@@ -609,8 +626,19 @@ export class Scheduler {
         if (hangTimerId) clearTimeout(hangTimerId);
       }
 
+      // An unsettled original still holds its resources (child processes, CDP, git
+      // locks). Diagnosing/retrying alongside it doubles the load that caused the
+      // timeout, so skip takeover entirely and let process cleanup own termination.
+      const originalStillRunning = !settled;
+      if (originalStillRunning) {
+        logger.error(
+          { jobId: job.config.id, jobName: job.config.name, graceMs: SETTLE_GRACE_MS },
+          "Job did not settle after abort — original still running, skipping takeover",
+        );
+      }
+
       // === FAILURE + TAKEOVER PATH ===
-      if (!result.success && takeoverEnabled && bot) {
+      if (!result.success && takeoverEnabled && bot && !originalStillRunning) {
         // Record failure but keep is_running lock held
         this.stateManager.recordScheduledJobFailed(
           runId, job.config.id, result.output, result.error, result.exitCode

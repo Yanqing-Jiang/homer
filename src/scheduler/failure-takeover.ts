@@ -456,6 +456,12 @@ export async function runFailureTakeover(params: {
   takeoverCountToday += 1;
   perJobCountToday.set(jobId, (perJobCountToday.get(jobId) ?? 0) + 1);
 
+  // One deadline for the whole takeover, enforced INSIDE each awaited phase rather
+  // than only between them — a single hung decision/retry used to blow past the cap.
+  const deadlineController = new AbortController();
+  const remainingMs = () => TAKEOVER_WALL_CLOCK_MS - (Date.now() - startTime);
+  const deadlineTimer = setTimeout(() => deadlineController.abort(), Math.max(remainingMs(), 0));
+
   try {
     logger.info({ jobId, runId, consecutiveFailures }, "Starting failure takeover");
 
@@ -500,6 +506,8 @@ export async function runFailureTakeover(params: {
             cwd,
             explicit: { harness },
             requiredCapabilities,
+            timeoutMs: Math.max(remainingMs(), 0),
+            signal: deadlineController.signal,
           });
           return result.output;
         } catch (error) {
@@ -510,12 +518,36 @@ export async function runFailureTakeover(params: {
       return null;
     };
 
-    // Re-run the failing job once; always releases the is_running lock afterwards.
+    /**
+     * Race an awaited takeover phase against the remaining wall-clock budget. The
+     * deadline signal alone is only cooperative: a handler that ignores AbortSignal
+     * would leave this function awaiting forever, so the outer scheduler would never
+     * record completion and is_running would stay 1, blocking every future cron fire.
+     * Returns ok:false on expiry instead of hanging; the signal still fires for
+     * cooperative child cleanup.
+     */
+    const withDeadline = async <T>(work: Promise<T>): Promise<{ ok: true; value: T } | { ok: false }> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const expiry = new Promise<"deadline">((resolve) => {
+        timer = setTimeout(() => resolve("deadline"), Math.max(remainingMs(), 0));
+      });
+      try {
+        const outcome = await Promise.race([work.then((value) => ({ value })), expiry]);
+        return outcome === "deadline" ? { ok: false } : { ok: true, value: outcome.value };
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+
+    // Re-run the failing job once. The is_running lock is deliberately NOT released
+    // here: clearing it between retries let the next cron/catch-up tick start a
+    // second ordinary execution that then overlapped takeover retry 2. The outer
+    // scheduler releases it when it records the final completion.
     const runJobRetry = async (): Promise<JobExecutionResult> => {
       try {
         return isInternal
-          ? await executeInternalJob(job, { stateManager, bot, chatId, jobRunId: runId, disableScheduledJob })
-          : await executeScheduledJob(job);
+          ? await executeInternalJob(job, { stateManager, bot, chatId, jobRunId: runId, disableScheduledJob, signal: deadlineController.signal })
+          : await executeScheduledJob(job, undefined, { signal: deadlineController.signal });
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         logger.error({ jobId, error: msg }, "Takeover retry execution failed");
@@ -524,14 +556,6 @@ export async function runFailureTakeover(params: {
           startedAt: new Date(), completedAt: new Date(),
           success: false, output: "", error: msg, exitCode: 1, duration: 0,
         };
-      } finally {
-        try {
-          stateManager.getDb().prepare(
-            "UPDATE scheduled_job_state SET is_running = 0 WHERE job_id = ?"
-          ).run(jobId);
-        } catch {
-          // Table may not exist or job state row may be missing
-        }
       }
     };
 
@@ -561,7 +585,12 @@ export async function runFailureTakeover(params: {
         retryAttempt: { current: attempt, max: MAX_TAKEOVER_RETRIES },
       });
 
-      const output = await runDecisionSession(prompt, allowAutoFix);
+      const decisionOutcome = await withDeadline(runDecisionSession(prompt, allowAutoFix));
+      if (!decisionOutcome.ok) {
+        logger.warn({ jobId, attempt }, "Takeover deadline expired during decision session, escalating");
+        break;
+      }
+      const output = decisionOutcome.value;
       if (output === null) {
         logger.error({ jobId, attempt }, "Takeover decision session unavailable (codex + claude both failed)");
         break; // fall through to escalation
@@ -584,11 +613,33 @@ export async function runFailureTakeover(params: {
       // Inter-retry backoff before the 2nd/3rd attempt (30s, 60s)
       if (attempt > 1) {
         const backoffMs = Math.min(BASE_BACKOFF_MS * Math.pow(2, attempt - 2), 120_000);
-        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        // Never sleep past the deadline — that would burn the budget doing nothing.
+        if (backoffMs >= remainingMs()) {
+          logger.warn({ jobId, attempt, backoffMs }, "Takeover deadline would expire during backoff, escalating");
+          break;
+        }
+        // Deadline-raced: timer scheduling can cross the deadline even after the
+        // pre-check, and work must never start after cancellation.
+        const slept = await withDeadline(new Promise<void>((resolve) => setTimeout(resolve, backoffMs)));
+        if (!slept.ok) {
+          logger.warn({ jobId, attempt }, "Takeover deadline expired during backoff, escalating");
+          break;
+        }
+        // An event-loop stall can cross the deadline even when the sleep wins the
+        // race — never start a retry after cancellation.
+        if (deadlineController.signal.aborted || remainingMs() <= 0) {
+          logger.warn({ jobId, attempt }, "Takeover deadline expired after backoff, escalating");
+          break;
+        }
       }
 
       retriesAttempted += 1;
-      retryResult = await runJobRetry();
+      const retryOutcome = await withDeadline(runJobRetry());
+      if (!retryOutcome.ok) {
+        logger.error({ jobId, attempt }, "Takeover deadline expired awaiting retry — abandoning takeover; original may still be running");
+        break;
+      }
+      retryResult = retryOutcome.value;
       recordTakeoverRun(stateManager, {
         jobRunId: runId,
         jobId,
@@ -629,7 +680,18 @@ export async function runFailureTakeover(params: {
       availableHarnesses: ["claude", "codex", "gemini", "kimi", "opencode"],
     });
 
-    const escalationOutput = await runDecisionSession(escalationPrompt, false);
+    // Deadline-raced like every other phase: an abort-ignoring harness must not
+    // hang past the wall-clock cap. An already-expired budget skips the session
+    // entirely and falls through to the synthesized escalation below.
+    let escalationOutput: string | null = null;
+    if (remainingMs() > 0) {
+      const raced = await withDeadline(runDecisionSession(escalationPrompt, false));
+      if (raced.ok) {
+        escalationOutput = raced.value;
+      } else {
+        logger.error({ jobId }, "Takeover deadline expired awaiting escalation session");
+      }
+    }
     let escalation: TakeoverDecision | undefined;
     if (escalationOutput) {
       lastOutput = escalationOutput;
@@ -670,6 +732,7 @@ export async function runFailureTakeover(params: {
     logger.error({ jobId, error: msg }, "Failure takeover crashed");
     return null;
   } finally {
+    clearTimeout(deadlineTimer);
     activeTakeovers.delete(jobId);
     activeTakeoverCount -= 1;
   }

@@ -26,6 +26,7 @@ import path from "node:path";
 import { getConnectivityMonitor } from "../heartbeat/index.js";
 import { processRegistry } from "../process/registry.js";
 import { cleanupScheduler } from "../process/cleanup-scheduler.js";
+import { probeCdp } from "../scraping/chrome-launcher.js";
 import { checkAndFlushExpiringSessions } from "../memory/flush.js";
 import { config } from "../config/index.js";
 import { runInternalJobHarness } from "./executor.js";
@@ -417,6 +418,20 @@ async function runHealthCheck(
     }
   } catch (err) {
     logger.warn({ error: err }, "Process monitoring in health handler failed");
+  }
+
+  // CDP state — REPORT ONLY. The probe is read-only: health must never launch or
+  // reap Chrome (cleanup-scheduler is the sole reaper). "absent" is the healthy
+  // steady state for an on-demand browser; "empty" is a listener agent-browser
+  // cannot attach to — the exact zombie that broke delta-upgrade-watch.
+  try {
+    const cdp = await probeCdp();
+    if (cdp.state === "empty") {
+      issues.push(`🟡 CDP: listener on :9222 with no attachable page target${cdp.reason ? ` (${cdp.reason})` : ""}`);
+    }
+    logger.debug({ state: cdp.state, pages: cdp.pages }, "CDP health probe");
+  } catch (err) {
+    logger.warn({ error: err }, "CDP probe in health handler failed");
   }
 
   // In production Homer must remain a child of the resident supervisor. If the
@@ -849,6 +864,7 @@ async function runHandler(
           stateManager: ctx.stateManager,
           job,
           startedAt,
+          signal: ctx.signal,
         });
         return buildResult(
           job,
@@ -885,7 +901,7 @@ async function runHandler(
       }
       case "delta_upgrade_watch": {
         const { runDeltaUpgradeWatch } = await import("./jobs/delta-upgrade-watch.js");
-        const result = await runDeltaUpgradeWatch();
+        const result = await runDeltaUpgradeWatch(ctx.signal);
         return buildResult(
           job,
           startedAt,

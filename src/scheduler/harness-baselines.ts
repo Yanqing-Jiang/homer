@@ -118,7 +118,14 @@ export const INTERNAL_JOB_HARNESS_BASELINES = {
     executor: "codex",
     model: CODEX_MODEL,
     stages: {
-      push: codexStage(PROJECT_DIR, 600_000, "high"),
+      // 90s, not 600s: a nicer commit message must never consume the whole job
+      // budget — generateCommitMessage falls back to a generic message on timeout.
+      // DEBT: this is a per-repo budget and nightly-code-push runs two repos
+      // serially, so two dirty repos can spend 180s of the job's 300s declared
+      // budget (watchdog at 330s) before any git work; upgrade to a job-wide
+      // allowance derived from remaining time when nightly-code-push hits its
+      // watchdog with both repos dirty.
+      push: codexStage(PROJECT_DIR, 90_000, "high"),
     },
   },
   "outcome-tracker": {

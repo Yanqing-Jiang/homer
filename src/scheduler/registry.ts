@@ -62,7 +62,6 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
   { id: "archive-verify", name: "Archive Verify", kind: "internal", handler: "archive_verify", handlerFile: "archive-verify", expectedInSchedule: true },
   { id: "content-scraper", name: "Content Scraper", kind: "internal", handler: "content_scraper", handlerFile: "content-scraper", expectedInSchedule: true },
   { id: "db-backup", name: "DB Backup", kind: "internal", handler: "db_backup", handlerFile: "db-backup", expectedInSchedule: true },
-  { id: "delta-upgrade-watch", name: "Delta D1 Upgrade Watch", kind: "internal", handler: "delta_upgrade_watch", handlerFile: "delta-upgrade-watch", expectedInSchedule: true, note: "4 AM PT: scrape GBEMBL SEA→ICN upgrade offer for morning brief" },
   { id: "ideas-explore", name: "Ideas Explore", kind: "internal", handler: "ideas_explore", handlerFile: "ideas-explore", expectedInSchedule: true },
   { id: "link-processor", name: "Link Processor", kind: "internal", handler: "link_processor", handlerFile: "link-processor", expectedInSchedule: true },
   { id: "memory-embeddings", name: "Memory Embeddings", kind: "internal", handler: "memory_embeddings", handlerFile: "memory-embeddings", expectedInSchedule: true, note: "event-triggered; cron is safety net" },
@@ -99,6 +98,7 @@ const SCHEDULED_INLINE_ONLY: JobEntry[] = [
  * Jobs dispatched via external CLI (no internal handler needed).
  */
 const SCHEDULED_CLI_JOBS: JobEntry[] = [
+  { id: "delta-upgrade-watch", name: "Delta D1 Upgrade Watch", kind: "cli", handler: "codex", handlerFile: "delta-upgrade-watch", expectedInSchedule: true, note: "4:05 AM PT CLI skill before morning-brief; module at jobs/delta-upgrade-watch.ts still used by the skill preferred path" },
   { id: "morning-brief", name: "Morning Brief", kind: "cli", handler: "codex", expectedInSchedule: true },
   { id: "morning-reads", name: "Morning Reads", kind: "cli", handler: "codex", expectedInSchedule: true },
   { id: "home-cleanup", name: "Home Cleanup", kind: "cli", handler: "opencode", expectedInSchedule: true },

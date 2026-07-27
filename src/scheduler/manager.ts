@@ -43,15 +43,20 @@ export class CronManager extends EventEmitter {
     this.emit("job:updated", registeredJob);
 
     if (config.enabled) {
+      // Expected fire time of the next tick, captured at registration and advanced
+      // on every callback. croner's previousRun() is the previous START, not this
+      // tick's expected fire, so `now - previousRun()` reported one full cadence
+      // (1.8M ms for a :30 job, 3.6M for an hourly) on perfectly punctual runs.
+      let expectedAt = registeredJob.nextRun?.getTime() ?? 0;
       const task = new Cron(config.cron, { protect: true, catch: true }, () => {
         const now = Date.now();
-        const prev = task.previousRun();
-        if (prev) {
-          const delta = now - prev.getTime();
-          if (delta > 2000) {
-            logger.warn({ jobId: config.id, deltaMs: delta }, "Cron callback fired late");
+        if (expectedAt > 0) {
+          const latenessMs = now - expectedAt;
+          if (latenessMs > 2000) {
+            logger.warn({ jobId: config.id, latenessMs }, "Cron callback fired late");
           }
         }
+        expectedAt = task.nextRun()?.getTime() ?? 0;
         recordFire();
         recordJobFire(config.id);
         this.triggerJob(config.id, false);

@@ -23,7 +23,7 @@ import { basename, dirname, join } from "path";
 import { processRegistry } from "./registry.js";
 import type { ProcessRecord } from "./registry.js";
 import { logger } from "../utils/logger.js";
-import { teardownIdleSession, getLastCdpUseAt } from "../scraping/chrome-launcher.js";
+import { teardownIdleSession, getLastCdpUseAt, probeCdp, type CdpProbe } from "../scraping/chrome-launcher.js";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
 // @ts-ignore
 import type Database from "better-sqlite3";
@@ -430,8 +430,8 @@ export class CleanupScheduler {
   }
 
   /**
-   * D: Tear down the long-lived CDP scraping Chrome when it is idle AND its tabs
-   * have piled up. The live :9222 listener is spared by every other path (by
+   * D: Tear down the long-lived CDP scraping Chrome when it is idle AND either has
+   * zero page targets or its tabs have piled up. The live :9222 listener is spared by every other path (by
    * design, so an in-flight scrape is never killed); this is the one sanctioned
    * reaper. The checks here are a cheap pre-filter — the AUTHORITATIVE idle
    * re-check happens inside teardownIdleSession under the CDP op lock, which also
@@ -445,37 +445,36 @@ export class CleanupScheduler {
       if (!this.cdp.trusted) return;
       if (this.cdp.liveProfileDirs.size === 0) return;
 
-      const idleMs = Date.now() - getLastCdpUseAt();
+      // lastCdpUseAt === 0 means no scrape has touched CDP since daemon start, so
+      // idleness is genuinely UNKNOWN — Date.now() - 0 logged epoch-sized minutes
+      // (~29.7M). A session we never used still predates this process, so unknown
+      // stays teardown-eligible (the zero-target reap exception is unaffected); it
+      // is only labelled honestly.
+      const lastUse = getLastCdpUseAt();
+      const idleMs = lastUse === 0 ? CDP_IDLE_TEARDOWN_MS : Date.now() - lastUse;
       if (idleMs < CDP_IDLE_TEARDOWN_MS) return;
 
       const pid = [...this.cdp.listenerPids][0] ?? 0;
-      const idleMin = Math.round(idleMs / 60000);
-      const pageProbe = await countCdpPages(CDP_PORT);
-      if (!pageProbe.ok) {
-        logger.warn({ pid, idleMin, reason: pageProbe.reason }, "MONITOR: CDP page probe failed; skipping idle teardown");
-        actions.push({ pid, command: "chrome-cdp", action: "spared", reason: `cdp page probe failed: ${pageProbe.reason}` });
+      const idleLabel = lastUse === 0 ? "idle unknown since daemon start" : `idle ${Math.round(idleMs / 60000)}min`;
+      const decision = decideIdleCdpTeardown(await probeCdp(CDP_PORT));
+      if (decision.action === "skip") return;
+      if (decision.action === "spare") {
+        logger.warn({ pid, idle: idleLabel, reason: decision.reason }, "MONITOR: CDP idle teardown skipped");
+        actions.push({ pid, command: "chrome-cdp", action: "spared", reason: decision.reason });
         return;
       }
 
-      const tabs = pageProbe.pages;
-      if (tabs === 0) {
-        logger.warn({ pid, idleMin }, "MONITOR: Idle CDP Chrome has no page targets; empty-session teardown disabled");
-        actions.push({ pid, command: "chrome-cdp", action: "spared", reason: `monitor-only: idle ${idleMin}min, 0 tabs; empty teardown disabled` });
-        return;
-      }
-
-      if (tabs <= CDP_MAX_IDLE_TABS) return;
-
+      const tabs = decision.tabs;
       if (!this.enforce) {
-        logger.warn({ pid, tabs, idleMin }, "MONITOR: Would tear down idle CDP Chrome");
-        actions.push({ pid, command: "chrome-cdp", action: "spared", reason: `monitor-only: idle ${idleMin}min, ${tabs} tabs` });
+        logger.warn({ pid, tabs, idle: idleLabel }, "MONITOR: Would tear down idle CDP Chrome");
+        actions.push({ pid, command: "chrome-cdp", action: "spared", reason: `monitor-only: ${idleLabel}, ${tabs} tabs` });
         return;
       }
 
       const outcome = await teardownIdleSession(CDP_IDLE_TEARDOWN_MS, CDP_PORT);
       if (outcome === "torn-down") {
-        logger.info({ pid, tabs, idleMin }, "Tore down idle CDP Chrome with tab pile-up");
-        actions.push({ pid, command: "chrome-cdp", action: "killed", reason: `idle ${idleMin}min, ${tabs} tabs` });
+        logger.info({ pid, tabs, idle: idleLabel }, tabs === 0 ? "Tore down idle CDP Chrome with no page targets" : "Tore down idle CDP Chrome with tab pile-up");
+        actions.push({ pid, command: "chrome-cdp", action: "killed", reason: `${idleLabel}, ${tabs} tabs` });
       } else {
         // "busy" (a scrape stamped lastCdpUseAt before we got the lock) or
         // "absent" (already gone) — both benign, just record it.
@@ -896,29 +895,23 @@ function sweepRetainedFiles(target: RetentionTarget): number {
   return pruned;
 }
 
-/**
- * Count open page targets on the CDP port via its /json endpoint. Probe failures
- * stay distinct from "0 pages" so callers can fail closed.
- */
-type CdpPageProbe =
-  | { ok: true; pages: number }
-  | { ok: false; reason: string };
+export type IdleCdpDecision =
+  | { action: "skip" }
+  | { action: "spare"; reason: string }
+  | { action: "teardown"; tabs: number };
 
-async function countCdpPages(port: number): Promise<CdpPageProbe> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 2000);
-  try {
-    const resp = await fetch(`http://localhost:${port}/json`, { signal: controller.signal });
-    if (!resp.ok) return { ok: false, reason: `http ${resp.status}` };
-    const list = (await resp.json()) as unknown;
-    if (!Array.isArray(list)) return { ok: false, reason: "non-array response" };
-    return { ok: true, pages: list.filter((t): t is { type?: string } => typeof t === "object" && t !== null && (t as { type?: unknown }).type === "page").length };
-  } catch (err) {
-    const name = err instanceof Error ? err.name : "unknown";
-    return { ok: false, reason: name === "AbortError" ? "timeout" : name };
-  } finally {
-    clearTimeout(timer);
-  }
+/**
+ * Pure teardown decision for an already-idle, Homer-owned CDP session, given the
+ * shared probe. Zero page targets is LESS usable than a tab pile-up (agent-browser
+ * connect times out on an empty list), so both take the teardown path. An
+ * unreadable list always spares — the probe is intermittently flaky under its 2s
+ * budget and reaping on it would kill healthy sessions.
+ */
+export function decideIdleCdpTeardown(probe: CdpProbe, maxIdleTabs: number = CDP_MAX_IDLE_TABS): IdleCdpDecision {
+  if (probe.reason) return { action: "spare", reason: `cdp page probe failed: ${probe.reason}` };
+  if (probe.state === "absent") return { action: "spare", reason: "cdp listener stopped answering /json/version" };
+  if (probe.pages > 0 && probe.pages <= maxIdleTabs) return { action: "skip" };
+  return { action: "teardown", tabs: probe.pages };
 }
 
 /**

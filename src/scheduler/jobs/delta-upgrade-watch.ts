@@ -18,20 +18,14 @@ import {
   readFileSync,
   writeFileSync,
   appendFileSync,
-  rmSync,
 } from "fs";
 import { join } from "path";
-import { homedir } from "os";
 import { PATHS } from "../../config/paths.js";
-import { withScrapeLock } from "../../executors/agent-browser-scrape.js";
-import { ensureCDP } from "../../scraping/chrome-launcher.js";
+import { withScrapeLock, connectScrapeBackend, resetScrapeBackend } from "../../executors/agent-browser-scrape.js";
 import { logger } from "../../utils/logger.js";
 import type { NotificationIntent } from "../../notifications/types.js";
 
-const AGENT_BROWSER_SOCKET = join(homedir(), ".agent-browser", "default.sock");
-
 const AGENT_BROWSER = "agent-browser";
-const CDP_PORT = 9222;
 const WATCH_DIR = join(PATHS.homerData, "watches", "delta-upgrade");
 const CONFIG_PATH = join(WATCH_DIR, "config.json");
 const HISTORY_PATH = join(WATCH_DIR, "history.jsonl");
@@ -78,12 +72,20 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Scheduler abort signal for the in-flight run. Module-scoped rather than threaded
+ * through all 17 execAb() call sites: the DB is_running lock guarantees only one
+ * delta-upgrade-watch executes per process, same reasoning as chrome-launcher's
+ * lastCdpUseAt. Set at the top of runDeltaUpgradeWatch, cleared when it returns.
+ */
+let jobSignal: AbortSignal | undefined;
+
 function execAb(args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       AGENT_BROWSER,
       args,
-      { encoding: "utf8", timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 },
+      { encoding: "utf8", timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, signal: jobSignal },
       (err, stdout, stderr) => {
         if (err) {
           const e = err as NodeJS.ErrnoException & { stderr?: string };
@@ -372,14 +374,9 @@ async function scrapeOffer(cfg: WatchConfig): Promise<OfferSnapshot> {
     loginOk: false,
   };
 
-  await ensureCDP({ headed: true });
-  // Drop stale agent-browser socket so connect re-handshakes against live CDP.
-  try {
-    rmSync(AGENT_BROWSER_SOCKET, { force: true });
-  } catch {
-    /* best effort */
-  }
-  await execAb(["connect", String(CDP_PORT)], 15_000);
+  // The executor owns ensure + stale-socket clear + connect (with its own bounded
+  // reconnect); this job no longer duplicates that sequence or probes targets.
+  await connectScrapeBackend(jobSignal);
   // Warm a tab; retry once on stale session id.
   try {
     await execAb(["open", cfg.upcomingTripsUrl], 60_000);
@@ -387,12 +384,8 @@ async function scrapeOffer(cfg: WatchConfig): Promise<OfferSnapshot> {
     const msg = err instanceof Error ? err.message : String(err);
     if (!/Session with given id not found|CDP error/i.test(msg)) throw err;
     logger.warn({ err: msg.slice(0, 200) }, "delta-upgrade-watch CDP stale — reconnect");
-    try {
-      rmSync(AGENT_BROWSER_SOCKET, { force: true });
-    } catch {
-      /* best effort */
-    }
-    await execAb(["connect", String(CDP_PORT)], 15_000);
+    resetScrapeBackend();
+    await connectScrapeBackend(jobSignal);
     await execAb(["open", cfg.upcomingTripsUrl], 60_000);
   }
   const listEval = EXTRACT_OFFER_JS.replace("PNR_PLACEHOLDER", cfg.pnr);
@@ -526,7 +519,16 @@ function shouldAlert(
   return { alert: reasons.length > 0, reasons };
 }
 
-export async function runDeltaUpgradeWatch(): Promise<DeltaUpgradeWatchResult> {
+export async function runDeltaUpgradeWatch(signal?: AbortSignal): Promise<DeltaUpgradeWatchResult> {
+  jobSignal = signal;
+  try {
+    return await runDeltaUpgradeWatchInner();
+  } finally {
+    jobSignal = undefined;
+  }
+}
+
+async function runDeltaUpgradeWatchInner(): Promise<DeltaUpgradeWatchResult> {
   mkdirSync(WATCH_DIR, { recursive: true });
   const cfg = loadConfig();
   const history = readHistory();
