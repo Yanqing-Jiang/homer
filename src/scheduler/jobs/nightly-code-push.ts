@@ -6,7 +6,7 @@
  *   2. If there are unpushed commits → `git push origin main` (with retries).
  */
 
-import { execSync } from "child_process";
+import { execSync, spawn } from "child_process";
 import { existsSync } from "fs";
 import { dirname, join } from "path";
 import type { Bot } from "grammy";
@@ -48,6 +48,7 @@ async function generateCommitMessage(
   fileCount: number,
   job?: RegisteredJob,
   startedAt = new Date(),
+  signal?: AbortSignal,
 ): Promise<string> {
   const fallback = `chore: nightly snapshot ${date} (${fileCount} files)`;
   if (!job) return fallback;
@@ -88,6 +89,7 @@ Output ONLY the commit message. No preamble, no explanation, no markdown fences.
       stage: "push",
       startedAt,
       emitCompletedEvent: false,
+      signal,
     });
 
     const output = result.output?.trim() ?? "";
@@ -104,10 +106,11 @@ Output ONLY the commit message. No preamble, no explanation, no markdown fences.
   }
 }
 
-async function pushWithRetries(repo: CodePushRepo): Promise<{ ok: true } | { ok: false; error: string }> {
+async function pushWithRetries(repo: CodePushRepo, signal?: AbortSignal): Promise<{ ok: true } | { ok: false; error: string }> {
   const GH_BIN = "/opt/homebrew/bin/gh";
   let lastErr: string | undefined;
   for (let attempt = 1; attempt <= PUSH_RETRIES; attempt++) {
+    if (signal?.aborted) return { ok: false, error: "aborted before push attempt" };
     try {
       let ghToken = process.env.GH_TOKEN ?? "";
       if (!ghToken) {
@@ -116,21 +119,72 @@ async function pushWithRetries(repo: CodePushRepo): Promise<{ ok: true } | { ok:
           timeout: 5_000,
         }).trim();
       }
-      execSync("git push origin main", {
-        cwd: repo.dir,
-        timeout: 900_000,
-        env: {
-          ...process.env,
-          GH_TOKEN: ghToken,
-          GIT_CONFIG_COUNT: "1",
-          GIT_CONFIG_KEY_0: "credential.helper",
-          GIT_CONFIG_VALUE_0: `!${GH_BIN} auth git-credential`,
-        },
+      // spawn(detached) — not execSync, not execFile: a 900s blocking push ignored
+      // the scheduler abort entirely and kept running underneath takeover. `git push`
+      // spawns git-remote-https/credential-helper descendants; detached gives the
+      // tree its own process group so abort/timeout kills the whole group via -pid.
+      // The promise settles on 'exit', so the parent-owned stderr pipe (kept for
+      // diagnostics) cannot hold it unsettled past the 30s settle grace.
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn("git", ["push", "origin", "main"], {
+          cwd: repo.dir,
+          detached: true,
+          stdio: ["ignore", "ignore", "pipe"],
+          env: {
+            ...process.env,
+            GH_TOKEN: ghToken,
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "credential.helper",
+            GIT_CONFIG_VALUE_0: `!${GH_BIN} auth git-credential`,
+          },
+        });
+        let done = false;
+        let timer: ReturnType<typeof setTimeout>;
+        let stderrTail = "";
+        child.stderr?.on("data", (d: Buffer) => {
+          stderrTail = (stderrTail + d.toString()).slice(-2000);
+        });
+        const onAbort = () => killGroup("aborted");
+        const finish = (fn: () => void) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
+          fn();
+        };
+        function killGroup(why: string): void {
+          try { process.kill(-child.pid!, "SIGTERM"); } catch { /* group already gone */ }
+          // Escalate if the group ignores SIGTERM; unref so this never holds the
+          // daemon open. Probe (signal 0) before killing: a fully-exited group
+          // no-ops here, while a SIGTERM-ignoring descendant that outlived the
+          // leader still gets reaped. Leader exit must NOT cancel this timer —
+          // survivors in the detached group would escape escalation.
+          setTimeout(() => {
+            try {
+              process.kill(-child.pid!, 0);
+              process.kill(-child.pid!, "SIGKILL");
+            } catch { /* group already gone */ }
+          }, 5_000).unref();
+          finish(() => reject(new Error(`git push ${why}`)));
+        }
+        timer = setTimeout(() => killGroup("timed out after 900s"), 900_000);
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (signal?.aborted) killGroup("aborted");
+        child.on("error", (err) => finish(() => reject(err)));
+        child.on("exit", (code, sig) => {
+          finish(() =>
+            code === 0
+              ? resolve()
+              : reject(new Error(
+                  `git push exited code=${code} signal=${sig}${stderrTail.trim() ? `: ${stderrTail.trim()}` : ""}`,
+                )));
+        });
       });
       return { ok: true };
     } catch (err: any) {
       lastErr = err.message ?? String(err);
       logger.warn(`${logPrefix(repo)} Push attempt ${attempt}/${PUSH_RETRIES} failed: ${lastErr}`);
+      if (signal?.aborted) return { ok: false, error: `push aborted: ${lastErr}` };
       if (attempt < PUSH_RETRIES) await sleep(PUSH_RETRY_DELAY_MS);
     }
   }
@@ -143,6 +197,7 @@ interface CodePushDeps {
   stateManager?: StateManager;
   job?: RegisteredJob;
   startedAt?: Date;
+  signal?: AbortSignal;
 }
 
 async function runNightlyCodePushForRepo(repo: CodePushRepo, deps: CodePushDeps): Promise<{
@@ -171,7 +226,7 @@ async function runNightlyCodePushForRepo(repo: CodePushRepo, deps: CodePushDeps)
       logger.info({ fileCount: lines.length }, `${prefix} Staging + committing locally...`);
       execSync("git add -A", { cwd: repo.dir, timeout: 30_000 });
 
-      commitMsg = await generateCommitMessage(repo, date, lines.length, deps.job, deps.startedAt);
+      commitMsg = await generateCommitMessage(repo, date, lines.length, deps.job, deps.startedAt, deps.signal);
 
       execSync(`git commit -F -`, {
         cwd: repo.dir,
@@ -193,7 +248,7 @@ async function runNightlyCodePushForRepo(repo: CodePushRepo, deps: CodePushDeps)
     }
 
     logger.info({ unpushedCount }, `${prefix} Auto-pushing ${unpushedCount} commit(s) to origin/main`);
-    const pushResult = await pushWithRetries(repo);
+    const pushResult = await pushWithRetries(repo, deps.signal);
     if (!pushResult.ok) {
       return { success: false, output: "", error: `Push failed: ${pushResult.error}` };
     }

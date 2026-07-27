@@ -278,7 +278,7 @@ function parseAgentBrowserJson(stdout: string): unknown {
 
 const AGENT_BROWSER_SOCKET = join(homedir(), ".agent-browser", "default.sock");
 let connectedOnce = false;
-async function ensureBackendReady(): Promise<{ ok: true } | { ok: false; status: ScrapeStatus; error: string }> {
+async function ensureBackendReady(signal?: AbortSignal): Promise<{ ok: true } | { ok: false; status: ScrapeStatus; error: string }> {
   try {
     const handle = await ensureCDP({ headed: true });
     // A non-zero pid means a FRESH Chrome was launched — any persisted
@@ -286,17 +286,14 @@ async function ensureBackendReady(): Promise<{ ok: true } | { ok: false; status:
     // drop the stale socket so `connect` re-handshakes against the new browser.
     // Done regardless of connectedOnce so a stale on-disk socket left by a prior
     // process is also cleared on the first launch of this one.
-    if (handle.pid !== 0) {
-      connectedOnce = false;
-      try { rmSync(AGENT_BROWSER_SOCKET, { force: true }); } catch { /* best effort */ }
-    }
+    if (handle.pid !== 0) resetScrapeBackend();
   } catch (err) {
     return { ok: false, status: "cdp_unavailable", error: err instanceof Error ? err.message : String(err) };
   }
   // Connect agent-browser to the CDP port. Idempotent once the socket exists.
   if (!connectedOnce) {
     try {
-      await execFileAsync(AGENT_BROWSER_BIN, ["connect", String(CDP_PORT)], AGENT_BROWSER_CONNECT_TIMEOUT);
+      await execFileAsync(AGENT_BROWSER_BIN, ["connect", String(CDP_PORT)], AGENT_BROWSER_CONNECT_TIMEOUT, signal);
       connectedOnce = true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -305,6 +302,31 @@ async function ensureBackendReady(): Promise<{ ok: true } | { ok: false; status:
     }
   }
   return { ok: true };
+}
+
+/** Drop the persisted socket and force the next ensure to re-handshake. */
+export function resetScrapeBackend(): void {
+  connectedOnce = false;
+  try { rmSync(AGENT_BROWSER_SOCKET, { force: true }); } catch { /* best effort */ }
+}
+
+/**
+ * Shared entry for jobs that drive agent-browser directly (delta-upgrade-watch):
+ * ensureCDP + stale-socket clear + connect, with ONE bounded reconnect on failure.
+ * Callers must NOT probe /json/list themselves — ensureCDP owns target readiness
+ * and throws when it cannot heal, so a second job-level probe only drifts.
+ */
+export async function connectScrapeBackend(signal?: AbortSignal): Promise<void> {
+  let ready = await ensureBackendReady(signal);
+  if (!ready.ok) {
+    // Don't spend a second bounded connect on a job that is already cancelled —
+    // that reconnect can eat the scheduler's settle grace and make the run look
+    // unsettled, which suppresses takeover.
+    if (signal?.aborted) throw new Error(`agent-browser connect aborted (${ready.status}): ${ready.error}`);
+    resetScrapeBackend();
+    ready = await ensureBackendReady(signal);
+  }
+  if (!ready.ok) throw new Error(`agent-browser backend unavailable (${ready.status}): ${ready.error}`);
 }
 
 export async function isScrapeBackendHealthy(): Promise<boolean> {
