@@ -2,7 +2,8 @@
  * Daily Delta Premium Select → Delta One upgrade offer watch.
  *
  * Scrapes logged-in My Trips (CDP Chrome :9222) for PNR GBEMBL (SEA→ICN),
- * appends history, writes latest.json + brief-snippet.html for morning-brief,
+ * appends history, writes latest.json + offers-by-date.json for morning-brief
+ * (JSON-only; no brief-snippet.html),
  * and surfaces a Telegram decision_request when cash ≤ alert threshold or
  * drops ≥ dropPctVs7dMedian vs 7-day median.
  *
@@ -30,8 +31,9 @@ const WATCH_DIR = join(PATHS.homerData, "watches", "delta-upgrade");
 const CONFIG_PATH = join(WATCH_DIR, "config.json");
 const HISTORY_PATH = join(WATCH_DIR, "history.jsonl");
 const LATEST_PATH = join(WATCH_DIR, "latest.json");
-const BRIEF_SNIPPET_PATH = join(WATCH_DIR, "brief-snippet.html");
+const OFFERS_BY_DATE_PATH = join(WATCH_DIR, "offers-by-date.json");
 const FAIL_STREAK_PATH = join(WATCH_DIR, "fail-streak.json");
+const OFFER_TZ = "America/Los_Angeles";
 
 export interface DeltaUpgradeWatchResult {
   success: boolean;
@@ -66,6 +68,34 @@ interface OfferSnapshot {
   raw: string | null;
   loginOk: boolean;
   error?: string;
+}
+
+/** One scrape sample nested under YYYY-MM-DD (America/Los_Angeles). */
+interface OfferByTimeEntry {
+  time: string;
+  ts: string;
+  source: string;
+  cabin: string | null;
+  cashUsdPerPax: number | null;
+  milesPerPax: number | null;
+  available: boolean;
+  raw: string | null;
+  loginOk: boolean;
+  error?: string;
+}
+
+interface OffersByDateFile {
+  meta: {
+    pnr: string;
+    route: string;
+    flightDate: string;
+    flight: string;
+    passengers: number;
+    alertCashUsd: number | null;
+    tz: string;
+    updatedAt: string;
+  };
+  byDate: Record<string, OfferByTimeEntry[]>;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -190,47 +220,134 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function writeBriefSnippet(offer: OfferSnapshot, cfg: WatchConfig, prev: OfferSnapshot | null): void {
-  // On scrape failure, keep the last good snippet so morning-brief still has a price
-  // (skill only includes the section when mtime < 24h).
-  if (!offer.available || offer.cashUsdPerPax == null) {
-    if (existsSync(BRIEF_SNIPPET_PATH) && prev?.available && prev.cashUsdPerPax != null) {
-      logger.warn(
-        { err: offer.error ?? "offer_unavailable" },
-        "delta-upgrade-watch scrape failed — preserving prior brief-snippet",
-      );
-      return;
+function ptDateAndTime(iso: string): { date: string; time: string } {
+  const d = new Date(iso);
+  const date = new Intl.DateTimeFormat("en-CA", {
+    timeZone: OFFER_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+  const time = new Intl.DateTimeFormat("en-GB", {
+    timeZone: OFFER_TZ,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(d);
+  return { date, time };
+}
+
+function offerToByTimeEntry(offer: OfferSnapshot): OfferByTimeEntry {
+  const { time } = ptDateAndTime(offer.ts);
+  const entry: OfferByTimeEntry = {
+    time,
+    ts: offer.ts,
+    source: offer.source,
+    cabin: offer.cabin,
+    cashUsdPerPax: offer.cashUsdPerPax,
+    milesPerPax: offer.milesPerPax,
+    available: offer.available,
+    raw: offer.raw,
+    loginOk: offer.loginOk,
+  };
+  if (offer.error) entry.error = offer.error;
+  return entry;
+}
+
+function readOffersByDate(cfg: WatchConfig): OffersByDateFile {
+  if (existsSync(OFFERS_BY_DATE_PATH)) {
+    try {
+      const parsed = JSON.parse(readFileSync(OFFERS_BY_DATE_PATH, "utf8")) as OffersByDateFile;
+      if (parsed && typeof parsed === "object" && parsed.byDate) {
+        return {
+          meta: {
+            pnr: cfg.pnr,
+            route: cfg.route,
+            flightDate: cfg.flightDate,
+            flight: cfg.flight,
+            passengers: cfg.passengers,
+            alertCashUsd: cfg.alertCashUsd,
+            tz: OFFER_TZ,
+            updatedAt: parsed.meta?.updatedAt ?? new Date().toISOString(),
+          },
+          byDate: parsed.byDate ?? {},
+        };
+      }
+    } catch {
+      // fall through to empty
     }
-    writeFileSync(
-      BRIEF_SNIPPET_PATH,
-      `<b>✈️ Delta D1 升舱</b>\n━━━━━━━━━━━━\n${escapeHtml(cfg.pnr)} ${escapeHtml(cfg.route)}：今日无升舱报价或抓取失败\n`,
-      "utf8",
-    );
-    return;
   }
-  const deltaCash =
-    prev?.cashUsdPerPax != null ? offer.cashUsdPerPax - prev.cashUsdPerPax : null;
-  const deltaMiles =
-    prev?.milesPerPax != null && offer.milesPerPax != null
-      ? offer.milesPerPax - prev.milesPerPax
-      : null;
-  const cashNote =
-    deltaCash == null ? "" : deltaCash === 0 ? "（较昨日持平）" : `（较昨日 ${deltaCash > 0 ? "+" : ""}$${deltaCash}）`;
-  const milesNote =
-    deltaMiles == null || deltaMiles === 0
-      ? ""
-      : ` / miles ${deltaMiles > 0 ? "+" : ""}${deltaMiles.toLocaleString("en-US")}`;
-  const body =
-    `${escapeHtml(cfg.pnr)} ${escapeHtml(cfg.route)} ${escapeHtml(cfg.flightDate)} ${escapeHtml(cfg.flight)}\n` +
-    `Premium Select → Delta One：<b>$${offer.cashUsdPerPax.toLocaleString("en-US")}</b> 或 ` +
-    `${(offer.milesPerPax ?? 0).toLocaleString("en-US")} miles / 人` +
-    `${cashNote}${milesNote}\n` +
-    `（${cfg.passengers} 人；阈值 $${cfg.alertCashUsd ?? "—"}）\n`;
-  writeFileSync(
-    BRIEF_SNIPPET_PATH,
-    `<b>✈️ Delta D1 升舱</b>\n━━━━━━━━━━━━\n${body}`,
-    "utf8",
-  );
+  return {
+    meta: {
+      pnr: cfg.pnr,
+      route: cfg.route,
+      flightDate: cfg.flightDate,
+      flight: cfg.flight,
+      passengers: cfg.passengers,
+      alertCashUsd: cfg.alertCashUsd,
+      tz: OFFER_TZ,
+      updatedAt: new Date().toISOString(),
+    },
+    byDate: {},
+  };
+}
+
+/** Upsert one scrape into byDate[YYYY-MM-DD] keyed by PT calendar date + time. */
+function writeOffersByDate(offer: OfferSnapshot, cfg: WatchConfig): void {
+  const store = readOffersByDate(cfg);
+  const { date } = ptDateAndTime(offer.ts);
+  const entry = offerToByTimeEntry(offer);
+  const day = store.byDate[date] ?? [];
+  const existingIdx = day.findIndex((e) => e.ts === entry.ts);
+  if (existingIdx >= 0) day[existingIdx] = entry;
+  else day.push(entry);
+  day.sort((a, b) => a.ts.localeCompare(b.ts));
+  store.byDate[date] = day;
+  store.meta = {
+    pnr: cfg.pnr,
+    route: cfg.route,
+    flightDate: cfg.flightDate,
+    flight: cfg.flight,
+    passengers: cfg.passengers,
+    alertCashUsd: cfg.alertCashUsd,
+    tz: OFFER_TZ,
+    updatedAt: new Date().toISOString(),
+  };
+  writeFileSync(OFFERS_BY_DATE_PATH, JSON.stringify(store, null, 2) + "\n", "utf8");
+}
+
+/**
+ * Rebuild offers-by-date.json from history.jsonl (idempotent). Used on first
+ * introduce and safe to re-run after manual history edits.
+ */
+export function rebuildOffersByDateFromHistory(cfg?: WatchConfig): OffersByDateFile {
+  const config = cfg ?? loadConfig();
+  const history = readHistory();
+  const store: OffersByDateFile = {
+    meta: {
+      pnr: config.pnr,
+      route: config.route,
+      flightDate: config.flightDate,
+      flight: config.flight,
+      passengers: config.passengers,
+      alertCashUsd: config.alertCashUsd,
+      tz: OFFER_TZ,
+      updatedAt: new Date().toISOString(),
+    },
+    byDate: {},
+  };
+  for (const offer of history) {
+    const { date } = ptDateAndTime(offer.ts);
+    const entry = offerToByTimeEntry(offer);
+    const day = store.byDate[date] ?? [];
+    if (!day.some((e) => e.ts === entry.ts)) day.push(entry);
+    day.sort((a, b) => a.ts.localeCompare(b.ts));
+    store.byDate[date] = day;
+  }
+  mkdirSync(WATCH_DIR, { recursive: true });
+  writeFileSync(OFFERS_BY_DATE_PATH, JSON.stringify(store, null, 2) + "\n", "utf8");
+  return store;
 }
 
 function setFailStreak(n: number): void {
@@ -532,7 +649,6 @@ async function runDeltaUpgradeWatchInner(): Promise<DeltaUpgradeWatchResult> {
   mkdirSync(WATCH_DIR, { recursive: true });
   const cfg = loadConfig();
   const history = readHistory();
-  const prev = [...history].reverse().find((h) => h.available && h.cashUsdPerPax != null) ?? null;
 
   let offer: OfferSnapshot;
   try {
@@ -559,7 +675,7 @@ async function runDeltaUpgradeWatchInner(): Promise<DeltaUpgradeWatchResult> {
 
   appendFileSync(HISTORY_PATH, JSON.stringify(offer) + "\n", "utf8");
   writeFileSync(LATEST_PATH, JSON.stringify(offer, null, 2), "utf8");
-  writeBriefSnippet(offer, cfg, prev);
+  writeOffersByDate(offer, cfg);
 
   if (!offer.available || offer.cashUsdPerPax == null) {
     const streak = getFailStreak() + 1;
