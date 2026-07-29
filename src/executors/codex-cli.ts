@@ -21,6 +21,8 @@ function resolveCodexModelVariant(
     case "gpt-5.6-sol-medium":
     case "gpt-5.5-medium":
       return { model: CODEX_CLI_MODEL, reasoningEffort: "medium" };
+    case "gpt-5.6-sol-low":
+      return { model: CODEX_CLI_MODEL, reasoningEffort: "low" };
     case "gpt-5.6-sol-xhigh":
     case "gpt-5.5-xhigh":
       return { model: CODEX_CLI_MODEL, reasoningEffort: "xhigh" };
