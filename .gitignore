@@ -72,8 +72,9 @@ backups/
 *.sqlite
 *.sqlite3
 
-# Binary blobs (use codesign-node.sh to regenerate locally)
+# Binary blobs (use scripts/update-node-runtime.sh to install locally)
 bin/node
+bin/node.prev
 
 # OS files
 .DS_Store

@@ -39,7 +39,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "rm -rf dist && npx tsc && mkdir -p dist/state/migrations dist/executors/scrape-scripts && cp src/state/migrations/*.sql dist/state/migrations/ && cp src/executors/scrape-scripts/*.js dist/executors/scrape-scripts/ && node scripts/write-build-version.mjs",
+    "build": "export PATH=\"$PWD/bin:$PATH\"; rm -rf dist && npx tsc && mkdir -p dist/state/migrations dist/executors/scrape-scripts && cp src/state/migrations/*.sql dist/state/migrations/ && cp src/executors/scrape-scripts/*.js dist/executors/scrape-scripts/ && node scripts/write-build-version.mjs",
     "skills:render": "tsx scripts/render-harness-assets.ts render",
     "skills:check": "tsx scripts/render-harness-assets.ts check",
     "skills:install": "tsx scripts/render-harness-assets.ts render --install",
@@ -61,11 +61,13 @@
     "app:service:unregister": "bash scripts/manage-app-service.sh unregister",
     "heartbeat:install": "bash scripts/install-heartbeat.sh",
     "supervisor:install": "bash scripts/install-daemon.sh",
+    "runtime:update": "bash scripts/update-node-runtime.sh",
+    "runtime:check": "bash scripts/update-node-runtime.sh --check",
     "supervisor:test": "node scripts/test-daemon-supervisor.mjs",
     "restart": "bash scripts/request-daemon-restart.sh manual-restart --now",
     "restart:force": "bash scripts/request-daemon-restart.sh manual-force-restart --force",
     "restart:force-stale": "bash scripts/request-daemon-restart.sh manual-force-stale-restart --force --force-stale",
-    "deploy": "npm run build && node scripts/smoke-test.mjs && npm run supervisor:test && npm run restart && node scripts/wait-runtime-build.mjs"
+    "deploy": "export PATH=\"$PWD/bin:$PATH\"; npm run runtime:check && npm run build && ./bin/node scripts/smoke-test.mjs && ./bin/node scripts/test-daemon-supervisor.mjs && npm run restart && ./bin/node scripts/wait-runtime-build.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",

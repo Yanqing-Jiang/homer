@@ -7,9 +7,9 @@
  * and surfaces a Telegram decision_request when cash ≤ alert threshold or
  * drops ≥ dropPctVs7dMedian vs 7-day median.
  *
- * If the Delta session expired, re-logins via Chrome autofill (username +
- * password already saved in the CDP profile) — never stores credentials in code.
- * Never clicks UPGRADE / purchases.
+ * If the Delta session expired, re-logins via Chrome saved credentials
+ * (autofill first; Keychain decrypt of primary Login Data as fallback).
+ * Never persists credentials to Homer files. Never clicks UPGRADE / purchases.
  */
 
 import { execFile } from "child_process";
@@ -23,6 +23,7 @@ import {
 import { join } from "path";
 import { PATHS } from "../../config/paths.js";
 import { withScrapeLock, connectScrapeBackend, resetScrapeBackend } from "../../executors/agent-browser-scrape.js";
+import { getChromeSavedLogin } from "../../scraping/chrome-login-data.js";
 import { logger } from "../../utils/logger.js";
 import type { NotificationIntent } from "../../notifications/types.js";
 
@@ -396,27 +397,34 @@ const EXTRACT_OFFER_JS = `(() => {
 })()`;
 
 /**
- * Re-establish Delta session using Chrome saved credentials (username + password
- * autofill in the CDP profile). Never reads/stores the password in code — focuses
- * the password field to trigger autofill, then clicks Log In.
+ * Re-establish Delta session using Chrome saved credentials.
+ * 1) Try profile autofill (click password field).
+ * 2) If passLen stays 0, decrypt the www.delta.com row from primary Chrome
+ *    Login Data via Keychain "Chrome Safe Storage" and fill via agent-browser.
+ * Never persists the password to disk/logs.
  */
 async function ensureDeltaLogin(returnUrl: string): Promise<boolean> {
   const loginUrl =
     `https://www.delta.com/login/loginPage?returnUrl=${encodeURIComponent(returnUrl)}`;
-  logger.info("delta-upgrade-watch attempting autofill re-login");
+  logger.info("delta-upgrade-watch attempting saved-credential re-login");
   await execAb(["open", loginUrl], 60_000);
 
-  // Wait for username prefill, then focus password to trigger Chrome autofill.
   let filled = false;
-  for (let attempt = 0; attempt < 8; attempt++) {
+  let loginRef: string | undefined;
+  let usedDecryptFill = false;
+
+  // Wait for username prefill, then focus password to trigger Chrome autofill.
+  for (let attempt = 0; attempt < 6; attempt++) {
     await sleep(attempt === 0 ? 2500 : 1500);
     const snap = await execAb(["snapshot"], 30_000);
-    if (!/Log In To Delta|SkyMiles Number or Username/i.test(snap)) {
+    if (!/Log In To Delta|SkyMiles Number or Username|password/i.test(snap) &&
+        /Yanqing|Log Out|Sign Out|MILES AVAILABLE/i.test(snap)) {
       // Already redirected / logged in
-      break;
+      logger.info("delta-upgrade-watch already logged in after open");
+      return true;
     }
     const passRef = snap.match(/textbox "Password" \[ref=(e\d+)\]/i)?.[1];
-    const loginRef = snap.match(/button "Log In" \[ref=(e\d+)\]/i)?.[1];
+    loginRef = snap.match(/button "Log In" \[ref=(e\d+)\]/i)?.[1];
     if (passRef) {
       await execAb(["click", `@${passRef}`], 15_000);
       await sleep(800);
@@ -425,8 +433,8 @@ async function ensureDeltaLogin(returnUrl: string): Promise<boolean> {
       [
         "eval",
         `(() => {
-          const user = document.querySelector('input:not([type=password]):not([type=hidden]):not([type=checkbox])');
-          const pass = document.querySelector('input[type=password]');
+          const user = document.querySelector('#userId-input, input:not([type=password]):not([type=hidden]):not([type=checkbox])');
+          const pass = document.querySelector('#password-input, input[type=password]');
           return {
             userLen: (user && user.value || '').length,
             passLen: (pass && pass.value || '').length,
@@ -442,10 +450,62 @@ async function ensureDeltaLogin(returnUrl: string): Promise<boolean> {
       filled = true;
       break;
     }
+
+    // After a couple autofill misses, decrypt+fill from Chrome Login Data once.
+    if (!usedDecryptFill && attempt >= 1 && (probe?.passLen ?? 0) < 4) {
+      const saved = getChromeSavedLogin("www.delta.com");
+      if (!saved) {
+        logger.warn("delta-upgrade-watch saved-credential decrypt unavailable");
+      } else {
+        usedDecryptFill = true;
+        logger.info(
+          { userLen: saved.username.length, origin: saved.originUrl },
+          "delta-upgrade-watch filling password from Chrome Login Data",
+        );
+        // Ensure username is present (remember-me usually is; fill if not).
+        if ((probe?.userLen ?? 0) < 4) {
+          await execAb(["fill", "#userId-input", saved.username], 15_000);
+        }
+        await execAb(["fill", "#password-input", saved.password], 15_000);
+        // Drop plaintext from this closure ASAP (best-effort; GC).
+        (saved as { password: string }).password = "";
+        const verifyRaw = await execAb(
+          [
+            "eval",
+            `(() => {
+              const user = document.querySelector('#userId-input, input:not([type=password]):not([type=hidden]):not([type=checkbox])');
+              const pass = document.querySelector('#password-input, input[type=password]');
+              return {
+                userLen: (user && user.value || '').length,
+                passLen: (pass && pass.value || '').length,
+              };
+            })()`,
+          ],
+          15_000,
+        );
+        const verify = parseAgentJson(verifyRaw) as { userLen?: number; passLen?: number } | null;
+        if ((verify?.userLen ?? 0) >= 4 && (verify?.passLen ?? 0) >= 4) {
+          if (!loginRef) {
+            const snap2 = await execAb(["snapshot"], 30_000);
+            loginRef = snap2.match(/button "Log In" \[ref=(e\d+)\]/i)?.[1];
+          }
+          if (loginRef) {
+            await execAb(["click", `@${loginRef}`], 30_000);
+            filled = true;
+            break;
+          }
+        } else {
+          logger.warn(
+            { userLen: verify?.userLen ?? 0, passLen: verify?.passLen ?? 0 },
+            "delta-upgrade-watch decrypt-fill did not stick in DOM",
+          );
+        }
+      }
+    }
   }
 
   if (!filled) {
-    logger.warn("delta-upgrade-watch autofill re-login: credentials not prefilled");
+    logger.warn("delta-upgrade-watch saved-credential re-login: credentials not filled");
     return false;
   }
 
@@ -466,11 +526,14 @@ async function ensureDeltaLogin(returnUrl: string): Promise<boolean> {
         await execAb(["open", returnUrl], 60_000);
         await sleep(3000);
       }
-      logger.info("delta-upgrade-watch autofill re-login ok");
+      logger.info(
+        { via: usedDecryptFill ? "login-data-decrypt" : "autofill" },
+        "delta-upgrade-watch saved-credential re-login ok",
+      );
       return true;
     }
   }
-  logger.warn("delta-upgrade-watch autofill re-login did not reach logged-in state");
+  logger.warn("delta-upgrade-watch saved-credential re-login did not reach logged-in state");
   return false;
 }
 

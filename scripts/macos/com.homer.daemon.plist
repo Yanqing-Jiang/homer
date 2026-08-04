@@ -7,9 +7,9 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/yj/homer/bin/node</string>
     <string>/Users/yj/homer/scripts/daemon-supervisor.mjs</string>
-    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/yj/homer/bin/node</string>
     <string>/Users/yj/homer/dist/index.js</string>
   </array>
 

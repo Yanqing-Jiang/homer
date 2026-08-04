@@ -542,6 +542,13 @@ experience:
         added_via: fit-analysis
         added_date: "2026-06-16"
         parent_bullet: pg-walgreens-forecasting
+      - id: pg-walgreens-instacart-ubereats
+        claim: "Partnered weekly with Instacart and Uber Eats consumer teams on P&G's Walgreens digital commerce business — P&G being Instacart's largest CPG revenue partner — collaborating with their UX/design teams on shopper-facing experiences such as combo purchases and interest-based product discovery."
+        metrics: ["weekly partner connects", "P&G = Instacart's largest CPG revenue partner"]
+        skills: [consumer UX collaboration, marketplace partnerships, Instacart, Uber Eats, digital commerce, product discovery, basket building, cross-company collaboration]
+        added_via: fit-analysis
+        added_date: "2026-08-03"
+        parent_bullet: pg-walgreens-digital-transformation
 
   - employer: Archer Daniels Midland
     role: Data Analytics Engineer
