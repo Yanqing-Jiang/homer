@@ -98,7 +98,7 @@ const SCHEDULED_INLINE_ONLY: JobEntry[] = [
  * Jobs dispatched via external CLI (no internal handler needed).
  */
 const SCHEDULED_CLI_JOBS: JobEntry[] = [
-  { id: "delta-upgrade-watch", name: "Delta D1 Upgrade Watch", kind: "cli", handler: "codex", handlerFile: "delta-upgrade-watch", expectedInSchedule: true, note: "4:05 AM PT CLI skill before morning-brief; module at jobs/delta-upgrade-watch.ts still used by the skill preferred path" },
+  { id: "delta-upgrade-watch", name: "Delta D1 Upgrade Watch", kind: "cli", handler: "opencode", handlerFile: "delta-upgrade-watch", expectedInSchedule: true, note: "4:05 AM PT CLI skill before morning-brief; module at jobs/delta-upgrade-watch.ts still used by the skill preferred path; harness pin opencode/cursor/grok-4.5-xhigh" },
   { id: "morning-brief", name: "Morning Brief", kind: "cli", handler: "codex", expectedInSchedule: true },
   { id: "morning-reads", name: "Morning Reads", kind: "cli", handler: "codex", expectedInSchedule: true },
   { id: "home-cleanup", name: "Home Cleanup", kind: "cli", handler: "opencode", expectedInSchedule: true },
