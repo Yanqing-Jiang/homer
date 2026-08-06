@@ -374,7 +374,8 @@ const EXTRACT_OFFER_JS = `(() => {
   let miles = null;
   let raw = null;
   const normalized = text.replace(/\\u00a0/g, " ").replace(/[\\u2000-\\u200b\\u202f\\ufeff]/g, " ");
-  const m = normalized.match(/\\$([\\d,]+(?:\\.\\d{2})?)\\s*USD\\s*or\\s*([\\d,]+)\\s*Miles/i);
+  // Delta sometimes renders the cash amount without a leading "$".
+  const m = normalized.match(/\\$?([\\d,]+(?:\\.\\d{2})?)\\s*USD\\s*or\\s*([\\d,]+)\\s*Miles/i);
   if (m) {
     cash = parseFloat(m[1].replace(/,/g, ""));
     miles = parseInt(m[2].replace(/,/g, ""), 10);
@@ -668,7 +669,11 @@ async function scrapeOffer(cfg: WatchConfig): Promise<OfferSnapshot> {
     cabin: detail.cabin ?? null,
     available: false,
     loginOk: true,
-    error: detail.hasPnr ? "upgrade_banner_missing" : "wrong_trip_details",
+    error: !detail.hasPnr
+      ? "wrong_trip_details"
+      : detail.hasBanner
+        ? "upgrade_price_missing"
+        : "upgrade_banner_missing",
   };
 }
 
