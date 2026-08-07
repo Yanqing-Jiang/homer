@@ -404,6 +404,23 @@ const EXTRACT_OFFER_JS = `(() => {
  *    Login Data via Keychain "Chrome Safe Storage" and fill via agent-browser.
  * Never persists the password to disk/logs.
  */
+async function submitDeltaLoginForm(): Promise<void> {
+  const raw = await execAb(
+    [
+      "eval",
+      `(() => {
+        const form = document.querySelector('form.login-screen__form, form');
+        if (!(form instanceof HTMLFormElement)) return { submitted: false };
+        form.requestSubmit();
+        return { submitted: true };
+      })()`,
+    ],
+    30_000,
+  );
+  const result = parseAgentJson(raw) as { submitted?: boolean } | null;
+  if (!result?.submitted) throw new Error("delta_login_form_missing");
+}
+
 async function ensureDeltaLogin(returnUrl: string): Promise<boolean> {
   const loginUrl =
     `https://www.delta.com/login/loginPage?returnUrl=${encodeURIComponent(returnUrl)}`;
@@ -447,7 +464,7 @@ async function ensureDeltaLogin(returnUrl: string): Promise<boolean> {
     );
     const probe = parseAgentJson(probeRaw) as { userLen?: number; passLen?: number } | null;
     if ((probe?.userLen ?? 0) >= 4 && (probe?.passLen ?? 0) >= 4 && loginRef) {
-      await execAb(["click", `@${loginRef}`], 30_000);
+      await submitDeltaLoginForm();
       filled = true;
       break;
     }
@@ -491,7 +508,7 @@ async function ensureDeltaLogin(returnUrl: string): Promise<boolean> {
             loginRef = snap2.match(/button "Log In" \[ref=(e\d+)\]/i)?.[1];
           }
           if (loginRef) {
-            await execAb(["click", `@${loginRef}`], 30_000);
+            await submitDeltaLoginForm();
             filled = true;
             break;
           }
