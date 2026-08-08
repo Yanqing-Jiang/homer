@@ -159,7 +159,7 @@ Operational claims (fact / decision / question / insight / commitment / lesson /
 
 Registered against Claude Code over stdio:
 
-- `memory_context`, `memory_read`, `memory_search`, `memory_promote`, `memory_remove`, `memory_suggest`
+- `memory_context`, `memory_search` (ranked recall, plus `mode='fetch'` for a whole-document read of a canonical doc — me/work/preferences/tools/patterns — or `file='daily'`), `memory_promote`, `memory_remove`, `memory_suggest`
 - `todo_save`, `todo_list`, `todo_start_chat`
 - `blob_upload`, `blob_download`, `blob_list`, `blob_get_content`, `blob_properties`
 - `call_person`, `outcome_check`, `preference_query`, `thread_load`, `session_archive`

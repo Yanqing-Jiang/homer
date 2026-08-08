@@ -209,7 +209,7 @@ const RETRYABLE_HANDLERS = new Set([
   "weekly_consolidation",
   "content_scraper", "outcome_tracker",
   "preference_updater", "nightly_code_push", "db_backup",
-  "link_processor", "archive_verify", "health_check",
+  "link_processor", "archive_verify", "health_check", "document_ingest",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
   "docker_restart",
   "delta_upgrade_watch",
@@ -752,6 +752,11 @@ async function runHandler(
           result.error,
           result.success ? { notificationIntent: "operational_status" } : {}
         );
+      }
+      case "document_ingest": {
+        const { runDocumentIngestJob } = await import("./jobs/document-ingest.js");
+        const result = await runDocumentIngestJob(ctx.stateManager);
+        return buildResult(job, startedAt, result.success, result.output, result.error);
       }
       case "telegram_registry_cleanup": {
         const { runTelegramRegistryCleanup } = await import("./jobs/telegram-registry-cleanup.js");

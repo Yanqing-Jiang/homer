@@ -6,7 +6,10 @@ declare namespace Database {
   interface Database {
     prepare<T = any>(sql: string): Statement<T>;
     exec(sql: string): this;
-    transaction<T extends (...args: any[]) => any>(fn: T): T;
+    // The returned wrapper is callable (BEGIN DEFERRED) and also carries the
+    // explicit locking modes — `.immediate()` takes the write lock at BEGIN,
+    // which is what a cross-process read-modify-write needs.
+    transaction<T extends (...args: any[]) => any>(fn: T): T & { default: T; deferred: T; immediate: T; exclusive: T };
     pragma(pragma: string, options?: { simple?: boolean }): any;
     close(): void;
     backup(destinationFile: string, options?: any): Promise<any>;

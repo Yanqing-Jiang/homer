@@ -62,6 +62,7 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
   { id: "archive-verify", name: "Archive Verify", kind: "internal", handler: "archive_verify", handlerFile: "archive-verify", expectedInSchedule: true },
   { id: "content-scraper", name: "Content Scraper", kind: "internal", handler: "content_scraper", handlerFile: "content-scraper", expectedInSchedule: true },
   { id: "db-backup", name: "DB Backup", kind: "internal", handler: "db_backup", handlerFile: "db-backup", expectedInSchedule: true },
+  { id: "document-ingest", name: "Document Ingest", kind: "internal", handler: "document_ingest", handlerFile: "document-ingest", expectedInSchedule: true, note: "every 15 min; also called inline at the start of link-processor" },
   { id: "ideas-explore", name: "Ideas Explore", kind: "internal", handler: "ideas_explore", handlerFile: "ideas-explore", expectedInSchedule: true },
   { id: "link-processor", name: "Link Processor", kind: "internal", handler: "link_processor", handlerFile: "link-processor", expectedInSchedule: true },
   { id: "memory-embeddings", name: "Memory Embeddings", kind: "internal", handler: "memory_embeddings", handlerFile: "memory-embeddings", expectedInSchedule: true, note: "event-triggered; cron is safety net" },
@@ -112,7 +113,6 @@ const UNSCHEDULED_HANDLER_FILES: JobEntry[] = [
   { id: "architecture-updater", name: "Architecture Updater", kind: "event", handler: "architecture_updater", handlerFile: "architecture-updater", expectedInSchedule: false, note: "event-triggered by commits/diffs" },
   { id: "preference-updater", name: "Preference Updater", kind: "event", handler: "preference_updater", handlerFile: "preference-updater", expectedInSchedule: false, note: "event-triggered from nightly-memory" },
   { id: "artifact-store", name: "Artifact Store (helper)", kind: "helper", handlerFile: "artifact-store", expectedInSchedule: false, note: "helper module, NOT a job — retire from portfolio vocabulary in Phase 4" },
-  { id: "upload-email-ingest", name: "Upload Email Ingest (helper)", kind: "helper", handlerFile: "upload-email-ingest", expectedInSchedule: false, note: "helper module, NOT a job — called by link-processor" },
 ];
 
 export const JOB_REGISTRY: readonly JobEntry[] = Object.freeze([
