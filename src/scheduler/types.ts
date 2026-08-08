@@ -24,7 +24,7 @@ export interface ScheduledJobConfig {
   timeout?: number; // ms, defaults to 600000 (10 min)
   model?: string; // e.g. "sonnet", "haiku", "opus" - defaults to sonnet
   executor?: "claude" | "codex" | "kimi" | "gemini" | "opencode" | "internal"; // defaults to claude; opencode = GLM-5.2 edit harness; internal for daemon handlers
-  handler?: "bookmark_ingest" | "session_harvester" | "memory_embeddings" | "memory_reindex" | "weekly_consolidation" | "ideas_explore" | "nightly_memory" | "morning_review" | "nightly_code_push" | "db_backup" | "outcome_tracker" | "preference_updater" | "content_scraper" | "archive_verify" | "health_check" | "architecture_updater" | "daemon_cleanup" | "session_maintenance" | "reminder_check" | "link_processor" | "telegram_registry_cleanup" | "docker_restart" | "abvp_refresh" | "delta_upgrade_watch";
+  handler?: "bookmark_ingest" | "session_harvester" | "memory_embeddings" | "memory_reindex" | "weekly_consolidation" | "ideas_explore" | "nightly_memory" | "morning_review" | "nightly_code_push" | "db_backup" | "document_ingest" | "outcome_tracker" | "preference_updater" | "content_scraper" | "archive_verify" | "health_check" | "architecture_updater" | "daemon_cleanup" | "session_maintenance" | "reminder_check" | "link_processor" | "telegram_registry_cleanup" | "docker_restart" | "abvp_refresh" | "delta_upgrade_watch";
   contextFiles?: string[]; // files to load and inject as system prompt context
   streamProgress?: boolean; // stream tool usage to Telegram (default: false)
   notifyOnSuccess?: boolean; // defaults to true

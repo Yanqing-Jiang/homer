@@ -2502,13 +2502,15 @@ export class StateManager {
     checksum: string;
     integrityCheck: string;
     retentionTier: string;
+    /** Outcome of the offsite (encrypted Azure) leg; null when not attempted. */
+    offsiteStatus?: string;
   }): number {
     const result = this._db.prepare(
-      `INSERT INTO backup_runs (backup_type, backup_path, db_size_bytes, backup_size_bytes, checksum, integrity_check, retention_tier)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO backup_runs (backup_type, backup_path, db_size_bytes, backup_size_bytes, checksum, integrity_check, retention_tier, offsite_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       run.backupType, run.backupPath, run.dbSizeBytes, run.backupSizeBytes,
-      run.checksum, run.integrityCheck, run.retentionTier
+      run.checksum, run.integrityCheck, run.retentionTier, run.offsiteStatus ?? null
     );
     return result.lastInsertRowid as number;
   }
@@ -2518,7 +2520,8 @@ export class StateManager {
       `SELECT id, backup_type as backupType, backup_path as backupPath,
               db_size_bytes as dbSizeBytes, backup_size_bytes as backupSizeBytes,
               checksum, integrity_check as integrityCheck,
-              retention_tier as retentionTier, created_at as createdAt
+              retention_tier as retentionTier, offsite_status as offsiteStatus,
+              created_at as createdAt
        FROM backup_runs ORDER BY created_at DESC LIMIT ?`
     ).all(limit) as BackupRun[];
   }
@@ -3185,6 +3188,7 @@ export interface BackupRun {
   checksum: string;
   integrityCheck: string;
   retentionTier: string;
+  offsiteStatus: string | null;
   createdAt: string;
 }
 

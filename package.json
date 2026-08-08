@@ -52,6 +52,7 @@
     "tui": "tsx src/tui/index.ts",
     "mcp": "tsx src/mcp/index.ts",
     "typecheck": "npx tsc --noEmit",
+    "backup:drill": "tsx src/scripts/backup-restore-drill.ts",
     "migrate": "tsx scripts/run-migrations.ts",
     "migrate:plans": "tsx scripts/migrate-plans.ts",
     "memory:generate-bootstrap": "tsx src/memory/session-bootstrap.ts",

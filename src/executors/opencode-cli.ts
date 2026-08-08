@@ -157,6 +157,26 @@ function usesCursorProvider(model?: string): boolean {
 }
 
 /**
+ * opencode 1.18.10 dropped the effort-suffixed Cursor model IDs the harness pins
+ * still use (e.g. `cursor/grok-4.5-xhigh`); effort is now a separate `--variant`
+ * flag. Split a legacy suffixed ID into base model + variant so old pins keep
+ * working; non-Cursor and unsuffixed models pass through unchanged.
+ */
+function splitCursorVariantSuffix(model?: string): { model?: string; variant?: string } {
+  const m = model?.startsWith("cursor/")
+    ? model.match(/^(cursor\/.+)-(low|medium|high|xhigh|max)$/)
+    : null;
+  if (!m) return { model };
+  const [, base, suffix] = m as unknown as [string, string, string];
+  // Cursor grok models only expose low|medium|high; the plugin resolves unknown
+  // variants to the catalog default (medium), so clamp xhigh/max down to high.
+  const variant = base.startsWith("cursor/grok") && (suffix === "xhigh" || suffix === "max")
+    ? "high"
+    : suffix;
+  return { model: base, variant };
+}
+
+/**
  * Env for opencode children. Cursor stall knobs apply ONLY to Cursor-provider
  * runs (`cursor/*` or omit-`-m`). Non-Cursor models (opencode-go, google,
  * github-copilot, …) strip those vars so daemon/.zshrc values cannot affect
@@ -232,14 +252,15 @@ async function executeOpenCodeCLIOnce(
 
   // Normalize model name: callers may pass "gemini-3-flash-preview" without provider prefix.
   // When model is undefined, we omit -m entirely so opencode uses its own config default.
-  const model = rawModel
+  const prefixedModel = rawModel
     ? (rawModel.includes("/") ? rawModel : `google/${rawModel}`)
     : undefined;
+  const { model, variant: suffixVariant } = splitCursorVariantSuffix(prefixedModel);
 
   // DeepSeek V4 Pro is only worth its premium at max reasoning effort (it's our
   // high-quality synthesis model — see eval 2026-06-22), so default it to --variant max
   // unless a caller explicitly overrides. Other models keep their opencode default.
-  const effectiveVariant = variant ?? (model === "opencode-go/deepseek-v4-pro" ? "max" : undefined);
+  const effectiveVariant = variant ?? suffixVariant ?? (model === "opencode-go/deepseek-v4-pro" ? "max" : undefined);
 
   // opencode-go/* models (GLM, DeepSeek, MiniMax, …) are first-class Zen models and must
   // never be diverted to the legacy Gemini CLI — guards against "deepseek-v4-pro" matching
@@ -756,9 +777,10 @@ export async function* streamOpenCodeCLI(
   options: OpenCodeCLIOptions = {}
 ): AsyncGenerator<OpenCodeStreamEvent> {
   const {
-    model = `google-aistudio/${GEMINI_CLI_FLASH_MODEL}`,
+    model: rawModel = `google-aistudio/${GEMINI_CLI_FLASH_MODEL}`,
     cwd,
   } = options;
+  const { model, variant } = splitCursorVariantSuffix(rawModel);
   const runtimeHome = getRuntimePaths().homeDir;
 
   const fullMessage = context
@@ -768,7 +790,8 @@ export async function* streamOpenCodeCLI(
   const args: string[] = [
     "run",
     fullMessage,
-    "-m", model,
+    "-m", model!,
+    ...(variant ? ["--variant", variant] : []),
     "--format", "json",
   ];
 

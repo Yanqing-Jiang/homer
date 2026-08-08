@@ -49,12 +49,23 @@ export async function ensureContainer(): Promise<void> {
   }
 }
 
+/** Access tier for a block blob. Cool = infrequent access, cheaper at rest. */
+export type BlobAccessTier = 'Hot' | 'Cool' | 'Cold' | 'Archive';
+
+export interface UploadOptions {
+  /** Blob access tier. Omitted = container default (Hot). */
+  tier?: BlobAccessTier;
+  /** User metadata. Azure requires C#-identifier-safe keys (lowercase, no dashes). */
+  metadata?: Record<string, string>;
+}
+
 /**
  * Upload a file to Azure Blob Storage
  */
 export async function uploadBlob(
   localFilePath: string,
-  blobName?: string
+  blobName?: string,
+  options: UploadOptions = {}
 ): Promise<{ url: string; blobName: string }> {
   try {
     const client = initializeBlobClient();
@@ -74,10 +85,12 @@ export async function uploadBlob(
     // Detect content type from file extension
     const contentType = getContentType(expandedPath);
 
-    logger.info({ localFilePath: expandedPath, blobName: finalBlobName }, 'Uploading file to blob storage');
+    logger.info({ localFilePath: expandedPath, blobName: finalBlobName, tier: options.tier }, 'Uploading file to blob storage');
 
     await blockBlobClient.uploadFile(expandedPath, {
-      blobHTTPHeaders: { blobContentType: contentType }
+      blobHTTPHeaders: { blobContentType: contentType },
+      ...(options.tier ? { tier: options.tier } : {}),
+      ...(options.metadata ? { metadata: options.metadata } : {})
     });
 
     logger.info({ blobName: finalBlobName }, 'File uploaded successfully');
@@ -274,6 +287,7 @@ export async function getBlobProperties(blobName: string): Promise<{
   size: number;
   lastModified: Date;
   contentType?: string;
+  accessTier?: string;
   metadata?: Record<string, string>;
 }> {
   try {
@@ -286,6 +300,7 @@ export async function getBlobProperties(blobName: string): Promise<{
       size: properties.contentLength || 0,
       lastModified: properties.lastModified || new Date(),
       contentType: properties.contentType,
+      accessTier: properties.accessTier,
       metadata: properties.metadata
     };
   } catch (error) {
