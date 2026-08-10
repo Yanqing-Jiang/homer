@@ -198,22 +198,24 @@ function supervisorHarness(probe: ChromeSupervisorDeps["probe"] = async () => ({
   return { supervisor, timers, children, drains: () => drains };
 }
 
-test("resident supervisor restarts on unexpected child exit and increments generation", () => {
+test("resident supervisor restarts on unexpected child exit and increments generation", async () => {
   const { supervisor, timers, children } = supervisorHarness();
   supervisor.start();
   assert.equal(supervisor.generation, 1);
   children[0]!.emit("exit", 1, null);
+  await Promise.resolve(); await Promise.resolve();
   timers.run(2);
   assert.equal(children.length, 2);
   assert.equal(supervisor.generation, 2);
   supervisor.stop();
 });
 
-test("resident supervisor uses capped 2,5,15,30,60 restart backoff", () => {
+test("resident supervisor uses capped 2,5,15,30,60 restart backoff", async () => {
   const { supervisor, timers, children } = supervisorHarness();
   supervisor.start();
   for (const expected of [2, 5, 15, 30, 60, 60]) {
     children.at(-1)!.emit("exit", 1, null);
+    await Promise.resolve(); await Promise.resolve();
     timers.run(expected);
   }
   assert.equal(children.length, 7);
@@ -224,9 +226,11 @@ test("resident supervisor restarts after three consecutive failed heartbeats", a
   const { supervisor, timers, children } = supervisorHarness(async () => ({ state: "absent", pages: 0 }));
   supervisor.start();
   await supervisor.heartbeatNow();
+  await Promise.resolve(); await Promise.resolve();
   await supervisor.heartbeatNow();
   assert.equal(children[0]!.killed, false);
   await supervisor.heartbeatNow();
+  await Promise.resolve(); await Promise.resolve();
   assert.equal(children[0]!.killed, true);
   timers.run(2);
   assert.equal(children.length, 2);
@@ -246,13 +250,97 @@ test("maintenance drains leases and suppresses restart until disabled", async ()
   harness.supervisor.stop();
 });
 
-test("restart generation invalidates prior targets and leases", {
-  skip: "Step 3 implements the target registry and generation contract",
-}, () => {});
+type CliResult = { code: number; stdout: string; stderr: string };
+function runBrowserctl(socketPath: string, ...args: string[]): Promise<CliResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [join(process.cwd(), "bin/browserctl"), ...args], {
+      env: { ...process.env, HOMER_BROWSER_CONTROL_SOCKET: socketPath },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = ""; let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("exit", (code) => resolve({ code: code ?? 1, stdout: stdout.trim(), stderr: stderr.trim() }));
+  });
+}
 
-test("lease expiry releases same-surface exclusion", {
-  skip: "Step 3 implements expiring per-surface leases",
-}, () => {});
+async function startBroker(socketPath: string, generation: number) {
+  const child = spawn(join(process.cwd(), "node_modules/.bin/tsx"), ["tests/helpers/browser-broker-server.ts"], {
+    env: { ...process.env, HOMER_BROWSER_CONTROL_SOCKET: socketPath, BROKER_GENERATION: String(generation) },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("broker test server did not become ready")), 5_000);
+    child.once("error", reject);
+    child.stdout!.on("data", (chunk) => {
+      if (String(chunk).includes("READY")) { clearTimeout(timer); resolve(); }
+    });
+  });
+  return child;
+}
+
+async function stopBroker(child: ReturnType<typeof spawn>): Promise<void> {
+  child.kill("SIGTERM");
+  await new Promise((resolve) => child.once("exit", resolve));
+}
+
+test("cross-process leases exclude same surface, allow different surfaces, and recover after expiry", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "homer-broker-test-"));
+  const socketPath = join(dir, "control.sock");
+  const broker = await startBroker(socketPath, 41);
+  try {
+    for (const surface of ["amazon.vc", "amazon.amc"]) {
+      const result = await runBrowserctl(socketPath, "reconcile", surface, "https://example.test", "https://example.test/bootstrap");
+      assert.equal(result.code, 0, result.stderr);
+    }
+    const contenders = await Promise.all([
+      runBrowserctl(socketPath, "acquire", "amazon.vc", "process-one", "5"),
+      runBrowserctl(socketPath, "acquire", "amazon.vc", "process-two", "5"),
+    ]);
+    const vc1 = contenders.find((result) => result.code === 0)!;
+    const vc2 = contenders.find((result) => result.code === 1)!;
+    assert.ok(vc1);
+    assert.ok(vc2);
+    assert.match(vc2.stderr, /leased by process-(one|two)/);
+    const amc = await runBrowserctl(socketPath, "acquire", "amazon.amc", "process-three", "5");
+    assert.equal(amc.code, 0, amc.stderr);
+    assert.equal(JSON.parse(amc.stdout).generation, 41);
+    const lease = JSON.parse(vc1.stdout).leaseId as string;
+    assert.equal((await runBrowserctl(socketPath, "release", lease)).code, 0);
+
+    const short = await runBrowserctl(socketPath, "acquire", "amazon.vc", "crashed-process", "0.1");
+    assert.equal(short.code, 0, short.stderr);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const recovered = await runBrowserctl(socketPath, "acquire", "amazon.vc", "recovery-process", "5");
+    assert.equal(recovered.code, 0, recovered.stderr);
+    console.log("cross-process: same-surface=excluded different-surface=concurrent expired-lease=recovered");
+  } finally {
+    await stopBroker(broker);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("restart generation invalidates prior targets and leases across processes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "homer-generation-test-"));
+  const socketPath = join(dir, "control.sock");
+  let broker = await startBroker(socketPath, 7);
+  try {
+    assert.equal((await runBrowserctl(socketPath, "reconcile", "amazon.vc", "https://example.test", "https://example.test/")).code, 0);
+    const acquired = await runBrowserctl(socketPath, "acquire", "amazon.vc", "generation-seven", "30");
+    assert.equal(acquired.code, 0, acquired.stderr);
+    const old = JSON.parse(acquired.stdout);
+    await stopBroker(broker);
+    broker = await startBroker(socketPath, 8);
+    const renewed = await runBrowserctl(socketPath, "renew", old.leaseId, "30");
+    assert.equal(renewed.code, 1);
+    assert.match(renewed.stderr, /unknown or expired lease/);
+    console.log(`cross-process: generation=${old.generation}->8 old-lease=invalidated old-target=${old.targetId}`);
+  } finally {
+    await stopBroker(broker);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test("status publication uses sibling temp, fsync, and atomic rename", {
   skip: "Step 5 implements the status writer",
