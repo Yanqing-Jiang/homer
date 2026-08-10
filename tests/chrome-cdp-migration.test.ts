@@ -274,6 +274,20 @@ function runBrowserctl(socketPath: string, ...args: string[]): Promise<CliResult
   });
 }
 
+function runBrowserctlStatus(statusPath: string, ...args: string[]): Promise<CliResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [join(process.cwd(), "bin/browserctl"), "status", ...args], {
+      env: { ...process.env, HOMER_BROWSER_STATUS_FILE: statusPath },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = ""; let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("exit", (code) => resolve({ code: code ?? 1, stdout: stdout.trim(), stderr: stderr.trim() }));
+  });
+}
+
 async function startBroker(socketPath: string, generation: number) {
   const child = spawn(join(process.cwd(), "node_modules/.bin/tsx"), ["tests/helpers/browser-broker-server.ts"], {
     env: { ...process.env, HOMER_BROWSER_CONTROL_SOCKET: socketPath, BROKER_GENERATION: String(generation) },
@@ -431,5 +445,32 @@ test("status publication uses sibling temp, fsync, and atomic rename", async () 
     writeStatusAtomic(path, status);
     assert.deepEqual(JSON.parse(await readFile(path, "utf8")), status);
     assert.deepEqual(await readdir(dir), ["status.json"]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("browserctl status applies 90-second service and 8-hour surface staleness", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "homer-status-cli-test-")); const path = join(dir, "status.json");
+  const now = Date.now();
+  const status: ChromeStatus = { schema: 1, updatedAt: new Date(now).toISOString(), generation: 3, supervisorPid: 1, chromePid: 2,
+    profilePath: "/profile", cdp: { state: "ready", pages: 2, restartCount: 0, reason: null }, maintenance: { enabled: false, reason: null },
+    surfaces: { "amazon.vc": { state: "authenticated", lastProbeAt: new Date(now - 7 * 60 * 60_000).toISOString(), lastOkAt: null, lastTouchAt: null, reason: null, targetId: "vc", lease: null } } };
+  try {
+    writeStatusAtomic(path, status);
+    const healthy = await runBrowserctlStatus(path, "amazon.vc");
+    assert.equal(healthy.code, 0, healthy.stderr);
+    assert.equal(JSON.parse(healthy.stdout).state, "healthy");
+
+    status.updatedAt = new Date(now - 91_000).toISOString();
+    writeStatusAtomic(path, status);
+    const staleService = await runBrowserctlStatus(path);
+    assert.equal(staleService.code, 1);
+    assert.match(JSON.parse(staleService.stdout).reasons.join(" "), /> 90s/);
+
+    status.updatedAt = new Date(now).toISOString();
+    status.surfaces["amazon.vc"]!.lastProbeAt = new Date(now - (8 * 60 * 60_000 + 1_000)).toISOString();
+    writeStatusAtomic(path, status);
+    const staleSurface = await runBrowserctlStatus(path, "amazon.vc");
+    assert.equal(staleSurface.code, 1);
+    assert.match(JSON.parse(staleSurface.stdout).reasons.join(" "), /> 8h/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
