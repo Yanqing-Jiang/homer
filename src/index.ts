@@ -125,11 +125,11 @@ async function main(): Promise<void> {
   try {
     await runAgentBrowserBindingSelfTest();
     browserLeaseBroker.setDegraded(null);
-    logger.info({ sessions: 2 }, "Agent-browser startup binding self-test passed");
+    logger.info({ sessions: 2, policy: "globally-serialized", concurrentCreationRefused: true }, "Agent-browser startup serialized-binding self-test passed");
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     browserLeaseBroker.setDegraded(reason);
-    logger.error({ err: reason }, "Agent-browser startup binding self-test failed; shared-CDP automation degraded");
+    logger.error({ err: reason }, "Agent-browser startup serialized-binding self-test failed; agent-browser automation degraded");
   }
   initFallbackChain(stateManager.getDb());
   initTraceWriter(stateManager.getDb());

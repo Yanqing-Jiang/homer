@@ -372,12 +372,37 @@ test("external agent target creation is serialized, registered exactly, and clea
   targets.set("external-1", { id: "external-1", type: "page", url: "about:blank#one", webSocketDebuggerUrl: "ws://test/external-1" });
   const registered = await broker.registerExternalTarget(first.leaseId, "external-1") as { targetId: string };
   assert.equal(registered.targetId, "external-1");
+  await assert.rejects(
+    () => broker.reserveExternal("agent.test-two", "wrapper-two", 30),
+    /agent-browser session is globally serialized/,
+  );
+  await broker.release(first.leaseId, true);
   const second = await broker.reserveExternal("agent.test-two", "wrapper-two", 30) as { leaseId: string };
   await broker.release(second.leaseId);
-  await broker.release(first.leaseId, true);
   assert.equal(targets.has("external-1"), false);
   broker.setDegraded("binding mismatch");
   await assert.rejects(() => broker.reserveExternal("agent.blocked", "wrapper", 30), /automation degraded/);
+});
+
+test("agent-browser degradation does not block exact-target reconcile and acquire", async () => {
+  const targets = new Map<string, { id: string; type: string; url: string; webSocketDebuggerUrl: string }>();
+  const client: BrowserTargetClient = {
+    list: async () => [...targets.values()],
+    create: async (url) => {
+      const target = { id: "direct-1", type: "page", url, webSocketDebuggerUrl: "ws://test/direct-1" };
+      targets.set(target.id, target);
+      return target;
+    },
+    close: async (targetId) => { targets.delete(targetId); },
+  };
+  const broker = new BrowserLeaseBroker(client);
+  broker.beginGeneration(10);
+  broker.setDegraded("named-session binding mismatch");
+  const reconciled = await broker.reconcile("amazon.vc", ["https://example.test"], "https://example.test/bootstrap");
+  assert.equal(reconciled.targetId, "direct-1");
+  const acquired = await broker.acquire("amazon.vc", "direct-client", 30) as { targetId: string; webSocketDebuggerUrl: string };
+  assert.equal(acquired.targetId, "direct-1");
+  assert.equal(acquired.webSocketDebuggerUrl, "ws://test/direct-1");
 });
 
 test("status publication uses sibling temp, fsync, and atomic rename", {
