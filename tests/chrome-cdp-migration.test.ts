@@ -246,6 +246,47 @@ test("resident supervisor restarts after three consecutive failed heartbeats", a
   supervisor.stop();
 });
 
+test("resident supervisor re-reconciles surfaces once per generation after a restart", async () => {
+  const { supervisor, timers, children } = supervisorHarness();
+  supervisor.start();
+  let reconciles = 0;
+  // Registering after startup means the current generation counts as reconciled.
+  supervisor.setSurfaceReconciler(async () => { reconciles++; });
+  await supervisor.heartbeatNow();
+  assert.equal(reconciles, 0, "steady-state heartbeats must not re-reconcile");
+
+  children.at(-1)!.emit("exit", 1, null);
+  await Promise.resolve(); await Promise.resolve();
+  timers.run(2);
+  assert.equal(children.length, 2);
+
+  await supervisor.heartbeatNow();
+  assert.equal(reconciles, 1, "first healthy heartbeat of a new generation reconciles surfaces");
+  await supervisor.heartbeatNow();
+  assert.equal(reconciles, 1, "reconcile happens once per generation, not every heartbeat");
+  supervisor.stop();
+});
+
+test("surface reconcile failure after restart is retried on the next heartbeat", async () => {
+  const { supervisor, timers, children } = supervisorHarness();
+  supervisor.start();
+  let attempts = 0;
+  supervisor.setSurfaceReconciler(async () => {
+    attempts++;
+    if (attempts === 1) throw new Error("CDP not ready yet");
+  });
+  children.at(-1)!.emit("exit", 1, null);
+  await Promise.resolve(); await Promise.resolve();
+  timers.run(2);
+  await supervisor.heartbeatNow();
+  assert.equal(attempts, 1);
+  await supervisor.heartbeatNow();
+  assert.equal(attempts, 2, "a failed reconcile must not mark the generation as done");
+  await supervisor.heartbeatNow();
+  assert.equal(attempts, 2, "the successful retry marks the generation reconciled");
+  supervisor.stop();
+});
+
 test("maintenance drains leases and suppresses restart until disabled", async () => {
   const harness = supervisorHarness();
   harness.supervisor.start();

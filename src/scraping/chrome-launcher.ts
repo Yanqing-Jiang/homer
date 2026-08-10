@@ -83,6 +83,15 @@ export class ResidentChromeSupervisor {
   private maintenanceReason: string | null = null;
   private lastProbe: CdpProbe = { state: "absent", pages: 0 };
   private restartCount = 0;
+  /**
+   * Re-registers the long-lived surface targets after a Chrome restart. A restart
+   * calls beginGeneration(), which clears the broker registry, but nothing else
+   * re-runs the startup reconcile — so without this the surfaces stay absent until
+   * the daemon itself restarts, silently disabling stewardship touches and blanking
+   * status.json for health consumers.
+   */
+  private reconcileSurfaces?: () => Promise<void>;
+  private surfacesGeneration = 0;
   private transition: () => void = () => {};
   generation = 0;
 
@@ -109,6 +118,11 @@ export class ResidentChromeSupervisor {
     return { enabled: this.maintenanceEnabled, reason: this.maintenanceReason };
   }
   setTransitionHandler(handler: () => void): void { this.transition = handler; }
+  /** Registering treats the current generation as already reconciled by daemon startup. */
+  setSurfaceReconciler(reconcile: () => Promise<void>): void {
+    this.reconcileSurfaces = reconcile;
+    this.surfacesGeneration = this.generation;
+  }
   status(): { generation: number; chromePid: number | null; cdp: CdpProbe & { restartCount: number }; maintenance: { enabled: boolean; reason: string | null } } {
     return { generation: this.generation, chromePid: this.child?.pid ?? null, cdp: { ...this.lastProbe, restartCount: this.restartCount }, maintenance: this.maintenance() };
   }
@@ -135,6 +149,14 @@ export class ResidentChromeSupervisor {
     this.lastProbe = result; this.transition();
     if (result.state !== "absent" && !result.reason) {
       await this.deps.observeTargets?.();
+      if (this.reconcileSurfaces && this.surfacesGeneration !== this.generation) {
+        try {
+          await this.reconcileSurfaces();
+          this.surfacesGeneration = this.generation;
+        } catch (err) {
+          logger.warn({ err, generation: this.generation }, "Surface reconcile after Chrome restart failed");
+        }
+      }
       this.failedHeartbeats = 0;
       this.restartAttempt = 0;
       return;
