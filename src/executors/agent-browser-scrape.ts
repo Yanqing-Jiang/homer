@@ -5,29 +5,24 @@
  * ~/memory/decisions/2026-05-26-reverted-opencli-back-to-agent-browser.md.
  *
  * Architecture:
- *   - Direct `agent-browser` CLI over Chrome DevTools Protocol (port 9222)
+ *   - `browserctl agent` lease wrapper over Chrome DevTools Protocol (port 9222)
  *   - Each scrape is a script file under ./scrape-scripts/, read + minified
  *     to a single-line expression and run via `agent-browser eval`
- *   - Serialized via a module-level mutex (agent-browser has one persistent
- *     CDP socket; concurrent open/eval would collide)
- *   - Executor owns the CDP lifecycle: ensureCDP({headed:true}) + connect
+ *   - Each workflow gets a unique named agent-browser session and broker lease
  *
  * Compatibility: returns a ScrapeResult<T> envelope that is a superset of
  * the old OpenCLIResult<T> shape so existing mappers/call sites keep working.
  */
 
-import { execFile } from "child_process";
-import { readFileSync, rmSync } from "fs";
-import { homedir } from "os";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { ensureCDP } from "../scraping/chrome-launcher.js";
+import { BrokeredAgentSession, withBrokeredAgentSession } from "../scraping/browser-agent-client.js";
 import { logger } from "../utils/logger.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCRIPTS_DIR = join(__dirname, "scrape-scripts");
-const AGENT_BROWSER_BIN = "agent-browser";
-const CDP_PORT = 9222;
 
 // ============================================
 // RESULT ENVELOPE
@@ -151,7 +146,6 @@ const TWITTER_BOOKMARKS_TIMEOUT = 60_000;
 const TWITTER_ARTICLE_TIMEOUT = 45_000;
 const TWITTER_THREAD_TIMEOUT = 45_000;
 const MEDIUM_TIMEOUT = 30_000;
-const AGENT_BROWSER_CONNECT_TIMEOUT = 10_000;
 // Pacing — small wait after open() so X SPA mounts tweets before eval probes the DOM.
 const POST_OPEN_SETTLE_MS = 3_500;
 // Bookmark scrolling — max passes and dwell.
@@ -168,8 +162,8 @@ export interface ScrapeOptions {
 // SERIALIZATION MUTEX
 // ============================================
 
-// agent-browser holds one CDP socket at ~/.agent-browser/default.sock. Concurrent
-// `open` / `eval` calls race on the same browser tab. Serialize all scrapes.
+// Preserve in-process pacing for call sites that share business state. Cross-process
+// browser ownership is enforced by browserctl's per-surface leases.
 let scrapeChain: Promise<unknown> = Promise.resolve();
 
 /** Serialize all agent-browser / shared CDP usage across scrapers and jobs. */
@@ -184,27 +178,11 @@ export function withScrapeLock<T>(fn: () => Promise<T>): Promise<T> {
 // LOW-LEVEL: agent-browser invocation
 // ============================================
 
-function execFileAsync(cmd: string, args: string[], timeoutMs: number, signal?: AbortSignal): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = execFile(
-      cmd,
-      args,
-      { encoding: "utf8", timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 },
-      (err, stdout, stderr) => {
-        if (err) {
-          const e = err as NodeJS.ErrnoException & { stderr?: string; killed?: boolean };
-          e.stderr = stderr;
-          reject(e);
-        } else {
-          resolve(stdout);
-        }
-      },
-    );
-    if (signal) {
-      if (signal.aborted) child.kill("SIGTERM");
-      else signal.addEventListener("abort", () => child.kill("SIGTERM"), { once: true });
-    }
-  });
+const agentSession = new AsyncLocalStorage<BrokeredAgentSession>();
+function execAgent(args: string[], timeoutMs: number, _signal?: AbortSignal): Promise<string> {
+  const session = agentSession.getStore();
+  if (!session) throw new Error("agent-browser command attempted outside browserctl agent lease");
+  return session.command(args, timeoutMs);
 }
 
 function minify(script: string): string {
@@ -276,68 +254,30 @@ function parseAgentBrowserJson(stdout: string): unknown {
 // CDP + BACKEND READINESS
 // ============================================
 
-const AGENT_BROWSER_SOCKET = join(homedir(), ".agent-browser", "default.sock");
-let connectedOnce = false;
 async function ensureBackendReady(signal?: AbortSignal): Promise<{ ok: true } | { ok: false; status: ScrapeStatus; error: string }> {
-  try {
-    const handle = await ensureCDP({ headed: true });
-    // A non-zero pid means a FRESH Chrome was launched — any persisted
-    // agent-browser socket now points at a dead backend. Force a reconnect and
-    // drop the stale socket so `connect` re-handshakes against the new browser.
-    // Done regardless of connectedOnce so a stale on-disk socket left by a prior
-    // process is also cleared on the first launch of this one.
-    if (handle.pid !== 0) resetScrapeBackend();
-  } catch (err) {
-    return { ok: false, status: "cdp_unavailable", error: err instanceof Error ? err.message : String(err) };
-  }
-  // Connect agent-browser to the CDP port. Idempotent once the socket exists.
-  if (!connectedOnce) {
-    try {
-      await execFileAsync(AGENT_BROWSER_BIN, ["connect", String(CDP_PORT)], AGENT_BROWSER_CONNECT_TIMEOUT, signal);
-      connectedOnce = true;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // Re-try once more on next call — don't latch failure forever.
-      return { ok: false, status: "backend_error", error: `agent-browser connect failed: ${msg}` };
-    }
-  }
+  void signal;
+  if (!agentSession.getStore()) return { ok: false, status: "backend_error", error: "browserctl agent lease unavailable" };
   return { ok: true };
 }
 
 /** Drop the persisted socket and force the next ensure to re-handshake. */
 export function resetScrapeBackend(): void {
-  connectedOnce = false;
-  try { rmSync(AGENT_BROWSER_SOCKET, { force: true }); } catch { /* best effort */ }
+  // Named browserctl sessions are closed per workflow; there is no shared socket to reset.
 }
 
 /**
- * Shared entry for jobs that drive agent-browser directly (delta-upgrade-watch):
- * ensureCDP + stale-socket clear + connect, with ONE bounded reconnect on failure.
- * Callers must NOT probe /json/list themselves — ensureCDP owns target readiness
- * and throws when it cannot heal, so a second job-level probe only drifts.
+ * Compatibility guard for jobs migrated to a browserctl agent workflow.
  */
 export async function connectScrapeBackend(signal?: AbortSignal): Promise<void> {
-  let ready = await ensureBackendReady(signal);
-  if (!ready.ok) {
-    // Don't spend a second bounded connect on a job that is already cancelled —
-    // that reconnect can eat the scheduler's settle grace and make the run look
-    // unsettled, which suppresses takeover.
-    if (signal?.aborted) throw new Error(`agent-browser connect aborted (${ready.status}): ${ready.error}`);
-    resetScrapeBackend();
-    ready = await ensureBackendReady(signal);
-  }
-  if (!ready.ok) throw new Error(`agent-browser backend unavailable (${ready.status}): ${ready.error}`);
+  if (signal?.aborted) throw new Error("agent-browser connect aborted");
+  if (!agentSession.getStore()) throw new Error("connectScrapeBackend requires browserctl agent workflow");
 }
 
 export async function isScrapeBackendHealthy(): Promise<boolean> {
-  const ready = await ensureBackendReady();
-  if (!ready.ok) return false;
   try {
-    // Quick eval ping — confirms socket is responsive.
-    await execFileAsync(AGENT_BROWSER_BIN, ["eval", "1+1"], 5_000);
+    await withBrokeredAgentSession(undefined, (session) => session.command(["eval", "1+1"], 5_000));
     return true;
   } catch {
-    connectedOnce = false; // force reconnect on next call
     return false;
   }
 }
@@ -362,7 +302,8 @@ async function openAndEval<T>({ url, scriptName, timeoutMs, signal, postOpen }: 
   // Outer start tracks queue + work for duration reporting only; the per-target
   // deadline is set INSIDE the lock so queue wait doesn't eat the scrape budget.
   const queueStart = Date.now();
-  return withScrapeLock(async () => {
+  const surface = url.includes("x.com") ? "agent.x" : url.includes("medium.com") ? "agent.medium" : undefined;
+  return withScrapeLock(() => withBrokeredAgentSession(surface, (session) => agentSession.run(session, async () => {
     const start = Date.now();
     const deadline = start + timeoutMs;
     const ready = await ensureBackendReady();
@@ -385,7 +326,7 @@ async function openAndEval<T>({ url, scriptName, timeoutMs, signal, postOpen }: 
 
     try {
       // Step 1: navigate
-      await execFileAsync(AGENT_BROWSER_BIN, ["open", url], remaining(), signal);
+      await execAgent(["open", url], remaining(), signal);
       // Step 2: settle dwell (gives SPAs time to mount) — bounded by deadline
       await new Promise((r) => setTimeout(r, Math.min(POST_OPEN_SETTLE_MS, Math.max(0, deadline - Date.now()))));
       // Step 3: optional scroll/wait sequence — postOpen owns its own deadline checks
@@ -393,13 +334,12 @@ async function openAndEval<T>({ url, scriptName, timeoutMs, signal, postOpen }: 
       // Step 4: eval extractor
       if (Date.now() >= deadline) throw new Error("Scrape deadline exceeded before final eval");
       const script = loadScript(scriptName);
-      rawOutput = await execFileAsync(AGENT_BROWSER_BIN, ["eval", script], remaining(), signal);
+      rawOutput = await execAgent(["eval", script], remaining(), signal);
     } catch (err) {
       const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: string };
       const isTimeout = e.killed || e.signal === "SIGTERM" || /timeout|deadline/i.test(e.message ?? "");
       const status: ScrapeStatus = isTimeout ? "timeout" : "backend_error";
       // On backend error, reset the connect latch so we re-handshake next call.
-      if (status === "backend_error") connectedOnce = false;
       return {
         data: null,
         rawOutput,
@@ -468,7 +408,7 @@ async function openAndEval<T>({ url, scriptName, timeoutMs, signal, postOpen }: 
       needsAuth: false,
       needsExtension: false,
     } satisfies ScrapeResult<T>;
-  });
+  }), signal));
 }
 
 // ============================================
@@ -489,7 +429,7 @@ export async function fetchTwitterBookmarks(limit = 20, options?: ScrapeOptions)
       const script = loadScript("twitter-bookmarks.js");
       let raw = "";
       try {
-        raw = await execFileAsync(AGENT_BROWSER_BIN, ["eval", script], evalTimeout);
+        raw = await execAgent(["eval", script], evalTimeout);
       } catch (err) {
         logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Bookmark scroll-eval failed mid-loop");
         break;
@@ -515,7 +455,7 @@ export async function fetchTwitterBookmarks(limit = 20, options?: ScrapeOptions)
         const remainingAfterEval = deadline - Date.now();
         if (remainingAfterEval <= BOOKMARK_SCROLL_DWELL_MS + 2_000) break;
         try {
-          await execFileAsync(AGENT_BROWSER_BIN, ["scroll", "down", String(BOOKMARK_SCROLL_PX)], Math.min(5_000, remainingAfterEval));
+          await execAgent(["scroll", "down", String(BOOKMARK_SCROLL_PX)], Math.min(5_000, remainingAfterEval));
         } catch {
           break;
         }

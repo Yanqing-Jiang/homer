@@ -134,7 +134,8 @@ Now proceed with the task:
 export const BROWSER_ONLY_PREFIX = `CRITICAL CONSTRAINTS:
 
 ALLOWED:
-- Run agent-browser commands via bash (connect, snapshot, open, click, scroll)
+- This worker is launched by browserctl agent and already holds one lease for the whole workflow
+- Run agent-browser commands via bash (snapshot, open, click, scroll); never run connect or override the injected named session
 - Return data as text/JSON in your response
 
 PROHIBITED:
@@ -329,7 +330,7 @@ async function executeOpenCodeCLIOnce(
 
     if (browserOnly) mkdirSync(effectiveCwd, { recursive: true });
 
-    const child: ChildProcess = spawn("opencode", args, {
+    const child: ChildProcess = spawn(browserOnly ? "browserctl" : "opencode", browserOnly ? ["agent", "--", "opencode", ...args] : args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: effectiveCwd,
       detached: true, // own process group so SIGTERM kills all children

@@ -15,6 +15,8 @@ import {
   BROWSER_CONTROL_SOCKET,
   BROWSER_CONTROL_STATE_DIR,
   BROWSER_STATUS_PATH,
+  BrowserLeaseBroker,
+  type BrowserTargetClient,
 } from "../src/scraping/browser-control.js";
 
 async function listen(server: Server): Promise<number> {
@@ -354,6 +356,28 @@ test("restart generation invalidates prior targets and leases across processes",
     await stopBroker(broker);
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("external agent target creation is serialized, registered exactly, and cleaned on release", async () => {
+  const targets = new Map<string, { id: string; type: string; url: string; webSocketDebuggerUrl: string }>();
+  const client: BrowserTargetClient = {
+    list: async () => [...targets.values()],
+    create: async () => { throw new Error("not used"); },
+    close: async (targetId) => { targets.delete(targetId); },
+  };
+  const broker = new BrowserLeaseBroker(client);
+  broker.beginGeneration(9);
+  const first = await broker.reserveExternal("agent.test-one", "wrapper-one", 30) as { leaseId: string };
+  await assert.rejects(() => broker.reserveExternal("agent.test-two", "wrapper-two", 30), /creation is reserved/);
+  targets.set("external-1", { id: "external-1", type: "page", url: "about:blank#one", webSocketDebuggerUrl: "ws://test/external-1" });
+  const registered = await broker.registerExternalTarget(first.leaseId, "external-1") as { targetId: string };
+  assert.equal(registered.targetId, "external-1");
+  const second = await broker.reserveExternal("agent.test-two", "wrapper-two", 30) as { leaseId: string };
+  await broker.release(second.leaseId);
+  await broker.release(first.leaseId, true);
+  assert.equal(targets.has("external-1"), false);
+  broker.setDegraded("binding mismatch");
+  await assert.rejects(() => broker.reserveExternal("agent.blocked", "wrapper", 30), /automation degraded/);
 });
 
 test("status publication uses sibling temp, fsync, and atomic rename", {
