@@ -1,16 +1,59 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import readline from "node:readline";
 
 const socketPath = process.env.HOMER_BROWSER_CONTROL_SOCKET
   ?? "/Users/yj/Library/Application Support/Homer/cdp-state/browser-control.sock";
+const statusPath = process.env.HOMER_BROWSER_STATUS_FILE
+  ?? "/Users/yj/Library/Application Support/Homer/cdp-state/status.json";
 const agentBrowser = process.env.HOMER_AGENT_BROWSER_BIN ?? "/opt/homebrew/bin/agent-browser";
 const cdpBase = process.env.HOMER_CDP_HTTP ?? "http://127.0.0.1:9222";
 const [command, ...args] = process.argv.slice(2);
 
-function usage() { throw new Error("usage: browserctl acquire <surface> <owner> <ttl-seconds> | renew <leaseId> <ttl-seconds> | release <leaseId> | reconcile <surface> <origin[,origin...]> <bootstrapUrl> | touch <amazon.vc|amazon.amc> | maintenance <on|off> [reason] | agent [agent.surface] [--ttl seconds] [--rpc | -- <workflow command...>]"); }
+function usage() { throw new Error("usage: browserctl status [surface] | acquire <surface> <owner> <ttl-seconds> | renew <leaseId> <ttl-seconds> | release <leaseId> | reconcile <surface> <origin[,origin...]> <bootstrapUrl> | touch <amazon.vc|amazon.amc> | maintenance <on|off> [reason] | agent [agent.surface] [--ttl seconds] [--rpc | -- <workflow command...>]"); }
+
+async function readStatus(surface) {
+  const now = Date.now();
+  let snapshot;
+  try {
+    snapshot = JSON.parse(await readFile(statusPath, "utf8"));
+  } catch (error) {
+    return { ok: false, state: "unhealthy", surface: surface ?? null, reasons: [`status.json unreadable: ${error.message}`] };
+  }
+  const reasons = [];
+  const updatedAtMs = Date.parse(snapshot.updatedAt);
+  const ageSeconds = Number.isFinite(updatedAtMs) ? Math.max(0, (now - updatedAtMs) / 1000) : null;
+  if (ageSeconds === null) reasons.push("status.json updatedAt is invalid");
+  else if (ageSeconds > 90) reasons.push(`status.json is stale (${Math.round(ageSeconds)}s > 90s)`);
+  if (snapshot.cdp?.state !== "ready") reasons.push(`CDP is ${snapshot.cdp?.state ?? "unknown"}`);
+
+  let surfaceStatus = null;
+  let surfaceAgeSeconds = null;
+  if (surface) {
+    surfaceStatus = snapshot.surfaces?.[surface] ?? null;
+    if (!surfaceStatus) {
+      reasons.push(`surface ${surface} is absent`);
+    } else {
+      const probedAtMs = Date.parse(surfaceStatus.lastProbeAt);
+      surfaceAgeSeconds = Number.isFinite(probedAtMs) ? Math.max(0, (now - probedAtMs) / 1000) : null;
+      if (surfaceAgeSeconds === null) reasons.push(`surface ${surface} has no valid lastProbeAt`);
+      else if (surfaceAgeSeconds > 8 * 60 * 60) reasons.push(`surface ${surface} is stale (${Math.round(surfaceAgeSeconds)}s > 8h)`);
+      if (surfaceStatus.state !== "authenticated") reasons.push(`surface ${surface} is ${surfaceStatus.state ?? "unknown"}`);
+    }
+  }
+  return {
+    ok: reasons.length === 0,
+    state: reasons.length === 0 ? "healthy" : "unhealthy",
+    surface: surface ?? null,
+    ageSeconds,
+    surfaceAgeSeconds,
+    reasons,
+    status: snapshot,
+  };
+}
 
 function requestBroker(request) {
   return new Promise((resolve, reject) => {
@@ -126,7 +169,11 @@ async function runAgent(agentArgs) {
 }
 
 try {
-  if (command === "agent") {
+  if (command === "status" && args.length <= 1) {
+    const result = await readStatus(args[0]);
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    if (!result.ok) process.exitCode = 1;
+  } else if (command === "agent") {
     process.exitCode = await runAgent(args);
   } else {
     let request;
