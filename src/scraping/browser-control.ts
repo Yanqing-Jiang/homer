@@ -46,7 +46,6 @@ export class BrowserLeaseBroker {
   setDegraded(reason: string | null): void { this.degradedReason = reason; }
   degraded(): string | null { return this.degradedReason; }
   async reconcile(surface: string, expectedOrigins: string[], bootstrapUrl: string): Promise<TargetRecord> {
-    if (this.degradedReason) throw new Error(`shared-CDP automation degraded: ${this.degradedReason}`);
     if (!surface || expectedOrigins.length === 0) throw new Error("surface and expectedOrigin are required");
     const allowed = [...new Set(expectedOrigins.map((origin) => new URL(origin).origin))];
     if (!allowed.includes(new URL(bootstrapUrl).origin)) throw new Error("bootstrapUrl origin is not allowed");
@@ -83,7 +82,6 @@ export class BrowserLeaseBroker {
     return run;
   }
   async acquire(surface: string, owner: string, ttl: number): Promise<Record<string, unknown>> {
-    if (this.degradedReason) throw new Error(`shared-CDP automation degraded: ${this.degradedReason}`);
     return this.withSurfaceLock(surface, async () => {
       this.expireLeases();
       if (this.draining) throw new Error("broker is draining leases");
@@ -109,12 +107,13 @@ export class BrowserLeaseBroker {
   }
   async reserveExternal(surface: string, owner: string, ttl: number): Promise<Record<string, unknown>> {
     this.expireLeases();
-    if (this.degradedReason) throw new Error(`shared-CDP automation degraded: ${this.degradedReason}`);
+    if (this.degradedReason) throw new Error(`agent-browser automation degraded: ${this.degradedReason}`);
     if (this.draining) throw new Error("broker is draining leases");
     if (!surface.startsWith("agent.")) throw new Error("external agent surfaces must start with agent.");
     if (this.externalReservation) throw new Error(`agent target creation is reserved by ${this.externalReservation.owner}`);
-    const record = this.records.get(surface);
-    if (record?.leaseId) throw new Error(`surface ${surface} is leased by ${record.owner}`);
+    // DEBT: agent-browser sessions are globally serialized due to 0.21.4 concurrent rebinding, upgrade when agent-browser exposes target-id attach.
+    const activeAgent = [...this.records.values()].find((record) => record.surface.startsWith("agent.") && record.leaseId);
+    if (activeAgent) throw new Error(`agent-browser session is globally serialized; active owner ${activeAgent.owner}`);
     const leaseId = randomUUID();
     const expiresAt = this.expiry(ttl);
     this.externalReservation = { surface, owner, leaseId, expiresAt };
