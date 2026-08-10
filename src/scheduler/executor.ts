@@ -17,7 +17,7 @@ import {
 /**
  * Lazy read-only connection to read the global harness default (migration 104) without
  * spinning up a full StateManager (which would re-run migrations). Conservative: any
- * failure → "opencode". Connection lives for the daemon lifetime.
+ * failure → Claude Opus at medium effort. Connection lives for the daemon lifetime.
  */
 let _harnessDb: Database.Database | null = null;
 function harnessDefault(): { executor: ExecutorKind; model: string | null } {
@@ -29,9 +29,9 @@ function harnessDefault(): { executor: ExecutorKind; model: string | null } {
     if (row?.executor && isExecutorKind(row.executor)) {
       return { executor: row.executor, model: row.model };
     }
-    return { executor: "opencode", model: "cursor/grok-4.5-xhigh" };
+    return { executor: "claude", model: "opus[medium]" };
   } catch {
-    return { executor: "opencode", model: "cursor/grok-4.5-xhigh" };
+    return { executor: "claude", model: "opus[medium]" };
   }
 }
 

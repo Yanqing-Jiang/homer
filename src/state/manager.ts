@@ -1700,9 +1700,8 @@ export class StateManager {
   }
 
   /**
-   * Read the global default harness (migration 104, one row id=1). Falls back to hard
-   * opencode/cursor/grok-4.5-xhigh if the row is somehow missing (the migration seeds
-   * opencode as the intended default; this is only the fail-safe floor). Not cached:
+   * Read the global default harness (migration 104, one row id=1). Falls back to
+   * Claude Opus at medium effort if the row is somehow missing. Not cached:
    * a single indexed read, and the kill-switch must be visible across the daemon + MCP
    * processes that share this DB.
    */
@@ -1712,14 +1711,14 @@ export class StateManager {
       .get() as { executor: string; model: string | null } | undefined;
     // Fail-safe floor when the row is somehow missing (fresh DB pre-seed / corruption).
     if (!row || !isScheduledHarnessExecutor(row.executor)) {
-      return { executor: "opencode", model: "cursor/grok-4.5-xhigh" };
+      return { executor: "claude", model: "opus[medium]" };
     }
     return { executor: row.executor, model: row.model };
   }
 
   /**
-   * Flip the global default harness. `setHarnessDefault('opencode')` restores the
-   * OpenCode cursor default (Grok 4.5 xhigh). Claude Code CLI is retired from defaults.
+   * Flip the global default harness. If no model is supplied, use the selected
+   * executor's current catalog default.
    */
   setHarnessDefault(executor: HarnessExecutor, model?: string | null): void {
     // Delegate to the single writer (harness_default is now a read-only view; migration 107).
