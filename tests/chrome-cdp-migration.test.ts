@@ -79,7 +79,7 @@ test("URL enumeration can return a target that disappears before WebSocket attac
     activeTarget = "page-b";
   });
   stub.on("upgrade", (request, socket) => {
-    const requestedTarget = request.url?.split("/").at(-1);
+    const requestedTarget = request.url?.split("/").pop();
     if (requestedTarget !== activeTarget) {
       socket.end("HTTP/1.1 410 Gone\r\nConnection: close\r\n\r\n");
       return;
@@ -223,7 +223,7 @@ test("resident supervisor uses capped 2,5,15,30,60 restart backoff", async () =>
   const { supervisor, timers, children } = supervisorHarness();
   supervisor.start();
   for (const expected of [2, 5, 15, 30, 60, 60]) {
-    children.at(-1)!.emit("exit", 1, null);
+    children[children.length - 1]!.emit("exit", 1, null);
     await Promise.resolve(); await Promise.resolve();
     timers.run(expected);
   }
@@ -255,7 +255,7 @@ test("resident supervisor re-reconciles surfaces once per generation after a res
   await supervisor.heartbeatNow();
   assert.equal(reconciles, 0, "steady-state heartbeats must not re-reconcile");
 
-  children.at(-1)!.emit("exit", 1, null);
+  children[children.length - 1]!.emit("exit", 1, null);
   await Promise.resolve(); await Promise.resolve();
   timers.run(2);
   assert.equal(children.length, 2);
@@ -275,7 +275,7 @@ test("surface reconcile failure after restart is retried on the next heartbeat",
     attempts++;
     if (attempts === 1) throw new Error("CDP not ready yet");
   });
-  children.at(-1)!.emit("exit", 1, null);
+  children[children.length - 1]!.emit("exit", 1, null);
   await Promise.resolve(); await Promise.resolve();
   timers.run(2);
   await supervisor.heartbeatNow();
