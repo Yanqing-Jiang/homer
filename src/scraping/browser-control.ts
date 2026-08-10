@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { createServer, type Server } from "node:net";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { logger } from "../utils/logger.js";
-export const BROWSER_CONTROL_SOCKET = "/Users/yj/Library/Application Support/Homer/chrome-cdp/browser-control.sock";
+export const BROWSER_CONTROL_STATE_DIR = "/Users/yj/Library/Application Support/Homer/cdp-state";
+export const BROWSER_CONTROL_SOCKET = join(BROWSER_CONTROL_STATE_DIR, "browser-control.sock");
+export const BROWSER_STATUS_PATH = join(BROWSER_CONTROL_STATE_DIR, "status.json");
 interface CdpTarget { id: string; type: string; url: string; webSocketDebuggerUrl: string }
 export interface TargetRecord {
   surface: string; generation: number; targetId: string; expectedOrigins: string[]; currentUrl: string;
@@ -144,8 +146,9 @@ export class BrowserLeaseBroker {
 }
 type ControlRequest = { verb: string; surface?: string; owner?: string; ttl?: number; leaseId?: string; expectedOrigin?: string[]; bootstrapUrl?: string; enabled?: boolean; reason?: string };
 export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenance: (enabled: boolean, reason: string) => Promise<void>, socketPath = BROWSER_CONTROL_SOCKET): Server {
-  mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
-  chmodSync(dirname(socketPath), 0o700);
+  const stateDir = dirname(socketPath);
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  chmodSync(stateDir, 0o700);
   if (existsSync(socketPath)) unlinkSync(socketPath);
   const server = createServer((socket) => {
     let input = "";
