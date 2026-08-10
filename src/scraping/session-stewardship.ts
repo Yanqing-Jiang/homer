@@ -62,6 +62,10 @@ export class SessionStewardship {
   async touch(surface: keyof typeof SURFACES, manual = false, deep = false): Promise<Record<string, unknown>> {
     const cfg = SURFACES[surface]; const now = this.now(); const record = this.broker.snapshot().find((item) => item.surface === surface);
     let humanAt: number | null = null;
+    // DEBT: __homerLastHumanActivity is page-local and its listeners install only after a successful
+    // touch, so navigation or a fresh tab drops the marker and human use can go unseen until the next
+    // touch re-installs it, upgrade to CDP-level (Input domain) activity observation when a scheduled
+    // touch reloads a tab Yanqing was actively using.
     if (record && !record.leaseId) humanAt = await this.readHumanActivity(record).catch(() => null);
     const skip = stewardshipSkip(record, humanAt, now, this.backoffUntil.get(surface) ?? 0);
     if (skip) return { surface, skipped: true, reason: skip };
