@@ -12,6 +12,7 @@ import Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
 import { processRegistry } from "../process/registry.js";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
+import { BrowserLeaseBroker, HttpBrowserTargetClient } from "./browser-control.js";
 
 const CDP_PORT = 9222;
 const CDP_PROFILE_PREFIX = "/tmp/chrome-cdp-profile-";
@@ -66,8 +67,8 @@ export interface ChromeSupervisorDeps {
   backoffMs: readonly number[];
 }
 
-/** Step 3 replaces this stub with bounded lease draining. */
-export async function drainLeases(): Promise<void> {}
+export const browserLeaseBroker = new BrowserLeaseBroker(new HttpBrowserTargetClient(CDP_PORT));
+export async function drainLeases(): Promise<void> { await browserLeaseBroker.drainLeases(); }
 
 export class ResidentChromeSupervisor {
   private child?: ResidentChromeChild;
@@ -76,6 +77,7 @@ export class ResidentChromeSupervisor {
   private running = false;
   private failedHeartbeats = 0;
   private restartAttempt = 0;
+  private restartDraining = false;
   private maintenanceEnabled = false;
   private maintenanceReason: string | null = null;
   generation = 0;
@@ -154,17 +156,24 @@ export class ResidentChromeSupervisor {
   }
 
   private scheduleRestart(reason: string): void {
-    if (!this.running || this.maintenanceEnabled || this.restartTimer) return;
-    const child = this.child;
-    this.child = undefined;
-    child?.kill("SIGTERM");
-    const delayMs = this.deps.backoffMs[Math.min(this.restartAttempt, this.deps.backoffMs.length - 1)]!;
-    this.restartAttempt++;
-    logger.warn({ reason, delayMs }, "Scheduling resident Chrome restart");
-    this.restartTimer = this.deps.setTimer(() => {
-      this.restartTimer = undefined;
-      this.launch();
-    }, delayMs);
+    if (!this.running || this.maintenanceEnabled || this.restartTimer || this.restartDraining) return;
+    this.restartDraining = true;
+    void this.deps.drainLeases().catch((err) => {
+      logger.warn({ err }, "Browser lease drain failed before Chrome restart");
+    }).finally(() => {
+      this.restartDraining = false;
+      if (!this.running || this.maintenanceEnabled || this.restartTimer) return;
+      const child = this.child;
+      this.child = undefined;
+      child?.kill("SIGTERM");
+      const delayMs = this.deps.backoffMs[Math.min(this.restartAttempt, this.deps.backoffMs.length - 1)]!;
+      this.restartAttempt++;
+      logger.warn({ reason, delayMs }, "Scheduling resident Chrome restart");
+      this.restartTimer = this.deps.setTimer(() => {
+        this.restartTimer = undefined;
+        this.launch();
+      }, delayMs);
+    });
   }
 
   private scheduleHeartbeat(): void {
@@ -204,6 +213,7 @@ export const residentChromeSupervisor = new ResidentChromeSupervisor({
     try { current = Number.parseInt(readFileSync(generationPath, "utf8"), 10) || 0; } catch { /* first launch */ }
     const next = current + 1;
     writeFileSync(generationPath, `${next}\n`, { mode: 0o600 });
+    browserLeaseBroker.beginGeneration(next);
     return next;
   },
   drainLeases,

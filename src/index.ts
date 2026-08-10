@@ -29,7 +29,8 @@ import { staleMapCleaner } from "./utils/stale-map-cleaner.js";
 import { processRegistry } from "./process/registry.js";
 import { SessionTimeoutManager } from "./process/timeout-manager.js";
 import { cleanupScheduler } from "./process/cleanup-scheduler.js";
-import { residentChromeSupervisor } from "./scraping/chrome-launcher.js";
+import { browserLeaseBroker, residentChromeSupervisor } from "./scraping/chrome-launcher.js";
+import { startBrowserControlServer, stopBrowserControlServer } from "./scraping/browser-control.js";
 import { initFallbackChain } from "./process/fallback-chain.js";
 import { initTraceWriter, rehydrateHealth, setGitCommit } from "./executors/trace-writer.js";
 import {
@@ -115,6 +116,11 @@ async function main(): Promise<void> {
   cleanupScheduler.init(stateManager.getDb());
   residentChromeSupervisor.start();
   registerShutdownTask(() => residentChromeSupervisor.stop());
+  const browserControlServer = startBrowserControlServer(
+    browserLeaseBroker,
+    (enabled, reason) => residentChromeSupervisor.setMaintenance(enabled, reason),
+  );
+  registerShutdownTask(() => stopBrowserControlServer(browserControlServer));
   initFallbackChain(stateManager.getDb());
   initTraceWriter(stateManager.getDb());
   rehydrateHealth(stateManager.getDb());
