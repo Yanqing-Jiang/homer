@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { probeCdp } from "../src/scraping/chrome-launcher.js";
+import {
+  probeCdp,
+  ResidentChromeSupervisor,
+  type ChromeSupervisorDeps,
+} from "../src/scraping/chrome-launcher.js";
 
 async function listen(server: Server): Promise<number> {
   await new Promise<void>((resolve, reject) => {
@@ -141,6 +146,104 @@ test("agent-browser binding hazard: independent processes contend on default.soc
     await new Promise((resolve) => first.once("exit", resolve));
     await rm(home, { recursive: true, force: true });
   }
+});
+
+class FakeChrome extends EventEmitter {
+  killed = false;
+  constructor(readonly pid: number) { super(); }
+  kill(): boolean { this.killed = true; return true; }
+}
+
+class FakeTimers {
+  tasks: Array<{ callback: () => void; delayMs: number; timer: ReturnType<typeof setTimeout> }> = [];
+
+  set = (callback: () => void, delayMs: number): ReturnType<typeof setTimeout> => {
+    const timer = { fake: true } as unknown as ReturnType<typeof setTimeout>;
+    this.tasks.push({ callback, delayMs, timer });
+    return timer;
+  };
+
+  clear = (timer: ReturnType<typeof setTimeout>): void => {
+    this.tasks = this.tasks.filter((task) => task.timer !== timer);
+  };
+
+  run(delayMs: number): void {
+    const index = this.tasks.findIndex((task) => task.delayMs === delayMs);
+    assert.notEqual(index, -1, `no timer scheduled for ${delayMs}ms`);
+    const [task] = this.tasks.splice(index, 1);
+    task!.callback();
+  }
+}
+
+function supervisorHarness(probe: ChromeSupervisorDeps["probe"] = async () => ({ state: "ready", pages: 1 })) {
+  const timers = new FakeTimers();
+  const children: FakeChrome[] = [];
+  let generation = 0;
+  let drains = 0;
+  const supervisor = new ResidentChromeSupervisor({
+    spawnChrome: () => {
+      const child = new FakeChrome(1000 + children.length);
+      children.push(child);
+      return child;
+    },
+    probe,
+    ensureProfile: () => {},
+    nextGeneration: () => ++generation,
+    drainLeases: async () => { drains++; },
+    setTimer: timers.set,
+    clearTimer: timers.clear,
+    heartbeatMs: 999,
+    backoffMs: [2, 5, 15, 30, 60],
+  });
+  return { supervisor, timers, children, drains: () => drains };
+}
+
+test("resident supervisor restarts on unexpected child exit and increments generation", () => {
+  const { supervisor, timers, children } = supervisorHarness();
+  supervisor.start();
+  assert.equal(supervisor.generation, 1);
+  children[0]!.emit("exit", 1, null);
+  timers.run(2);
+  assert.equal(children.length, 2);
+  assert.equal(supervisor.generation, 2);
+  supervisor.stop();
+});
+
+test("resident supervisor uses capped 2,5,15,30,60 restart backoff", () => {
+  const { supervisor, timers, children } = supervisorHarness();
+  supervisor.start();
+  for (const expected of [2, 5, 15, 30, 60, 60]) {
+    children.at(-1)!.emit("exit", 1, null);
+    timers.run(expected);
+  }
+  assert.equal(children.length, 7);
+  supervisor.stop();
+});
+
+test("resident supervisor restarts after three consecutive failed heartbeats", async () => {
+  const { supervisor, timers, children } = supervisorHarness(async () => ({ state: "absent", pages: 0 }));
+  supervisor.start();
+  await supervisor.heartbeatNow();
+  await supervisor.heartbeatNow();
+  assert.equal(children[0]!.killed, false);
+  await supervisor.heartbeatNow();
+  assert.equal(children[0]!.killed, true);
+  timers.run(2);
+  assert.equal(children.length, 2);
+  supervisor.stop();
+});
+
+test("maintenance drains leases and suppresses restart until disabled", async () => {
+  const harness = supervisorHarness();
+  harness.supervisor.start();
+  await harness.supervisor.setMaintenance(true, "profile cutover");
+  assert.deepEqual(harness.supervisor.maintenance(), { enabled: true, reason: "profile cutover" });
+  assert.equal(harness.drains(), 1);
+  harness.children[0]!.emit("exit", 0, null);
+  assert.equal(harness.timers.tasks.some((task) => task.delayMs === 2), false);
+  await harness.supervisor.setMaintenance(false, "complete");
+  assert.equal(harness.children.length, 2);
+  harness.supervisor.stop();
 });
 
 test("restart generation invalidates prior targets and leases", {

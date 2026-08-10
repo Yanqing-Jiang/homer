@@ -23,7 +23,7 @@ import { basename, dirname, join } from "path";
 import { processRegistry } from "./registry.js";
 import type { ProcessRecord } from "./registry.js";
 import { logger } from "../utils/logger.js";
-import { teardownIdleSession, getLastCdpUseAt, probeCdp, type CdpProbe } from "../scraping/chrome-launcher.js";
+import { teardownIdleSession, getLastCdpUseAt, isResidentChromeSupervisionActive, probeCdp, type CdpProbe } from "../scraping/chrome-launcher.js";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
 // @ts-ignore
 import type Database from "better-sqlite3";
@@ -387,6 +387,8 @@ export class CleanupScheduler {
    * referenced by any running Chrome, and confirmed stale on a fresh re-check.
    */
   private sweepCdpProfileDirs(): void {
+    // DEBT: dead path kept until step 7 post-soak deletion, upgrade when 7-day durable-profile soak completes
+    if (isResidentChromeSupervisionActive()) return;
     // Fail closed: if process/listener discovery failed this cycle, we cannot
     // prove any dir is dead — skip the sweep entirely rather than risk the live one.
     if (!this.cdp.trusted) {
@@ -439,6 +441,8 @@ export class CleanupScheduler {
    */
   private async maybeTeardownIdleCdp(actions: CleanupAction[]): Promise<void> {
     try {
+      // DEBT: dead path kept until step 7 post-soak deletion, upgrade when 7-day durable-profile soak completes
+      if (isResidentChromeSupervisionActive()) return;
       // Need trusted process/listener state and an actual Homer-owned live
       // listener (liveProfileDirs is only populated for cmdline-verified CDP
       // Chromes — a non-Homer listener on :9222 never lands here).
