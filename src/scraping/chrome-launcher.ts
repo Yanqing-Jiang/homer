@@ -81,6 +81,9 @@ export class ResidentChromeSupervisor {
   private restartDraining = false;
   private maintenanceEnabled = false;
   private maintenanceReason: string | null = null;
+  private lastProbe: CdpProbe = { state: "absent", pages: 0 };
+  private restartCount = 0;
+  private transition: () => void = () => {};
   generation = 0;
 
   constructor(private readonly deps: ChromeSupervisorDeps) {}
@@ -105,11 +108,16 @@ export class ResidentChromeSupervisor {
   maintenance(): { enabled: boolean; reason: string | null } {
     return { enabled: this.maintenanceEnabled, reason: this.maintenanceReason };
   }
+  setTransitionHandler(handler: () => void): void { this.transition = handler; }
+  status(): { generation: number; chromePid: number | null; cdp: CdpProbe & { restartCount: number }; maintenance: { enabled: boolean; reason: string | null } } {
+    return { generation: this.generation, chromePid: this.child?.pid ?? null, cdp: { ...this.lastProbe, restartCount: this.restartCount }, maintenance: this.maintenance() };
+  }
 
   async setMaintenance(enabled: boolean, reason: string): Promise<void> {
     if (enabled) {
       this.maintenanceEnabled = true;
       this.maintenanceReason = reason;
+      this.transition();
       if (this.restartTimer) this.deps.clearTimer(this.restartTimer);
       this.restartTimer = undefined;
       await this.deps.drainLeases();
@@ -117,12 +125,14 @@ export class ResidentChromeSupervisor {
     }
     this.maintenanceEnabled = false;
     this.maintenanceReason = null;
+    this.transition();
     if (this.running && !this.child) this.launch();
   }
 
   async heartbeatNow(): Promise<void> {
     if (!this.running || this.maintenanceEnabled) return;
     const result = await this.deps.probe();
+    this.lastProbe = result; this.transition();
     if (result.state !== "absent" && !result.reason) {
       await this.deps.observeTargets?.();
       this.failedHeartbeats = 0;
@@ -143,9 +153,11 @@ export class ResidentChromeSupervisor {
       this.generation = this.deps.nextGeneration();
       const child = this.deps.spawnChrome();
       this.child = child;
+      this.lastProbe = { state: "empty", pages: 0, reason: "Chrome starting" }; this.transition();
       const settle = () => {
         if (this.child !== child) return;
         this.child = undefined;
+        this.lastProbe = { state: "absent", pages: 0, reason: "Chrome exited" }; this.transition();
         this.scheduleRestart("unexpected child exit");
       };
       child.once("exit", settle);
@@ -170,6 +182,7 @@ export class ResidentChromeSupervisor {
       child?.kill("SIGTERM");
       const delayMs = this.deps.backoffMs[Math.min(this.restartAttempt, this.deps.backoffMs.length - 1)]!;
       this.restartAttempt++;
+      this.restartCount++; this.transition();
       logger.warn({ reason, delayMs }, "Scheduling resident Chrome restart");
       this.restartTimer = this.deps.setTimer(() => {
         this.restartTimer = undefined;

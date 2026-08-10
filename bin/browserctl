@@ -10,7 +10,7 @@ const agentBrowser = process.env.HOMER_AGENT_BROWSER_BIN ?? "/opt/homebrew/bin/a
 const cdpBase = process.env.HOMER_CDP_HTTP ?? "http://127.0.0.1:9222";
 const [command, ...args] = process.argv.slice(2);
 
-function usage() { throw new Error("usage: browserctl acquire <surface> <owner> <ttl-seconds> | renew <leaseId> <ttl-seconds> | release <leaseId> | reconcile <surface> <origin[,origin...]> <bootstrapUrl> | maintenance <on|off> [reason] | agent [agent.surface] [--ttl seconds] [--rpc | -- <workflow command...>]"); }
+function usage() { throw new Error("usage: browserctl acquire <surface> <owner> <ttl-seconds> | renew <leaseId> <ttl-seconds> | release <leaseId> | reconcile <surface> <origin[,origin...]> <bootstrapUrl> | touch <amazon.vc|amazon.amc> | maintenance <on|off> [reason] | agent [agent.surface] [--ttl seconds] [--rpc | -- <workflow command...>]"); }
 
 function requestBroker(request) {
   return new Promise((resolve, reject) => {
@@ -134,6 +134,7 @@ try {
     else if (command === "renew" && args.length === 2) request = { verb: command, leaseId: args[0], ttl: Number(args[1]) };
     else if (command === "release" && args.length === 1) request = { verb: command, leaseId: args[0] };
     else if (command === "reconcile" && args.length === 3) request = { verb: command, surface: args[0], expectedOrigin: args[1].split(","), bootstrapUrl: args[2] };
+    else if (command === "touch" && args.length === 1) request = { verb: command, surface: args[0] };
     else if (command === "maintenance" && args.length >= 1 && ["on", "off"].includes(args[0])) request = { verb: command, enabled: args[0] === "on", reason: args.slice(1).join(" ") || "browserctl" };
     else usage();
     process.stdout.write(`${JSON.stringify(await requestBroker(request))}\n`);

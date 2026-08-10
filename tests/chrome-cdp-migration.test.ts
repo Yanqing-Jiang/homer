@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtemp, mkdir, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,8 @@ import {
   BrowserLeaseBroker,
   type BrowserTargetClient,
 } from "../src/scraping/browser-control.js";
+import { writeStatusAtomic, type ChromeStatus } from "../src/scraping/browser-status.js";
+import { stewardshipBackoffMs, stewardshipJitterMs, stewardshipSkip } from "../src/scraping/session-stewardship.js";
 
 async function listen(server: Server): Promise<number> {
   await new Promise<void>((resolve, reject) => {
@@ -405,6 +407,29 @@ test("agent-browser degradation does not block exact-target reconcile and acquir
   assert.equal(acquired.webSocketDebuggerUrl, "ws://test/direct-1");
 });
 
-test("status publication uses sibling temp, fsync, and atomic rename", {
-  skip: "Step 5 implements the status writer",
-}, () => {});
+test("touch scheduler bounds independent jitter and backs off exponentially", () => {
+  assert.equal(stewardshipJitterMs(() => 0), -15 * 60_000);
+  assert.equal(stewardshipJitterMs(() => 0.5), 0);
+  assert.ok(stewardshipJitterMs(() => 0.999999) < 15 * 60_000);
+  assert.deepEqual([1, 2, 3, 9].map(stewardshipBackoffMs), [15, 30, 60, 360].map((m) => m * 60_000));
+});
+
+test("touch scheduler skips leases, recent human activity, and active backoff", () => {
+  const now = 1_000_000_000;
+  const record = { surface: "amazon.vc", generation: 1, targetId: "vc", expectedOrigins: ["https://example.test"], currentUrl: "https://example.test", lastVerifiedUrl: "https://example.test", owner: null, leaseId: null, leaseExpiresAt: null, lastActivityAt: 0 };
+  assert.match(stewardshipSkip({ ...record, owner: "collector", leaseId: "lease" }, null, now, 0)!, /leased/);
+  assert.match(stewardshipSkip(record, now - 29 * 60_000, now, 0)!, /human activity/);
+  assert.match(stewardshipSkip(record, null, now, now + 1)!, /backoff/);
+  assert.equal(stewardshipSkip(record, now - 31 * 60_000, now, 0), null);
+});
+
+test("status publication uses sibling temp, fsync, and atomic rename", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "homer-status-test-")); const path = join(dir, "status.json");
+  const status: ChromeStatus = { schema: 1, updatedAt: new Date(0).toISOString(), generation: 3, supervisorPid: 1, chromePid: 2,
+    profilePath: "/profile", cdp: { state: "ready", pages: 2, restartCount: 0, reason: null }, maintenance: { enabled: false, reason: null }, surfaces: {} };
+  try {
+    writeStatusAtomic(path, status);
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), status);
+    assert.deepEqual(await readdir(dir), ["status.json"]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

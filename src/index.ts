@@ -29,8 +29,10 @@ import { staleMapCleaner } from "./utils/stale-map-cleaner.js";
 import { processRegistry } from "./process/registry.js";
 import { SessionTimeoutManager } from "./process/timeout-manager.js";
 import { cleanupScheduler } from "./process/cleanup-scheduler.js";
-import { browserLeaseBroker, residentChromeSupervisor } from "./scraping/chrome-launcher.js";
+import { browserLeaseBroker, residentChromeSupervisor, RESIDENT_CDP_PROFILE } from "./scraping/chrome-launcher.js";
 import { startBrowserControlServer, stopBrowserControlServer } from "./scraping/browser-control.js";
+import { BrowserStatusService } from "./scraping/browser-status.js";
+import { SessionStewardship } from "./scraping/session-stewardship.js";
 import { runAgentBrowserBindingSelfTest } from "./scraping/agent-browser-binding.js";
 import { initFallbackChain } from "./process/fallback-chain.js";
 import { initTraceWriter, rehydrateHealth, setGitCommit } from "./executors/trace-writer.js";
@@ -117,9 +119,23 @@ async function main(): Promise<void> {
   cleanupScheduler.init(stateManager.getDb());
   residentChromeSupervisor.start();
   registerShutdownTask(() => residentChromeSupervisor.stop());
+  const browserStatus = new BrowserStatusService(() => {
+    const status = residentChromeSupervisor.status();
+    return { generation: status.generation, supervisorPid: process.pid, chromePid: status.chromePid,
+      profilePath: RESIDENT_CDP_PROFILE,
+      cdp: { state: status.cdp.state, pages: status.cdp.pages, restartCount: status.cdp.restartCount, reason: status.cdp.reason ?? null },
+      maintenance: status.maintenance, records: browserLeaseBroker.snapshot() };
+  });
+  const publishBrowserStatus = () => { try { browserStatus.publish(); } catch (err) { logger.warn({ err }, "Chrome status publication failed"); } };
+  browserLeaseBroker.setTransitionHandler(publishBrowserStatus);
+  residentChromeSupervisor.setTransitionHandler(publishBrowserStatus);
+  browserStatus.start(); registerShutdownTask(() => browserStatus.stop());
+  const stewardship = new SessionStewardship(browserLeaseBroker, browserStatus);
   const browserControlServer = startBrowserControlServer(
     browserLeaseBroker,
     (enabled, reason) => residentChromeSupervisor.setMaintenance(enabled, reason),
+    undefined,
+    (surface) => stewardship.touch(surface, true),
   );
   registerShutdownTask(() => stopBrowserControlServer(browserControlServer));
   try {
@@ -131,6 +147,8 @@ async function main(): Promise<void> {
     browserLeaseBroker.setDegraded(reason);
     logger.error({ err: reason }, "Agent-browser startup serialized-binding self-test failed; agent-browser automation degraded");
   }
+  await residentChromeSupervisor.heartbeatNow();
+  await stewardship.ensureSurfaces(); stewardship.start(); registerShutdownTask(() => stewardship.stop());
   initFallbackChain(stateManager.getDb());
   initTraceWriter(stateManager.getDb());
   rehydrateHealth(stateManager.getDb());

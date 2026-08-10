@@ -20,13 +20,14 @@ import {
 } from "../notifications/telegram-router.js";
 import type { NotificationIntent } from "../notifications/types.js";
 import { createHash } from "crypto";
+import { readFileSync } from "node:fs";
 import { execFile } from "child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import { getConnectivityMonitor } from "../heartbeat/index.js";
 import { processRegistry } from "../process/registry.js";
 import { cleanupScheduler } from "../process/cleanup-scheduler.js";
-import { probeCdp } from "../scraping/chrome-launcher.js";
+import { BROWSER_STATUS_PATH } from "../scraping/browser-control.js";
 import { checkAndFlushExpiringSessions } from "../memory/flush.js";
 import { config } from "../config/index.js";
 import { runInternalJobHarness } from "./executor.js";
@@ -420,18 +421,16 @@ async function runHealthCheck(
     logger.warn({ error: err }, "Process monitoring in health handler failed");
   }
 
-  // CDP state — REPORT ONLY. The probe is read-only: health must never launch or
-  // reap Chrome (cleanup-scheduler is the sole reaper). "absent" is the healthy
-  // steady state for an on-demand browser; "empty" is a listener agent-browser
-  // cannot attach to — the exact zombie that broke delta-upgrade-watch.
+  // Chrome service owns CDP/session interpretation and alert transition state.
   try {
-    const cdp = await probeCdp();
-    if (cdp.state === "empty") {
-      issues.push(`🟡 CDP: listener on :9222 with no attachable page target${cdp.reason ? ` (${cdp.reason})` : ""}`);
-    }
-    logger.debug({ state: cdp.state, pages: cdp.pages }, "CDP health probe");
+    const status = JSON.parse(readFileSync(BROWSER_STATUS_PATH, "utf8"));
+    const ageMs = now - Date.parse(status.updatedAt);
+    if (!Number.isFinite(ageMs) || ageMs > 90_000) issues.push(`🔴 Chrome service: stale status.json (${Number.isFinite(ageMs) ? `${Math.round(ageMs / 1000)}s` : "invalid timestamp"})`);
+    else if (status.cdp?.state !== "ready") issues.push(`🔴 Chrome service: CDP ${status.cdp?.state ?? "unknown"}${status.cdp?.reason ? ` (${status.cdp.reason})` : ""}`);
+    logger.debug({ state: status.cdp?.state, ageMs }, "Chrome service status");
   } catch (err) {
-    logger.warn({ error: err }, "CDP probe in health handler failed");
+    issues.push("🔴 Chrome service: status.json missing or unreadable");
+    logger.warn({ error: err }, "Chrome service status read failed");
   }
 
   // In production Homer must remain a child of the resident supervisor. If the
