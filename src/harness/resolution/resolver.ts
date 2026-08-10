@@ -1,8 +1,8 @@
 /**
  * The single harness resolver. Every selection — scheduler, queue, runtime, router — flows
  * through this one function. Precedence is explicit and symmetric across scopes; a baseline
- * is a profile, never a selector. The system default is NOT hardcoded to Claude: it is the
- * first registry harness that can generate text, with HARNESS_IDS as the stable tie-break.
+ * is a profile, never a selector. The system default is Claude so a missing DB selection
+ * cannot silently route scheduled work through a subscription-backed OpenCode model.
  */
 
 import type { CapabilityRequirement, HarnessId, OutputContract } from "../types.js";
@@ -48,10 +48,9 @@ function scopeChain(scope: ResolveHarnessSelectionInput["scope"]): Array<{ type:
   return chain;
 }
 
-/** First registry harness that can generate text — OpenCode-first after Claude Code retirement. */
+/** Subscription-independent default for requests with no selection row at any scope. */
 function systemDefaultHarness(): HarnessId {
-  // First non-retired registry harness — currently opencode.
-  return HARNESS_IDS[0] ?? "opencode";
+  return HARNESS_IDS.includes("claude") ? "claude" : (HARNESS_IDS[0] ?? "claude");
 }
 
 export function resolveHarnessSelection(
@@ -112,7 +111,7 @@ export function resolveHarnessSelection(
       source: "system-default",
       found: true,
       harness,
-      reason: "no selection row at any scope (incl. global); using first healthy registry harness",
+      reason: "no selection row at any scope (incl. global); using subscription-independent system default",
     });
   }
 

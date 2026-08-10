@@ -51,6 +51,20 @@ derived_claims:
       - "10+ years"
       - "10+ years of working experience"
       - "10+ years building and launching technical products and analytics platforms"
+  years_technical_program_management:
+    value: "7+ years"
+    derivation: "Program ownership runs continuously from Nov 2015. US Army (Nov 2015-Jan 2020): Government Travel Card Program Manager, Defense Travel System Approving Official, and Government Purchase Card Holder — owning program scope, approval workflow inside a government system of record, budget forecasting, and the tracking dashboards reporting on it. Analytics/AI platform era (Jan 2020-present): ADM project-management application and ETL platform for 400+ global members, P&G Walgreens BI/analytics platform multi-year roadmap across 5-10 cross-functional product teams, P&G Amazon analytics platform with SLA, change-management, and release-gate ownership. Dated 2015->2026 (~10.7 yrs of program ownership); 7+ years counted as technical program management is conservative. Approved by Yanqing 2026-07-29."
+    approved_phrasings:
+      - "7+ years of technical program management"
+      - "7+ years leading technical programs"
+      - "10+ years of program ownership across military logistics and enterprise data platforms"
+  leadership_years:
+    value: "6+ years"
+    derivation: "Team leadership begins with dotted-line direction of 1-3 contractors/analysts at ADM (Jan 2020-Mar 2022, `adm-team-lead`), continues through Senior Manager roles at P&G Walgreens (Apr 2022) and P&G Amazon (Jul 2024-present) with 1-2 direct reports plus 3-5 dotted-line. Jan 2020->Jul 2026 = ~6.5 yrs; 6+ is conservative. Approved by Yanqing 2026-07-29."
+    approved_phrasings:
+      - "6+ years leading data engineering and analytics teams"
+      - "6+ years of engineering team leadership"
+      - "6+ years leading engineering and analytics teams"
   total_revenue_impact:
     value: "$420M+"
     derivation: "$200M media optimizer + $150M ML pipeline + $70M forecasting (verbatim from bullets)"
@@ -348,6 +362,48 @@ experience:
         added_via: fit-analysis
         added_date: "2026-07-24"
         parent_bullet: pg-amazon-medallion
+      - id: pg-amazon-exec-narrative
+        claim: "Authors the annual and quarterly planning narrative documents for P&G's Amazon Sales analytics and AI program — scope, milestones, trade-offs, and success metrics — and presents them directly to Director- and VP-level leadership in recurring business reviews."
+        metrics: []
+        skills: [executive narrative, written planning documents, annual planning, quarterly planning, business reviews, VP communication, Director communication, stakeholder influence, trade-off framing, single-threaded communication, roadmap narrative]
+        added_via: fit-analysis
+        added_date: "2026-07-29"
+        parent_bullet: pg-amazon-ai-roadmap
+      - id: pg-amazon-freshness-sla
+        claim: "Owns intraday (sub-daily) refresh cadence on the Amazon analytics platform against committed data-freshness SLAs, with alerting that fires when a freshness or pipeline-health commitment is missed before downstream consumers are affected."
+        metrics: []
+        skills: [data freshness SLA, intraday refresh, latency commitments, refresh cadence, pipeline SLA, availability commitments, alerting, consistency guarantees, real-time-adjacent data delivery]
+        added_via: fit-analysis
+        added_date: "2026-07-29"
+        parent_bullet: pg-amazon-platform-monitoring
+      - id: pg-amazon-launch-gate
+        claim: "Owns the release gate for the Amazon analytics platform — approves go/no-go before changes reach consuming teams, maintains documented rollback paths, and issues the release communication to downstream stakeholders."
+        metrics: []
+        skills: [launch readiness, go/no-go decision, release gate, rollback plan, release communication, change control, deployment readiness, downstream consumer management, operational readiness review]
+        added_via: fit-analysis
+        added_date: "2026-07-29"
+        parent_bullet: pg-amazon-itsm-platform
+      - id: pg-amazon-streaming-cdc
+        claim: "Built real-time and change-data-capture ingestion on the Azure Databricks lakehouse backing P&G's Amazon analytics platform — Spark Structured Streaming jobs, Delta Live Tables and Auto Loader for incremental ingestion, and CDC merge/upsert into Delta tables alongside the batch Airflow and dbt pipelines."
+        metrics: []
+        skills: [Spark Structured Streaming, streaming, real-time pipelines, Delta Live Tables, DLT, Auto Loader, CDC, change data capture, MERGE INTO, Delta Lake, incremental ingestion, ETL, ELT, data integration, batch and real-time]
+        added_via: fit-analysis
+        added_date: "2026-07-29"
+        parent_bullet: pg-amazon-modern-stack
+      - id: pg-amazon-platform-budget
+        claim: "Owns a $1M-$5M annual platform budget on P&G's Amazon analytics platform — cloud compute and storage, SaaS and data tooling, and contractor and vendor engineering spend — setting priorities and making renewal, consolidation, and rationalization calls."
+        metrics: ["$1M-$5M annual platform budget"]
+        skills: [budget ownership, budget management, resource allocation, cloud cost, FinOps, vendor spend, tooling spend, prioritization, operational execution, cost optimization]
+        added_via: fit-analysis
+        added_date: "2026-07-29"
+        parent_bullet: pg-amazon-tech-spend
+      - id: pg-amazon-access-controls
+        claim: "Designed and enforced role-based access controls on the Databricks lakehouse across four data classes — consumer PII under GDPR/CCPA, retailer-confidential data restricted by contract, SOX-scoped financial data, and internal company-confidential classification tiers — so each consuming team sees only what its policy tier allows."
+        metrics: []
+        skills: [access controls, RBAC, role-based access control, data security, PII, GDPR, CCPA, SOX, data classification, regulatory compliance, policy enforcement, Unity Catalog, least privilege, data governance, secure data access]
+        added_via: fit-analysis
+        added_date: "2026-07-29"
+        parent_bullet: pg-amazon-unity-catalog
       - id: pg-amazon-revenue-pl-forecast
         claim: "Built revenue and margin forecasting models feeding P&G's Amazon business P&L, projecting sales and profitability to guide growth-investment and budget decisions for sales leadership."
         metrics: []
@@ -486,6 +542,13 @@ experience:
         added_via: fit-analysis
         added_date: "2026-06-16"
         parent_bullet: pg-walgreens-forecasting
+      - id: pg-walgreens-instacart-ubereats
+        claim: "Partnered weekly with Instacart and Uber Eats consumer teams on P&G's Walgreens digital commerce business — P&G being Instacart's largest CPG revenue partner — collaborating with their UX/design teams on shopper-facing experiences such as combo purchases and interest-based product discovery."
+        metrics: ["weekly partner connects", "P&G = Instacart's largest CPG revenue partner"]
+        skills: [consumer UX collaboration, marketplace partnerships, Instacart, Uber Eats, digital commerce, product discovery, basket building, cross-company collaboration]
+        added_via: fit-analysis
+        added_date: "2026-08-03"
+        parent_bullet: pg-walgreens-digital-transformation
 
   - employer: Archer Daniels Midland
     role: Data Analytics Engineer
@@ -519,6 +582,13 @@ experience:
         added_via: fit-analysis
         added_date: "2026-05-04"
         parent_bullet: adm-sql-etl
+      - id: adm-team-lead
+        claim: "Led a dotted-line team of 1-3 contractors and analysts on ADM's global procurement and supply chain data work — directing the SQL, ETL, and Power Platform build serving 400+ global team members without formal reporting lines."
+        metrics: ["1-3 dotted-line contractors and analysts", "400+ global team members"]
+        skills: [team leadership, dotted-line management, contractor management, technical direction, data engineering leadership, tech lead]
+        added_via: fit-analysis
+        added_date: "2026-07-29"
+        parent_bullet: adm-project-management-app
       - id: adm-budget-forecast
         claim: "Built procurement cost and category budget forecasts across multi-million-dollar indirect and tech categories at ADM Global Procurement, projecting spend to support sourcing, budget-setting, and resource-allocation decisions for procurement leadership."
         metrics: ["multi-million-dollar indirect and tech categories"]

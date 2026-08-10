@@ -56,6 +56,16 @@ CLAUDE.md
 GEMINI.md
 AGENTS.md
 
+# Skill definitions — never publish, even if the *.md rule above is ever narrowed
+**/skill.md
+**/SKILL.md
+# Amazon-portal login skills: whole dirs (their config.json describes the
+# keychain + Telegram-MFA login workflow and must not ship either)
+skills/skills/vc-login/
+skills/skills/amc-login/
+generated/harness/*/skills/vc-login/
+generated/harness/*/skills/amc-login/
+
 # Browser profiles
 profiles/
 
