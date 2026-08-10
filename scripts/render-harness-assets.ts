@@ -188,7 +188,7 @@ function renderClaude(a: CanonicalAsset, aliases: AliasTable): RenderedFile[] {
     });
     files.push({
       path: join(targetDir, "SKILL.md"),
-      content: `${BANNER(a.sourceRel)}\n${fm}\n\n${body}`,
+      content: `${fm}\n\n${BANNER(a.sourceRel)}\n\n${body}`,
       installPath: join(installDir, "SKILL.md"),
     });
     files.push(...renderResourceFiles(a, targetDir, installDir));
@@ -201,7 +201,7 @@ function renderClaude(a: CanonicalAsset, aliases: AliasTable): RenderedFile[] {
     });
     files.push({
       path: join(GENERATED, "claude", "commands", `${a.id}.md`),
-      content: `${BANNER(a.sourceRel)}\n${fm}\n\n${body}`,
+      content: `${fm}\n\n${BANNER(a.sourceRel)}\n\n${body}`,
       installPath: join(HOME, ".claude", "commands", `${a.id}.md`),
     });
   }
@@ -218,7 +218,7 @@ function renderOpenCode(a: CanonicalAsset, aliases: AliasTable): RenderedFile[] 
     const fm = yamlFrontmatter({ name: a.id, description: a.frontmatter.description });
     files.push({
       path: join(targetDir, "SKILL.md"),
-      content: `${BANNER(a.sourceRel)}\n${fm}\n\n${body}`,
+      content: `${fm}\n\n${BANNER(a.sourceRel)}\n\n${body}`,
       installPath: join(installDir, "SKILL.md"),
     });
     files.push(...renderResourceFiles(a, targetDir, installDir));
@@ -227,7 +227,7 @@ function renderOpenCode(a: CanonicalAsset, aliases: AliasTable): RenderedFile[] 
     const fm = yamlFrontmatter({ description: a.frontmatter.description, "argument-hint": a.frontmatter.arguments?.hint });
     files.push({
       path: join(GENERATED, "opencode", "command", `${a.id}.md`),
-      content: `${BANNER(a.sourceRel)}\n${fm}\n\n${body}`,
+      content: `${fm}\n\n${BANNER(a.sourceRel)}\n\n${body}`,
       installPath: join(HOME, ".config", "opencode", "command", `${a.id}.md`),
     });
   }
@@ -248,7 +248,7 @@ function renderCodex(a: CanonicalAsset, aliases: AliasTable): RenderedFile[] {
     const fm = yamlFrontmatter({ name: a.id, description: desc });
     files.push({
       path: join(targetDir, "SKILL.md"),
-      // Codex requires YAML frontmatter on line 1, so the banner goes below it (unlike claude/opencode).
+      // YAML frontmatter must start on line 1 in every harness, so the banner goes below it.
       content: `${fm}\n\n${BANNER(a.sourceRel)}\n\n${body}`,
       installPath: join(installDir, "SKILL.md"),
     });
