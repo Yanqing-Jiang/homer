@@ -65,6 +65,8 @@ export interface ClaudeExecutorOptions {
    *  callers that parse structured output aren't polluted by CLI warnings.
    *  Off by default so existing callers keep stderr appended to output. */
   cleanOutput?: boolean;
+  /** Run the complete nested browser workflow under one browserctl agent lease. */
+  browserAgent?: boolean;
 }
 
 export interface ClaudeExecutorResult extends ExecutorResult {
@@ -250,8 +252,10 @@ export async function executeClaudeCommand(
   );
 
   const claudeBin = resolveClaudePath();
+  const spawnBin = options.browserAgent ? "browserctl" : claudeBin;
+  const spawnArgs = options.browserAgent ? ["agent", "--", claudeBin, ...args] : args;
   return new Promise((resolve, reject) => {
-    const proc = spawn(claudeBin, args, {
+    const proc = spawn(spawnBin, spawnArgs, {
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],

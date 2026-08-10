@@ -35,9 +35,18 @@ export class BrowserLeaseBroker {
   private inFlightAcquires = 0;
   private inFlightReconciles = 0;
   private draining = false;
+  private degradedReason: string | null = null;
+  private externalReservation: { surface: string; owner: string; leaseId: string; expiresAt: number } | null = null;
+  private observedTargetIds: Set<string> | null = null;
   constructor(private readonly targets: BrowserTargetClient, private readonly now = Date.now) {}
-  beginGeneration(generation: number): void { this.generation = generation; this.records.clear(); this.draining = false; }
+  beginGeneration(generation: number): void {
+    this.generation = generation; this.records.clear(); this.draining = false;
+    this.externalReservation = null; this.observedTargetIds = null;
+  }
+  setDegraded(reason: string | null): void { this.degradedReason = reason; }
+  degraded(): string | null { return this.degradedReason; }
   async reconcile(surface: string, expectedOrigins: string[], bootstrapUrl: string): Promise<TargetRecord> {
+    if (this.degradedReason) throw new Error(`shared-CDP automation degraded: ${this.degradedReason}`);
     if (!surface || expectedOrigins.length === 0) throw new Error("surface and expectedOrigin are required");
     const allowed = [...new Set(expectedOrigins.map((origin) => new URL(origin).origin))];
     if (!allowed.includes(new URL(bootstrapUrl).origin)) throw new Error("bootstrapUrl origin is not allowed");
@@ -74,6 +83,7 @@ export class BrowserLeaseBroker {
     return run;
   }
   async acquire(surface: string, owner: string, ttl: number): Promise<Record<string, unknown>> {
+    if (this.degradedReason) throw new Error(`shared-CDP automation degraded: ${this.degradedReason}`);
     return this.withSurfaceLock(surface, async () => {
       this.expireLeases();
       if (this.draining) throw new Error("broker is draining leases");
@@ -97,14 +107,66 @@ export class BrowserLeaseBroker {
       } finally { this.inFlightAcquires--; }
     });
   }
+  async reserveExternal(surface: string, owner: string, ttl: number): Promise<Record<string, unknown>> {
+    this.expireLeases();
+    if (this.degradedReason) throw new Error(`shared-CDP automation degraded: ${this.degradedReason}`);
+    if (this.draining) throw new Error("broker is draining leases");
+    if (!surface.startsWith("agent.")) throw new Error("external agent surfaces must start with agent.");
+    if (this.externalReservation) throw new Error(`agent target creation is reserved by ${this.externalReservation.owner}`);
+    const record = this.records.get(surface);
+    if (record?.leaseId) throw new Error(`surface ${surface} is leased by ${record.owner}`);
+    const leaseId = randomUUID();
+    const expiresAt = this.expiry(ttl);
+    this.externalReservation = { surface, owner, leaseId, expiresAt };
+    return { leaseId, generation: this.generation, baselineTargetIds: (await this.targets.list()).map((target) => target.id) };
+  }
+  async registerExternalTarget(leaseId: string, targetId: string): Promise<Record<string, unknown>> {
+    const reservation = this.externalReservation;
+    if (!reservation || reservation.leaseId !== leaseId) throw new Error("unknown or expired external reservation");
+    const live = (await this.targets.list()).find((target) => target.id === targetId);
+    if (!live) throw new Error("external target is unavailable");
+    const record: TargetRecord = {
+      surface: reservation.surface, generation: this.generation, targetId: live.id,
+      expectedOrigins: [originOf(live.url)], currentUrl: live.url, lastVerifiedUrl: live.url,
+      owner: reservation.owner, leaseId, leaseExpiresAt: reservation.expiresAt, lastActivityAt: this.now(),
+    };
+    this.records.set(record.surface, record);
+    this.externalReservation = null;
+    return { leaseId, generation: this.generation, targetId: live.id, currentUrl: live.url };
+  }
   renew(leaseId: string, ttl: number): Record<string, unknown> {
-    this.expireLeases(); const record = this.byLease(leaseId);
+    this.expireLeases();
+    if (this.externalReservation?.leaseId === leaseId) {
+      this.externalReservation.expiresAt = this.expiry(ttl);
+      return { leaseId, generation: this.generation, expiresAt: this.externalReservation.expiresAt };
+    }
+    const record = this.byLease(leaseId);
     record.leaseExpiresAt = this.expiry(ttl); record.lastActivityAt = this.now();
     return { leaseId, generation: this.generation, expiresAt: record.leaseExpiresAt };
   }
-  release(leaseId: string): Record<string, unknown> {
-    const record = this.byLease(leaseId); this.clearLease(record);
+  async release(leaseId: string, closeTarget = false, externalTargetId?: string): Promise<Record<string, unknown>> {
+    if (this.externalReservation?.leaseId === leaseId) {
+      if (closeTarget && externalTargetId) await this.targets.close(externalTargetId);
+      this.externalReservation = null;
+      return { leaseId, released: true };
+    }
+    const record = this.byLease(leaseId);
+    if (closeTarget) {
+      await this.targets.close(record.targetId);
+      this.records.delete(record.surface);
+    } else this.clearLease(record);
     return { leaseId, released: true };
+  }
+  async observeTargets(): Promise<void> {
+    const live = new Set((await this.targets.list()).map((target) => target.id));
+    if (this.observedTargetIds === null) { this.observedTargetIds = live; return; }
+    const registered = new Set([...this.records.values()].map((record) => record.targetId));
+    for (const targetId of live) {
+      if (!this.observedTargetIds.has(targetId) && !registered.has(targetId)) {
+        logger.warn({ targetId }, "Unregistered browser target mutation observed");
+      }
+    }
+    this.observedTargetIds = live;
   }
   async drainLeases(timeoutMs = 10_000): Promise<void> {
     this.draining = true;
@@ -135,16 +197,20 @@ export class BrowserLeaseBroker {
     if (!record) throw new Error("unknown or expired lease");
     return record;
   }
-  private activeLeaseCount(): number { this.expireLeases(); return [...this.records.values()].filter((r) => r.leaseId).length; }
+  private activeLeaseCount(): number {
+    this.expireLeases();
+    return [...this.records.values()].filter((r) => r.leaseId).length + (this.externalReservation ? 1 : 0);
+  }
   private expireLeases(): void {
     const now = this.now();
+    if (this.externalReservation && this.externalReservation.expiresAt <= now) this.externalReservation = null;
     for (const record of this.records.values()) if (record.leaseExpiresAt !== null && record.leaseExpiresAt <= now) this.clearLease(record);
   }
   private clearLease(record: TargetRecord): void {
     record.owner = null; record.leaseId = null; record.leaseExpiresAt = null; record.lastActivityAt = this.now();
   }
 }
-type ControlRequest = { verb: string; surface?: string; owner?: string; ttl?: number; leaseId?: string; expectedOrigin?: string[]; bootstrapUrl?: string; enabled?: boolean; reason?: string };
+type ControlRequest = { verb: string; surface?: string; owner?: string; ttl?: number; leaseId?: string; targetId?: string; closeTarget?: boolean; expectedOrigin?: string[]; bootstrapUrl?: string; enabled?: boolean; reason?: string };
 export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenance: (enabled: boolean, reason: string) => Promise<void>, socketPath = BROWSER_CONTROL_SOCKET): Server {
   const stateDir = dirname(socketPath);
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
@@ -165,8 +231,10 @@ export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenanc
         let result: unknown;
         if (request.verb === "reconcile") result = await broker.reconcile(request.surface!, request.expectedOrigin!, request.bootstrapUrl!);
         else if (request.verb === "acquire") result = await broker.acquire(request.surface!, request.owner!, request.ttl!);
+        else if (request.verb === "reserve-external") result = await broker.reserveExternal(request.surface!, request.owner!, request.ttl!);
+        else if (request.verb === "register-external-target") result = await broker.registerExternalTarget(request.leaseId!, request.targetId!);
         else if (request.verb === "renew") result = broker.renew(request.leaseId!, request.ttl!);
-        else if (request.verb === "release") result = broker.release(request.leaseId!);
+        else if (request.verb === "release") result = await broker.release(request.leaseId!, request.closeTarget, request.targetId);
         else if (request.verb === "maintenance") {
           await maintenance(Boolean(request.enabled), request.reason ?? "browserctl");
           if (!request.enabled) broker.resume();

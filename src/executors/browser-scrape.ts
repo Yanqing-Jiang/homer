@@ -22,7 +22,8 @@ const CLAUDE_TIMEOUT_RATIO = 0.9;
 const SCRAPE_CWD = "/tmp/homer-scrape";
 
 const BROWSER_ONLY_CONSTRAINT = `CRITICAL CONSTRAINT: You are a browser scraping worker.
-- Use agent-browser commands via bash for all browser interaction.
+- This worker is launched by browserctl agent and already holds one lease for the whole workflow.
+- Use agent-browser commands via bash; never run connect or override the injected named session.
 - Do NOT create, write, or modify any files on disk.
 - Do NOT use bash commands that create files (no >, >>, tee, touch, mkdir, cp, mv, curl -o, wget).
 - ALL output must be in your response text, not written to files.
@@ -48,6 +49,7 @@ export async function executeBrowserScrape(
       model: "sonnet",
       timeout: claudeTimeout,
       signal,
+      browserAgent: true,
     });
 
     const useful =

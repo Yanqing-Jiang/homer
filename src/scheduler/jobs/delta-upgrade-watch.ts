@@ -12,7 +12,6 @@
  * Never persists credentials to Homer files. Never clicks UPGRADE / purchases.
  */
 
-import { execFile } from "child_process";
 import {
   existsSync,
   mkdirSync,
@@ -22,12 +21,12 @@ import {
 } from "fs";
 import { join } from "path";
 import { PATHS } from "../../config/paths.js";
-import { withScrapeLock, connectScrapeBackend, resetScrapeBackend } from "../../executors/agent-browser-scrape.js";
+import { withScrapeLock } from "../../executors/agent-browser-scrape.js";
+import { BrokeredAgentSession, withBrokeredAgentSession } from "../../scraping/browser-agent-client.js";
 import { getChromeSavedLogin } from "../../scraping/chrome-login-data.js";
 import { logger } from "../../utils/logger.js";
 import type { NotificationIntent } from "../../notifications/types.js";
 
-const AGENT_BROWSER = "agent-browser";
 const WATCH_DIR = join(PATHS.homerData, "watches", "delta-upgrade");
 const CONFIG_PATH = join(WATCH_DIR, "config.json");
 const HISTORY_PATH = join(WATCH_DIR, "history.jsonl");
@@ -110,24 +109,11 @@ function sleep(ms: number): Promise<void> {
  * lastCdpUseAt. Set at the top of runDeltaUpgradeWatch, cleared when it returns.
  */
 let jobSignal: AbortSignal | undefined;
+let deltaBrowser: BrokeredAgentSession | undefined;
 
 function execAb(args: string[], timeoutMs: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      AGENT_BROWSER,
-      args,
-      { encoding: "utf8", timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, signal: jobSignal },
-      (err, stdout, stderr) => {
-        if (err) {
-          const e = err as NodeJS.ErrnoException & { stderr?: string };
-          e.stderr = stderr;
-          reject(e);
-        } else {
-          resolve(stdout);
-        }
-      },
-    );
-  });
+  if (!deltaBrowser) throw new Error("delta agent-browser command attempted outside browserctl agent lease");
+  return deltaBrowser.command(args, timeoutMs);
 }
 
 function loadConfig(): WatchConfig {
@@ -572,18 +558,13 @@ async function scrapeOffer(cfg: WatchConfig): Promise<OfferSnapshot> {
     loginOk: false,
   };
 
-  // The executor owns ensure + stale-socket clear + connect (with its own bounded
-  // reconnect); this job no longer duplicates that sequence or probes targets.
-  await connectScrapeBackend(jobSignal);
-  // Warm a tab; retry once on stale session id.
+  // browserctl owns the named session, target registration, and lease.
   try {
     await execAb(["open", cfg.upcomingTripsUrl], 60_000);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (!/Session with given id not found|CDP error/i.test(msg)) throw err;
-    logger.warn({ err: msg.slice(0, 200) }, "delta-upgrade-watch CDP stale — reconnect");
-    resetScrapeBackend();
-    await connectScrapeBackend(jobSignal);
+    logger.warn({ err: msg.slice(0, 200) }, "delta-upgrade-watch CDP command stale — retrying once");
     await execAb(["open", cfg.upcomingTripsUrl], 60_000);
   }
   const listEval = EXTRACT_OFFER_JS.replace("PNR_PLACEHOLDER", cfg.pnr);
@@ -737,7 +718,10 @@ async function runDeltaUpgradeWatchInner(): Promise<DeltaUpgradeWatchResult> {
 
   let offer: OfferSnapshot;
   try {
-    offer = await withScrapeLock(() => scrapeOffer(cfg));
+    offer = await withScrapeLock(() => withBrokeredAgentSession("agent.delta", async (session) => {
+      deltaBrowser = session;
+      try { return await scrapeOffer(cfg); } finally { deltaBrowser = undefined; }
+    }, jobSignal));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error({ err: msg }, "delta-upgrade-watch scrape threw");

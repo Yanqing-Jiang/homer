@@ -31,6 +31,7 @@ import { SessionTimeoutManager } from "./process/timeout-manager.js";
 import { cleanupScheduler } from "./process/cleanup-scheduler.js";
 import { browserLeaseBroker, residentChromeSupervisor } from "./scraping/chrome-launcher.js";
 import { startBrowserControlServer, stopBrowserControlServer } from "./scraping/browser-control.js";
+import { runAgentBrowserBindingSelfTest } from "./scraping/agent-browser-binding.js";
 import { initFallbackChain } from "./process/fallback-chain.js";
 import { initTraceWriter, rehydrateHealth, setGitCommit } from "./executors/trace-writer.js";
 import {
@@ -121,6 +122,15 @@ async function main(): Promise<void> {
     (enabled, reason) => residentChromeSupervisor.setMaintenance(enabled, reason),
   );
   registerShutdownTask(() => stopBrowserControlServer(browserControlServer));
+  try {
+    await runAgentBrowserBindingSelfTest();
+    browserLeaseBroker.setDegraded(null);
+    logger.info({ sessions: 2 }, "Agent-browser startup binding self-test passed");
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    browserLeaseBroker.setDegraded(reason);
+    logger.error({ err: reason }, "Agent-browser startup binding self-test failed; shared-CDP automation degraded");
+  }
   initFallbackChain(stateManager.getDb());
   initTraceWriter(stateManager.getDb());
   rehydrateHealth(stateManager.getDb());

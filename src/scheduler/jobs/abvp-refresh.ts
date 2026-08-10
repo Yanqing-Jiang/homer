@@ -20,8 +20,8 @@ import { flockSync, fcntlSync, constants as fsExtConstants } from "fs-ext";
 import type { Bot } from "grammy";
 // @ts-ignore better-sqlite3 default export typing
 import type Database from "better-sqlite3";
-import { ensureCDP } from "../../scraping/chrome-launcher.js";
 import { withScrapeLock } from "../../executors/agent-browser-scrape.js";
+import { BrokeredAgentSession, withBrokeredAgentSession } from "../../scraping/browser-agent-client.js";
 import {
   formatScheduledTelegramHtml,
   routeTelegramNotification,
@@ -48,9 +48,6 @@ const LANDING_ROOTS = [
 ];
 
 const PORTAL_URL = "https://advertising.amazon.com/bv#/ABVP/PNG_US/reports";
-const AGENT_BROWSER = "agent-browser";
-const SESSION = "abvp";
-const CDP_PORT = "9222";
 const LOOKBACK_DAYS = 28;
 const AUTH_WAIT_MS = 45 * 60 * 1000;
 const AUTH_POLL_MS = 20_000;
@@ -423,18 +420,12 @@ async function abvpBrowser(
   args: string[],
   opts: { timeoutMs?: number; signal?: AbortSignal; env?: Record<string, string> } = {},
 ): Promise<string> {
-  const full = ["--session", SESSION, ...args];
-  const { stdout, stderr } = await execFileAsync(AGENT_BROWSER, full, {
-    timeout: opts.timeoutMs ?? 120_000,
-    maxBuffer: 32 * 1024 * 1024,
-    signal: opts.signal,
-    env: { ...process.env, AGENT_BROWSER_HEADED: "1", ...opts.env },
-  });
-  if (stderr?.trim()) {
-    logger.debug({ stderr: stderr.slice(0, 500) }, "agent-browser stderr");
-  }
-  return (stdout || "").trim();
+  void opts.signal; void opts.env;
+  if (!abvpAgent) throw new Error("ABVP agent-browser command attempted outside browserctl agent lease");
+  return (await abvpAgent.command(args, opts.timeoutMs ?? 120_000)).trim();
 }
+
+let abvpAgent: BrokeredAgentSession | undefined;
 
 function parseEvalJson<T>(stdout: string): T {
   let out = stdout.trim();
@@ -451,13 +442,8 @@ function parseEvalJson<T>(stdout: string): T {
 }
 
 async function ensureBrowserReady(signal?: AbortSignal): Promise<void> {
-  await ensureCDP({ headed: true });
-  try {
-    await abvpBrowser(["connect", CDP_PORT], { timeoutMs: 30_000, signal });
-  } catch (err) {
-    logger.warn({ err }, "abvp connect failed; retrying once");
-    await abvpBrowser(["connect", CDP_PORT], { timeoutMs: 30_000, signal });
-  }
+  if (signal?.aborted) throw new Error("ABVP browser workflow aborted");
+  if (!abvpAgent) throw new Error("ABVP browserctl agent lease unavailable");
 }
 
 function classifyAuth(url: string, bodyText: string): AuthKind | null {
@@ -1369,7 +1355,9 @@ export async function runAbvpRefresh(ctx: AbvpRefreshContext): Promise<AbvpRefre
     }
 
     // Portal phase under shared browser mutex
-    const portalResult = await withScrapeLock(async () => {
+    const portalResult = await withScrapeLock(() => withBrokeredAgentSession("agent.abvp", async (session) => {
+      abvpAgent = session;
+      try {
       state!.stage = "preflight";
       await persist();
       await ensureBrowserReady(ctx.signal);
@@ -1653,7 +1641,8 @@ export async function runAbvpRefresh(ctx: AbvpRefreshContext): Promise<AbvpRefre
       }
 
       return null; // portal phase OK
-    });
+      } finally { abvpAgent = undefined; }
+    }, ctx.signal));
 
     if (portalResult) return portalResult;
 

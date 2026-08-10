@@ -61,6 +61,7 @@ export interface ChromeSupervisorDeps {
   ensureProfile: () => void;
   nextGeneration: () => number;
   drainLeases: () => Promise<void>;
+  observeTargets?: () => Promise<void>;
   setTimer: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
   clearTimer: (timer: ReturnType<typeof setTimeout>) => void;
   heartbeatMs: number;
@@ -123,6 +124,7 @@ export class ResidentChromeSupervisor {
     if (!this.running || this.maintenanceEnabled) return;
     const result = await this.deps.probe();
     if (result.state !== "absent" && !result.reason) {
+      await this.deps.observeTargets?.();
       this.failedHeartbeats = 0;
       this.restartAttempt = 0;
       return;
@@ -217,6 +219,7 @@ export const residentChromeSupervisor = new ResidentChromeSupervisor({
     return next;
   },
   drainLeases,
+  observeTargets: () => browserLeaseBroker.observeTargets(),
   setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
   clearTimer: (timer) => clearTimeout(timer),
   heartbeatMs: CDP_HEARTBEAT_MS,
