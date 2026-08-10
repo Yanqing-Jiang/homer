@@ -149,6 +149,7 @@ async function main(): Promise<void> {
   }
   await residentChromeSupervisor.heartbeatNow();
   await stewardship.ensureSurfaces(); stewardship.start(); registerShutdownTask(() => stewardship.stop());
+  residentChromeSupervisor.setSurfaceReconciler(() => stewardship.ensureSurfaces());
   initFallbackChain(stateManager.getDb());
   initTraceWriter(stateManager.getDb());
   rehydrateHealth(stateManager.getDb());
