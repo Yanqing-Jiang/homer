@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, stat } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,11 @@ import {
   ResidentChromeSupervisor,
   type ChromeSupervisorDeps,
 } from "../src/scraping/chrome-launcher.js";
+import {
+  BROWSER_CONTROL_SOCKET,
+  BROWSER_CONTROL_STATE_DIR,
+  BROWSER_STATUS_PATH,
+} from "../src/scraping/browser-control.js";
 
 async function listen(server: Server): Promise<number> {
   await new Promise<void>((resolve, reject) => {
@@ -290,6 +295,8 @@ test("cross-process leases exclude same surface, allow different surfaces, and r
   const socketPath = join(dir, "control.sock");
   const broker = await startBroker(socketPath, 41);
   try {
+    assert.equal((await stat(dir)).mode & 0o777, 0o700);
+    assert.equal((await stat(socketPath)).mode & 0o777, 0o600);
     for (const surface of ["amazon.vc", "amazon.amc"]) {
       const result = await runBrowserctl(socketPath, "reconcile", surface, "https://example.test", "https://example.test/bootstrap");
       assert.equal(result.code, 0, result.stderr);
@@ -319,6 +326,13 @@ test("cross-process leases exclude same surface, allow different surfaces, and r
     await stopBroker(broker);
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("control state is outside the case-insensitive Chrome profile path", () => {
+  assert.equal(BROWSER_CONTROL_STATE_DIR, "/Users/yj/Library/Application Support/Homer/cdp-state");
+  assert.equal(BROWSER_CONTROL_SOCKET, `${BROWSER_CONTROL_STATE_DIR}/browser-control.sock`);
+  assert.equal(BROWSER_STATUS_PATH, `${BROWSER_CONTROL_STATE_DIR}/status.json`);
+  assert.notEqual(BROWSER_CONTROL_STATE_DIR.toLowerCase(), "/Users/yj/Library/Application Support/Homer/Chrome-CDP".toLowerCase());
 });
 
 test("restart generation invalidates prior targets and leases across processes", async () => {

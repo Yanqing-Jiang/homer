@@ -2,7 +2,7 @@
 import { createConnection } from "node:net";
 
 const socketPath = process.env.HOMER_BROWSER_CONTROL_SOCKET
-  ?? "/Users/yj/Library/Application Support/Homer/chrome-cdp/browser-control.sock";
+  ?? "/Users/yj/Library/Application Support/Homer/cdp-state/browser-control.sock";
 const [command, ...args] = process.argv.slice(2);
 
 function usage() { throw new Error("usage: browserctl acquire <surface> <owner> <ttl-seconds> | renew <leaseId> <ttl-seconds> | release <leaseId> | reconcile <surface> <origin[,origin...]> <bootstrapUrl> | maintenance <on|off> [reason]"); }
