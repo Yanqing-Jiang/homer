@@ -38,11 +38,15 @@ export class BrowserLeaseBroker {
   private degradedReason: string | null = null;
   private externalReservation: { surface: string; owner: string; leaseId: string; expiresAt: number } | null = null;
   private observedTargetIds: Set<string> | null = null;
+  private transition: () => void = () => {};
   constructor(private readonly targets: BrowserTargetClient, private readonly now = Date.now) {}
   beginGeneration(generation: number): void {
     this.generation = generation; this.records.clear(); this.draining = false;
     this.externalReservation = null; this.observedTargetIds = null;
+    this.transition();
   }
+  setTransitionHandler(handler: () => void): void { this.transition = handler; }
+  snapshot(): TargetRecord[] { this.expireLeases(); return [...this.records.values()].map((record) => ({ ...record })); }
   setDegraded(reason: string | null): void { this.degradedReason = reason; }
   degraded(): string | null { return this.degradedReason; }
   async reconcile(surface: string, expectedOrigins: string[], bootstrapUrl: string): Promise<TargetRecord> {
@@ -73,6 +77,7 @@ export class BrowserLeaseBroker {
           leaseExpiresAt: null, lastActivityAt: this.now(),
         };
         this.records.set(surface, record);
+        this.transition();
         return { ...record };
       } finally {
         this.inFlightReconciles--;
@@ -100,6 +105,7 @@ export class BrowserLeaseBroker {
         record.currentUrl = live.url;
         record.lastVerifiedUrl = live.url;
         record.lastActivityAt = this.now();
+        this.transition();
         return { leaseId, generation: this.generation, targetId: live.id,
           webSocketDebuggerUrl: live.webSocketDebuggerUrl, currentUrl: live.url };
       } finally { this.inFlightAcquires--; }
@@ -117,6 +123,7 @@ export class BrowserLeaseBroker {
     const leaseId = randomUUID();
     const expiresAt = this.expiry(ttl);
     this.externalReservation = { surface, owner, leaseId, expiresAt };
+    this.transition();
     return { leaseId, generation: this.generation, baselineTargetIds: (await this.targets.list()).map((target) => target.id) };
   }
   async registerExternalTarget(leaseId: string, targetId: string): Promise<Record<string, unknown>> {
@@ -131,6 +138,7 @@ export class BrowserLeaseBroker {
     };
     this.records.set(record.surface, record);
     this.externalReservation = null;
+    this.transition();
     return { leaseId, generation: this.generation, targetId: live.id, currentUrl: live.url };
   }
   renew(leaseId: string, ttl: number): Record<string, unknown> {
@@ -141,12 +149,14 @@ export class BrowserLeaseBroker {
     }
     const record = this.byLease(leaseId);
     record.leaseExpiresAt = this.expiry(ttl); record.lastActivityAt = this.now();
+    this.transition();
     return { leaseId, generation: this.generation, expiresAt: record.leaseExpiresAt };
   }
   async release(leaseId: string, closeTarget = false, externalTargetId?: string): Promise<Record<string, unknown>> {
     if (this.externalReservation?.leaseId === leaseId) {
       if (closeTarget && externalTargetId) await this.targets.close(externalTargetId);
       this.externalReservation = null;
+      this.transition();
       return { leaseId, released: true };
     }
     const record = this.byLease(leaseId);
@@ -154,6 +164,7 @@ export class BrowserLeaseBroker {
       await this.targets.close(record.targetId);
       this.records.delete(record.surface);
     } else this.clearLease(record);
+    this.transition();
     return { leaseId, released: true };
   }
   async observeTargets(): Promise<void> {
@@ -210,7 +221,7 @@ export class BrowserLeaseBroker {
   }
 }
 type ControlRequest = { verb: string; surface?: string; owner?: string; ttl?: number; leaseId?: string; targetId?: string; closeTarget?: boolean; expectedOrigin?: string[]; bootstrapUrl?: string; enabled?: boolean; reason?: string };
-export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenance: (enabled: boolean, reason: string) => Promise<void>, socketPath = BROWSER_CONTROL_SOCKET): Server {
+export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenance: (enabled: boolean, reason: string) => Promise<void>, socketPath = BROWSER_CONTROL_SOCKET, touch?: (surface: "amazon.vc" | "amazon.amc") => Promise<unknown>): Server {
   const stateDir = dirname(socketPath);
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   chmodSync(stateDir, 0o700);
@@ -234,6 +245,7 @@ export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenanc
         else if (request.verb === "register-external-target") result = await broker.registerExternalTarget(request.leaseId!, request.targetId!);
         else if (request.verb === "renew") result = broker.renew(request.leaseId!, request.ttl!);
         else if (request.verb === "release") result = await broker.release(request.leaseId!, request.closeTarget, request.targetId);
+        else if (request.verb === "touch" && touch && (request.surface === "amazon.vc" || request.surface === "amazon.amc")) result = await touch(request.surface);
         else if (request.verb === "maintenance") {
           await maintenance(Boolean(request.enabled), request.reason ?? "browserctl");
           if (!request.enabled) broker.resume();
