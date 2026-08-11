@@ -1,7 +1,7 @@
 /**
  * ABVP fortnightly refresh — deterministic internal handler.
  *
- * Contract: ~/memory/ABVP raw/skills.md
+ * Contract: /Volumes/Warehouse/ABVP raw/skills.md
  * Stages: cadence → lock → inventory (28d) → sequential DL → place → ingest → verify → notify
  *
  * Post Codex sol-xhigh NO-GO (2026-07-20): stable portal keys (no EXCEL), nonempty
@@ -33,7 +33,7 @@ import { logger } from "../../utils/logger.js";
 
 const execFileAsync = promisify(execFile);
 
-const ABVP_ROOT = join(homedir(), "memory", "ABVP raw");
+const ABVP_ROOT = "/Volumes/Warehouse/ABVP raw";
 const RUNS_DIR = join(ABVP_ROOT, ".abvp-runs");
 const CADENCE_PATH = join(RUNS_DIR, "cadence.json");
 const ACTIVE_PATH = join(RUNS_DIR, "active.json");
