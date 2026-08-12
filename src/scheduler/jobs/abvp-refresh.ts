@@ -14,7 +14,7 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream, promises as fs } from "node:fs";
 import { openSync, closeSync, mkdirSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, basename, dirname } from "node:path";
+import { join, basename, dirname, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { flockSync, fcntlSync, constants as fsExtConstants } from "fs-ext";
 import type { Bot } from "grammy";
@@ -29,6 +29,7 @@ import {
 } from "../../notifications/telegram-router.js";
 import type { NotificationIntent } from "../../notifications/types.js";
 import type { RegisteredJob } from "../types.js";
+import { runInternalJobHarness } from "../executor.js";
 import { logger } from "../../utils/logger.js";
 
 const execFileAsync = promisify(execFile);
@@ -135,6 +136,25 @@ interface RunState {
   wal_checkpoint: { busy: number; log: number; checkpointed: number; at: string } | null;
   cadence_advanced_at: string | null;
   last_error: string | null;
+}
+
+interface AgentDownloadManifest {
+  schema_version: 1;
+  run_id: string;
+  portal_url: string;
+  marketplace: "PNG_US";
+  coverage_complete: boolean;
+  inventory: Array<{
+    type: ReportType;
+    portal_date: string;
+    label: string;
+    status: string;
+  }>;
+  files: Array<{
+    type: ReportType;
+    portal_date: string;
+    staged_path: string;
+  }>;
 }
 
 export interface AbvpRefreshContext {
@@ -1286,6 +1306,111 @@ async function revalidateItemBytes(item: RunItem): Promise<boolean> {
   return true;
 }
 
+function buildAgentDownloadPrompt(state: RunState, stagingDir: string): string {
+  const manifestPath = join(stagingDir, "agent-result.json");
+  return `You are the download-only driver for Homer's ABVP refresh.
+
+Run ID: ${state.run_id}
+Inclusive portal-date window: ${state.lookback_start} through ${state.lookback_end}
+Run staging directory: ${stagingDir}
+Final manifest: ${manifestPath}
+
+Before acting, read /Volumes/Warehouse/ABVP raw/skills.md and /Users/yj/.codex/skills/homer/amc-login/SKILL.md completely. The ABVP runbook is authoritative. Reuse only the login/MFA recovery portion of amc-login; this run remains download-only.
+
+Use only /Users/yj/homer/bin/browserctl agent agent.abvp for the shared headed Chrome/CDP browser (set AGENT_BROWSER_SOCKET_DIR=/tmp/ab). Never use raw agent-browser connect/open against the shared browser. Navigate in two steps: open https://advertising.amazon.com/bv, wait about 10 seconds for SPA initialization, then set location.hash to #/ABVP/PNG_US/reports. Allow up to six minutes for a nonblank table whose report rows are stable and whose spinners are gone.
+
+If the table shell stays on "Loading Reports" after the route sticks, do not classify that as an empty inventory. From the same authenticated leased page, fetch /abvp/getPermissionedAdvertisers and require PNG_US permission, then fetch /abvp/getAllAdvertiserReports?advCode=PNG_US&productType=ABVP with credentials included. A 200 JSON response with released rows is the authoritative inventory fallback. Normalize SEARCH_REPORT to SR, ZIP_ASIN to ASIN, and ZIP_BRAND to Brand; exclude EXCEL and every unknown type. If both the stable table and authenticated API contract fail, exit nonzero.
+
+If and only if a real sign-in/MFA challenge appears, preserve staging and release the agent.abvp lease before login recovery. Never run two browser leases concurrently. Run at most two sequential recovery attempts, waiting for each exit: cd /Users/yj/Desktop/AMZ_API && AMZ_NO_ALERTS=1 AMZ_TG_MFA=1 AMZ_TG_MFA_SOURCE=homer_db ./cleanroom_relogin.py, with stdout/stderr redirected to a run-scoped /tmp log. The script retrieves the password from Keychain and, when Amazon requests a verification code, sends the request through Telegram and consumes Yanqing's reply from the Homer DB relay. Never put a password, token, signed URL, or verification code on argv or in output; never print the recovery log. Exit 0 proves only the shared advertising.amazon.com session may be restored, not ABVP access. Reacquire agent.abvp, repeat the two-step navigation, and require the exact PNG_US permission plus nonempty released-report API contract before resuming. On failed recovery, unresolved challenge, CAPTCHA, or missing PNG_US permission, exit nonzero without writing a success manifest. Do not patch login code during this run.
+
+Inventory every PNG_US row in the inclusive window. Select only Brand Metrics ZIP, ASIN Metrics ZIP, and Search Report rows. Never click EXCEL/XLS/XLSX. Download sequentially, one row at a time. A successful click is not success without new stable bytes. The React button may return a short-lived signed URL through /abvp/getPresignedReportDownloadURL before assigning window.location; if Chrome does not commit the file, capture that fresh response in the leased page and transfer the exact URL immediately without printing or logging it.
+
+Write files only inside the run staging directory, named Brand_YYYY-MM-DD.zip, ASIN_YYYY-MM-DD.zip, or SR_YYYY-MM-DD.zip using the portal row date (not the internal member date). Before manifesting a file, require regular-file/no-symlink, stable nonzero size, ZIP CRC success, expected members, and SHA-256. Existing valid staged files for this same run may be reused. Do not touch canonical downloads/, downloads_sr/, abvp.db, ingestion_drop, cadence.json, active.json, state.json, quarantine, or OPERATIONS-LOG.md. Do not acquire .abvp.lock; the parent holds it. Do not invoke Python ingesters. Do not delete unrelated browser downloads.
+
+Atomically write agent-result.json via a temporary sibling and rename. It must be strict JSON:
+{"schema_version":1,"run_id":"${state.run_id}","portal_url":"https://advertising.amazon.com/bv#/ABVP/PNG_US/reports","marketplace":"PNG_US","coverage_complete":true,"inventory":[{"type":"Brand|ASIN|SR","portal_date":"YYYY-MM-DD","label":"portal label","status":"RELEASED"}],"files":[{"type":"Brand|ASIN|SR","portal_date":"YYYY-MM-DD","staged_path":"absolute path"}]}
+
+Inventory must be nonempty and include Brand, ASIN, and SR coverage in the window. Files must include every selected item whose valid canonical or same-run staged ZIP is absent. If auth, contract, coverage, download, or validation fails, do not claim coverage_complete and exit nonzero. Your final text should be a terse summary; the manifest is authoritative.`;
+}
+
+async function runAgentDownloadStage(
+  ctx: AbvpRefreshContext,
+  state: RunState,
+  stagingDir: string,
+): Promise<AgentDownloadManifest> {
+  const manifestPath = join(stagingDir, "agent-result.json");
+  await fs.unlink(manifestPath).catch(() => undefined);
+  const result = await runInternalJobHarness(ctx.job, buildAgentDownloadPrompt(state, stagingDir), {
+    stage: "download",
+    startedAt: ctx.startedAt,
+    signal: ctx.signal,
+    scheduledRunId: ctx.jobRunId,
+  });
+  if (!result.success) {
+    throw new Error(`Sol-medium download stage failed: ${result.error || result.output || "unknown error"}`);
+  }
+
+  let manifest: AgentDownloadManifest;
+  try {
+    manifest = JSON.parse(await fs.readFile(manifestPath, "utf8")) as AgentDownloadManifest;
+  } catch (error) {
+    throw new Error(`Sol-medium download stage produced no valid agent-result.json: ${String(error)}`);
+  }
+  if (
+    manifest.schema_version !== 1 ||
+    manifest.run_id !== state.run_id ||
+    manifest.portal_url !== PORTAL_URL ||
+    manifest.marketplace !== "PNG_US" ||
+    manifest.coverage_complete !== true ||
+    !Array.isArray(manifest.inventory) || manifest.inventory.length === 0 ||
+    !Array.isArray(manifest.files)
+  ) {
+    throw new Error("Sol-medium agent manifest failed schema/run/portal/coverage validation");
+  }
+
+  const validTypes = new Set<ReportType>(["Brand", "ASIN", "SR"]);
+  const inventoryKeys = new Set<string>();
+  const coveredTypes = new Set<ReportType>();
+  for (const row of manifest.inventory) {
+    if (!validTypes.has(row.type) || !/^\d{4}-\d{2}-\d{2}$/.test(row.portal_date)) {
+      throw new Error("Sol-medium manifest contains an invalid inventory type/date");
+    }
+    if (row.portal_date < state.lookback_start || row.portal_date > state.lookback_end) {
+      throw new Error(`Sol-medium manifest contains out-of-window inventory: ${row.type}:${row.portal_date}`);
+    }
+    if (isExcelLabel(row.label)) throw new Error("Sol-medium manifest contains a forbidden Excel row");
+    const key = `${row.type}:${row.portal_date}`;
+    if (inventoryKeys.has(key)) throw new Error(`Sol-medium manifest contains duplicate inventory: ${key}`);
+    inventoryKeys.add(key);
+    coveredTypes.add(row.type);
+  }
+  if (["Brand", "ASIN", "SR"].some((type) => !coveredTypes.has(type as ReportType))) {
+    throw new Error("Sol-medium manifest does not prove Brand, ASIN, and SR coverage");
+  }
+
+  const stagingRoot = resolve(stagingDir) + sep;
+  const fileKeys = new Set<string>();
+  for (const file of manifest.files) {
+    const key = `${file.type}:${file.portal_date}`;
+    if (!inventoryKeys.has(key) || fileKeys.has(key)) {
+      throw new Error(`Sol-medium manifest has unmatched or duplicate file: ${key}`);
+    }
+    fileKeys.add(key);
+    const expected = resolve(stagingDir, `${file.type}_${file.portal_date}.zip`);
+    const actual = resolve(file.staged_path);
+    if (!actual.startsWith(stagingRoot) || actual !== expected) {
+      throw new Error(`Sol-medium staged path rejected: ${file.staged_path}`);
+    }
+    const stat = await fs.lstat(actual);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0) {
+      throw new Error(`Sol-medium staged file is not a nonempty regular file: ${actual}`);
+    }
+    const valid = await validateZip(actual, file.type);
+    if (!valid.ok) throw new Error(`Sol-medium staged ZIP rejected for ${key}: ${valid.error}`);
+  }
+  return manifest;
+}
+
 export async function runAbvpRefresh(ctx: AbvpRefreshContext): Promise<AbvpRefreshResult> {
   await ensureDirs();
   const cadence = await loadCadence();
@@ -1352,6 +1477,16 @@ export async function runAbvpRefresh(ctx: AbvpRefreshContext): Promise<AbvpRefre
     const floor = Math.max(25 * 1024 ** 3, Math.floor(dbSize * 0.5), 2 * pendingEstimate + 5 * 1024 ** 3);
     if (free < floor) {
       return fail(`low disk: free=${free} floor=${floor}`);
+    }
+
+    state.stage = "download_agent";
+    state.status = "downloading";
+    await persist();
+    let agentManifest: AgentDownloadManifest;
+    try {
+      agentManifest = await runAgentDownloadStage(ctx, state, stagingDir);
+    } catch (error) {
+      return fail(error instanceof Error ? error.message : String(error));
     }
 
     // Portal phase under shared browser mutex
@@ -1466,6 +1601,41 @@ export async function runAbvpRefresh(ctx: AbvpRefreshContext): Promise<AbvpRefre
         sealed_at: nowIso(),
         window: built.window,
       };
+
+      const manifestInventory = new Set(
+        agentManifest.inventory.map((row) => `${row.type}:${row.portal_date}`),
+      );
+      const manifestFiles = new Map(
+        agentManifest.files.map((file) => [`${file.type}:${file.portal_date}`, file.staged_path]),
+      );
+      const portalKeys = new Set(state!.items.map((item) => `${item.type}:${item.portal_date}`));
+      for (const key of manifestInventory) {
+        if (!portalKeys.has(key)) return fail(`Sol-medium manifest inventory disagrees with portal: ${key}`);
+      }
+      for (const item of state!.items) {
+        const key = `${item.type}:${item.portal_date}`;
+        if (!manifestInventory.has(key)) return fail(`Sol-medium manifest missed portal item: ${key}`);
+
+        const staged = manifestFiles.get(key);
+        if (staged) {
+          const valid = await validateZip(staged, item.type);
+          if (!valid.ok) return fail(`Sol-medium staged ZIP failed deterministic validation for ${key}`);
+          item.staging_path = staged;
+          item.landing_path = null;
+          item.size_bytes = (await fs.stat(staged)).size;
+          item.sha256 = await sha256File(staged);
+          item.zip_valid = true;
+          item.stage = "validated";
+          continue;
+        }
+
+        if (item.staging_path && await revalidateItemBytes(item)) continue;
+        if (existsSync(item.canonical_path)) {
+          const valid = await validateZip(item.canonical_path, item.type);
+          if (valid.ok) continue;
+        }
+        return fail(`Sol-medium manifest has no staged file for missing/invalid canonical ${key}`);
+      }
       state!.status = "downloading";
       state!.stage = "download";
       await persist();
