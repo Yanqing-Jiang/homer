@@ -57,6 +57,13 @@ const youtubeClassifyStage: InternalHarnessCallProfile = youtubeStage(900_000);
 const youtubeAnalyzeStage: InternalHarnessCallProfile = youtubeStage(300_000); // 5 min — Opus medium deep analysis
 
 export const INTERNAL_JOB_HARNESS_BASELINES = {
+  "abvp-refresh": {
+    executor: "codex",
+    model: "gpt-5.6-sol-medium",
+    stages: {
+      download: codexStage("<warehouse-volume>/<portal-dataset> raw", 6_000_000, "medium"),
+    },
+  },
   "ideas-explore": {
     executor: "codex",
     model: CODEX_MODEL,

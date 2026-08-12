@@ -12,11 +12,27 @@ export interface TuiComponents {
   statsBar: any;
 }
 
+// OpenCode Dark Theme Palette
+const OPENCODE = {
+  primary: "#fab283",   // Warm Coral / Peach
+  accent: "#9d7cd8",    // Lavender / Purple
+  secondary: "#5c9cf5", // Soft Blue
+  green: "#7fd88f",     // Mint / Green
+  yellow: "#e5c07b",    // Amber / Yellow
+  red: "#e06c75",       // Coral Red
+  cyan: "#56b6c2",      // Cyan / Teal
+  gray: "#808080",      // Muted Gray
+  fg: "#eeeeee",        // Foreground
+  bgBase: "#0a0a0a",    // Dark Base Background
+  bgSurface: "#141414", // Surface Background
+  trackBg: "#1e1e1e",   // Scrollbar Track
+};
+
 const LANE_COLORS: Record<string, string> = {
-  work: "blue",
-  invest: "green",
-  personal: "magenta",
-  learning: "yellow",
+  work: OPENCODE.secondary,
+  invest: OPENCODE.green,
+  personal: OPENCODE.accent,
+  learning: OPENCODE.yellow,
 };
 
 export function createTuiComponents(): TuiComponents {
@@ -37,8 +53,9 @@ export function createTuiComponents(): TuiComponents {
     content: " H.O.M.E.R - Loading...",
     border: { type: "line" },
     style: {
-      border: { fg: "cyan" },
-      fg: "white",
+      border: { fg: OPENCODE.primary },
+      fg: OPENCODE.fg,
+      bg: OPENCODE.bgSurface,
     },
   });
 
@@ -55,12 +72,14 @@ export function createTuiComponents(): TuiComponents {
     alwaysScroll: true,
     scrollbar: {
       ch: " ",
-      track: { bg: "gray" },
-      style: { bg: "white" },
+      track: { bg: OPENCODE.trackBg },
+      style: { bg: OPENCODE.primary },
     },
     style: {
-      border: { fg: "green" },
-      label: { fg: "green", bold: true },
+      border: { fg: OPENCODE.green },
+      label: { fg: OPENCODE.green, bold: true },
+      bg: OPENCODE.bgBase,
+      fg: OPENCODE.fg,
     },
   });
 
@@ -77,12 +96,14 @@ export function createTuiComponents(): TuiComponents {
     alwaysScroll: true,
     scrollbar: {
       ch: " ",
-      track: { bg: "gray" },
-      style: { bg: "white" },
+      track: { bg: OPENCODE.trackBg },
+      style: { bg: OPENCODE.primary },
     },
     style: {
-      border: { fg: "yellow" },
-      label: { fg: "yellow", bold: true },
+      border: { fg: OPENCODE.yellow },
+      label: { fg: OPENCODE.yellow, bold: true },
+      bg: OPENCODE.bgBase,
+      fg: OPENCODE.fg,
     },
   });
 
@@ -99,12 +120,14 @@ export function createTuiComponents(): TuiComponents {
     alwaysScroll: true,
     scrollbar: {
       ch: " ",
-      track: { bg: "gray" },
-      style: { bg: "white" },
+      track: { bg: OPENCODE.trackBg },
+      style: { bg: OPENCODE.primary },
     },
     style: {
-      border: { fg: "blue" },
-      label: { fg: "blue", bold: true },
+      border: { fg: OPENCODE.accent },
+      label: { fg: OPENCODE.accent, bold: true },
+      bg: OPENCODE.bgBase,
+      fg: OPENCODE.fg,
     },
   });
 
@@ -129,8 +152,8 @@ export function updateSessions(
   const lines = sessions.map((s) => {
     const age = Math.round((Date.now() - s.lastActivityAt) / 1000 / 60);
     const claudeId = getClaudeSessionId(s.lane);
-    const color = LANE_COLORS[s.lane] || "white";
-    const claudeStr = claudeId ? `{gray-fg}[${claudeId.slice(0, 8)}]{/gray-fg}` : "";
+    const color = LANE_COLORS[s.lane] || OPENCODE.fg;
+    const claudeStr = claudeId ? `{${OPENCODE.gray}-fg}[${claudeId.slice(0, 8)}]{/${OPENCODE.gray}-fg}` : "";
     return ` {${color}-fg}${s.lane.padEnd(10)}{/${color}-fg} ${String(age).padStart(3)}m  ${String(s.messageCount).padStart(3)} msgs  ${claudeStr}`;
   });
 
@@ -144,17 +167,17 @@ export function updateJobs(box: any, jobs: Job[]): void {
   }
 
   const statusColors: Record<string, string> = {
-    pending: "yellow",
-    running: "blue",
-    completed: "green",
-    failed: "red",
+    pending: OPENCODE.yellow,
+    running: OPENCODE.secondary,
+    completed: OPENCODE.green,
+    failed: OPENCODE.red,
   };
 
   const lines = jobs.slice(0, 20).map((j) => {
     const age = j.createdAt ? Math.round((Date.now() - j.createdAt) / 1000 / 60) : 0;
     const queryPreview = j.query.slice(0, 20) + (j.query.length > 20 ? ".." : "");
-    const color = statusColors[j.status] || "white";
-    const laneColor = LANE_COLORS[j.lane] || "white";
+    const color = statusColors[j.status] || OPENCODE.fg;
+    const laneColor = LANE_COLORS[j.lane] || OPENCODE.fg;
     return ` {${color}-fg}${j.status.padEnd(10)}{/${color}-fg} {${laneColor}-fg}${j.lane.padEnd(10)}{/${laneColor}-fg} ${String(age).padStart(3)}m  ${queryPreview}`;
   });
 
@@ -172,14 +195,14 @@ export function updateStats(
 
   bar.setContent(
     ` H.O.M.E.R | ` +
-      `Sessions: {green-fg}${activeSessions}{/green-fg} | ` +
-      `Pending: {yellow-fg}${jobStats.pending}{/yellow-fg} | ` +
-      `Running: {blue-fg}${jobStats.running}{/blue-fg} | ` +
-      `Done: {green-fg}${jobStats.completed}{/green-fg} | ` +
-      `Failed: {red-fg}${jobStats.failed}{/red-fg} | ` +
+      `Sessions: {${OPENCODE.green}-fg}${activeSessions}{/${OPENCODE.green}-fg} | ` +
+      `Pending: {${OPENCODE.yellow}-fg}${jobStats.pending}{/${OPENCODE.yellow}-fg} | ` +
+      `Running: {${OPENCODE.secondary}-fg}${jobStats.running}{/${OPENCODE.secondary}-fg} | ` +
+      `Done: {${OPENCODE.green}-fg}${jobStats.completed}{/${OPENCODE.green}-fg} | ` +
+      `Failed: {${OPENCODE.red}-fg}${jobStats.failed}{/${OPENCODE.red}-fg} | ` +
       `Uptime: ${uptimeMinutes}m | ` +
       `Mem: ${memMb}MB | ` +
-      `{gray-fg}Press q to quit{/gray-fg}`
+      `{${OPENCODE.gray}-fg}Press q to quit{/${OPENCODE.gray}-fg}`
   );
 }
 
@@ -190,14 +213,14 @@ export function addLog(box: any, entry: string): void {
     const level = parsed.level || 30;
     const msg = parsed.msg || "";
     const levelColors: Record<number, string> = {
-      10: "gray",    // trace
-      20: "cyan",    // debug
-      30: "white",   // info
-      40: "yellow",  // warn
-      50: "red",     // error
-      60: "red",     // fatal
+      10: "#606060",        // trace
+      20: OPENCODE.cyan,    // debug
+      30: OPENCODE.fg,      // info
+      40: OPENCODE.yellow,  // warn
+      50: OPENCODE.red,     // error
+      60: OPENCODE.red,     // fatal
     };
-    const color = levelColors[level] || "white";
+    const color = levelColors[level] || OPENCODE.fg;
     box.log(`{${color}-fg}${msg}{/${color}-fg}`);
   } catch {
     box.log(entry);
