@@ -1,10 +1,12 @@
 {
-  "description": "Monthly review of ~/ and ~/archive for housekeeping, plus a 30-day sweep of /tmp, ~/Desktop agent-output folders, and the web/Telegram upload-drop dirs. Trigger on '/home-cleanup', 'monthly home cleanup', 'check ~ for stale files'. Scheduled: last day of month at 9 AM.",
+  "description": "Monthly review of ~/ and ~/Desktop for housekeeping, a 30-day sweep of /tmp, the ~/Desktop agent-output folders and the web/Telegram upload-drop dirs, and an offload of aged ~/archive subfolders to the Warehouse external SSD. Nothing user-created is deleted. Trigger on '/home-cleanup', 'monthly home cleanup', 'check ~ for stale files'. Scheduled: last day of month at 9 AM.",
   "schedule": "0 9 L * *",
   "review_dir": "~/homer/output/home-cleanup",
   "archive_age_months": 3,
-  "delete_age_months": 4,
+  "offload_age_months": 2,
   "sweep_age_days": 30,
+  "warehouse_root": "/Volumes/Warehouse/archive",
+  "warehouse_sentinel": "/Volumes/Warehouse/archive/.archive-root",
   "sweep_locations": [
     "/tmp",
     "~/Desktop/homer-output",
@@ -15,5 +17,21 @@
     "~/homer-upload-landing/web",
     "~/homer-upload-landing/tg"
   ],
+  "desktop_scan": true,
+  "desktop_scan_age_months": 3,
+  "desktop_archive_subfolder": "desktop",
+  "desktop_keep_list": [
+    "homer-output",
+    "gemini-output",
+    "kimi-output",
+    "opencode-output",
+    "codex-output",
+    ".DS_Store",
+    ".localized",
+    "AMZ_API",
+    "job-applications",
+    "Resume-Yanqing Jiang.docx"
+  ],
+  "offload_drop_subfolders": ["tmp"],
   "modes": ["scan", "execute"]
 }
