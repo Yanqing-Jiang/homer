@@ -3,6 +3,7 @@ import { StateManager } from "../state/manager.js";
 import { QueueManager } from "../queue/manager.js";
 import {
   createTuiComponents,
+  enableSelectionCopy,
   updateSessions,
   updateJobs,
   updateStats,
@@ -16,7 +17,9 @@ async function main(): Promise<void> {
   const queueManager = new QueueManager(stateManager);
 
   // Create TUI
-  const { screen, sessionsBox, jobsBox, logsBox, statsBar } = createTuiComponents();
+  const components = createTuiComponents();
+  const { screen, sessionsBox, jobsBox, logsBox, statsBar } = components;
+  const selection = enableSelectionCopy(components);
 
   // Enable tags for colors (blessed types are incomplete, so cast through unknown)
   (sessionsBox as unknown as { tags: boolean }).tags = true;
@@ -26,6 +29,8 @@ async function main(): Promise<void> {
 
   // Update function
   const update = () => {
+    // Freeze repaints mid-drag so the selection highlight stays put.
+    if (selection.isSelecting()) return;
     const sessions = stateManager.getActiveSessions();
     const jobs = queueManager.getRecentJobs(20);
     const jobStats = queueManager.getStats();
@@ -42,6 +47,7 @@ async function main(): Promise<void> {
   let lastLogSize = 0;
 
   const checkLogs = () => {
+    if (selection.isSelecting()) return;
     try {
       const stat = statSync(logPath);
       if (stat.size > lastLogSize) {
