@@ -1,6 +1,7 @@
 import blessed from "blessed";
 // @ts-ignore
 import type { Widgets } from "blessed";
+import { spawn } from "child_process";
 import type { Session } from "../state/manager.js";
 import type { Job } from "../state/manager.js";
 
@@ -202,8 +203,147 @@ export function updateStats(
       `Failed: {${OPENCODE.red}-fg}${jobStats.failed}{/${OPENCODE.red}-fg} | ` +
       `Uptime: ${uptimeMinutes}m | ` +
       `Mem: ${memMb}MB | ` +
-      `{${OPENCODE.gray}-fg}Press q to quit{/${OPENCODE.gray}-fg}`
+      `{${OPENCODE.gray}-fg}drag to copy | q to quit{/${OPENCODE.gray}-fg}`
   );
+}
+
+function copyToClipboard(text: string): void {
+  const proc = spawn("pbcopy", [], { stdio: ["pipe", "ignore", "ignore"] });
+  proc.on("error", () => {});
+  proc.stdin.write(text);
+  proc.stdin.end();
+}
+
+// Strip SGR escape sequences left behind by blessed's tag parsing.
+function stripAnsi(line: string): string {
+  return line.replace(/\x1b\[[\d;]*m/g, "");
+}
+
+export interface SelectionHandle {
+  isSelecting: () => boolean;
+}
+
+// Drag over a panel to select whole lines; on release the text lands in the
+// macOS clipboard. Terminal-native selection is unreliable here because the
+// TUI repaints every 500ms-1s, which clears the selection before Cmd+C.
+// (Option+drag still gives raw terminal selection if ever needed.)
+export function enableSelectionCopy(components: TuiComponents): SelectionHandle {
+  const { screen, sessionsBox, jobsBox, logsBox, statsBar } = components;
+  const panels = [sessionsBox, jobsBox, logsBox];
+
+  let activeBox: any = null;
+  let anchorY = 0;
+  let lastY = 0;
+  let moved = false;
+  let overlay: any = null;
+  let flashTimer: NodeJS.Timeout | null = null;
+
+  const contentTop = (box: any) => box.atop + box.itop;
+  const contentBottom = (box: any) => box.atop + box.height - box.ibottom - 1;
+  const inContent = (box: any, x: number, y: number) =>
+    x >= box.aleft + box.ileft &&
+    x <= box.aleft + box.width - box.iright - 1 &&
+    y >= contentTop(box) &&
+    y <= contentBottom(box);
+
+  const clamp = (y: number) =>
+    Math.max(contentTop(activeBox), Math.min(contentBottom(activeBox), y));
+
+  const redrawOverlay = () => {
+    const y1 = Math.min(anchorY, lastY);
+    const y2 = Math.max(anchorY, lastY);
+    overlay.top = y1;
+    overlay.height = y2 - y1 + 1;
+    screen.render();
+  };
+
+  const clearOverlay = () => {
+    if (overlay) {
+      overlay.destroy();
+      overlay = null;
+    }
+  };
+
+  const flash = (msg: string) => {
+    if (flashTimer) clearTimeout(flashTimer);
+    const prev = statsBar.getContent();
+    statsBar.setContent(`${prev}  {${OPENCODE.green}-fg}✓ ${msg}{/${OPENCODE.green}-fg}`);
+    flashTimer = setTimeout(() => {
+      flashTimer = null;
+      statsBar.setContent(prev);
+      screen.render();
+    }, 2000);
+  };
+
+  const selectedText = (): string => {
+    const lines: string[] = activeBox._clines || [];
+    const base = activeBox.childBase | 0;
+    const start = base + Math.min(anchorY, lastY) - contentTop(activeBox);
+    const end = base + Math.max(anchorY, lastY) - contentTop(activeBox);
+    return lines
+      .slice(start, end + 1)
+      .map((l) => stripAnsi(l).trimEnd())
+      .join("\n");
+  };
+
+  screen.on("mouse", (data: any) => {
+    if (data.action === "wheelup" || data.action === "wheeldown") {
+      // Mouse capture swallows terminal wheel behavior, so scroll panels ourselves.
+      const box = panels.find((b) => inContent(b, data.x, data.y));
+      if (box) {
+        box.scroll(data.action === "wheelup" ? -2 : 2);
+        screen.render();
+      }
+      return;
+    }
+
+    if (data.action === "mousedown" && !activeBox) {
+      const box = panels.find((b) => inContent(b, data.x, data.y));
+      if (!box) return;
+      activeBox = box;
+      anchorY = data.y;
+      lastY = data.y;
+      moved = false;
+      overlay = blessed.box({
+        parent: screen,
+        left: box.aleft + box.ileft,
+        width: box.width - box.ileft - box.iright,
+        top: anchorY,
+        height: 1,
+        transparent: true,
+        style: { bg: OPENCODE.secondary },
+      });
+      overlay.setFront();
+      screen.render();
+      return;
+    }
+
+    if (!activeBox) return;
+
+    if (data.action === "mousemove") {
+      moved = true;
+      const y = clamp(data.y);
+      if (y !== lastY) {
+        lastY = y;
+        redrawOverlay();
+      }
+      return;
+    }
+
+    if (data.action === "mouseup") {
+      lastY = clamp(data.y);
+      const text = selectedText();
+      clearOverlay();
+      if (moved && text.trim()) {
+        copyToClipboard(text);
+        flash(`Copied ${text.split("\n").length} lines`);
+      }
+      activeBox = null;
+      screen.render();
+    }
+  });
+
+  return { isSelecting: () => activeBox !== null };
 }
 
 export function addLog(box: any, entry: string): void {
