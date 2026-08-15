@@ -1,5 +1,5 @@
 {
-  "description": "Monthly review of ~/ and ~/Desktop for housekeeping, a 30-day sweep of /tmp, the ~/Desktop agent-output folders and the web/Telegram upload-drop dirs, and an offload of aged ~/archive subfolders to the Warehouse external SSD. Nothing user-created is deleted. Trigger on '/home-cleanup', 'monthly home cleanup', 'check ~ for stale files'. Scheduled: last day of month at 9 AM.",
+  "description": "Monthly review of ~/ and ~/Desktop for housekeeping, a 30-day sweep of /tmp, the ~/Desktop agent-output folders and the web/Telegram upload-drop dirs, and an offload of aged ~/archive subfolders to the Warehouse external SSD. Nothing is ever deleted. Trigger on '/home-cleanup', 'monthly home cleanup', 'check ~ for stale files'. Scheduled: last day of month at 9 AM.",
   "schedule": "0 9 L * *",
   "review_dir": "~/homer/output/home-cleanup",
   "archive_age_months": 3,
@@ -32,6 +32,5 @@
     "job-applications",
     "Resume-Yanqing Jiang.docx"
   ],
-  "offload_drop_subfolders": ["tmp"],
   "modes": ["scan", "execute"]
 }
