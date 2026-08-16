@@ -1,8 +1,22 @@
 // Extract a single tweet's full content (normal tweet, X Article, or link card).
-// Returns: {author, content, title?, url}
+// Returns: {author, content, title?, url, images}
 (() => {
   const article = document.querySelector('article[data-testid="tweet"]') || document.querySelector("article");
   if (!article) return null;
+
+  const images = [];
+  const seenSrc = new Set();
+  article.querySelectorAll('[data-testid="tweetPhoto"] img').forEach((img) => {
+    const src = img.getAttribute("src") || "";
+    if (!src.includes("pbs.twimg.com/media/")) return;
+    if (seenSrc.has(src)) return;
+    seenSrc.add(src);
+    const alt = (img.getAttribute("alt") || "").trim();
+    const item = { url: src };
+    if (alt && alt !== "Image") item.alt = alt;
+    images.push(item);
+  });
+  const imageList = images.slice(0, 4);
 
   const userBlock = article.querySelector('[data-testid="User-Name"]');
   let author = "";
@@ -25,7 +39,7 @@
     const title = articleTitleEl ? articleTitleEl.innerText.trim() : undefined;
     const body = articleBodyEl ? articleBodyEl.innerText.trim() : "";
     const content = title && body ? `# ${title}\n\n${body}` : body || title || "";
-    return { author, content, title, url: window.location.href };
+    return { author, content, title, url: window.location.href, images: imageList };
   }
 
   const tweetTextEl = article.querySelector('[data-testid="tweetText"]');
@@ -45,7 +59,7 @@
         content += (content ? "\n\n" : "") + "[Quoted tweet]\n" + quoteText;
       }
     }
-    return { author, content, url: window.location.href };
+    return { author, content, url: window.location.href, images: imageList };
   }
 
   const legacyArticleEl = article.querySelector('[data-testid="article"]');
@@ -53,8 +67,8 @@
     const content = legacyArticleEl.innerText.trim();
     const titleEl = article.querySelector("h1, h2");
     const title = titleEl ? titleEl.innerText.trim() : undefined;
-    return { author, content, title, url: window.location.href };
+    return { author, content, title, url: window.location.href, images: imageList };
   }
 
-  return { author, content: article.innerText.trim(), url: window.location.href };
+  return { author, content: article.innerText.trim(), url: window.location.href, images: imageList };
 })();

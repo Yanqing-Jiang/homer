@@ -68,6 +68,12 @@ export function isRetryableOpenCLIError(exitCode: number): boolean {
 // RAW DATA TYPES (schema matches old OpenCLI* aliases for mapper compat)
 // ============================================
 
+/** One attached tweet image: pbs.twimg.com URL plus author-provided alt text (if any). */
+export interface RawTweetImage {
+  url: string;
+  alt?: string;
+}
+
 export interface RawBookmark {
   id: string;
   author: string;
@@ -81,6 +87,7 @@ export interface RawBookmark {
   article_title?: string | null;
   external_urls?: string[];
   needs_detail_fetch?: boolean;
+  media?: RawTweetImage[];
 }
 
 export interface RawArticle {
@@ -88,6 +95,7 @@ export interface RawArticle {
   content: string;
   title?: string;
   url: string;
+  images?: RawTweetImage[];
 }
 
 export interface RawThreadTweet {
@@ -302,8 +310,33 @@ async function openAndEval<T>({ url, scriptName, timeoutMs, signal, postOpen }: 
   // Outer start tracks queue + work for duration reporting only; the per-target
   // deadline is set INSIDE the lock so queue wait doesn't eat the scrape budget.
   const queueStart = Date.now();
+  // Ambient session (withSharedScrapeSession): the caller already holds the scrape
+  // lock and one brokered session — navigate its single tab instead of opening a
+  // fresh lease+tab per call. Re-wrapping here would deadlock on withScrapeLock.
+  if (agentSession.getStore()) {
+    return runOpenAndEval<T>({ url, scriptName, timeoutMs, signal, postOpen }, queueStart);
+  }
   const surface = url.includes("x.com") ? "agent.x" : url.includes("medium.com") ? "agent.medium" : undefined;
-  return withScrapeLock(() => withBrokeredAgentSession(surface, (session) => agentSession.run(session, async () => {
+  return withScrapeLock(() => withBrokeredAgentSession(surface, (session) => agentSession.run(session, () =>
+    runOpenAndEval<T>({ url, scriptName, timeoutMs, signal, postOpen }, queueStart),
+  ), signal));
+}
+
+/**
+ * Hold ONE browserctl agent lease + agent-browser session (one tab) for the whole
+ * callback. Every fetch* helper called inside reuses that tab via navigation,
+ * instead of the per-call open/close session churn. agent.* leases are globally
+ * serialized by the broker, so the callback must NOT spawn its own browserctl
+ * agent workflow (e.g. executeBrowserScrape) — that reserve would fail while the
+ * shared lease is held. Re-entrant: an existing ambient session is reused.
+ */
+export async function withSharedScrapeSession<T>(surface: string, fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (agentSession.getStore()) return fn();
+  return withScrapeLock(() => withBrokeredAgentSession(surface, (session) => agentSession.run(session, fn), signal));
+}
+
+async function runOpenAndEval<T>({ url, scriptName, timeoutMs, signal, postOpen }: OpenAndEvalArgs, queueStart: number): Promise<ScrapeResult<T>> {
+  {
     const start = Date.now();
     const deadline = start + timeoutMs;
     const ready = await ensureBackendReady();
@@ -408,7 +441,7 @@ async function openAndEval<T>({ url, scriptName, timeoutMs, signal, postOpen }: 
       needsAuth: false,
       needsExtension: false,
     } satisfies ScrapeResult<T>;
-  }), signal));
+  }
 }
 
 // ============================================

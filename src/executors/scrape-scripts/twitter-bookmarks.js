@@ -1,6 +1,6 @@
 // Extract bookmark cards from x.com/i/bookmarks.
 // Returns: [{id, author, name, text, likes, retweets, created_at, url,
-//            content_type, article_title, external_urls, needs_detail_fetch}]
+//            content_type, article_title, external_urls, needs_detail_fetch, media}]
 // Schema matches RawBookmark / OpenCLIBookmark for mapper compatibility.
 (() => {
   const out = [];
@@ -30,6 +30,22 @@
       if (isExternalUrl(full) || full.includes("t.co/")) urls.push(full);
     });
     return [...new Set(urls)];
+  }
+
+  function extractMedia(article) {
+    const media = [];
+    const seenSrc = new Set();
+    article.querySelectorAll('[data-testid="tweetPhoto"] img').forEach((img) => {
+      const src = img.getAttribute("src") || "";
+      if (!src.includes("pbs.twimg.com/media/")) return;
+      if (seenSrc.has(src)) return;
+      seenSrc.add(src);
+      const alt = (img.getAttribute("alt") || "").trim();
+      const item = { url: src };
+      if (alt && alt !== "Image") item.alt = alt;
+      media.push(item);
+    });
+    return media.slice(0, 4);
   }
 
   function articlePreviewFromLines(article) {
@@ -64,6 +80,7 @@
     const photoEl = a.querySelector('[data-testid="tweetPhoto"]');
     const articlePreview = articlePreviewFromLines(a);
     const external_urls = extractUrls(a);
+    const media = extractMedia(a);
 
     let content_type = "tweet";
     let article_title = null;
@@ -132,6 +149,7 @@
       article_title,
       external_urls,
       needs_detail_fetch,
+      media,
     });
   });
   return out;
