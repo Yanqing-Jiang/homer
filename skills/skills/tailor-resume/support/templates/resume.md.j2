@@ -6,7 +6,7 @@
      contact: { name, location, email, phone, website, linkedin }
      target: { resume_headline }
      summary: [str, str, str]
-     skills: { "Analytics and AI": [...], "Data Engineering": [...], "Business and Leadership": [...] }
+     capabilities: [str] (technical IC roles only; empty for management roles)
      experience: [ { employer, role, team, location, start, end, selected_bullets: [{rewritten_bullet, ...}] } ]
      education: [str]
      certifications: [str]
@@ -21,14 +21,6 @@
 
 {% for line in summary %}{{ line }}{% if not loop.last %} {% endif %}{% endfor %}
 
-## Skills
-
-**Analytics and AI:** {{ skills["Analytics and AI"] | join(", ") }}
-
-**Data Engineering:** {{ skills["Data Engineering"] | join(", ") }}
-
-**Business and Leadership:** {{ skills["Business and Leadership"] | join(", ") }}
-
 ## Experience
 
 {% for job in experience %}
@@ -38,6 +30,12 @@
 {% endfor %}
 
 {% endfor %}
+{% if capabilities %}
+## Capabilities
+
+{{ capabilities | join(" · ") }}
+
+{% endif %}
 ## Education
 
 {% for line in education %}- {{ line }}

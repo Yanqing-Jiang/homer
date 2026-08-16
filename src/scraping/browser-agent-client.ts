@@ -41,8 +41,19 @@ export class BrokeredAgentSession {
     await this.readyPromise;
     const id = this.nextId++;
     return await new Promise<string>((resolve, reject) => {
+      // Long-held sessions can outlive a crashed browserctl child; writing to its
+      // closed stdin without a callback would emit an unhandled stream error.
+      if (this.child.exitCode !== null || !this.child.stdin?.writable) {
+        reject(new Error("browserctl agent session is closed"));
+        return;
+      }
       this.pending.set(id, { resolve, reject });
-      this.child.stdin!.write(`${JSON.stringify({ id, args, timeoutMs })}\n`);
+      this.child.stdin.write(`${JSON.stringify({ id, args, timeoutMs })}\n`, (err) => {
+        if (err) {
+          this.pending.delete(id);
+          reject(err);
+        }
+      });
     });
   }
 

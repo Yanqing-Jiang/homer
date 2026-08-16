@@ -150,9 +150,26 @@ experience:
     end: Present
     bullets:
       - id: pg-amazon-growth-analytics
-        claim: "Led demand creation and sales growth analytics for P&G's #1 Growth team that contributes 50% of total company sales growth."
-        metrics: ["50% of total company sales growth"]
+        claim: "Led demand creation and sales growth analytics for P&G's #1 Growth team that contributes 60% of total company sales growth."
+        metrics: ["60% of total company sales growth"]
         skills: [demand creation analytics, sales growth analytics, Amazon sales]
+      - id: pg-amazon-genai-growth-lead
+        claim: "Serves as the team's lead for GenAI advanced analytics and sales-growth analytics for P&G's Amazon business."
+        metrics: []
+        skills: [GenAI analytics leadership, sales growth analytics, advanced analytics leadership]
+        added_via: chat
+        added_date: "2026-08-15"
+      - id: pg-amazon-business-growth-tenure
+        claim: "P&G's Amazon business grew 20% — $3.9B to $4.7B in shipped revenue (trailing 12 months, Jul-Jun) — during his first two years as the team's GenAI and sales-growth analytics lead (Jul 2024-Jun 2026)."
+        metrics: ["20% growth", "$3.9B to $4.7B shipped revenue"]
+        skills: [sales growth, business growth analytics]
+        derivation_note: "Computed 2026-08-15 from Vendor Central margin.db quarterly aggregates (MANUFACTURING view, RETAIL program, US marketplace). Year 1 Jul 2024-Jun 2025: $3,928.4M; Year 2 Jul 2025-Jun 2026: $4,713.7M = +19.99%. Absolute dollars are P&G-confidential — default to the %-only phrasing on outbound documents; use dollar figures only with Yanqing's explicit per-document approval."
+        approved_phrasings:
+          - "grew 20% in two years"
+          - "a multi-billion-dollar business that grew 20% during his two-year tenure"
+          - "$3.9B to $4.7B (+20%)"
+        added_via: chat
+        added_date: "2026-08-15"
       - id: pg-amazon-campaign-optimizer
         claim: "Built a campaign fund optimizer that helped allocate $200M+ in upper funnel media spend, doubled audience reach year over year, and delivered 50%+ incremental sales with flat budget."
         metrics: ["$200M+ upper funnel media spend", "doubled audience reach YOY", "50%+ incremental sales", "flat budget"]

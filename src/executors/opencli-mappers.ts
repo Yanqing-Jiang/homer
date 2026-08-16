@@ -5,7 +5,7 @@
  * that Homer's existing pipelines expect, preserving data contracts.
  */
 
-import type { OpenCLIBookmark, OpenCLILinkedInPost, OpenCLIMediumPost, OpenCLIArticle } from "./agent-browser-scrape.js";
+import type { OpenCLIBookmark, OpenCLILinkedInPost, OpenCLIMediumPost, OpenCLIArticle, RawTweetImage } from "./agent-browser-scrape.js";
 import { sanitizeExtractedUrl } from "../scraping/canonical-url.js";
 
 // ============================================
@@ -64,6 +64,7 @@ export interface TwitterBookmark {
   contentType?: OpenCLIBookmark["content_type"];
   articleTitle?: string | null;
   needsDetailFetch?: boolean;
+  media?: RawTweetImage[];
 }
 
 function bookmarkHasUsableContent(b: OpenCLIBookmark): boolean {
@@ -98,6 +99,7 @@ export function mapOpenCLIBookmark(b: OpenCLIBookmark): TwitterBookmark {
     contentType: b.content_type,
     articleTitle: b.article_title,
     needsDetailFetch: b.needs_detail_fetch ?? false,
+    media: b.media?.filter((m) => typeof m?.url === "string" && m.url.length > 0) ?? [],
   };
 }
 

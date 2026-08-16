@@ -68,7 +68,7 @@ def main():
     configure_style(styles, "Heading 1", font_size=22, bold=True,
                     space_before=0, space_after=2, keep_with_next=True)
 
-    # Heading 2 → section names (Summary, Skills, Experience, ...)
+    # Heading 2 → section names (Summary, Experience, Education, ...)
     configure_style(styles, "Heading 2", font_size=12, bold=True,
                     space_before=10, space_after=3, keep_with_next=True)
 
@@ -106,12 +106,6 @@ def main():
         "then renders to .docx using this reference for fonts, sizes, margins, "
         "and spacing."
     )
-
-    doc.add_heading("Skills", level=2)
-    skills_para = doc.add_paragraph()
-    r1 = skills_para.add_run("Analytics and AI: ")
-    r1.bold = True
-    skills_para.add_run("A/B testing, hypothesis testing, machine learning pipelines")
 
     doc.add_heading("Experience", level=2)
     doc.add_heading("Procter & Gamble — Advanced Analytics Senior Manager", level=3)
