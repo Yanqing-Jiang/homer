@@ -57,6 +57,21 @@ const youtubeClassifyStage: InternalHarnessCallProfile = youtubeStage(900_000);
 const youtubeAnalyzeStage: InternalHarnessCallProfile = youtubeStage(300_000); // 5 min — Opus medium deep analysis
 
 export const INTERNAL_JOB_HARNESS_BASELINES = {
+  "job-scanner": {
+    executor: "claude",
+    model: CLAUDE_OPUS_MODEL,
+    stages: {
+      // Batched fit-scoring of up to 25 postings; Opus medium, Codex fallback.
+      score: {
+        executor: "claude",
+        model: CLAUDE_OPUS_MODEL,
+        cwdOverride: TMP_DIR,
+        timeoutOverride: 300_000,
+        fallbackChain: ["codex"],
+        fallbackModels: { codex: CODEX_FALLBACK_MODEL },
+      },
+    },
+  },
   "abvp-refresh": {
     executor: "codex",
     model: "gpt-5.6-sol-medium",

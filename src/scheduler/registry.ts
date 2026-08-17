@@ -64,6 +64,7 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
   { id: "db-backup", name: "DB Backup", kind: "internal", handler: "db_backup", handlerFile: "db-backup", expectedInSchedule: true },
   { id: "document-ingest", name: "Document Ingest", kind: "internal", handler: "document_ingest", handlerFile: "document-ingest", expectedInSchedule: true, note: "every 15 min; also called inline at the start of link-processor" },
   { id: "ideas-explore", name: "Ideas Explore", kind: "internal", handler: "ideas_explore", handlerFile: "ideas-explore", expectedInSchedule: true },
+  { id: "job-scanner", name: "Job Scanner", kind: "internal", handler: "job_scanner", handlerFile: "job-scanner", expectedInSchedule: true, note: "discover→verify→rank→email digest to hi@yanqing.app; notify-only, no auto-apply" },
   { id: "link-processor", name: "Link Processor", kind: "internal", handler: "link_processor", handlerFile: "link-processor", expectedInSchedule: true },
   { id: "memory-embeddings", name: "Memory Embeddings", kind: "internal", handler: "memory_embeddings", handlerFile: "memory-embeddings", expectedInSchedule: true, note: "event-triggered; cron is safety net" },
   { id: "memory-reindex", name: "Memory Reindex", kind: "internal", handler: "memory_reindex", handlerFile: "memory-reindex", expectedInSchedule: true, note: "event-triggered; cron is safety net" },
