@@ -938,6 +938,27 @@ async function runHandler(
           },
         );
       }
+      case "job_scanner": {
+        const { runJobScanner } = await import("./jobs/[redacted].js");
+        const result = await runJobScanner({
+          stateManager: ctx.stateManager,
+          jobRunId: ctx.jobRunId,
+          signal: ctx.signal,
+          job,
+          startedAt,
+        });
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          {
+            notificationIntent: result.success ? "operational_status" : "failure_alert",
+            sideEffectDelivered: result.sideEffectDelivered,
+          },
+        );
+      }
       // idea_synthesizer and idea_expiry were deleted 2026-07-26 with the rest
       // of the idea subsystem. The scrapes corpus is the reading material now.
       case "link_processor": {
