@@ -1,5 +1,6 @@
 /**
- * ABVP fortnightly refresh — deterministic internal handler.
+ * ABVP weekly refresh — deterministic internal handler (weekly since 2026-08-18;
+ * Brand/ASIN publish fortnightly and dedupe out on off-weeks, SR lands weekly).
  *
  * Contract: /Volumes/Warehouse/ABVP raw/skills.md
  * Stages: cadence → lock → inventory (28d) → sequential DL → place → ingest → verify → notify
@@ -305,7 +306,9 @@ function isDue(nextDueAt: string, now = new Date()): boolean {
 function advanceDue(fromIso: string): string {
   const base = Date.parse(fromIso);
   const start = Number.isFinite(base) ? new Date(base) : new Date();
-  const next = new Date(start.getTime() + 14 * 24 * 60 * 60 * 1000);
+  // Weekly cadence (2026-08-18, was 14d): SR publishes weekly while Brand/ASIN
+  // stay fortnightly; SHA dedupe makes off-fortnight runs fetch only the new SR ZIP.
+  const next = new Date(start.getTime() + 7 * 24 * 60 * 60 * 1000);
   const local = new Intl.DateTimeFormat("en-CA", {
     timeZone: TZ,
     year: "numeric",
@@ -405,12 +408,13 @@ with zipfile.ZipFile(p) as zf:
                  for n in (x.lower().replace('\\\\','/') for x in names))
         ok = any(re.search(r'(^|/)metrics\\.csv$', n.replace('\\\\','/'), re.I) for n in names)
     elif t == "ASIN":
-        # Require an ASIN-grain-ish csv, not a random helper csv
-        ok = any(re.search(r'(asin|grain).*\.csv$', n.replace('\\\\','/').split('/')[-1], re.I) or
-                 re.search(r'asin grain report.*\\.csv$', n.replace('\\\\','/').split('/')[-1], re.I)
+        # Require an ASIN-grain-ish csv, not a random helper csv. The portal
+        # ships members as .csv or .csv.gz (gz observed since the 2026-08-01
+        # ZIP; the old pre-agent path ingested those fine on 2026-08-11).
+        ok = any(re.search(r'(asin|grain).*\\.csv(\\.gz)?$', n.replace('\\\\','/').split('/')[-1], re.I)
                  for n in names)
         if not ok:
-            csvs = [n for n in names if n.lower().endswith('.csv') and not n.lower().endswith('/')]
+            csvs = [n for n in names if re.search(r'\\.csv(\\.gz)?$', n, re.I)]
             ok = len(csvs) >= 1 and any('asin' in n.lower() or 'grain' in n.lower() or 'metric' in n.lower() for n in csvs)
     else:
         a = any(re.search(r'dataset_a', n, re.I) and n.lower().endswith('.csv.gz') for n in names)
@@ -617,6 +621,84 @@ async function readPortalSnapshot(signal?: AbortSignal) {
   }>(raw);
 }
 
+// Portal labels matching labelToType(), so API-derived rows stay interchangeable
+// with table-derived rows everywhere downstream.
+const API_FILE_TYPE_MAP: Record<string, { type: ReportType; label: string }> = {
+  SEARCH_REPORT: { type: "SR", label: "Search Report" },
+  ZIP_ASIN: { type: "ASIN", label: "Zip (ASIN Metrics)" },
+  ZIP_BRAND: { type: "Brand", label: "Zip (Brand Metrics)" },
+};
+
+/**
+ * Authenticated API contract fallback for the deterministic preflight, mirroring
+ * the download agent's documented fallback (skills.md): when the SPA table shell
+ * will not render rows (observed 2026-08-18: route sticks, table stays a 2-row
+ * shell while /abvp/getAllAdvertiserReports returns 141 RELEASED rows), a 200
+ * JSON response with released rows from the same authenticated leased page is
+ * the authoritative inventory. Returns null when the API cannot vouch either.
+ */
+async function inventoryPortalViaApi(
+  url: string,
+  signal?: AbortSignal,
+): Promise<{ auth: AuthKind | null; url: string; rows: PortalRow[]; contractOk: boolean; reason?: string } | null> {
+  if (!url.startsWith("https://advertising.amazon.com/")) return null;
+  let data: {
+    error?: string;
+    permStatus?: number;
+    pngUs?: boolean;
+    repStatus?: number;
+    rows?: Array<{ fileType: string; date: string; status: string; advertiser: string }>;
+  };
+  try {
+    const raw = await abvpBrowser(
+      [
+        "eval",
+        `(async () => {
+          try {
+            const perm = await fetch("/abvp/getPermissionedAdvertisers", { credentials: "include" });
+            const permBody = await perm.text();
+            const rep = await fetch("/abvp/getAllAdvertiserReports?advCode=PNG_US&productType=ABVP", { credentials: "include" });
+            const repJson = await rep.json();
+            const rows = Array.isArray(repJson) ? repJson : (repJson.reports || repJson.data || []);
+            return JSON.stringify({
+              permStatus: perm.status,
+              pngUs: permBody.includes("PNG_US"),
+              repStatus: rep.status,
+              rows: rows.map((r) => ({
+                fileType: r.reportFileType, date: r.reportDate,
+                status: r.releaseStatus, advertiser: r.advName,
+              })),
+            });
+          } catch (e) { return JSON.stringify({ error: String(e) }); }
+        })()`,
+      ],
+      { timeoutMs: 60_000, signal },
+    );
+    data = parseEvalJson(raw);
+  } catch {
+    return null;
+  }
+  if (data.error || data.permStatus !== 200 || !data.pngUs || data.repStatus !== 200) return null;
+  const rows: PortalRow[] = [];
+  for (const r of data.rows ?? []) {
+    const mapped = API_FILE_TYPE_MAP[r.fileType];
+    if (!mapped) continue;
+    const portalDate = normalizePortalDate(r.date ?? "");
+    if (!portalDate) continue;
+    rows.push({
+      key: `${mapped.type}::${portalDate}::${mapped.label}::${r.advertiser}`,
+      type: mapped.type,
+      label: mapped.label,
+      date: portalDate,
+      status: r.status,
+      advertiser: r.advertiser,
+      fingerprint: `${mapped.type}|${portalDate}|${mapped.label}|${r.advertiser}|${r.status}`,
+    });
+  }
+  if (rows.length === 0) return null;
+  return { auth: null, url, rows, contractOk: true, reason: "api_contract_fallback" };
+}
+
 async function inventoryPortal(signal?: AbortSignal): Promise<{
   auth: AuthKind | null;
   url: string;
@@ -659,22 +741,17 @@ async function inventoryPortal(signal?: AbortSignal): Promise<{
   // Accept PNG_US reports route strictly (hash or path form).
   const routeOk = data.url.includes("ABVP/PNG_US/reports");
   const contractOk = routeOk && data.marketplaceHint && (data.hasTable || data.count > 0);
-  if (!contractOk) {
+  if (!contractOk || data.count === 0) {
+    const viaApi = await inventoryPortalViaApi(data.url, signal);
+    if (viaApi) return viaApi;
     return {
       auth: "portal_contract_failure",
       url: data.url,
       rows: [],
       contractOk: false,
-      reason: `route/marketplace/table failed url=${data.url} market=${data.marketplaceHint} table=${data.hasTable} count=${data.count}`,
-    };
-  }
-  if (data.count === 0) {
-    return {
-      auth: "portal_contract_failure",
-      url: data.url,
-      rows: [],
-      contractOk: false,
-      reason: "empty inventory after scroll-to-stable",
+      reason: contractOk
+        ? "empty inventory after scroll-to-stable (API fallback also failed)"
+        : `route/marketplace/table failed url=${data.url} market=${data.marketplaceHint} table=${data.hasTable} count=${data.count} (API fallback also failed)`,
     };
   }
 
