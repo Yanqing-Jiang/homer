@@ -133,7 +133,9 @@ async function runAgent(agentArgs) {
     else usage();
   }
   const owner = `browserctl-agent:${process.pid}`;
-  const session = `homer-${surface.replace(/[^a-zA-Z0-9_-]/g, "-")}-${randomUUID()}`;
+  // Short suffix: agent-browser session names become socket paths (103-byte
+  // cap), and the default surface already carries a full UUID.
+  const session = `homer-${surface.replace(/[^a-zA-Z0-9_-]/g, "-")}-${randomUUID().slice(0, 8)}`;
   let leaseId;
   let targetId;
   let renewTimer;
