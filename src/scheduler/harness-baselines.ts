@@ -1,5 +1,6 @@
 import { PATHS } from "../config/paths.js";
 import type { ExecutorKind } from "../executors/fallback-orchestrator.js";
+import { join } from "node:path";
 import type {
   HarnessSelection,
   InternalHarnessCallProfile,
@@ -77,6 +78,22 @@ export const INTERNAL_JOB_HARNESS_BASELINES = {
     model: "gpt-5.6-sol-medium",
     stages: {
       download: codexStage("<warehouse-volume>/<portal-dataset> raw", 6_000_000, "medium"),
+    },
+  },
+  "freshness-escalation": {
+    executor: "claude",
+    model: "opus[high]",
+    fallbackChain: [],
+    fallbackModels: { claude: "opus[high]" },
+    stages: {
+      remediate: {
+        executor: "claude",
+        model: "opus[high]",
+        cwdOverride: join(HOME_DIR, "Desktop", "<data-pipeline>"),
+        timeoutOverride: 3_600_000,
+        fallbackChain: [],
+        fallbackModels: { claude: "opus[high]" },
+      },
     },
   },
   "ideas-explore": {
