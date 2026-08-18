@@ -1,6 +1,7 @@
 /**
- * Deterministic rules gate: taxonomy, geography (Seattle metro + Remote US),
- * comp floor, seniority sanity, and staffing-agency exclusion.
+ * Deterministic rules gate: taxonomy, geography (Seattle metro only — fully
+ * remote is excluded), comp floor, seniority sanity, and staffing-agency
+ * exclusion.
  *
  * Staffing-agency lists salvaged from the retired src/job-hunt/scorer.ts —
  * that blocklist was the proven part of the old pipeline.
@@ -13,10 +14,11 @@ import type { NormalizedJob } from "./types.js";
 // disqualifying. Missing bands pass to LLM judgment.
 export const MIN_LISTED_YEARLY_MAX = 200_000;
 
-// The source's 7-day window is on ITS fetch date, not the posting's publish
-// date — 30% of the first week's emailed jobs were >30 days old (one was 60).
-// Missing/unparseable publish dates pass; the estimate errs on inclusion.
-export const MAX_POSTING_AGE_DAYS = 30;
+// Only postings under a week old (Yanqing, 2026-08-18). The source's 7-day
+// window is on ITS fetch date, not the posting's publish date, so this local
+// gate is what actually enforces freshness. Missing/unparseable publish dates
+// pass; the estimate errs on inclusion.
+export const MAX_POSTING_AGE_DAYS = 7;
 
 const STAFFING_NAME_KEYWORDS = [
   "staffing", "recruiting", "recruitment", "talent solutions", "talent acquisition",
@@ -63,20 +65,12 @@ function isSeattleArea(job: NormalizedJob): boolean {
   );
 }
 
-function isRemoteUs(job: NormalizedJob): boolean {
-  if (job.workplaceType !== "Remote") return false;
-  if (job.workplaceCountries.length === 0) {
-    return (job.location ?? "").toLowerCase().includes("united states");
-  }
-  return job.workplaceCountries.includes("US");
-}
-
 export interface RulesVerdict {
   pass: boolean;
   reason?: string;
   category?: string;
   categoryWeight?: number;
-  geography: "seattle" | "remote-us" | null;
+  geography: "seattle" | null;
 }
 
 export function applyRules(job: NormalizedJob): RulesVerdict {
@@ -101,9 +95,10 @@ export function applyRules(job: NormalizedJob): RulesVerdict {
     return fail("requires security clearance");
   }
 
-  const seattle = isSeattleArea(job);
-  const remoteUs = isRemoteUs(job);
-  if (!seattle && !remoteUs) return fail("outside Seattle metro and not Remote-US");
+  // Fully-remote roles are out even when nominally Seattle-based (Yanqing,
+  // 2026-08-18): only onsite/hybrid within ~1h of Seattle.
+  if (job.workplaceType === "Remote") return fail("fully remote");
+  if (!isSeattleArea(job)) return fail("outside Seattle metro");
   if (!job.workplaceCountries.includes("US") && job.workplaceCountries.length > 0) {
     return fail(`not a US posting: ${job.workplaceCountries.join(",")}`);
   }
@@ -123,7 +118,7 @@ export function applyRules(job: NormalizedJob): RulesVerdict {
     pass: true,
     category: match.category,
     categoryWeight: match.weight,
-    geography: seattle ? "seattle" : "remote-us",
+    geography: "seattle",
   };
 }
 

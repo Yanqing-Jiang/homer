@@ -14,7 +14,7 @@ import { runInternalJobHarness } from "../executor.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { storeJobArtifact } from "./artifact-store.js";
 import { PATHS } from "../../config/paths.js";
-import { searchHiringCafe, normalizeHit, SEARCH_SCOPES } from "../../job-scanner/hiring-cafe.js";
+import { searchHiringCafe, normalizeHit } from "../../job-scanner/hiring-cafe.js";
 import { discoveryQueries } from "../../job-scanner/taxonomy.js";
 import { applyRules, digestKeyFromFingerprint } from "../../job-scanner/filters.js";
 import { verifyJob, resetVerifyCache } from "../../job-scanner/verify.js";
@@ -22,9 +22,10 @@ import {
   upsertPosting, markFiltered, setCategory, setVerification,
   setFitScore, setRankScore, getEmailCandidates, getPostingsNeedingScore,
   getRecentlyEmailedFingerprints, getDismissedKeys, markEmailed, recordRun, recordEmail,
+  hoursSinceLastSentEmail,
 } from "../../job-scanner/store.js";
 import { buildScoringPrompt, computeRankScore, FitScoreSchema } from "../../job-scanner/scoring.js";
-import { renderDigestHtml, renderDigestText } from "../../job-scanner/digest.js";
+import { renderDigestHtml, renderDigestText, renderQuietDayHtml, renderQuietDayText } from "../../job-scanner/digest.js";
 import { sendHtmlEmail, GmailAuthError } from "../../job-scanner/gmail.js";
 import type { NormalizedJob, RankedJob, RunStats } from "../../job-scanner/types.js";
 
@@ -64,49 +65,47 @@ export async function runJobScanner(
     resetVerifyCache();
 
     // ── 1. Discover ─────────────────────────────────────────────
-    // Each query runs once per geographic scope (Seattle locality, Remote-US)
-    // so the source's ~55-hit slice is spent only on postings that can pass
-    // the local geography gate.
+    // Seattle-locality only (fully-remote roles are excluded outright), so
+    // the source's ~55-hit slice is spent on postings that can pass the
+    // local geography gate.
     const survivors: NormalizedJob[] = [];
     const seenThisRun = new Set<string>();
     for (const { query } of discoveryQueries()) {
-      for (const scope of SEARCH_SCOPES) {
-        if (ctx.signal?.aborted) throw new Error("aborted");
-        let hits: Record<string, unknown>[] = [];
-        try {
-          hits = await searchHiringCafe(query, scope, {
-            dateWindowDays: DATE_WINDOW_DAYS,
-            signal: ctx.signal,
-          });
-        } catch (error) {
-          stats.errors.push(`discovery "${query}" [${scope}]: ${String(error).slice(0, 120)}`);
+      if (ctx.signal?.aborted) throw new Error("aborted");
+      let hits: Record<string, unknown>[] = [];
+      try {
+        hits = await searchHiringCafe(query, {
+          dateWindowDays: DATE_WINDOW_DAYS,
+          signal: ctx.signal,
+        });
+      } catch (error) {
+        stats.errors.push(`discovery "${query}": ${String(error).slice(0, 120)}`);
+        continue;
+      }
+      for (const hit of hits) {
+        const job = normalizeHit(hit);
+        if (!job || seenThisRun.has(job.id)) continue;
+        seenThisRun.add(job.id);
+        stats.discovered++;
+
+        const isNew = upsertPosting(db, job);
+        if (!isNew) continue;
+        stats.newJobs++;
+
+        // ── 2. Rules gate ───────────────────────────────────────
+        const verdict = applyRules(job);
+        if (!verdict.pass) {
+          markFiltered(db, job.id, verdict.reason ?? "rules");
           continue;
         }
-        for (const hit of hits) {
-          const job = normalizeHit(hit);
-          if (!job || seenThisRun.has(job.id)) continue;
-          seenThisRun.add(job.id);
-          stats.discovered++;
-
-          const isNew = upsertPosting(db, job);
-          if (!isNew) continue;
-          stats.newJobs++;
-
-          // ── 2. Rules gate ───────────────────────────────────────
-          const verdict = applyRules(job);
-          if (!verdict.pass) {
-            markFiltered(db, job.id, verdict.reason ?? "rules");
-            continue;
-          }
-          setCategory(db, job.id, verdict.category!, verdict.categoryWeight!);
-          job.category = verdict.category!;
-          job.categoryWeight = verdict.categoryWeight!;
-          stats.rulesPassed++;
-          survivors.push(job);
-        }
-        // Politeness gap between requests against the unofficial route.
-        await new Promise((r) => setTimeout(r, 1_000));
+        setCategory(db, job.id, verdict.category!, verdict.categoryWeight!);
+        job.category = verdict.category!;
+        job.categoryWeight = verdict.categoryWeight!;
+        stats.rulesPassed++;
+        survivors.push(job);
       }
+      // Politeness gap between requests against the unofficial route.
+      await new Promise((r) => setTimeout(r, 1_000));
     }
 
     // ── 3. Verify against employer ATS feeds ──────────────────────
@@ -194,11 +193,40 @@ export async function runJobScanner(
       .slice(0, TOP_N);
 
     // ── 6. Digest email ───────────────────────────────────────────
-    // No qualifying roles → no email. An empty "nothing today" send trains
-    // the reader to ignore the digest.
+    // Runs with qualifying roles email immediately. Quiet runs stay silent
+    // and let candidates keep queueing — except the midday (12:00) run,
+    // which sends at most one "no qualifying roles" status per day so a
+    // jobless stretch is confirmed once, mid-day, instead of pinging every
+    // run or going ambiguously silent (Yanqing, 2026-08-18).
     const now = new Date();
     if (ranked.length === 0) {
-      stats.emailStatus = "skipped:no_candidates";
+      const isMiddayRun = now.getHours() >= 11 && now.getHours() < 14;
+      const sinceLastSent = hoursSinceLastSentEmail(db);
+      if (!isMiddayRun || (sinceLastSent !== null && sinceLastSent < 20)) {
+        stats.emailStatus = "skipped:no_candidates";
+      } else {
+        const nearMisses: RankedJob[] = candidates
+          .filter((p) => !emailedKeys.has(digestKeyFromFingerprint(p.fingerprint)))
+          .sort((a, b) => (b.rank_score ?? 0) - (a.rank_score ?? 0))
+          .slice(0, 5)
+          .map((job) => ({ job, rankScore: job.rank_score ?? 0 }));
+        const dayLabel = now.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+        const subject = `Job Scanner: no qualifying roles — ${dayLabel}`;
+        const html = renderQuietDayHtml(nearMisses, dayLabel, stats);
+        try {
+          const sent = await sendHtmlEmail(
+            { from: FROM_ADDRESS, to: RECIPIENT, subject, html, text: renderQuietDayText(nearMisses, dayLabel) },
+            ctx.signal,
+          );
+          recordEmail(db, RECIPIENT, subject, [], sent.messageId, "sent");
+          stats.emailStatus = "sent:quiet_day";
+        } catch (error) {
+          const reason = error instanceof GmailAuthError ? "auth_dead" : String(error).slice(0, 200);
+          recordEmail(db, RECIPIENT, subject, [], null, `failed:${reason}`);
+          stats.emailStatus = `failed:${reason}`;
+          stats.errors.push(error instanceof GmailAuthError ? error.message : `email send: ${reason}`);
+        }
+      }
     } else {
       const runLabel = `${now.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${now.getHours() < 12 ? "AM" : "PM"}`;
       const html = renderDigestHtml(ranked, runLabel, stats);

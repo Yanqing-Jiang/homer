@@ -76,50 +76,32 @@ async function fetchSearchPage(
   };
 }
 
-/** Geographic scope for a discovery pass. Every hit can pass the local rules
- * gate, instead of spending the ~55-hit slice on nationwide postings. */
-export type SearchScope = "seattle" | "remote-us";
-
-export const SEARCH_SCOPES: SearchScope[] = ["seattle", "remote-us"];
-
-function scopeLocations(scope: SearchScope): Record<string, unknown>[] {
-  if (scope === "seattle") {
-    return [
-      {
-        formatted_address: "Seattle, WA, USA",
-        types: ["locality"],
-        geometry: { location: { lat: 47.6061, lon: -122.3328 } },
-        id: "user_locality",
-        address_components: [
-          { long_name: "Seattle", short_name: "Seattle", types: ["locality"] },
-          { long_name: "Washington", short_name: "WA", types: ["administrative_area_level_1"] },
-          { long_name: "United States", short_name: "US", types: ["country"] },
-        ],
-        options: {},
-      },
-    ];
-  }
-  return [
-    {
-      formatted_address: "United States",
-      types: ["country"],
-      geometry: { location: { lat: "39.8283", lon: "-98.5795" } },
-      id: "user_country",
-      address_components: [{ long_name: "United States", short_name: "US", types: ["country"] }],
-      options: { flexible_regions: ["anywhere_in_continent"] },
-    },
-  ];
-}
+/** Discovery is Seattle-locality only, onsite/hybrid: fully-remote roles are
+ * excluded outright (Yanqing, 2026-08-18), so the ~55-hit slice is spent only
+ * on postings that can pass the local rules gate. */
+const SEATTLE_LOCATION: Record<string, unknown>[] = [
+  {
+    formatted_address: "Seattle, WA, USA",
+    types: ["locality"],
+    geometry: { location: { lat: 47.6061, lon: -122.3328 } },
+    id: "user_locality",
+    address_components: [
+      { long_name: "Seattle", short_name: "Seattle", types: ["locality"] },
+      { long_name: "Washington", short_name: "WA", types: ["administrative_area_level_1"] },
+      { long_name: "United States", short_name: "US", types: ["country"] },
+    ],
+    options: {},
+  },
+];
 
 /**
- * Run one scoped discovery query. `dateWindowDays` bounds the source-side
- * freshness filter; our own first-seen timestamps remain the authoritative
- * clock. Single fetch per query: the route's `page` param is a no-op (see
- * DEBT above), so the date-sorted first slice is all the source offers.
+ * Run one discovery query. `dateWindowDays` bounds the source-side freshness
+ * filter; our own first-seen timestamps remain the authoritative clock.
+ * Single fetch per query: the route's `page` param is a no-op (see DEBT
+ * above), so the date-sorted first slice is all the source offers.
  */
 export async function searchHiringCafe(
   query: string,
-  scope: SearchScope,
   opts: { dateWindowDays?: number; signal?: AbortSignal } = {},
 ): Promise<Record<string, unknown>[]> {
   // NOTE: the source's dateFetchedPastNDays behaves like an enum — some values
@@ -129,9 +111,9 @@ export async function searchHiringCafe(
     searchQuery: query,
     dateFetchedPastNDays: opts.dateWindowDays ?? 7,
     sortBy: "date",
-    workplaceTypes: scope === "remote-us" ? ["Remote"] : ["Remote", "Hybrid", "Onsite"],
+    workplaceTypes: ["Hybrid", "Onsite"],
     commitmentTypes: ["Full Time"],
-    locations: scopeLocations(scope),
+    locations: SEATTLE_LOCATION,
   };
 
   const result = await fetchSearchPage(searchState, opts.signal);
@@ -140,7 +122,7 @@ export async function searchHiringCafe(
     // are invisible until churn surfaces them. Persistent warnings here mean
     // the adapter needs the authed endpoint or Apify (see DEBT).
     logger.warn(
-      { query, scope, returned: result.hits.length, totalCount: result.totalCount },
+      { query, returned: result.hits.length, totalCount: result.totalCount },
       "hiring.cafe slice cap: source has more in-window results than one page",
     );
   }

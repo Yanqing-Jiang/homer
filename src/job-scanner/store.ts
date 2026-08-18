@@ -6,7 +6,7 @@
 // @ts-ignore
 import type Database from "better-sqlite3";
 import type { NormalizedJob, StoredPosting } from "./types.js";
-import { fingerprintJob, digestKeyFor } from "./filters.js";
+import { fingerprintJob, digestKeyFor, MAX_POSTING_AGE_DAYS } from "./filters.js";
 
 /** Upsert a discovered job. Returns true when the posting id is new. */
 export function upsertPosting(db: Database.Database, job: NormalizedJob): boolean {
@@ -146,7 +146,7 @@ export function getEmailCandidates(db: Database.Database, freshHours = 72): Stor
          AND emailed_at IS NULL
          AND (ats_live IS NULL OR ats_live = 1)
          AND first_seen_at >= datetime('now', ?)
-         AND (publish_date IS NULL OR substr(publish_date, 1, 10) >= date('now', '-30 days'))
+         AND (publish_date IS NULL OR substr(publish_date, 1, 10) >= date('now', '-${MAX_POSTING_AGE_DAYS} days'))
        ORDER BY rank_score DESC`,
     )
     .all(`-${freshHours} hours`) as StoredPosting[];
@@ -216,6 +216,16 @@ export function recordRun(
     stats.errors.length > 0 ? JSON.stringify(stats.errors).slice(0, 2_000) : null,
     stats.durationMs,
   );
+}
+
+/** Hours since the last successfully sent scanner email, or null if none. */
+export function hoursSinceLastSentEmail(db: Database.Database): number | null {
+  const row = db
+    .prepare(
+      "SELECT (julianday('now') - julianday(MAX(sent_at))) * 24 AS hrs FROM job_scan_emails WHERE status = 'sent'",
+    )
+    .get() as { hrs: number | null };
+  return row.hrs;
 }
 
 export function recordEmail(

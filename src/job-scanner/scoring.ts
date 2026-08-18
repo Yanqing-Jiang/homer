@@ -27,7 +27,8 @@ Targets: $250K-350K total comp. Role families, in preference order:
 4) AI Product Manager (Senior/Principal, incl. Amazon PM-T and agentic product)
 5) Principal/Senior Technical Program Manager (AI/data)
 6) Staff/Principal Analytics or Data Engineer (IC, only if comp clearly $250K+)
-Location: Seattle metro (onsite/hybrid fine) or Remote US.`;
+Location: Seattle metro or within ~1 hour drive (Bellevue, Issaquah, Redmond,
+etc.), onsite or hybrid. Fully-remote roles are excluded upstream.`;
 
 export function buildScoringPrompt(jobs: NormalizedJob[]): string {
   const items = jobs.map((j) => ({
@@ -82,7 +83,9 @@ export function computeRankScore(p: StoredPosting): number {
     comp = p.yearly_max_comp >= 250_000 ? 15 : p.yearly_max_comp >= 200_000 ? 9 : 0;
   }
 
-  const geo = isSeattleLocation(p.location) ? 5 : p.workplace_type === "Remote" ? 4 : 2;
+  // Remote postings are filtered upstream; anything here is Seattle-area,
+  // so this only separates named-metro locations from bare-WA ones.
+  const geo = isSeattleLocation(p.location) ? 5 : 2;
 
   const score = fit + authenticity + seniority + comp + geo - repostPenalty;
   return Math.max(0, Math.min(100, Math.round(score * 10) / 10));

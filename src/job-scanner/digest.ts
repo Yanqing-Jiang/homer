@@ -92,7 +92,7 @@ export function renderDigestHtml(
   <div style="padding:20px 12px 8px;">
     <div style="font-size:20px;font-weight:700;">Job Scanner — ${esc(runLabel)}</div>
     <div style="font-size:13px;color:#666;margin-top:4px;">
-      Fresh, employer-verified postings ranked for fit. Seattle metro + Remote US, $250K+ target.
+      Fresh (&lt;7d), employer-verified postings ranked for fit. Seattle metro onsite/hybrid, $250K+ target.
     </div>
   </div>
   <table style="width:100%;border-collapse:collapse;" cellpadding="0" cellspacing="0">
@@ -104,6 +104,53 @@ export function renderDigestHtml(
     ${stats.errors.length > 0 ? `Errors: ${esc(stats.errors.join("; ").slice(0, 300))}` : ""}
   </div>
 </div>`;
+}
+
+/** Once-a-day midday status for quiet stretches: confirms the scanner is
+ * alive and shows the closest below-the-bar roles sitting in the queue. */
+export function renderQuietDayHtml(nearMisses: RankedJob[], dayLabel: string, stats: RunStats): string {
+  const rows = nearMisses
+    .map((r) => {
+      const j = r.job;
+      return `
+      <tr>
+        <td style="padding:10px 12px;border-bottom:1px solid #e6e6e6;">
+          <div style="font-size:14px;font-weight:600;color:#1a1a1a;">${esc(j.title)}</div>
+          <div style="font-size:13px;color:#555;margin-top:2px;">
+            ${esc(j.company)} &middot; ${esc(j.location ?? "location n/a")}
+            &middot; ${compLabel(j.yearly_min_comp, j.yearly_max_comp, j.comp_transparent)}
+            &middot; rank ${r.rankScore.toFixed(0)}/100 &middot; ${ageLabel(j.first_seen_at, j.publish_date)}
+          </div>
+        </td>
+      </tr>`;
+    })
+    .join("\n");
+
+  return `<div style="max-width:680px;margin:0 auto;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:#ffffff;color:#1a1a1a;">
+  <div style="padding:20px 12px 8px;">
+    <div style="font-size:20px;font-weight:700;">Job Scanner — ${esc(dayLabel)}: no qualifying roles</div>
+    <div style="font-size:13px;color:#666;margin-top:4px;">
+      Nothing has cleared the bar since the last digest (fresh &lt;7d, Seattle metro onsite/hybrid, $250K+ target, rank &ge; 70).
+      ${nearMisses.length > 0 ? "Closest below-the-bar roles in the queue:" : "The queue is empty."}
+    </div>
+  </div>
+  ${nearMisses.length > 0 ? `<table style="width:100%;border-collapse:collapse;" cellpadding="0" cellspacing="0">${rows}</table>` : ""}
+  <div style="padding:16px 12px;font-size:12px;color:#999;">
+    This run: ${stats.discovered} discovered &middot; ${stats.newJobs} new &middot; ${stats.rulesPassed} passed rules
+    &middot; ${stats.verifiedLive} verified live.
+    ${stats.errors.length > 0 ? `Errors: ${esc(stats.errors.join("; ").slice(0, 300))}` : ""}
+  </div>
+</div>`;
+}
+
+export function renderQuietDayText(nearMisses: RankedJob[], dayLabel: string): string {
+  const head = `Job Scanner — ${dayLabel}: no qualifying roles since the last digest.`;
+  if (nearMisses.length === 0) return `${head}\nThe queue is empty.`;
+  const lines = nearMisses.map(
+    (r) =>
+      `- ${r.job.title} — ${r.job.company} (${r.job.location ?? "n/a"}) | rank ${r.rankScore.toFixed(0)}/100`,
+  );
+  return `${head}\nClosest below-the-bar roles:\n${lines.join("\n")}`;
 }
 
 export function renderDigestText(ranked: RankedJob[], runLabel: string): string {
