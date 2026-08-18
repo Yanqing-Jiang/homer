@@ -1,9 +1,10 @@
 /**
  * CleanupScheduler — Periodic orphan/idle process cleanup.
  *
- * Runs every 2 hours. Two-pronged detection:
+ * Runs every 2 hours. Three-pronged detection:
  * A) Registry scan for over-timeout / idle processes.
  * B) OS orphan scan via `ps` for known HOMER patterns not in registry.
+ * C) Structural browser-automation scan with a 30-minute zombie grace.
  *
  * 6-layer safety before any kill. Enforcement ON by default (set PROCESS_CLEANUP_ENFORCE=0 to disable).
  * Age-based kill: tty-less HOMER-pattern process > 6h; or TTY-attached `claude` > 6h with TTY idle > 6h.
@@ -13,17 +14,34 @@ import { execSync, spawnSync } from "child_process";
 import {
   copyFileSync,
   existsSync,
+  lstatSync,
+  readFileSync,
   readdirSync,
   renameSync,
   rmSync,
   statSync,
   truncateSync,
+  unlinkSync,
 } from "fs";
+import { tmpdir } from "os";
 import { basename, dirname, join } from "path";
 import { processRegistry } from "./registry.js";
 import type { ProcessRecord } from "./registry.js";
+import {
+  decideBrowserAutomationCleanup,
+  extractUserDataDir,
+  isAgentBrowserArtifactFilename,
+  isAgentBrowserDaemonCmdline,
+  isChromeFamilyCmdline,
+  isTempBrowserProfileDir,
+  isTempProfileHeadlessChromeCmdline,
+  normalizeBrowserProfileDir,
+  type BrowserAutomationCleanupDecision,
+  type BrowserAutomationKind,
+} from "./browser-zombie-classifier.js";
 import { logger } from "../utils/logger.js";
-import { teardownIdleSession, getLastCdpUseAt, isResidentChromeSupervisionActive, probeCdp, type CdpProbe } from "../scraping/chrome-launcher.js";
+import { teardownIdleSession, getLastCdpUseAt, isResidentChromeSupervisionActive, probeCdp, RESIDENT_CDP_PROFILE, type CdpProbe } from "../scraping/chrome-launcher.js";
+import { BROWSER_STATUS_PATH } from "../scraping/browser-control.js";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
 // @ts-ignore
 import type Database from "better-sqlite3";
@@ -41,15 +59,16 @@ const ORPHAN_PATTERNS = [
   "kimi --quiet",
   "gemini.*-(?:m|p)\\s",
 ];
-// DEBT: substring ORPHAN_PATTERNS + registry lacks protected-PID concept; upgrade when next cleanup false-positive is observed (see output/codex/outage-fixplan-review-2026-07-15-1425.md P1-4)
+// DEBT: browser automation now has structural classifiers plus a protected-PID
+// fence. General CLI ORPHAN_PATTERNS remain substring-based; replace them with
+// executable/argv ownership checks when that scanner is next revised (P1-4).
 
-// CDP scraping Chrome lifecycle. These are matched by a dedicated predicate
-// (isCdpChromeCmdline) rather than a bare ORPHAN_PATTERNS regex, because a loose
-// "chrome-cdp-profile" string also matches unrelated command lines (e.g. an agent
-// prompt that merely mentions the path). The live :9222 listener is always spared.
+// Browser Chrome lifecycle uses structural executable/profile predicates rather
+// than ORPHAN_PATTERNS, so prompt text that mentions a profile never authorizes a
+// signal. The live :9222 listener and broker status PIDs are always spared.
 const CDP_PORT = 9222;
-const CDP_PROFILE_PREFIX = "/tmp/chrome-cdp-profile-";
-const CDP_PROFILE_MIN_AGE_MS = 30 * 60 * 1000; // grace period before sweeping a /tmp profile dir
+const CDP_PROFILE_MIN_AGE_MS = 30 * 60 * 1000; // shared grace for browser processes and artifacts
+const AGENT_BROWSER_FALLBACK_SOCKET_DIR = "/tmp/ab";
 // Idle-teardown of the long-lived CDP Chrome (it is spared by every other path by
 // design). Gated on a long idle window — scrapes are seconds-long, so a 2h-idle
 // instance has nothing mid-flight — AND a tab-count floor so a healthy reused
@@ -59,17 +78,6 @@ const CDP_MAX_IDLE_TABS = 3;
 const MIB = 1024 * 1024;
 const LOG_RETENTION_AGE_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
 const LOG_RETENTION_MAX_FILES = 200;
-
-/** True only for a real Homer CDP Chrome process (has both the Chrome binary and our temp profile). */
-function isCdpChromeCmdline(cmdline: string): boolean {
-  return cmdline.includes("Google Chrome") && cmdline.includes(`--user-data-dir=${CDP_PROFILE_PREFIX}`);
-}
-
-/** Extract the /tmp CDP profile dir from a command line, or null. */
-function extractCdpProfileDir(cmdline: string): string | null {
-  const m = cmdline.match(/--user-data-dir=(\/tmp\/chrome-cdp-profile-\d+)/);
-  return m?.[1] ?? null;
-}
 
 interface CleanupAction {
   pid: number;
@@ -115,11 +123,36 @@ interface CdpState {
   trusted: boolean;
 }
 
+interface BrokerProtectionState {
+  protectedPids: Set<number>;
+  profileDirs: Set<string>;
+}
+
+interface AgentSocketState {
+  livePaths: Set<string>;
+  ownerPids: Set<number>;
+  trusted: boolean;
+}
+
 interface ProcessIdentity {
   pid: number;
   ppid: number;
   pgid: number;
   command: string;
+}
+
+interface ProcessSnapshot extends ProcessIdentity {
+  ageMs: number;
+}
+
+interface ProcessTableState {
+  processes: Map<number, ProcessSnapshot>;
+  trusted: boolean;
+}
+
+interface BrowserAutomationCandidate {
+  kind: BrowserAutomationKind;
+  ageMs: number;
 }
 
 interface ProtectedTopology {
@@ -136,6 +169,10 @@ export class CleanupScheduler {
   private cdp: CdpState = { listenerPids: new Set(), liveProfileDirs: new Set(), referencedProfileDirs: new Set(), trusted: false };
   /** Daemon ancestry and process groups protected for the current cleanup cycle. */
   private protectedTopology: ProtectedTopology | null = null;
+  /** Explicit no-signal fence: daemon topology, registry, broker status and :9222. */
+  private protectedPids = new Set<number>();
+  private broker: BrokerProtectionState = { protectedPids: new Set(), profileDirs: new Set([RESIDENT_CDP_PROFILE]) };
+  private agentSockets: AgentSocketState = { livePaths: new Set(), ownerPids: new Set(), trusted: false };
 
   constructor() {
     // Enforcement ON by default; set PROCESS_CLEANUP_ENFORCE=0 to disable
@@ -166,6 +203,9 @@ export class CleanupScheduler {
       // Snapshot live CDP state once per cycle — used to spare the active :9222
       // session in both scans and to gate the /tmp profile-dir sweep.
       this.cdp = this.buildCdpState();
+      this.broker = this.readBrokerProtectionState();
+      this.agentSockets = this.buildAgentSocketState();
+      this.rebuildProtectedPidFence();
 
       // A: Registry scan
       const registryActions = this.scanRegistry();
@@ -175,13 +215,19 @@ export class CleanupScheduler {
       const orphanActions = this.scanOrphans();
       actions.push(...orphanActions);
 
-      // C: Disk sweep of leaked CDP profile directories
-      this.sweepCdpProfileDirs();
+      // C: Browser-automation zombies have their own structural classifiers and
+      // shorter grace window; the general CLI orphan policy above is unchanged.
+      const browserActions = this.scanBrowserAutomation();
+      actions.push(...browserActions);
 
-      // D: Tear down the long-lived CDP Chrome if it is idle with piled-up tabs.
+      // D: Disk sweep of leaked throwaway Chrome profiles and dead AB sockets.
+      this.sweepCdpProfileDirs();
+      this.sweepAgentBrowserArtifacts();
+
+      // E: Tear down the long-lived CDP Chrome if it is idle with piled-up tabs.
       await this.maybeTeardownIdleCdp(actions);
 
-      // E: Log lifecycle maintenance. Copy-truncate keeps launchd/cloudflared
+      // F: Log lifecycle maintenance. Copy-truncate keeps launchd/cloudflared
       // file descriptors valid without booting anything.
       logMaintenance = this.maintainLogs();
 
@@ -265,7 +311,7 @@ export class CleanupScheduler {
         const pid = parseInt(cols[1] ?? "", 10);
         if (isNaN(pid) || pid <= 1) continue;
         if (registeredPids.has(pid)) continue; // Known to registry
-        if (pid === process.pid || this.protectedTopology.ancestors.has(pid)) continue;
+        if (this.protectedPids.has(pid) || this.protectedTopology.ancestors.has(pid)) continue;
 
         // Pre-filter on the snapshot cmdline so the per-PID `ps` identity read
         // only runs for actual candidates — one execSync per PID across ~700
@@ -273,7 +319,7 @@ export class CleanupScheduler {
         // converts into an emergency restart (2026-07-18 restart storm).
         const snapshotCmdline = cols.slice(10).join(" ");
         const matchesHomer = (cmd: string) =>
-          isCdpChromeCmdline(cmd) || ORPHAN_PATTERNS.some((p) => new RegExp(p).test(cmd));
+          ORPHAN_PATTERNS.some((p) => new RegExp(p).test(cmd));
         if (!matchesHomer(snapshotCmdline)) continue;
 
         const identity = this.readProcessIdentity(pid);
@@ -281,25 +327,6 @@ export class CleanupScheduler {
         const cmdline = identity.command;
         // Fail closed on PID reuse: the authoritative identity must still match.
         if (!matchesHomer(cmdline)) continue;
-        const isCdpChrome = isCdpChromeCmdline(cmdline);
-
-        // Never reap a CDP Chrome unless we have TRUSTED state proving it is not
-        // the live :9222 session. If listener discovery failed this cycle
-        // (untrusted), spare every CDP Chrome — we cannot tell which one is live.
-        if (isCdpChrome) {
-          const dir = extractCdpProfileDir(cmdline);
-          const isLive = this.cdp.listenerPids.has(pid) || (!!dir && this.cdp.liveProfileDirs.has(dir));
-          if (!this.cdp.trusted || isLive) {
-            actions.push({
-              pid,
-              command: cmdline.slice(0, 100),
-              action: "spared",
-              reason: isLive ? "live cdp session" : "cdp state untrusted",
-            });
-            continue;
-          }
-        }
-
         // Safety: Check parent PID
         if (!this.isSafeToKillOrphan(identity)) {
           actions.push({
@@ -323,6 +350,151 @@ export class CleanupScheduler {
   }
 
   /**
+   * C: Structurally classify browser-automation processes. These candidates use
+   * the existing 30-minute profile grace, then pass the category-specific guard
+   * again immediately before every TERM/KILL signal.
+   */
+  private scanBrowserAutomation(): CleanupAction[] {
+    const actions: CleanupAction[] = [];
+    if (!this.protectedTopology) return actions;
+
+    const table = this.readProcessTable();
+    if (!table.trusted) {
+      logger.debug("Skipping browser-automation scan — process table unavailable");
+      return actions;
+    }
+
+    for (const snapshot of table.processes.values()) {
+      const kind: BrowserAutomationKind | null = isTempProfileHeadlessChromeCmdline(snapshot.command)
+        ? "temp-profile-chrome"
+        : isAgentBrowserDaemonCmdline(snapshot.command)
+          ? "agent-browser-daemon"
+          : null;
+      if (!kind) continue;
+
+      const authoritative = this.readProcessIdentity(snapshot.pid);
+      if (!authoritative || authoritative.command !== snapshot.command || authoritative.ppid !== snapshot.ppid) continue;
+      const candidate = { kind, ageMs: snapshot.ageMs } satisfies BrowserAutomationCandidate;
+      const decision = this.evaluateBrowserCandidate(authoritative, candidate, table, this.cdp, this.broker, this.agentSockets);
+      if (decision.action === "spare") {
+        actions.push({ pid: snapshot.pid, command: snapshot.command.slice(0, 100), action: "spared", reason: decision.reason });
+        continue;
+      }
+      actions.push(this.handleBrowserAutomation(authoritative, candidate, decision.reason));
+    }
+
+    return actions;
+  }
+
+  private evaluateBrowserCandidate(
+    identity: ProcessIdentity,
+    candidate: BrowserAutomationCandidate,
+    table: ProcessTableState,
+    cdp: CdpState,
+    broker: BrokerProtectionState,
+    sockets: AgentSocketState,
+  ): BrowserAutomationCleanupDecision {
+    const browserProtectedPids = new Set(this.protectedPids);
+    for (const record of processRegistry.getActive()) browserProtectedPids.add(record.pid);
+    const parent = table.processes.get(identity.ppid);
+    const liveAncestor = identity.ppid > 1 && parent !== undefined;
+    let owningToolGone = identity.ppid === 1;
+    if (!owningToolGone && parent && isAgentBrowserDaemonCmdline(parent.command)) {
+      // A reparented daemon with no listening session socket no longer owns its
+      // fallback Chrome, even though the native daemon process still exists.
+      owningToolGone = parent.ppid === 1 && sockets.trusted && !sockets.ownerPids.has(parent.pid);
+    }
+
+    return decideBrowserAutomationCleanup({
+      kind: candidate.kind,
+      pid: identity.pid,
+      ppid: identity.ppid,
+      command: identity.command,
+      ageMs: candidate.ageMs,
+      graceMs: CDP_PROFILE_MIN_AGE_MS,
+      protectedPids: browserProtectedPids,
+      listenerPids: cdp.listenerPids,
+      listenerStateTrusted: cdp.trusted,
+      brokerProfileDirs: broker.profileDirs,
+      owningToolGone,
+      sessionSocketAlive: sockets.ownerPids.has(identity.pid),
+      liveAncestor,
+      socketStateTrusted: sockets.trusted,
+    });
+  }
+
+  private handleBrowserAutomation(
+    identity: ProcessIdentity,
+    candidate: BrowserAutomationCandidate,
+    reason: string,
+  ): CleanupAction {
+    if (!this.enforce) {
+      logger.warn({ pid: identity.pid, reason }, "MONITOR: Would kill browser-automation zombie");
+      return { pid: identity.pid, command: identity.command.slice(0, 100), action: "spared", reason: `monitor-only: ${reason}` };
+    }
+
+    const result = this.guardedBrowserSignal(identity, candidate, "SIGTERM");
+    if (result !== "signaled") {
+      return {
+        pid: identity.pid,
+        command: identity.command.slice(0, 100),
+        action: "spared",
+        reason: `${candidate.kind}: signal guard ${result}`,
+      };
+    }
+    setTimeout(() => {
+      this.guardedBrowserSignal(identity, candidate, "SIGKILL");
+    }, 5000);
+    return { pid: identity.pid, command: identity.command.slice(0, 100), action: "killed", reason };
+  }
+
+  /** Refresh every browser-specific rail immediately before TERM and escalation. */
+  private guardedBrowserSignal(
+    expected: ProcessIdentity,
+    candidate: BrowserAutomationCandidate,
+    signal: NodeJS.Signals,
+  ): GuardedSignalResult {
+    const current = this.readProcessIdentity(expected.pid);
+    if (!current) return "gone";
+    if (current.command !== expected.command || current.ppid !== expected.ppid || current.pgid !== expected.pgid) return "pid-reuse";
+
+    const table = this.readProcessTable();
+    if (!table.trusted || !table.processes.has(current.pid)) return "protected";
+    this.cdp = this.buildCdpState();
+    this.broker = this.readBrokerProtectionState();
+    this.agentSockets = this.buildAgentSocketState();
+    this.rebuildProtectedPidFence();
+    const decision = this.evaluateBrowserCandidate(current, candidate, table, this.cdp, this.broker, this.agentSockets);
+    if (decision.action !== "kill") {
+      logger.warn({ pid: current.pid, signal, reason: decision.reason }, "Browser cleanup safety guard spared process");
+      return "protected";
+    }
+    return this.guardedSignal(expected, signal);
+  }
+
+  private readProcessTable(): ProcessTableState {
+    const processes = new Map<number, ProcessSnapshot>();
+    try {
+      const output = execSync("ps -axo pid=,ppid=,pgid=,etime=,command= -ww", { encoding: "utf-8", timeout: 5000 });
+      for (const line of output.split("\n")) {
+        const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+([\s\S]+)$/);
+        if (!match) continue;
+        const pid = Number(match[1]);
+        const ppid = Number(match[2]);
+        const pgid = Number(match[3]);
+        const etime = match[4] ?? "";
+        const command = match[5] ?? "";
+        if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(ppid) || !Number.isInteger(pgid) || !command) continue;
+        processes.set(pid, { pid, ppid, pgid, command, ageMs: parseEtime(etime) });
+      }
+      return { processes, trusted: true };
+    } catch (err) {
+      logger.debug({ error: err }, "Browser process-table scan failed");
+      return { processes, trusted: false };
+    }
+  }
+
+  /**
    * Snapshot live CDP state: which PIDs are LISTENing on :9222, which profile
    * dirs back them, and which profile dirs are referenced by any running Chrome.
    */
@@ -333,14 +505,15 @@ export class CleanupScheduler {
     let psOk = false;
     let lsofOk = false;
 
-    // Any running Chrome process referencing a /tmp CDP profile dir.
+    // Any running Chrome-family process referencing a recognized throwaway
+    // profile dir. Helpers count too, so disk removal waits for the whole tree.
     try {
       const psOutput = execSync("ps auxww", { encoding: "utf-8", timeout: 5000 });
       for (const line of psOutput.split("\n").slice(1)) {
         const cmdline = line.trim().split(/\s+/).slice(10).join(" ");
-        if (!isCdpChromeCmdline(cmdline)) continue;
-        const dir = extractCdpProfileDir(cmdline);
-        if (dir) referencedProfileDirs.add(dir);
+        if (!isChromeFamilyCmdline(cmdline)) continue;
+        const dir = extractUserDataDir(cmdline);
+        if (dir && isTempBrowserProfileDir(dir)) referencedProfileDirs.add(normalizeBrowserProfileDir(dir));
       }
       psOk = true;
     } catch (err) {
@@ -355,15 +528,15 @@ export class CleanupScheduler {
       encoding: "utf-8",
       timeout: 2000,
     });
-    if (r.error || r.status === null) {
+    if (r.error || r.status === null || ![0, 1].includes(r.status)) {
       logger.debug({ error: r.error, signal: r.signal }, "CDP lsof scan failed (untrusted)");
     } else {
       for (const raw of (r.stdout ?? "").trim().split("\n").filter(Boolean)) {
         const pid = Number(raw);
         if (!Number.isFinite(pid) || pid <= 1) continue;
         listenerPids.add(pid);
-        const dir = extractCdpProfileDir(this.getCmdline(pid));
-        if (dir) liveProfileDirs.add(dir);
+        const dir = extractUserDataDir(this.getCmdline(pid));
+        if (dir) liveProfileDirs.add(normalizeBrowserProfileDir(dir));
       }
       lsofOk = true; // lsof executed; empty result legitimately means "no listeners"
     }
@@ -381,14 +554,75 @@ export class CleanupScheduler {
     }
   }
 
-  /**
-   * C: Delete leaked /tmp/chrome-cdp-profile-* directories. A dir is removed only
-   * when ALL hold: older than the grace period, not the live profile, not
-   * referenced by any running Chrome, and confirmed stale on a fresh re-check.
-   */
+  private readBrokerProtectionState(): BrokerProtectionState {
+    const protectedPids = new Set<number>();
+    const profileDirs = new Set<string>([normalizeBrowserProfileDir(RESIDENT_CDP_PROFILE)]);
+    const statusPath = process.env.HOMER_BROWSER_STATUS_FILE ?? BROWSER_STATUS_PATH;
+    try {
+      const raw = JSON.parse(readFileSync(statusPath, "utf-8")) as {
+        supervisorPid?: unknown;
+        chromePid?: unknown;
+        profilePath?: unknown;
+        surfaces?: Record<string, { lease?: { owner?: unknown } | null }>;
+      };
+      for (const pid of [raw.supervisorPid, raw.chromePid]) {
+        if (Number.isInteger(pid) && Number(pid) > 1) protectedPids.add(Number(pid));
+      }
+      if (typeof raw.profilePath === "string" && raw.profilePath.trim()) {
+        profileDirs.add(normalizeBrowserProfileDir(raw.profilePath));
+      }
+      for (const surface of Object.values(raw.surfaces ?? {})) {
+        const owner = surface.lease?.owner;
+        if (typeof owner !== "string") continue;
+        const match = owner.match(/^browserctl-agent:(\d+)$/);
+        if (match && Number(match[1]) > 1) protectedPids.add(Number(match[1]));
+      }
+    } catch (err) {
+      // The immutable broker profile and live listener fence still apply even
+      // when the additive status-file PID fence is unavailable.
+      logger.debug({ error: err, statusPath }, "Browser broker status unreadable");
+    }
+    return { protectedPids, profileDirs };
+  }
+
+  private buildAgentSocketState(): AgentSocketState {
+    const livePaths = new Set<string>();
+    const ownerPids = new Set<number>();
+    const socketDirs = new Set([AGENT_BROWSER_FALLBACK_SOCKET_DIR]);
+    const configured = process.env.AGENT_BROWSER_SOCKET_DIR?.trim();
+    if (configured?.startsWith("/")) socketDirs.add(configured.replace(/\/+$/, ""));
+
+    const result = spawnSync("lsof", ["-nP", "-U", "-Fpn"], { encoding: "utf-8", timeout: 5000 });
+    if (result.error || result.status === null || ![0, 1].includes(result.status)) {
+      logger.debug({ error: result.error, status: result.status }, "Agent-browser socket scan failed (untrusted)");
+      return { livePaths, ownerPids, trusted: false };
+    }
+
+    let ownerPid = 0;
+    for (const line of (result.stdout ?? "").split("\n")) {
+      if (line.startsWith("p")) {
+        ownerPid = Number(line.slice(1));
+        continue;
+      }
+      if (!line.startsWith("n") || ownerPid <= 1) continue;
+      const socketPath = line.slice(1);
+      if (![...socketDirs].some((dir) => socketPath.startsWith(`${dir}/`))) continue;
+      livePaths.add(socketPath);
+      ownerPids.add(ownerPid);
+    }
+    return { livePaths, ownerPids, trusted: true };
+  }
+
+  private rebuildProtectedPidFence(): void {
+    const protectedPids = new Set<number>([process.pid]);
+    for (const pid of this.protectedTopology?.ancestors ?? []) protectedPids.add(pid);
+    for (const pid of this.cdp.listenerPids) protectedPids.add(pid);
+    for (const pid of this.broker.protectedPids) protectedPids.add(pid);
+    this.protectedPids = protectedPids;
+  }
+
+  /** Delete recognized throwaway Chrome profiles after process/listener re-checks. */
   private sweepCdpProfileDirs(): void {
-    // DEBT: dead path kept until step 7 post-soak deletion, upgrade when 7-day durable-profile soak completes
-    if (isResidentChromeSupervisionActive()) return;
     // Fail closed: if process/listener discovery failed this cycle, we cannot
     // prove any dir is dead — skip the sweep entirely rather than risk the live one.
     if (!this.cdp.trusted) {
@@ -396,37 +630,116 @@ export class CleanupScheduler {
       return;
     }
 
-    let entries: string[];
-    try {
-      entries = readdirSync("/tmp").filter((n) => n.startsWith("chrome-cdp-profile-"));
-    } catch {
-      return;
-    }
-
     const now = Date.now();
-    for (const name of entries) {
-      const dir = join("/tmp", name);
+    for (const dir of this.discoverTempBrowserProfileDirs()) {
       try {
-        const st = statSync(dir);
+        const st = lstatSync(dir);
+        if (!st.isDirectory() || st.isSymbolicLink()) continue;
         const ageMs = now - Math.max(st.birthtimeMs || 0, st.mtimeMs);
         if (ageMs < CDP_PROFILE_MIN_AGE_MS) continue;
-        if (this.cdp.liveProfileDirs.has(dir) || this.cdp.referencedProfileDirs.has(dir)) continue;
+        const normalized = normalizeBrowserProfileDir(dir);
+        if (this.cdp.liveProfileDirs.has(normalized) || this.cdp.referencedProfileDirs.has(normalized)) continue;
+        if ([...this.broker.profileDirs].some((profile) => normalizeBrowserProfileDir(profile) === normalized)) continue;
 
         // Fresh re-check just before deletion — guards the launch race where a
         // brand-new profile dir exists before Chrome starts listening. Also
         // fail-closed: an untrusted re-check must not authorize deletion.
         const fresh = this.buildCdpState();
         if (!fresh.trusted) continue;
-        if (fresh.liveProfileDirs.has(dir) || fresh.referencedProfileDirs.has(dir)) continue;
+        const freshBroker = this.readBrokerProtectionState();
+        if (fresh.liveProfileDirs.has(normalized) || fresh.referencedProfileDirs.has(normalized)) continue;
+        if ([...freshBroker.profileDirs].some((profile) => normalizeBrowserProfileDir(profile) === normalized)) continue;
 
         if (this.enforce) {
           rmSync(dir, { recursive: true, force: true });
-          logger.info({ dir }, "Swept stale CDP profile dir");
+          logger.info({ dir }, "Swept stale browser-automation temp profile");
         } else {
-          logger.warn({ dir }, "MONITOR: Would delete stale CDP profile dir");
+          logger.warn({ dir }, "MONITOR: Would delete stale browser-automation temp profile");
         }
       } catch {
         // Best effort — dir may have vanished between readdir and stat.
+      }
+    }
+  }
+
+  private discoverTempBrowserProfileDirs(): Set<string> {
+    const roots = new Set<string>(["/tmp", tmpdir()]);
+    // tmpdir() covers the current user; this bounded two-level walk also finds
+    // leftovers from older macOS temp buckets without recursing arbitrary trees.
+    try {
+      for (const shard of readdirSync("/var/folders", { withFileTypes: true })) {
+        if (!shard.isDirectory()) continue;
+        const shardPath = join("/var/folders", shard.name);
+        try {
+          for (const bucket of readdirSync(shardPath, { withFileTypes: true })) {
+            if (bucket.isDirectory()) roots.add(join(shardPath, bucket.name, "T"));
+          }
+        } catch { /* inaccessible bucket */ }
+      }
+    } catch { /* non-macOS or inaccessible temp root */ }
+
+    const profiles = new Set<string>();
+    for (const root of roots) {
+      try {
+        for (const entry of readdirSync(root, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          const path = join(root, entry.name);
+          if (isTempBrowserProfileDir(path)) profiles.add(normalizeBrowserProfileDir(path));
+        }
+      } catch { /* best effort */ }
+    }
+    return profiles;
+  }
+
+  /** Remove only old, paired, dead session sockets and their matching PID file. */
+  private sweepAgentBrowserArtifacts(): void {
+    if (!this.agentSockets.trusted) {
+      logger.debug("Skipping agent-browser artifact sweep — socket state untrusted");
+      return;
+    }
+    let names: Set<string>;
+    try {
+      names = new Set(readdirSync(AGENT_BROWSER_FALLBACK_SOCKET_DIR).filter(isAgentBrowserArtifactFilename));
+    } catch {
+      return;
+    }
+
+    const now = Date.now();
+    for (const sockName of names) {
+      if (!sockName.endsWith(".sock")) continue;
+      const base = sockName.slice(0, -".sock".length);
+      const pidName = `${base}.pid`;
+      if (!names.has(pidName)) continue;
+      const socketPath = join(AGENT_BROWSER_FALLBACK_SOCKET_DIR, sockName);
+      const pidPath = join(AGENT_BROWSER_FALLBACK_SOCKET_DIR, pidName);
+      try {
+        const socketStat = lstatSync(socketPath);
+        const pidStat = lstatSync(pidPath);
+        // The .sock must truly be a Unix socket and its paired .pid a regular
+        // file. This is the guard that excludes screenshots and all other files.
+        if (!socketStat.isSocket() || !pidStat.isFile() || pidStat.isSymbolicLink()) continue;
+        const newestMs = Math.max(socketStat.birthtimeMs || 0, socketStat.mtimeMs, pidStat.birthtimeMs || 0, pidStat.mtimeMs);
+        if (now - newestMs < CDP_PROFILE_MIN_AGE_MS) continue;
+        if (this.agentSockets.livePaths.has(socketPath)) continue;
+
+        const recordedPid = Number(readFileSync(pidPath, "utf-8").trim());
+        if (Number.isInteger(recordedPid) && recordedPid > 1) {
+          const identity = this.readProcessIdentity(recordedPid);
+          if (identity && isAgentBrowserDaemonCmdline(identity.command)) continue;
+        }
+
+        // Fresh lsof immediately before unlink closes the scan/delete race.
+        const fresh = this.buildAgentSocketState();
+        if (!fresh.trusted || fresh.livePaths.has(socketPath)) continue;
+        if (this.enforce) {
+          unlinkSync(socketPath);
+          unlinkSync(pidPath);
+          logger.info({ socketPath, pidPath }, "Swept dead agent-browser socket pair");
+        } else {
+          logger.warn({ socketPath, pidPath }, "MONITOR: Would delete dead agent-browser socket pair");
+        }
+      } catch {
+        // Best effort — a daemon may remove its own pair between checks.
       }
     }
   }
@@ -494,7 +807,7 @@ export class CleanupScheduler {
    */
   private handleProcess(record: ProcessRecord, reason: string): CleanupAction {
     // Layer 1: PID safety
-    if (record.pid <= 1 || record.pid === process.pid) {
+    if (record.pid <= 1 || this.protectedPids.has(record.pid)) {
       return { pid: record.pid, command: record.command, action: "spared", reason: "protected PID" };
     }
 
@@ -717,7 +1030,7 @@ export class CleanupScheduler {
     if (
       !topology ||
       expected.pid <= 1 ||
-      expected.pid === process.pid ||
+      this.protectedPids.has(expected.pid) ||
       topology.ancestors.has(expected.pid)
     ) {
       logger.warn({ pid: expected.pid, signal }, "Cleanup signal guard blocked protected PID");
