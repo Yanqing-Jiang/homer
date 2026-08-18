@@ -58,11 +58,12 @@ export interface JobEntry {
  * Handler file name is derived from id unless noted.
  */
 const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
-  { id: "abvp-refresh", name: "ABVP + Search Rank Fortnightly Refresh", kind: "internal", handler: "abvp_refresh", handlerFile: "abvp-refresh", expectedInSchedule: true, note: "Tue 7 AM cadence + next_due_at fortnightly; 28-day portal window" },
+  { id: "abvp-refresh", name: "ABVP + Search Rank Weekly Refresh", kind: "internal", handler: "abvp_refresh", handlerFile: "abvp-refresh", expectedInSchedule: true, note: "Tue 7 AM cadence + next_due_at weekly (SR weekly, Brand/ASIN fortnightly via dedupe); 28-day portal window" },
   { id: "archive-verify", name: "Archive Verify", kind: "internal", handler: "archive_verify", handlerFile: "archive-verify", expectedInSchedule: true },
   { id: "content-scraper", name: "Content Scraper", kind: "internal", handler: "content_scraper", handlerFile: "content-scraper", expectedInSchedule: true },
   { id: "db-backup", name: "DB Backup", kind: "internal", handler: "db_backup", handlerFile: "db-backup", expectedInSchedule: true },
   { id: "document-ingest", name: "Document Ingest", kind: "internal", handler: "document_ingest", handlerFile: "document-ingest", expectedInSchedule: true, note: "every 15 min; also called inline at the start of link-processor" },
+  { id: "freshness-escalation", name: "Amazon Freshness Escalation", kind: "internal", handler: "freshness_escalation", handlerFile: "freshness-escalation", expectedInSchedule: true, note: "hourly exception-only remediation; deterministic alert_state gate, at most one Opus-high dispatch per tick" },
   { id: "ideas-explore", name: "Ideas Explore", kind: "internal", handler: "ideas_explore", handlerFile: "ideas-explore", expectedInSchedule: true },
   { id: "job-scanner", name: "Job Scanner", kind: "internal", handler: "job_scanner", handlerFile: "job-scanner", expectedInSchedule: true, note: "discover→verify→rank→email digest to hi@yanqing.app; notify-only, no auto-apply" },
   { id: "link-processor", name: "Link Processor", kind: "internal", handler: "link_processor", handlerFile: "link-processor", expectedInSchedule: true },

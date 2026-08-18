@@ -938,6 +938,24 @@ async function runHandler(
           },
         );
       }
+      case "freshness_escalation": {
+        const { runFreshnessEscalation } = await import("./jobs/freshness-escalation.js");
+        const result = await runFreshnessEscalation({
+          db: ctx.stateManager.getDb(),
+          job,
+          startedAt,
+          jobRunId: ctx.jobRunId,
+          signal: ctx.signal,
+        });
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          { notificationIntent: result.notificationIntent },
+        );
+      }
       case "job_scanner": {
         const { runJobScanner } = await import("./jobs/job-scanner.js");
         const result = await runJobScanner({
