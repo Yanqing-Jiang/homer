@@ -15,6 +15,7 @@ import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { storeJobArtifact } from "./artifact-store.js";
 import { PATHS } from "../../config/paths.js";
 import { searchHiringCafe, normalizeHit } from "../../job-scanner/hiring-cafe.js";
+import { searchTrueUp, normalizeTrueUpHit } from "../../job-scanner/trueup.js";
 import { discoveryQueries } from "../../job-scanner/taxonomy.js";
 import { applyRules, digestKeyFromFingerprint } from "../../job-scanner/filters.js";
 import { verifyJob, resetVerifyCache } from "../../job-scanner/verify.js";
@@ -66,45 +67,54 @@ export async function runJobScanner(
 
     // ── 1. Discover ─────────────────────────────────────────────
     // Seattle-locality only (fully-remote roles are excluded outright), so
-    // the source's ~55-hit slice is spent on postings that can pass the
-    // local geography gate.
+    // each source's slice is spent on postings that can pass the local
+    // geography gate. Two sources per query: hiringcafe.com and Lenny's Jobs
+    // (TrueUp). Cross-source repeats of one role collapse later at the digest
+    // fingerprint; here they just cost a cheap seen-id skip.
     const survivors: NormalizedJob[] = [];
     const seenThisRun = new Set<string>();
+
+    /** Upsert one normalized hit and run it through the rules gate. */
+    const ingest = (job: NormalizedJob | null): void => {
+      if (!job || seenThisRun.has(job.id)) return;
+      seenThisRun.add(job.id);
+      stats.discovered++;
+
+      const isNew = upsertPosting(db, job);
+      if (!isNew) return;
+      stats.newJobs++;
+
+      // ── 2. Rules gate ─────────────────────────────────────────
+      const verdict = applyRules(job);
+      if (!verdict.pass) {
+        markFiltered(db, job.id, verdict.reason ?? "rules");
+        return;
+      }
+      setCategory(db, job.id, verdict.category!, verdict.categoryWeight!);
+      job.category = verdict.category!;
+      job.categoryWeight = verdict.categoryWeight!;
+      stats.rulesPassed++;
+      survivors.push(job);
+    };
+
     for (const { query } of discoveryQueries()) {
       if (ctx.signal?.aborted) throw new Error("aborted");
-      let hits: Record<string, unknown>[] = [];
+
       try {
-        hits = await searchHiringCafe(query, {
-          dateWindowDays: DATE_WINDOW_DAYS,
-          signal: ctx.signal,
-        });
+        const hits = await searchHiringCafe(query, { dateWindowDays: DATE_WINDOW_DAYS, signal: ctx.signal });
+        for (const hit of hits) ingest(normalizeHit(hit));
       } catch (error) {
-        stats.errors.push(`discovery "${query}": ${String(error).slice(0, 120)}`);
-        continue;
+        stats.errors.push(`hiring.cafe "${query}": ${String(error).slice(0, 120)}`);
       }
-      for (const hit of hits) {
-        const job = normalizeHit(hit);
-        if (!job || seenThisRun.has(job.id)) continue;
-        seenThisRun.add(job.id);
-        stats.discovered++;
 
-        const isNew = upsertPosting(db, job);
-        if (!isNew) continue;
-        stats.newJobs++;
-
-        // ── 2. Rules gate ───────────────────────────────────────
-        const verdict = applyRules(job);
-        if (!verdict.pass) {
-          markFiltered(db, job.id, verdict.reason ?? "rules");
-          continue;
-        }
-        setCategory(db, job.id, verdict.category!, verdict.categoryWeight!);
-        job.category = verdict.category!;
-        job.categoryWeight = verdict.categoryWeight!;
-        stats.rulesPassed++;
-        survivors.push(job);
+      try {
+        const hits = await searchTrueUp(query, { dateWindowDays: DATE_WINDOW_DAYS, signal: ctx.signal });
+        for (const hit of hits) ingest(normalizeTrueUpHit(hit));
+      } catch (error) {
+        stats.errors.push(`lennys "${query}": ${String(error).slice(0, 120)}`);
       }
-      // Politeness gap between requests against the unofficial route.
+
+      // Politeness gap between requests against the unofficial routes.
       await new Promise((r) => setTimeout(r, 1_000));
     }
 
