@@ -65,7 +65,9 @@ export interface StoredPosting {
   yearly_min_comp: number | null;
   yearly_max_comp: number | null;
   comp_transparent: number;
+  publish_date: string | null;
   first_seen_at: string;
+  fingerprint: string;
   repost_count: number;
   status: string;
   ats_source: string | null;
@@ -76,12 +78,21 @@ export interface StoredPosting {
   rank_score: number | null;
 }
 
+/**
+ * Per-run stats. Two populations by design: discovered/newJobs/rulesPassed/
+ * verifiedLive count only postings first seen THIS run; scored and emailed
+ * count the 72-hour backlog batch (self-healing: a scoring or email outage in
+ * one run is repaired by the next), so e.g. emailed > 0 with rulesPassed = 0
+ * is normal after a prior failed send.
+ */
 export interface RunStats {
   discovered: number;
   newJobs: number;
   rulesPassed: number;
   verifiedLive: number;
+  /** Backlog-scoped: fresh-window postings LLM-scored this run, regardless of which run discovered them. */
   scored: number;
+  /** Backlog-scoped: fresh-window postings included in this run's digest. */
   emailed: number;
   emailStatus: string;
   errors: string[];

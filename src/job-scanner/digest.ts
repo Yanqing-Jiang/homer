@@ -20,7 +20,16 @@ function compLabel(min: number | null, max: number | null, transparent: number):
   return max !== null ? `up to ${k(max)}` : `from ${k(min!)}`;
 }
 
-function ageLabel(firstSeenAt: string): string {
+function ageLabel(firstSeenAt: string, publishDate: string | null): string {
+  // The posting's own publish date is what the reader cares about; scanner
+  // first-seen is the fallback when the source didn't estimate one.
+  if (publishDate) {
+    const published = Date.parse(publishDate);
+    if (Number.isFinite(published)) {
+      const days = Math.max(0, Math.round((Date.now() - published) / 86_400_000));
+      return days === 0 ? "posted today" : `posted ${days}d ago`;
+    }
+  }
   const seen = new Date(firstSeenAt.replace(" ", "T") + "Z").getTime();
   const hours = Math.max(0, Math.round((Date.now() - seen) / 3_600_000));
   return hours < 24 ? `first seen ${hours}h ago` : `first seen ${Math.round(hours / 24)}d ago`;
@@ -64,7 +73,7 @@ export function renderDigestHtml(
           <div style="font-size:13px;color:#555;margin-top:4px;">
             <strong>${compLabel(j.yearly_min_comp, j.yearly_max_comp, j.comp_transparent)}</strong>
             &middot; rank ${r.rankScore.toFixed(0)}/100 (fit ${j.fit_score?.toFixed(1) ?? "?"}/10)
-            &middot; ${verifyBadge(j)} &middot; ${ageLabel(j.first_seen_at)}${repost}
+            &middot; ${verifyBadge(j)} &middot; ${ageLabel(j.first_seen_at, j.publish_date)}${repost}
           </div>
           ${j.fit_rationale ? `<div style="font-size:13px;color:#666;margin-top:4px;font-style:italic;">${esc(j.fit_rationale)}</div>` : ""}
         </td>
@@ -83,7 +92,7 @@ export function renderDigestHtml(
   <div style="padding:20px 12px 8px;">
     <div style="font-size:20px;font-weight:700;">Job Scanner — ${esc(runLabel)}</div>
     <div style="font-size:13px;color:#666;margin-top:4px;">
-      Fresh, employer-verified postings ranked for fit. Seattle metro + Remote US, $200K+ target.
+      Fresh, employer-verified postings ranked for fit. Seattle metro + Remote US, $250K+ target.
     </div>
   </div>
   <table style="width:100%;border-collapse:collapse;" cellpadding="0" cellspacing="0">

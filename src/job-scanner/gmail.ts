@@ -1,26 +1,54 @@
 /**
- * Minimal Gmail API sender using the existing installed-app OAuth credentials
- * at ~/.gmail-mcp/ (shared with the gmail-mcp connector and the portfolio
- * booking backend). Plain fetch — no googleapis dependency.
+ * Digest email sender. Preferred transport: Gmail SMTP (smtp.gmail.com:465)
+ * with an app password on yanqing.app@gmail.com — read from the login keychain
+ * item `homer-gmail-smtp` or $HOMER_GMAIL_APP_PASSWORD. App passwords never
+ * expire, so the scheduled sender has no OAuth-token deadline.
+ *
+ * Fallback (until the app password exists): the installed-app OAuth
+ * credentials at ~/.gmail-mcp/ shared with the gmail-mcp connector. That
+ * client is in Testing status, so its refresh tokens die every 7 days —
+ * the reason SMTP is preferred.
  *
  * Auth account: yanqing.app@gmail.com; mail is sent AS hi@yanqing.app via the
- * verified Gmail send-as alias. If the refresh token has died (invalid_grant —
- * the OAuth client must be published to production or tokens expire in 7 days),
- * sendHtmlEmail throws GmailAuthError with the recovery command.
+ * verified Gmail send-as alias (honored on both transports).
+ *
+ * To enable SMTP: create an app password at myaccount.google.com/apppasswords
+ * (requires 2FA on yanqing.app@gmail.com), then:
+ *   security add-generic-password -a yanqing.app@gmail.com -s homer-gmail-smtp -w '<app password>'
  */
 
 import { readFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+import { execFileSync } from "child_process";
+import nodemailer from "nodemailer";
 
 export class GmailAuthError extends Error {
   constructor(detail: string) {
     super(
-      `Gmail OAuth refresh failed (${detail}). Re-auth with: node ~/homer/scripts/gmail-reauth.mjs ` +
-        `(and publish the OAuth client to production per ~/homer/output/opus/hi-yanqing-app-email-setup-2026-08-16.md step 7, ` +
-        `or the new token dies again in 7 days).`,
+      `Gmail auth failed (${detail}). Durable fix: add an app password as keychain item ` +
+        `homer-gmail-smtp (see src/job-scanner/gmail.ts header). OAuth stopgap: ` +
+        `node ~/homer/scripts/gmail-reauth.mjs (token dies again in 7 days while the client stays in Testing).`,
     );
     this.name = "GmailAuthError";
+  }
+}
+
+const SMTP_USER = process.env.JOB_SCANNER_SMTP_USER ?? "yanqing.app@gmail.com";
+const SMTP_KEYCHAIN_SERVICE = "homer-gmail-smtp";
+
+function getSmtpAppPassword(): string | null {
+  const env = process.env.HOMER_GMAIL_APP_PASSWORD;
+  if (env && env.trim().length > 0) return env.trim();
+  try {
+    const out = execFileSync(
+      "security",
+      ["find-generic-password", "-s", SMTP_KEYCHAIN_SERVICE, "-w"],
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    return out.length > 0 ? out : null;
+  } catch {
+    return null;
   }
 }
 
@@ -63,10 +91,49 @@ export interface SendResult {
   messageId: string;
 }
 
-export async function sendHtmlEmail(
-  opts: { from: string; to: string; subject: string; html: string; text?: string },
-  signal?: AbortSignal,
-): Promise<SendResult> {
+interface SendOpts {
+  from: string;
+  to: string;
+  subject: string;
+  html: string;
+  text?: string;
+}
+
+async function sendViaSmtp(password: string, opts: SendOpts): Promise<SendResult> {
+  const transporter = nodemailer.createTransport({
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
+    auth: { user: SMTP_USER, pass: password },
+    connectionTimeout: 20_000,
+    socketTimeout: 30_000,
+  });
+  try {
+    const info = await transporter.sendMail({
+      from: `HOMER Job Scanner <${opts.from}>`,
+      to: opts.to,
+      subject: opts.subject,
+      text: opts.text ?? "This digest is HTML-only; open in an HTML-capable mail client.",
+      html: opts.html,
+    });
+    return { messageId: info.messageId };
+  } catch (error) {
+    if ((error as { code?: string }).code === "EAUTH") {
+      throw new GmailAuthError(
+        "SMTP app password rejected — regenerate at myaccount.google.com/apppasswords and update keychain item homer-gmail-smtp",
+      );
+    }
+    throw error;
+  } finally {
+    transporter.close();
+  }
+}
+
+export async function sendHtmlEmail(opts: SendOpts, signal?: AbortSignal): Promise<SendResult> {
+  const appPassword = getSmtpAppPassword();
+  if (appPassword) return sendViaSmtp(appPassword, opts);
+
+  // OAuth fallback until the app password is provisioned.
   const token = await getAccessToken(signal);
   const boundary = `homer-${Date.now().toString(36)}`;
   const text = opts.text ?? "This digest is HTML-only; open in an HTML-capable mail client.";

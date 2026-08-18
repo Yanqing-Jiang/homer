@@ -14,14 +14,14 @@ import { runInternalJobHarness } from "../executor.js";
 import { parseSwarmJSON } from "../../executors/model-swarm.js";
 import { storeJobArtifact } from "./artifact-store.js";
 import { PATHS } from "../../config/paths.js";
-import { searchHiringCafe, normalizeHit } from "../../job-scanner/hiring-cafe.js";
+import { searchHiringCafe, normalizeHit, SEARCH_SCOPES } from "../../job-scanner/hiring-cafe.js";
 import { discoveryQueries } from "../../job-scanner/taxonomy.js";
-import { applyRules } from "../../job-scanner/filters.js";
+import { applyRules, digestKeyFromFingerprint } from "../../job-scanner/filters.js";
 import { verifyJob, resetVerifyCache } from "../../job-scanner/verify.js";
 import {
   upsertPosting, markFiltered, setCategory, setVerification,
   setFitScore, setRankScore, getEmailCandidates, getPostingsNeedingScore,
-  markEmailed, recordRun, recordEmail,
+  getRecentlyEmailedFingerprints, getDismissedKeys, markEmailed, recordRun, recordEmail,
 } from "../../job-scanner/store.js";
 import { buildScoringPrompt, computeRankScore, FitScoreSchema } from "../../job-scanner/scoring.js";
 import { renderDigestHtml, renderDigestText } from "../../job-scanner/digest.js";
@@ -34,6 +34,10 @@ const DATE_WINDOW_DAYS = 7; // source-side coarse filter only; first-seen dedup 
 const MAX_LLM_JOBS = 25;
 const TOP_N = 10;
 const FRESH_HOURS = 72;
+// Digests only carry roles worth acting on: below this rank the backlog drip
+// degrades into rank-60s filler, so the send is skipped instead.
+const RANK_FLOOR = 70;
+const EMAILED_FP_DAYS = 7; // re-cut requisitions of an emailed role stay out this long
 const OUTPUT_DIR = `${PATHS.homerRoot}/output/job-scanner`;
 
 export interface JobScannerContext {
@@ -53,51 +57,56 @@ export async function runJobScanner(
     scored: 0, emailed: 0, emailStatus: "skipped", errors: [],
   };
 
+  if (!ctx.job) return { success: false, output: "", error: "Registered job context required" };
+
   try {
-    if (!ctx.job) return { success: false, output: "", error: "Registered job context required" };
     const db = ctx.stateManager.getDb();
     resetVerifyCache();
 
     // ── 1. Discover ─────────────────────────────────────────────
+    // Each query runs once per geographic scope (Seattle locality, Remote-US)
+    // so the source's ~55-hit slice is spent only on postings that can pass
+    // the local geography gate.
     const survivors: NormalizedJob[] = [];
     const seenThisRun = new Set<string>();
     for (const { query } of discoveryQueries()) {
-      if (ctx.signal?.aborted) throw new Error("aborted");
-      let hits: Record<string, unknown>[] = [];
-      try {
-        hits = await searchHiringCafe(query, {
-          dateWindowDays: DATE_WINDOW_DAYS,
-          maxPages: 2,
-          signal: ctx.signal,
-        });
-      } catch (error) {
-        stats.errors.push(`discovery "${query}": ${String(error).slice(0, 120)}`);
-        continue;
-      }
-      for (const hit of hits) {
-        const job = normalizeHit(hit);
-        if (!job || seenThisRun.has(job.id)) continue;
-        seenThisRun.add(job.id);
-        stats.discovered++;
-
-        const isNew = upsertPosting(db, job);
-        if (!isNew) continue;
-        stats.newJobs++;
-
-        // ── 2. Rules gate ───────────────────────────────────────
-        const verdict = applyRules(job);
-        if (!verdict.pass) {
-          markFiltered(db, job.id, verdict.reason ?? "rules");
+      for (const scope of SEARCH_SCOPES) {
+        if (ctx.signal?.aborted) throw new Error("aborted");
+        let hits: Record<string, unknown>[] = [];
+        try {
+          hits = await searchHiringCafe(query, scope, {
+            dateWindowDays: DATE_WINDOW_DAYS,
+            signal: ctx.signal,
+          });
+        } catch (error) {
+          stats.errors.push(`discovery "${query}" [${scope}]: ${String(error).slice(0, 120)}`);
           continue;
         }
-        setCategory(db, job.id, verdict.category!, verdict.categoryWeight!);
-        job.category = verdict.category!;
-        job.categoryWeight = verdict.categoryWeight!;
-        stats.rulesPassed++;
-        survivors.push(job);
+        for (const hit of hits) {
+          const job = normalizeHit(hit);
+          if (!job || seenThisRun.has(job.id)) continue;
+          seenThisRun.add(job.id);
+          stats.discovered++;
+
+          const isNew = upsertPosting(db, job);
+          if (!isNew) continue;
+          stats.newJobs++;
+
+          // ── 2. Rules gate ───────────────────────────────────────
+          const verdict = applyRules(job);
+          if (!verdict.pass) {
+            markFiltered(db, job.id, verdict.reason ?? "rules");
+            continue;
+          }
+          setCategory(db, job.id, verdict.category!, verdict.categoryWeight!);
+          job.category = verdict.category!;
+          job.categoryWeight = verdict.categoryWeight!;
+          stats.rulesPassed++;
+          survivors.push(job);
+        }
+        // Politeness gap between requests against the unofficial route.
+        await new Promise((r) => setTimeout(r, 1_000));
       }
-      // Politeness gap between queries against the unofficial route.
-      await new Promise((r) => setTimeout(r, 1_000));
     }
 
     // ── 3. Verify against employer ATS feeds ──────────────────────
@@ -163,42 +172,61 @@ export async function runJobScanner(
       p.rank_score = computeRankScore(p);
       setRankScore(db, p.id, p.rank_score);
     }
+    // One digest slot per role: drop permanently dismissed roles (applied /
+    // rejected) and re-cuts of anything emailed recently, then keep only the
+    // best-ranked posting per fingerprint, and never let the backlog drip pad
+    // the list below the quality floor.
+    const emailedKeys = new Set(
+      [...getRecentlyEmailedFingerprints(db, EMAILED_FP_DAYS)].map(digestKeyFromFingerprint),
+    );
+    for (const key of getDismissedKeys(db)) emailedKeys.add(key);
+    const seenKeys = new Set<string>();
     const ranked: RankedJob[] = candidates
+      .filter((p) => (p.rank_score ?? 0) >= RANK_FLOOR)
+      .sort((a, b) => (b.rank_score ?? 0) - (a.rank_score ?? 0))
+      .filter((p) => {
+        const key = digestKeyFromFingerprint(p.fingerprint);
+        if (emailedKeys.has(key) || seenKeys.has(key)) return false;
+        seenKeys.add(key);
+        return true;
+      })
       .map((job) => ({ job, rankScore: job.rank_score ?? 0 }))
-      .sort((a, b) => b.rankScore - a.rankScore)
       .slice(0, TOP_N);
 
     // ── 6. Digest email ───────────────────────────────────────────
+    // No qualifying roles → no email. An empty "nothing today" send trains
+    // the reader to ignore the digest.
     const now = new Date();
-    const runLabel = `${now.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${now.getHours() < 12 ? "AM" : "PM"}`;
-    const html = renderDigestHtml(ranked, runLabel, stats);
-    const text = renderDigestText(ranked, runLabel);
-    const subject = ranked.length > 0
-      ? `Job Scanner: ${ranked.length} fresh role${ranked.length === 1 ? "" : "s"} — ${runLabel}`
-      : `Job Scanner: no qualifying fresh roles — ${runLabel}`;
+    if (ranked.length === 0) {
+      stats.emailStatus = "skipped:no_candidates";
+    } else {
+      const runLabel = `${now.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${now.getHours() < 12 ? "AM" : "PM"}`;
+      const html = renderDigestHtml(ranked, runLabel, stats);
+      const text = renderDigestText(ranked, runLabel);
+      const subject = `Job Scanner: ${ranked.length} fresh role${ranked.length === 1 ? "" : "s"} — ${runLabel}`;
 
-    mkdirSync(OUTPUT_DIR, { recursive: true });
-    const stamp = now.toISOString().slice(0, 16).replace(/[:T]/g, "-");
-    writeFileSync(`${OUTPUT_DIR}/digest-${stamp}.html`, html);
+      mkdirSync(OUTPUT_DIR, { recursive: true });
+      const stamp = now.toISOString().slice(0, 16).replace(/[:T]/g, "-");
+      writeFileSync(`${OUTPUT_DIR}/digest-${stamp}.html`, html);
 
-    const jobIds = ranked.map((r) => r.job.id);
-    try {
-      const sent = await sendHtmlEmail({ from: FROM_ADDRESS, to: RECIPIENT, subject, html, text }, ctx.signal);
-      recordEmail(db, RECIPIENT, subject, jobIds, sent.messageId, "sent");
-      markEmailed(db, jobIds);
-      stats.emailed = ranked.length;
-      stats.emailStatus = "sent";
-    } catch (error) {
-      const reason = error instanceof GmailAuthError ? "auth_dead" : String(error).slice(0, 200);
-      recordEmail(db, RECIPIENT, subject, jobIds, null, `failed:${reason}`);
-      stats.emailStatus = `failed:${reason}`;
-      stats.errors.push(error instanceof GmailAuthError ? error.message : `email send: ${reason}`);
-      // Postings stay un-emailed so the next successful send includes them.
+      const jobIds = ranked.map((r) => r.job.id);
+      try {
+        const sent = await sendHtmlEmail({ from: FROM_ADDRESS, to: RECIPIENT, subject, html, text }, ctx.signal);
+        recordEmail(db, RECIPIENT, subject, jobIds, sent.messageId, "sent");
+        markEmailed(db, jobIds);
+        stats.emailed = ranked.length;
+        stats.emailStatus = "sent";
+      } catch (error) {
+        const reason = error instanceof GmailAuthError ? "auth_dead" : String(error).slice(0, 200);
+        recordEmail(db, RECIPIENT, subject, jobIds, null, `failed:${reason}`);
+        stats.emailStatus = `failed:${reason}`;
+        stats.errors.push(error instanceof GmailAuthError ? error.message : `email send: ${reason}`);
+        // Postings stay un-emailed so the next successful send includes them.
+      }
     }
 
-    // ── 7. Bookkeeping ────────────────────────────────────────────
+    // ── 7. Bookkeeping (recordRun lives in the finally) ───────────
     const durationMs = Date.now() - startedAt.getTime();
-    recordRun(db, { ...stats, durationMs });
     if (ctx.jobRunId) {
       storeJobArtifact(db, ctx.jobRunId, "job-scanner", "digest", "json",
         JSON.stringify({ ranked: ranked.map((r) => ({ id: r.job.id, title: r.job.title, company: r.job.company, rank: r.rankScore })), stats }),
@@ -220,9 +248,11 @@ export async function runJobScanner(
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     logger.error({ error: msg }, "job-scanner run failed");
+    return { success: false, output: "", error: msg };
+  } finally {
+    // Every invocation — scheduled, manual, killed mid-run — leaves a run row.
     try {
       recordRun(ctx.stateManager.getDb(), { ...stats, durationMs: Date.now() - startedAt.getTime() });
     } catch { /* best effort */ }
-    return { success: false, output: "", error: msg };
   }
 }

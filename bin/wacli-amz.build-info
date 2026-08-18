@@ -1,0 +1,5 @@
+OpenClaw wacli source: https://github.com/openclaw/wacli
+Source commit: 97e14efdf91a7c9de1b68845321eb6355943b5f5
+whatsmeow module: v0.0.0-20260806224404-e277b766ab33
+Local change: set Client.AutomaticMessageRerequestFromPhone=true in internal/wa/session.go
+Binary SHA-256: a7986b46d1c77a97a903f53136d4f1c6ca00dfd88a5fe389e88402a86a8c5061

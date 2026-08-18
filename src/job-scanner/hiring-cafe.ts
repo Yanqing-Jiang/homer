@@ -8,6 +8,11 @@
  *
  * DEBT: unofficial interface — if the data route closes, swap this module for
  * an Apify hiringcafe actor (~$1-2/1k jobs) behind the same NormalizedJob shape.
+ * DEBT: the route ignores `page` (verified 2026-08-17: pages 0-2 return
+ * identical IDs), so each query yields one ~55-hit date-sorted slice. Scoped
+ * Seattle/Remote-US searches keep totals under the slice in steady state; if
+ * capWarning fires persistently, upgrade to the authed /api/search-jobs
+ * endpoint (needs a key from the JS bundle) or the Apify actor.
  */
 
 import { logger } from "../utils/logger.js";
@@ -47,11 +52,10 @@ interface SearchPage {
 
 async function fetchSearchPage(
   searchState: Record<string, unknown>,
-  page: number,
   signal?: AbortSignal,
 ): Promise<SearchPage> {
   const buildId = cachedBuildId ?? (await resolveBuildId(signal));
-  const state = { ...searchState, page };
+  const state = { ...searchState, page: 0 };
   const url = `${BASE}/_next/data/${buildId}/index.json?searchState=${encodeURIComponent(JSON.stringify(state))}`;
   const res = await fetch(url, {
     headers: { "User-Agent": UA, Accept: "application/json", "x-nextjs-data": "1", Referer: `${BASE}/` },
@@ -61,7 +65,7 @@ async function fetchSearchPage(
   // A stale buildId yields a 404 (or a redirect to the HTML page): refresh once.
   if (res.status === 404 || res.status >= 300) {
     await resolveBuildId(signal);
-    return fetchSearchPage(searchState, page, signal);
+    return fetchSearchPage(searchState, signal);
   }
   const body = (await res.json()) as { pageProps?: Record<string, unknown> };
   const pp = body.pageProps ?? {};
@@ -72,13 +76,51 @@ async function fetchSearchPage(
   };
 }
 
+/** Geographic scope for a discovery pass. Every hit can pass the local rules
+ * gate, instead of spending the ~55-hit slice on nationwide postings. */
+export type SearchScope = "seattle" | "remote-us";
+
+export const SEARCH_SCOPES: SearchScope[] = ["seattle", "remote-us"];
+
+function scopeLocations(scope: SearchScope): Record<string, unknown>[] {
+  if (scope === "seattle") {
+    return [
+      {
+        formatted_address: "Seattle, WA, USA",
+        types: ["locality"],
+        geometry: { location: { lat: 47.6061, lon: -122.3328 } },
+        id: "user_locality",
+        address_components: [
+          { long_name: "Seattle", short_name: "Seattle", types: ["locality"] },
+          { long_name: "Washington", short_name: "WA", types: ["administrative_area_level_1"] },
+          { long_name: "United States", short_name: "US", types: ["country"] },
+        ],
+        options: {},
+      },
+    ];
+  }
+  return [
+    {
+      formatted_address: "United States",
+      types: ["country"],
+      geometry: { location: { lat: "39.8283", lon: "-98.5795" } },
+      id: "user_country",
+      address_components: [{ long_name: "United States", short_name: "US", types: ["country"] }],
+      options: { flexible_regions: ["anywhere_in_continent"] },
+    },
+  ];
+}
+
 /**
- * Run one discovery query. `dateWindowDays` bounds the source-side freshness
- * filter; our own first-seen timestamps remain the authoritative clock.
+ * Run one scoped discovery query. `dateWindowDays` bounds the source-side
+ * freshness filter; our own first-seen timestamps remain the authoritative
+ * clock. Single fetch per query: the route's `page` param is a no-op (see
+ * DEBT above), so the date-sorted first slice is all the source offers.
  */
 export async function searchHiringCafe(
   query: string,
-  opts: { dateWindowDays?: number; maxPages?: number; signal?: AbortSignal } = {},
+  scope: SearchScope,
+  opts: { dateWindowDays?: number; signal?: AbortSignal } = {},
 ): Promise<Record<string, unknown>[]> {
   // NOTE: the source's dateFetchedPastNDays behaves like an enum — some values
   // (e.g. 2) silently return 0 results. 7 is verified-working; our own
@@ -87,30 +129,22 @@ export async function searchHiringCafe(
     searchQuery: query,
     dateFetchedPastNDays: opts.dateWindowDays ?? 7,
     sortBy: "date",
-    workplaceTypes: ["Remote", "Hybrid", "Onsite"],
+    workplaceTypes: scope === "remote-us" ? ["Remote"] : ["Remote", "Hybrid", "Onsite"],
     commitmentTypes: ["Full Time"],
-    locations: [
-      {
-        formatted_address: "United States",
-        types: ["country"],
-        geometry: { location: { lat: "39.8283", lon: "-98.5795" } },
-        id: "user_country",
-        address_components: [{ long_name: "United States", short_name: "US", types: ["country"] }],
-        options: { flexible_regions: ["anywhere_in_continent", "anywhere_in_world"] },
-      },
-    ],
+    locations: scopeLocations(scope),
   };
 
-  const all: Record<string, unknown>[] = [];
-  const maxPages = opts.maxPages ?? 2;
-  for (let page = 0; page < maxPages; page++) {
-    const result = await fetchSearchPage(searchState, page, opts.signal);
-    all.push(...result.hits);
-    if (result.isLastPage || result.hits.length === 0) break;
-    // Be a polite client on the unofficial route.
-    await new Promise((r) => setTimeout(r, 1_500));
+  const result = await fetchSearchPage(searchState, opts.signal);
+  if (result.totalCount > result.hits.length && !result.isLastPage) {
+    // Upstream slice cap is biting: new postings deeper than the first slice
+    // are invisible until churn surfaces them. Persistent warnings here mean
+    // the adapter needs the authed endpoint or Apify (see DEBT).
+    logger.warn(
+      { query, scope, returned: result.hits.length, totalCount: result.totalCount },
+      "hiring.cafe slice cap: source has more in-window results than one page",
+    );
   }
-  return all;
+  return result.hits;
 }
 
 /** Source payloads carry HTML entities in titles/companies; decode the common ones. */

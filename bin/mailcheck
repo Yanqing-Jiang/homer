@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""mailcheck — read recent mail for hi@yanqing.app (delivered to yanqing.app@gmail.com) over IMAP.
+
+The standard inbox tool for auto-apply flows: portal verification links, Greenhouse email codes,
+Workday activation emails (from *@otp.workday.com).
+
+Usage:
+  mailcheck                          # list recent messages (newest first)
+  mailcheck --from otp.workday.com   # filter by sender substring
+  mailcheck --subject verify         # filter by subject substring
+  mailcheck --to hi@yanqing.app      # filter by recipient
+  mailcheck --since-minutes 15       # only mail newer than 15 min (bind to the triggering event)
+  mailcheck --links                  # also print URLs extracted from each body
+  mailcheck --body                   # also print the text body (first 2000 chars)
+  mailcheck --days 7 --limit 20
+
+Notes for agents: bind lookups to the event that triggered the email (--since-minutes), and only
+open HTTPS links on the exact ATS tenant host you are working with — never "the newest match".
+Extracted links and codes are secrets: use them, don't persist them in reports.
+
+Credentials: keychain item `homer-gmail-smtp`, account yanqing.app@gmail.com (Gmail app password).
+"""
+import argparse
+import datetime as dt
+import email
+import email.policy
+import email.utils
+import html as htmllib
+import imaplib
+import re
+import socket
+import subprocess
+import sys
+
+HOST = "imap.gmail.com"
+USER = "yanqing.app@gmail.com"
+KEYCHAIN_SERVICE = "homer-gmail-smtp"
+
+
+def keychain_password() -> str:
+    out = subprocess.run(
+        ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", USER, "-w"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        sys.exit(f"mailcheck: keychain item {KEYCHAIN_SERVICE!r} for {USER} not readable: {out.stderr.strip()}")
+    return out.stdout.strip()
+
+
+def imap_quote(s: str) -> str:
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def body_texts(msg):
+    """All non-attachment text/plain and text/html parts, decoded; html reduced to text with hrefs kept."""
+    texts = []
+    parts = msg.walk() if msg.is_multipart() else [msg]
+    for part in parts:
+        if part.is_multipart():
+            continue
+        if part.get_content_maintype() != "text":
+            continue
+        if part.get_content_disposition() == "attachment":
+            continue
+        try:
+            text = part.get_content()
+        except Exception:
+            payload = part.get_payload(decode=True) or b""
+            text = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+        if part.get_content_type() == "text/html":
+            text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", text, flags=re.S | re.I)
+            # keep hrefs visible (double-, single-, or un-quoted) before stripping tags
+            text = re.sub(r'''<a\s[^>]*href=(?:"([^"]+)"|'([^']+)'|([^\s>]+))[^>]*>''',
+                          lambda m: " %s " % (m.group(1) or m.group(2) or m.group(3)), text, flags=re.I)
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = htmllib.unescape(text)
+        texts.append(re.sub(r"[ \t]+", " ", text))
+    return texts
+
+
+def extract_links(texts):
+    seen, out = set(), []
+    for text in texts:
+        for l in re.findall(r'https?://[^\s"\'<>\])]+', text):
+            l = l.rstrip(".,;")
+            if l not in seen:
+                seen.add(l)
+                out.append(l)
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--from", dest="sender", help="sender substring filter (IMAP FROM)")
+    ap.add_argument("--subject", help="subject substring filter (IMAP SUBJECT)")
+    ap.add_argument("--to", dest="rcpt", help="recipient substring filter (IMAP TO)")
+    ap.add_argument("--since-minutes", type=int, help="only messages whose Date is within the last N minutes")
+    ap.add_argument("--days", type=int, default=2, help="IMAP SINCE lookback in days (default 2; inclusive dates)")
+    ap.add_argument("--limit", type=int, default=10, help="max messages (default 10)")
+    ap.add_argument("--links", action="store_true", help="print URLs found in each body")
+    ap.add_argument("--body", action="store_true", help="print text body (first 2000 chars)")
+    args = ap.parse_args()
+    if args.days < 0 or args.limit <= 0 or (args.since_minutes is not None and args.since_minutes <= 0):
+        sys.exit("mailcheck: --days must be >= 0, --limit and --since-minutes must be > 0")
+
+    since = (dt.date.today() - dt.timedelta(days=args.days)).strftime("%d-%b-%Y")
+    criteria = ["SINCE", since]
+    if args.sender:
+        criteria += ["FROM", imap_quote(args.sender)]
+    if args.subject:
+        criteria += ["SUBJECT", imap_quote(args.subject)]
+    if args.rcpt:
+        criteria += ["TO", imap_quote(args.rcpt)]
+    cutoff = None
+    if args.since_minutes:
+        cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=args.since_minutes)
+
+    socket.setdefaulttimeout(30)
+    try:
+        conn = imaplib.IMAP4_SSL(HOST)
+    except (OSError, imaplib.IMAP4.error) as e:
+        sys.exit(f"mailcheck: cannot reach {HOST}: {e}")
+    try:
+        conn.login(USER, keychain_password())
+        ok, _ = conn.select("INBOX", readonly=True)
+        if ok != "OK":
+            sys.exit("mailcheck: cannot select INBOX")
+        ok, data = conn.uid("search", None, *criteria)
+        if ok != "OK":
+            sys.exit(f"mailcheck: search failed: {data}")
+        uids = data[0].split()
+        if not uids:
+            print(f"no messages since {since}" + (f" from {args.sender}" if args.sender else ""))
+            return
+        shown = 0
+        for uid in reversed(uids):
+            if shown >= args.limit:
+                break
+            try:
+                ok, msgdata = conn.uid("fetch", uid, "(BODY.PEEK[])")
+                if ok != "OK" or not msgdata or not msgdata[0] or not isinstance(msgdata[0], tuple):
+                    continue
+                msg = email.message_from_bytes(msgdata[0][1], policy=email.policy.default)
+                if cutoff is not None:
+                    msg_dt = email.utils.parsedate_to_datetime(msg.get("Date", "")) if msg.get("Date") else None
+                    if msg_dt is None:
+                        continue
+                    if msg_dt.tzinfo is None:
+                        msg_dt = msg_dt.replace(tzinfo=dt.timezone.utc)
+                    if msg_dt < cutoff:
+                        continue
+                shown += 1
+                print(f"--- uid={uid.decode()} | {msg.get('Date', '?')}")
+                print(f"    From: {msg.get('From', '?')}")
+                print(f"    To: {msg.get('To', '?')}")
+                print(f"    Subject: {msg.get('Subject', '?')}")
+                if args.links or args.body:
+                    texts = body_texts(msg)
+                    if args.body:
+                        print("    Body:", " ".join(texts)[:2000].strip())
+                    if args.links:
+                        for l in extract_links(texts):
+                            print(f"    Link: {l}")
+            except Exception as e:
+                print(f"--- uid={uid.decode()} | <unreadable: {e}>", file=sys.stderr)
+        if shown == 0:
+            print("no messages matched the filters" + (" (within --since-minutes window)" if cutoff else ""))
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()

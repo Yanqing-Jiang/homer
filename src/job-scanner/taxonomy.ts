@@ -38,21 +38,35 @@ export const ROLE_FAMILIES: Record<string, RoleFamily> = {
       "engineering manager, machine learning", "engineering manager, ml",
       "engineering manager, ai", "ai engineering manager", "head of ai",
       "head of machine learning", "head of ml", "manager, machine learning",
-      "manager, applied science",
+      "manager, applied science", "manager of ai engineering",
+      "manager, ai engineering", "ai engineering lead",
+      "machine learning manager", "senior machine learning manager",
     ],
-    pattern: /\b(ml|machine learning|ai|artificial intelligence)\b.*\b(engineering manager|eng manager)\b|\b(engineering manager|head)\b.*\b(ml|machine learning|ai)\b/i,
+    pattern: /\b(ml|machine learning|ai|artificial intelligence)\b.*\b(engineering manager|eng manager)\b|\b(engineering manager|manager|head)\b.*\b(ml|machine learning|ai|applied science)\b/i,
     weight: 1.0,
   },
   "ai-product": {
-    queries: ['"ai product manager"', '"product manager, ai"', '"principal product manager" ai'],
+    queries: ['"ai product manager"', '"product manager, ai"', '"principal product manager" ai', '"product manager tech"'],
     titles: [
       "ai product manager", "product manager, ai", "product manager - ai",
       "product manager, machine learning", "product manager, ml",
       "senior product manager, ai", "principal product manager, ai",
       "product lead, ai", "group product manager, ai",
+      // Amazon's PM-T idiom ("Principal Product Manager Tech", "Principal PMT")
+      // — normalizeTitle expands "pmt" to "product manager tech".
+      "product manager tech", "product manager - tech", "product manager, tech",
     ],
-    pattern: /\bproduct manager\b.*\b(ai|ml|machine learning|artificial intelligence|genai|gen ai|llm)\b|\b(ai|genai)\b.*\bproduct manager\b/i,
+    pattern: /\bproduct manager\b.*\b(ai|ml|machine learning|artificial intelligence|genai|gen ai|llm|agents?|agentic|copilot)\b|\b(ai|genai)\b.*\bproduct manager\b/i,
     weight: 0.9,
+  },
+  "ai-agents": {
+    queries: ['"agentic" manager', '"ai agents" product', '"generative ai" director'],
+    titles: [
+      "director of agents", "head of agents", "agent platform",
+      "product manager, agents", "product manager, agentic",
+    ],
+    pattern: /\b(agent(s|ic)?|gen(erative)?\s?ai|genai)\b.*\b(product manager|manager|director|lead|head)\b|\b(head|director)\b.*\bagents?\b/i,
+    weight: 1.0,
   },
   "tpm": {
     queries: ['"principal technical program manager"', '"senior technical program manager"'],
@@ -89,15 +103,25 @@ export const ROLE_FAMILIES: Record<string, RoleFamily> = {
   },
 };
 
+/** Expand employer title shorthand so substring/pattern matching sees the
+ * canonical vocabulary: Sr→senior, Mgr→manager, Amazon's PMT/PM-T idiom. */
+export function normalizeTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/\bsr\.?\b/g, "senior")
+    .replace(/\bmgr\.?\b/g, "manager")
+    .replace(/\bpm-?t\b/g, "product manager tech");
+}
+
 export function matchTitleToFamily(title: string): { category: string; weight: number } | null {
-  const lower = title.toLowerCase();
+  const lower = normalizeTitle(title);
   for (const [key, fam] of Object.entries(ROLE_FAMILIES)) {
     for (const t of fam.titles) {
       if (lower.includes(t)) return { category: key, weight: fam.weight };
     }
   }
   for (const [key, fam] of Object.entries(ROLE_FAMILIES)) {
-    if (fam.pattern?.test(title)) return { category: key, weight: fam.weight * 0.9 };
+    if (fam.pattern?.test(lower)) return { category: key, weight: fam.weight * 0.9 };
   }
   return null;
 }

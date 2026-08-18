@@ -6,7 +6,7 @@
 // @ts-ignore
 import type Database from "better-sqlite3";
 import type { NormalizedJob, StoredPosting } from "./types.js";
-import { fingerprintJob } from "./filters.js";
+import { fingerprintJob, digestKeyFor } from "./filters.js";
 
 /** Upsert a discovered job. Returns true when the posting id is new. */
 export function upsertPosting(db: Database.Database, job: NormalizedJob): boolean {
@@ -135,7 +135,9 @@ export function getPostingsNeedingScore(
     .all(`-${freshHours} hours`, cap) as { id: string; raw_json: string }[];
 }
 
-/** Scored, still-live postings first seen in the last `freshHours`, not yet emailed. */
+/** Scored, still-live postings first seen in the last `freshHours`, not yet
+ * emailed. The publish-date clause also ages out stale postings already in the
+ * backlog from before MAX_POSTING_AGE_DAYS existed as an ingest rule. */
 export function getEmailCandidates(db: Database.Database, freshHours = 72): StoredPosting[] {
   return db
     .prepare(
@@ -144,9 +146,38 @@ export function getEmailCandidates(db: Database.Database, freshHours = 72): Stor
          AND emailed_at IS NULL
          AND (ats_live IS NULL OR ats_live = 1)
          AND first_seen_at >= datetime('now', ?)
+         AND (publish_date IS NULL OR substr(publish_date, 1, 10) >= date('now', '-30 days'))
        ORDER BY rank_score DESC`,
     )
     .all(`-${freshHours} hours`) as StoredPosting[];
+}
+
+/** Digest keys of roles permanently suppressed (applied / rejected / dismissed). */
+export function getDismissedKeys(db: Database.Database): Set<string> {
+  const rows = db.prepare("SELECT digest_key FROM job_scan_dismissals").all() as { digest_key: string }[];
+  return new Set(rows.map((r) => r.digest_key));
+}
+
+/** Permanently suppress a role from future digests. Idempotent. */
+export function addDismissal(db: Database.Database, company: string, title: string, reason: string): string {
+  const key = digestKeyFor(company, title);
+  db.prepare(
+    `INSERT INTO job_scan_dismissals (digest_key, company, title, reason) VALUES (?, ?, ?, ?)
+     ON CONFLICT(digest_key) DO UPDATE SET reason = excluded.reason`,
+  ).run(key, company, title, reason.slice(0, 300));
+  return key;
+}
+
+/** Fingerprints of postings emailed in the last `days` — used to keep
+ * re-cut requisitions of an already-surfaced role out of fresh digests. */
+export function getRecentlyEmailedFingerprints(db: Database.Database, days = 7): Set<string> {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT fingerprint FROM job_scan_postings
+       WHERE emailed_at >= datetime('now', ?) AND fingerprint IS NOT NULL`,
+    )
+    .all(`-${days} days`) as { fingerprint: string }[];
+  return new Set(rows.map((r) => r.fingerprint));
 }
 
 export function markEmailed(db: Database.Database, ids: string[]): void {

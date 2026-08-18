@@ -22,14 +22,22 @@
 person:
   name: Yanqing Jiang
   location: Seattle, WA
-  email: jiangyanqing90@gmail.com
+  email: hi@yanqing.app  # confirmed by Yanqing 2026-08-17; matches the master resume DOCX. Do not use jiangyanqing90/91@gmail.com or yanqing.app@gmail.com on outbound documents.
   phone: "(270) 978-9240"
   website: yanqing.app
   linkedin: https://www.linkedin.com/in/jiangyanqing/
   github: https://github.com/Yanqing-Jiang
+  # Application-form answers, confirmed by Yanqing 2026-08-17. Answer truthfully; do not decline.
+  application_profile:
+    work_authorization: authorized to work in the US
+    requires_sponsorship: false
+    veteran_status: protected veteran (US Army 2015-2020)
+    gender: Male
+    race_ethnicity: Asian (Not Hispanic or Latino)
+    disability: false
 
 source:
-  master_resume_docx: "/Users/yj/Desktop/Resume-Yanqing Jiang.docx"
+  master_resume_docx: "/Users/yj/Desktop/job-applications/Resume-Yanqing Jiang.docx"
   canonicalized_from_text_date: "2026-05-01"
   rule: "Tailored outputs may select, reorder, and rephrase claims here, but may not add new factual claims."
 
@@ -153,6 +161,20 @@ experience:
         claim: "Led demand creation and sales growth analytics for P&G's #1 Growth team that contributes 60% of total company sales growth."
         metrics: ["60% of total company sales growth"]
         skills: [demand creation analytics, sales growth analytics, Amazon sales]
+        correction_note: "Recorded as 60%; briefly corrected to 50% on 2026-08-17, then reverted to 60% per Yanqing explicitly the same day — 60% is the confirmed true figure."
+      - id: pg-amazon-agentic-growth-lead
+        claim: "Leads agentic analytics and sales-growth analytics for P&G's #1 Growth team, which contributes 60% of total company sales growth — ranked #1 in sales growth across all retailer teams during his leadership."
+        metrics: ["60% of total company sales growth", "#1 in sales growth across all retailer teams"]
+        skills: [agentic analytics, sales growth analytics, analytics leadership]
+        added_via: chat
+        added_date: "2026-08-17"
+      - id: pg-amazon-agentic-products
+        claim: "Led the team that developed the agentic 'Monday Morning Report' and conversational-analytics products, scaled to a 100+ member team — 10x team productivity, backed by user feedback."
+        metrics: ["10x team productivity (per user feedback)", "scaled to a 100+ member team"]
+        correction_note: "Phrasing corrected per Yanqing 2026-08-17: scaled to 100+ member team (not 'across all of P&G'); 10x claim carries its evidence; no harness/agents mention."
+        skills: [AI agents, agentic products, conversational analytics, AI harness, team leadership]
+        added_via: chat
+        added_date: "2026-08-17"
       - id: pg-amazon-genai-growth-lead
         claim: "Serves as the team's lead for GenAI advanced analytics and sales-growth analytics for P&G's Amazon business."
         metrics: []
@@ -202,8 +224,9 @@ experience:
         added_via: fit-analysis
         added_date: "2026-05-02"
       - id: pg-amazon-distributed-mgmt
-        claim: "Leads a dotted-line team of 3-5 contractors and vendors and partners with cross-functional collaborators across multiple US and international time zones on P&G's Amazon Sales team, accumulating 2-3 years of geographically distributed team leadership."
-        metrics: ["3-5 dotted-line reports", "2-3 years", "multi time zone"]
+        claim: "Leads 5-6 contracted software/data engineers and partners with cross-functional collaborators across multiple US and international time zones on P&G's Amazon Sales team, accumulating 2-3 years of geographically distributed team leadership."
+        metrics: ["5-6 contracted software/data engineers", "2-3 years", "multi time zone"]
+        correction_note: "Scope corrected per Yanqing 2026-08-17: contractors are software/data engineers (5-6), not 3-5 data scientists."
         skills: [people management, dotted-line management, vendor management, geographically distributed team, cross-geo collaboration]
         added_via: fit-analysis
         added_date: "2026-05-02"
@@ -241,8 +264,9 @@ experience:
         added_date: "2026-05-04"
         parent_bullet: pg-amazon-campaign-optimizer
       - id: pg-amazon-ds-team-lead
-        claim: "Leads a dotted-line team of 3-5 data scientists and analysts (contractor and vendor staff) on P&G's Amazon Sales team — sets the quality bar, reviews deliverables, and coaches their work across multiple US and international time zones over 2-3 years."
-        metrics: ["3-5 dotted-line data scientists and analysts", "2-3 years", "multi time zone"]
+        claim: "Leads 5-6 contracted software/data engineers and 8-9 indirect analysts on P&G's Amazon Sales team — sets the quality bar, reviews deliverables, and coaches their work across multiple US and international time zones over 2-3 years."
+        metrics: ["5-6 contracted software/data engineers", "8-9 indirect analysts", "2-3 years", "multi time zone"]
+        correction_note: "Scope corrected per Yanqing 2026-08-17."
         skills: [people leadership, dotted-line management, data scientist mentorship, analyst coaching, quality bar setting, deliverable review, geographically distributed team, cross-geo collaboration]
         added_via: fit-analysis
         added_date: "2026-05-04"
@@ -261,8 +285,9 @@ experience:
         added_date: "2026-05-04"
         parent_bullet: pg-amazon-modern-stack
       - id: pg-amazon-direct-reports
-        claim: "Manages 1-2 direct reports on P&G's Amazon Sales analytics team in addition to a 3-5 person dotted-line team of contractors and vendors across multiple US and international time zones."
-        metrics: ["1-2 direct reports", "3-5 dotted-line", "multi time zone"]
+        claim: "Manages 2 direct-report FTEs on P&G's Amazon Sales analytics team, plus 5-6 contracted software/data engineers and 8-9 indirect analysts across multiple US and international time zones."
+        metrics: ["2 direct-report FTEs", "5-6 contracted software/data engineers", "8-9 indirect analysts", "multi time zone"]
+        correction_note: "Scope corrected per Yanqing 2026-08-17 (was 1-2 directs + 3-5 dotted-line contractors)."
         skills: [people management, direct reports, supervisory, mentoring, distributed team leadership, vendor management]
         added_via: fit-analysis
         added_date: "2026-05-04"
@@ -408,12 +433,21 @@ experience:
         added_date: "2026-07-29"
         parent_bullet: pg-amazon-modern-stack
       - id: pg-amazon-platform-budget
-        claim: "Owns a $1M-$5M annual platform budget on P&G's Amazon analytics platform — cloud compute and storage, SaaS and data tooling, and contractor and vendor engineering spend — setting priorities and making renewal, consolidation, and rationalization calls."
-        metrics: ["$1M-$5M annual platform budget"]
+        claim: "Manages a $3M annual platform budget on P&G's Amazon analytics platform — cloud compute and storage, SaaS and data tooling, and contractor and vendor engineering spend — setting priorities and making renewal, consolidation, and rationalization calls."
+        metrics: ["$3M annual platform budget"]
         skills: [budget ownership, budget management, resource allocation, cloud cost, FinOps, vendor spend, tooling spend, prioritization, operational execution, cost optimization]
         added_via: fit-analysis
         added_date: "2026-07-29"
+        correction_note: "Figure corrected per Yanqing 2026-08-17: exact annual budget is $3M (was recorded as an unusable '$1M-$5M' range, which the skill's scope-honesty gate bans). Verb softened from 'Owns' to 'Manages' — Yanqing did not confirm sole commit-without-signature authority, so do not render this as unilateral discretionary authority."
         parent_bullet: pg-amazon-tech-spend
+      - id: pg-amazon-azure-native
+        claim: "Builds on the Azure-native data stack alongside the Databricks lakehouse backing P&G's Amazon analytics platform — Azure Data Factory, Azure Synapse Analytics, and ADLS Gen2 for core data engineering, plus Microsoft Fabric."
+        metrics: []
+        skills: [Azure Data Factory, ADF, Azure Synapse Analytics, Synapse, ADLS Gen2, Azure Data Lake Storage, Microsoft Fabric, Azure, modern data engineering, data warehousing, data lakes, cloud data platform]
+        added_via: fit-analysis
+        added_date: "2026-08-17"
+        parent_bullet: pg-amazon-modern-stack
+        context_note: "Yanqing confirmed hands-on build experience with ADF, Synapse, ADLS Gen2, and Microsoft Fabric on 2026-08-17 but did not state the employer context. Placed under the P&G Amazon Azure platform as the most plausible venue, consistent with pg-amazon-modern-stack and pg-amazon-medallion, both of which already place the lakehouse on Azure Databricks. VERIFY WITH YANQING BEFORE INTERVIEW. He explicitly did NOT select Microsoft Purview — never claim Purview; Unity Catalog remains the governance evidence."
       - id: pg-amazon-access-controls
         claim: "Designed and enforced role-based access controls on the Databricks lakehouse across four data classes — consumer PII under GDPR/CCPA, retailer-confidential data restricted by contract, SOX-scoped financial data, and internal company-confidential classification tiers — so each consuming team sees only what its policy tier allows."
         metrics: []
@@ -752,6 +786,36 @@ personal_projects:
         added_via: fit-analysis
         added_date: "2026-07-24"
         parent_bullet: homer-context-graph
+
+  - id: yanqing-consulting
+    name: Independent AI-Implementation Consulting (yanqing.app)
+    url: yanqing.app
+    start: null   # NOT CONFIRMED — Yanqing did not state when the practice began. Never render a start date or a duration for the consulting work.
+    end: Present
+    added_via: fit-analysis
+    added_date: "2026-08-17"
+    note: "Confirmed by Yanqing 2026-08-17 in the 3Cloud fit interview. He runs external AI-implementation consulting engagements through yanqing.app for both small teams and enterprise clients. HARD LIMITS: he did NOT claim consultancy employment or 8-10 years of consulting tenure; he did NOT name clients, revenue, engagement values, or a start date; he did NOT confirm external presales executive presentations or named executive-sponsor roles. Do not invent any of these. Frame as a real but present-tense external consulting practice."
+    bullets:
+      - id: yanqing-consulting-practice
+        claim: "Runs an independent AI-implementation consulting practice through yanqing.app, serving clients that range from small teams to enterprise organizations."
+        metrics: []
+        skills: [consulting, AI implementation, external client delivery, client engagement, independent practice, enterprise clients, professional services]
+        added_via: fit-analysis
+        added_date: "2026-08-17"
+      - id: yanqing-consulting-sow
+        claim: "Scopes, estimates, and writes roughly 2-3 statements of work per year for external AI-implementation engagements."
+        metrics: ["2-3 statements of work per year"]
+        skills: [scoping, estimating, statement of work, SOW, engagement scoping, proposal writing, solution positioning, client engagement]
+        added_via: fit-analysis
+        added_date: "2026-08-17"
+        parent_bullet: yanqing-consulting-practice
+      - id: yanqing-azure-ai-services
+        claim: "Builds AI implementations on Azure OpenAI Service, Azure AI Foundry, and Azure Machine Learning."
+        metrics: []
+        skills: [Azure OpenAI Service, Azure AI Foundry, Azure Machine Learning, Azure ML, Azure AI, generative AI implementation, cloud AI platform]
+        added_via: fit-analysis
+        added_date: "2026-08-17"
+        context_note: "Yanqing confirmed hands-on build experience with Azure OpenAI / AI Foundry / Azure ML on 2026-08-17 without stating employer context; placed here rather than under P&G because the consulting practice is a confirmed AI-implementation venue and requires no employer inference. He explicitly did NOT select Microsoft Purview."
 
   - id: ai-portfolio
     name: AI Portfolio

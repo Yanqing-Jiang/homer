@@ -20,13 +20,13 @@ const PROFILE = `Candidate profile: Yanqing Jiang — senior analytics/AI leader
 ~10 years in ecommerce and Amazon-ads analytics leadership (CPG/P&G), leading
 analyst teams and executive reporting; hands-on builder of LLM/agent systems
 (Claude/GPT agents, MCP, scraping/data pipelines, TypeScript/Python/SQL).
-Targets: $200K+ total comp. Role families, in preference order:
+Targets: $250K-350K total comp. Role families, in preference order:
 1) Data Science / Analytics Manager or Senior Manager
-2) ML/AI Engineering Manager, Head of AI
-3) Director of Data Science / Analytics / AI / Data Platform
-4) AI Product Manager (Senior/Principal)
+2) ML/AI Engineering Manager, Head of AI, agent/GenAI platform leadership
+3) Director of Data Science / Analytics / AI / Data Platform / Agents
+4) AI Product Manager (Senior/Principal, incl. Amazon PM-T and agentic product)
 5) Principal/Senior Technical Program Manager (AI/data)
-6) Staff/Principal Analytics or Data Engineer (IC, only if comp clearly $200K+)
+6) Staff/Principal Analytics or Data Engineer (IC, only if comp clearly $250K+)
 Location: Seattle metro (onsite/hybrid fine) or Remote US.`;
 
 export function buildScoringPrompt(jobs: NormalizedJob[]): string {
@@ -49,7 +49,7 @@ export function buildScoringPrompt(jobs: NormalizedJob[]): string {
 ${PROFILE}
 
 Score each posting 0-10 for how strongly the candidate should prioritize applying:
-- 9-10: near-perfect — right family, right seniority, credible $200K+, strong domain overlap (ads/ecommerce/retail/analytics/AI)
+- 9-10: near-perfect — right family, right seniority, credible $250K+, strong domain overlap (ads/ecommerce/retail/analytics/AI/agents)
 - 7-8: strong fit worth applying same-day
 - 5-6: plausible but a stretch (seniority off by a level, domain distant, comp doubtful)
 - 0-4: weak fit (wrong function, too junior/senior, likely under $200K, poor domain match)
@@ -77,7 +77,9 @@ export function computeRankScore(p: StoredPosting): number {
 
   let comp = 6; // band not listed: neutral, LLM already judged plausibility
   if (p.comp_transparent === 1 && p.yearly_max_comp !== null) {
-    comp = p.yearly_max_comp >= 200_000 ? 15 : p.yearly_max_comp >= 170_000 ? 8 : 0;
+    // Full credit only when the listed max reaches the $250K target floor;
+    // a $200K max is band-bottom, not target attainment.
+    comp = p.yearly_max_comp >= 250_000 ? 15 : p.yearly_max_comp >= 200_000 ? 9 : 0;
   }
 
   const geo = isSeattleLocation(p.location) ? 5 : p.workplace_type === "Remote" ? 4 : 2;
