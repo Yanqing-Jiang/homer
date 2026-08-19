@@ -1,7 +1,8 @@
 /**
  * Role families for the job scanner, tuned to Yanqing's 2026 targets:
- * management-first (DS/Analytics Mgr+, ML/AI Eng Mgr, AI PM, Principal/Sr TPM,
- * Director-level) plus comp-gated Staff Analytics/Data IC roles.
+ * management/leadership only (DS/Analytics Mgr+, ML/AI Eng Mgr, AI PM,
+ * Principal/Sr TPM, Director-level). IC roles — including all software
+ * engineering ICs — are out entirely (Yanqing, 2026-08-18).
  *
  * Matching approach salvaged from the retired src/job-hunt/taxonomy.ts
  * (curated title substrings first, regex fallback second — no LLM here).
@@ -76,7 +77,9 @@ export const ROLE_FAMILIES: Record<string, RoleFamily> = {
       "technical program manager, machine learning", "technical program manager, data",
     ],
     pattern: /\b(principal|senior|sr\.?)\b.*\btechnical program manager\b/i,
-    weight: 0.9,
+    // Deprioritized (Yanqing, 2026-08-18): TPM stays discoverable but ranks
+    // below every analytics/AI leadership family and AI PM.
+    weight: 0.6,
   },
   "director": {
     queries: ['"director of data science"', '"director of analytics"', '"director, data"', '"director of machine learning"'],
@@ -90,16 +93,6 @@ export const ROLE_FAMILIES: Record<string, RoleFamily> = {
     ],
     pattern: /\bdirector\b.*\b(data|analytics?|machine learning|ml|ai|insights|business intelligence)\b/i,
     weight: 1.0,
-  },
-  "staff-analytics-ic": {
-    queries: ['"staff analytics engineer"', '"principal analytics engineer"', '"staff data engineer"'],
-    titles: [
-      "staff analytics engineer", "principal analytics engineer",
-      "lead analytics engineer", "staff data engineer", "principal data engineer",
-      "principal product analytics", "staff data scientist", "principal data scientist",
-    ],
-    pattern: /\b(staff|principal|lead)\b.*\b(analytics? engineer|data engineer|data scientist)\b/i,
-    weight: 0.8,
   },
 };
 

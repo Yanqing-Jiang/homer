@@ -20,13 +20,17 @@ const PROFILE = `Candidate profile: Yanqing Jiang — senior analytics/AI leader
 ~10 years in ecommerce and Amazon-ads analytics leadership (CPG/P&G), leading
 analyst teams and executive reporting; hands-on builder of LLM/agent systems
 (Claude/GPT agents, MCP, scraping/data pipelines, TypeScript/Python/SQL).
-Targets: $250K-350K total comp. Role families, in preference order:
-1) Data Science / Analytics Manager or Senior Manager
-2) ML/AI Engineering Manager, Head of AI, agent/GenAI platform leadership
-3) Director of Data Science / Analytics / AI / Data Platform / Agents
-4) AI Product Manager (Senior/Principal, incl. Amazon PM-T and agentic product)
-5) Principal/Senior Technical Program Manager (AI/data)
-6) Staff/Principal Analytics or Data Engineer (IC, only if comp clearly $250K+)
+Targets: $250K-350K total comp. Management/leadership roles ONLY — he is no
+longer an IC and is NOT interested in software engineering or any hands-on IC
+position (engineer, developer, scientist without direct reports). Score any IC
+role 0-2 regardless of comp. Role families, in preference order:
+1) Analytics and AI leadership — top priority: Data Science / Analytics
+   Manager or Senior Manager; ML/AI Engineering Manager, Head of AI,
+   agent/GenAI platform leadership; Director of Data Science / Analytics /
+   AI / Data Platform / Agents
+2) AI Product Manager (Senior/Principal, incl. Amazon PM-T and agentic product)
+3) Principal/Senior Technical Program Manager (AI/data) — DEPRIORITIZED:
+   score TPM roles at most 6 even when otherwise strong
 Location: Seattle metro or within ~1 hour drive (Bellevue, Issaquah, Redmond,
 etc.), onsite or hybrid. Fully-remote roles are excluded upstream.`;
 

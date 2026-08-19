@@ -90,9 +90,9 @@ export function renderDigestHtml(
 
   return `<div style="max-width:680px;margin:0 auto;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:#ffffff;color:#1a1a1a;">
   <div style="padding:20px 12px 8px;">
-    <div style="font-size:20px;font-weight:700;">Job Scanner — ${esc(runLabel)}</div>
+    <div style="font-size:20px;font-weight:700;">Job Scanner daily digest — ${esc(runLabel)}</div>
     <div style="font-size:13px;color:#666;margin-top:4px;">
-      Fresh (&lt;7d), employer-verified postings ranked for fit. Seattle metro onsite/hybrid, $250K+ target.
+      Top 10 fresh (&lt;7d), employer-verified postings ranked for fit. Management/leadership only, Seattle metro onsite/hybrid, $250K+ target.
     </div>
   </div>
   <table style="width:100%;border-collapse:collapse;" cellpadding="0" cellspacing="0">

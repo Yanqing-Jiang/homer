@@ -455,54 +455,6 @@ experience:
         added_via: fit-analysis
         added_date: "2026-07-29"
         parent_bullet: pg-amazon-unity-catalog
-      - id: pg-amazon-ai-eval-pipelines
-        claim: "Built evaluation pipelines and output-quality gates for every ML and LLM system shipped across P&G's Walgreens and Amazon analytics work \u2014 benchmarking model output against held-out ground truth, scoring generated results before release, and blocking regressions from reaching business consumers."
-        metrics: []
-        skills: [AI evaluation, eval pipelines, model validation, output quality assurance, LLM evaluation, guardrails, regression testing, Responsible AI, trustworthy AI, model monitoring, AI quality assurance]
-        added_via: fit-analysis
-        added_date: "2026-08-18"
-        parent_bullet: pg-amazon-predictive-diagnostics
-        context_note: "Confirmed by Yanqing 2026-08-18 in the Accenture Data & AI Strategy fit interview: 'I do have eval pipeline in all my previous ml and invoice llm pipeline.' Venue spans the P&G Walgreens $150M+ ML pipeline (pg-walgreens-ml-pipeline), the Gen AI invoice matching system (pg-walgreens-genai-invoice), and the P&G Amazon agentic products (pg-amazon-agentic-products). Do not attach a named external eval framework."
-      - id: pg-amazon-ai-policy-risk-review
-        claim: "Set the AI usage policy and model-risk review gate for analytics and AI work on P&G's Amazon Sales team \u2014 defining where AI output may be used unreviewed, where human review is mandatory, and what has to clear review before an AI-generated result reaches a business decision."
-        metrics: []
-        skills: [Responsible AI, AI governance, AI policy, model risk review, human-in-the-loop, AI risk management, approval gates, trustworthy AI, AI operating model, AI assurance]
-        added_via: fit-analysis
-        added_date: "2026-08-18"
-        parent_bullet: pg-amazon-ai-roadmap
-        context_note: "Confirmed by Yanqing 2026-08-18 in the Accenture fit interview (selected 'AI policy / model risk review' and 'Human-in-the-loop governance'). He did NOT state scope beyond his own team and did NOT name a formal framework. NEVER claim enterprise-wide AI governance, NIST AI RMF, EU AI Act, or a named Responsible AI framework. VERIFY SCOPE WITH YANQING BEFORE INTERVIEW."
-      - id: pg-amazon-model-explainability
-        claim: "Applies model explainability and interpretability techniques \u2014 SHAP values and feature-importance analysis \u2014 to the predictive models behind the Amazon analytics platform, so stakeholders see why a model produced a recommendation before acting on it."
-        metrics: []
-        skills: [model explainability, interpretability, SHAP, LIME, feature importance, explainable AI, XAI, model transparency, stakeholder trust, Responsible AI]
-        added_via: fit-analysis
-        added_date: "2026-08-18"
-        parent_bullet: pg-amazon-predictive-diagnostics
-        context_note: "Capability confirmed by Yanqing 2026-08-18 (Bain Coro fit interview, role later skipped). He confirmed SHAP / LIME / feature-importance experience but did NOT state the employer venue or which specific models. Placed under the P&G Amazon predictive-modeling work as the most plausible venue. VERIFY VENUE WITH YANQING BEFORE INTERVIEW."
-      - id: pg-amazon-tam-sizing
-        claim: "Builds bottoms-up market opportunity and addressable-market sizing for P&G's Amazon business \u2014 quantifying category headroom and whitespace to direct where growth investment goes."
-        metrics: []
-        skills: [TAM, total addressable market, market sizing, bottoms-up sizing, opportunity sizing, whitespace analysis, market opportunity modeling, growth investment prioritization, value modeling]
-        added_via: fit-analysis
-        added_date: "2026-08-18"
-        parent_bullet: pg-amazon-growth-analytics
-        context_note: "Capability confirmed by Yanqing 2026-08-18 (Bain Coro fit interview, role later skipped). He confirmed TAM / bottoms-up market sizing but did NOT state the venue, methodology, or a dollar figure. No sizing number may be attached to this claim. VERIFY VENUE WITH YANQING BEFORE INTERVIEW."
-      - id: pg-amazon-propensity-scoring
-        claim: "Built propensity and predictive scoring models on P&G's Amazon business \u2014 ranking audiences and opportunities by predicted response so budget and sales effort go where conversion is most likely."
-        metrics: []
-        skills: [propensity modeling, predictive scoring, lead scoring, opportunity scoring, response modeling, classification, targeting, predictive analytics]
-        added_via: fit-analysis
-        added_date: "2026-08-18"
-        parent_bullet: pg-amazon-segmentation
-        context_note: "Capability confirmed by Yanqing 2026-08-18 (Bain Coro fit interview, role later skipped). He confirmed propensity / predictive scoring models but did NOT state venue or performance metrics. Never attach a lift or accuracy figure. VERIFY VENUE WITH YANQING BEFORE INTERVIEW."
-      - id: pg-amazon-xgboost
-        claim: "Uses gradient-boosted tree models (XGBoost) alongside scikit-learn, pandas, and NumPy for the predictive modeling behind the Amazon analytics platform."
-        metrics: []
-        skills: [XGBoost, gradient boosting, GBM, boosted trees, scikit-learn, pandas, NumPy, supervised learning, Python ML stack]
-        added_via: fit-analysis
-        added_date: "2026-08-18"
-        parent_bullet: pg-amazon-predictive-diagnostics
-        context_note: "Capability confirmed by Yanqing 2026-08-18 (Bain Coro fit interview, role later skipped). He confirmed XGBoost / gradient boosting; the ledger previously named only scikit-learn and pandas. Venue not stated. VERIFY VENUE WITH YANQING BEFORE INTERVIEW."
       - id: pg-amazon-revenue-pl-forecast
         claim: "Built revenue and margin forecasting models feeding P&G's Amazon business P&L, projecting sales and profitability to guide growth-investment and budget decisions for sales leadership."
         metrics: []

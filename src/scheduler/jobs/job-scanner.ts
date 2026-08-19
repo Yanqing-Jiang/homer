@@ -1,12 +1,13 @@
 /**
  * Job Scanner — discover fresh postings, verify them on the employer's own
- * ATS feed, filter + LLM-score, and email a ranked top-10 digest to
- * hi@yanqing.app. Notify-only: no auto-apply, no resume tailoring.
+ * ATS feed, filter + LLM-score. Scans run three times a day; only the midday
+ * run emails, one daily ranked top-10 digest to hi@yanqing.app.
+ * Notify-only: no auto-apply, no resume tailoring.
  *
  * Plan of record: ~/homer/output/research/job-scanner-plan-2026-08-16.md
  */
 
-import { mkdirSync, writeFileSync } from "fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "fs";
 import { logger } from "../../utils/logger.js";
 import type { StateManager } from "../../state/manager.js";
 import type { RegisteredJob } from "../types.js";
@@ -41,6 +42,10 @@ const FRESH_HOURS = 72;
 const RANK_FLOOR = 70;
 const EMAILED_FP_DAYS = 7; // re-cut requisitions of an emailed role stay out this long
 const OUTPUT_DIR = `${PATHS.homerRoot}/output/job-scanner`;
+// Human-reviewable audit trail: one block per refresh with the ranked list,
+// so what each scan surfaced (and whether it emailed) is greppable without
+// the DB or homer.log.
+const RUN_LOG = `${PATHS.homerRoot}/logs/job-scanner.log`;
 
 export interface JobScannerContext {
   stateManager: StateManager;
@@ -202,43 +207,42 @@ export async function runJobScanner(
       .map((job) => ({ job, rankScore: job.rank_score ?? 0 }))
       .slice(0, TOP_N);
 
-    // ── 6. Digest email ───────────────────────────────────────────
-    // Runs with qualifying roles email immediately. Quiet runs stay silent
-    // and let candidates keep queueing — except the midday (12:00) run,
-    // which sends at most one "no qualifying roles" status per day so a
-    // jobless stretch is confirmed once, mid-day, instead of pinging every
-    // run or going ambiguously silent (Yanqing, 2026-08-18).
+    // ── 6. Digest email — once a day, at midday ───────────────────
+    // Scans run three times a day to keep the queue fresh, but only the
+    // midday (12:00) run emails: one daily digest ranking every un-emailed
+    // fresh candidate into a top 10, or one "no qualifying roles" status
+    // when nothing clears the bar. Morning/evening runs stay silent and let
+    // candidates queue for the next midday send (Yanqing, 2026-08-18).
     const now = new Date();
-    if (ranked.length === 0) {
-      const isMiddayRun = now.getHours() >= 11 && now.getHours() < 14;
-      const sinceLastSent = hoursSinceLastSentEmail(db);
-      if (!isMiddayRun || (sinceLastSent !== null && sinceLastSent < 20)) {
-        stats.emailStatus = "skipped:no_candidates";
-      } else {
-        const nearMisses: RankedJob[] = candidates
-          .filter((p) => !emailedKeys.has(digestKeyFromFingerprint(p.fingerprint)))
-          .sort((a, b) => (b.rank_score ?? 0) - (a.rank_score ?? 0))
-          .slice(0, 5)
-          .map((job) => ({ job, rankScore: job.rank_score ?? 0 }));
-        const dayLabel = now.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-        const subject = `Job Scanner: no qualifying roles — ${dayLabel}`;
-        const html = renderQuietDayHtml(nearMisses, dayLabel, stats);
-        try {
-          const sent = await sendHtmlEmail(
-            { from: FROM_ADDRESS, to: RECIPIENT, subject, html, text: renderQuietDayText(nearMisses, dayLabel) },
-            ctx.signal,
-          );
-          recordEmail(db, RECIPIENT, subject, [], sent.messageId, "sent");
-          stats.emailStatus = "sent:quiet_day";
-        } catch (error) {
-          const reason = error instanceof GmailAuthError ? "auth_dead" : String(error).slice(0, 200);
-          recordEmail(db, RECIPIENT, subject, [], null, `failed:${reason}`);
-          stats.emailStatus = `failed:${reason}`;
-          stats.errors.push(error instanceof GmailAuthError ? error.message : `email send: ${reason}`);
-        }
+    const isMiddayRun = now.getHours() >= 11 && now.getHours() < 14;
+    const sinceLastSent = hoursSinceLastSentEmail(db);
+    const sentWithin20h = sinceLastSent !== null && sinceLastSent < 20;
+    if (!isMiddayRun || sentWithin20h) {
+      stats.emailStatus = ranked.length === 0 ? "skipped:no_candidates" : "skipped:awaiting_midday";
+    } else if (ranked.length === 0) {
+      const nearMisses: RankedJob[] = candidates
+        .filter((p) => !emailedKeys.has(digestKeyFromFingerprint(p.fingerprint)))
+        .sort((a, b) => (b.rank_score ?? 0) - (a.rank_score ?? 0))
+        .slice(0, 5)
+        .map((job) => ({ job, rankScore: job.rank_score ?? 0 }));
+      const dayLabel = now.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      const subject = `Job Scanner: no qualifying roles — ${dayLabel}`;
+      const html = renderQuietDayHtml(nearMisses, dayLabel, stats);
+      try {
+        const sent = await sendHtmlEmail(
+          { from: FROM_ADDRESS, to: RECIPIENT, subject, html, text: renderQuietDayText(nearMisses, dayLabel) },
+          ctx.signal,
+        );
+        recordEmail(db, RECIPIENT, subject, [], sent.messageId, "sent");
+        stats.emailStatus = "sent:quiet_day";
+      } catch (error) {
+        const reason = error instanceof GmailAuthError ? "auth_dead" : String(error).slice(0, 200);
+        recordEmail(db, RECIPIENT, subject, [], null, `failed:${reason}`);
+        stats.emailStatus = `failed:${reason}`;
+        stats.errors.push(error instanceof GmailAuthError ? error.message : `email send: ${reason}`);
       }
     } else {
-      const runLabel = `${now.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${now.getHours() < 12 ? "AM" : "PM"}`;
+      const runLabel = now.toLocaleDateString("en-US", { month: "short", day: "numeric" });
       const html = renderDigestHtml(ranked, runLabel, stats);
       const text = renderDigestText(ranked, runLabel);
       const subject = `Job Scanner: ${ranked.length} fresh role${ranked.length === 1 ? "" : "s"} — ${runLabel}`;
@@ -264,6 +268,15 @@ export async function runJobScanner(
     }
 
     // ── 7. Bookkeeping (recordRun lives in the finally) ───────────
+    try {
+      const logLines = [
+        `[${now.toISOString()}] discovered=${stats.discovered} new=${stats.newJobs} rules_passed=${stats.rulesPassed} verified=${stats.verifiedLive} scored=${stats.scored} email=${stats.emailStatus}`,
+        ...ranked.map((r, i) => `  ${i + 1}. [rank ${r.rankScore.toFixed(0)}] ${r.job.title} — ${r.job.company} (${r.job.location ?? "n/a"})`),
+      ];
+      if (stats.errors.length > 0) logLines.push(`  errors: ${stats.errors.join(" | ").slice(0, 400)}`);
+      appendFileSync(RUN_LOG, logLines.join("\n") + "\n");
+    } catch { /* audit log is best effort */ }
+
     const durationMs = Date.now() - startedAt.getTime();
     if (ctx.jobRunId) {
       storeJobArtifact(db, ctx.jobRunId, "job-scanner", "digest", "json",

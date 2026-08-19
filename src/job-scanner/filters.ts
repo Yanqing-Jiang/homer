@@ -85,6 +85,16 @@ export function applyRules(job: NormalizedJob): RulesVerdict {
   if (/\b(intern|junior|jr\.|entry.level|new grad)\b/i.test(job.title)) {
     return fail("junior/intern title");
   }
+  // IC titles are out entirely — no software-engineering / hands-on IC roles,
+  // management track only (Yanqing, 2026-08-18). An engineer/developer/
+  // scientist title survives only with an explicit management word; "lead" and
+  // "staff/principal" do NOT count — those are IC levels.
+  if (
+    /\b(engineer|developer|programmer|scientist|sde|swe)\b/i.test(job.title) &&
+    !/\b(manager|mgr\.?|director|head|vp|vice president|chief)\b/i.test(job.title)
+  ) {
+    return fail("IC engineering/scientist title (management roles only)");
+  }
   if (job.seniority === "Entry Level" || job.seniority === "No Prior Experience Required") {
     return fail(`seniority too low: ${job.seniority}`);
   }
