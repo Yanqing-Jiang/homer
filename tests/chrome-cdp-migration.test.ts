@@ -19,6 +19,7 @@ import {
   type BrowserTargetClient,
 } from "../src/scraping/browser-control.js";
 import { writeStatusAtomic, type ChromeStatus } from "../src/scraping/browser-status.js";
+import { logger } from "../src/utils/logger.js";
 import { stewardshipBackoffMs, stewardshipJitterMs, stewardshipSkip } from "../src/scraping/session-stewardship.js";
 
 async function listen(server: Server): Promise<number> {
@@ -184,7 +185,31 @@ class FakeTimers {
   }
 }
 
-function supervisorHarness(probe: ChromeSupervisorDeps["probe"] = async () => ({ state: "ready", pages: 1 })) {
+/** Flushes every pending microtask, including the drain chain inside scheduleRestart. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * The singleton-forward classification and the flap breaker are observable only
+ * through the log, so tests read it directly rather than asserting on side
+ * effects the supervisor deliberately keeps identical (both still restart).
+ */
+function captureLogs(): { warns: string[]; errors: string[]; restore: () => void } {
+  const warns: string[] = [];
+  const errors: string[] = [];
+  const original = { warn: logger.warn, error: logger.error };
+  const record = (sink: string[]) => (...args: unknown[]) => {
+    sink.push(args.map((arg) => typeof arg === "string" ? arg : JSON.stringify(arg)).join(" "));
+  };
+  Object.assign(logger, { warn: record(warns), error: record(errors) });
+  return { warns, errors, restore: () => { Object.assign(logger, original); } };
+}
+
+function supervisorHarness(
+  probe: ChromeSupervisorDeps["probe"] = async () => ({ state: "ready", pages: 1 }),
+  overrides: Partial<ChromeSupervisorDeps> = {},
+) {
   const timers = new FakeTimers();
   const children: FakeChrome[] = [];
   let generation = 0;
@@ -203,6 +228,7 @@ function supervisorHarness(probe: ChromeSupervisorDeps["probe"] = async () => ({
     clearTimer: timers.clear,
     heartbeatMs: 999,
     backoffMs: [2, 5, 15, 30, 60],
+    ...overrides,
   });
   return { supervisor, timers, children, drains: () => drains };
 }
@@ -219,15 +245,18 @@ test("resident supervisor restarts on unexpected child exit and increments gener
   supervisor.stop();
 });
 
-test("resident supervisor uses capped 2,5,15,30,60 restart backoff", async () => {
+test("resident supervisor walks the 2,5,15,30,60 restart backoff up to the flap breaker", async () => {
   const { supervisor, timers, children } = supervisorHarness();
   supervisor.start();
-  for (const expected of [2, 5, 15, 30, 60, 60]) {
+  // The ladder's repeating 60 tail is now unreachable: the flap breaker stops the
+  // loop at the sixth restart inside its window, well before the ladder saturates.
+  for (const expected of [2, 5, 15, 30, 60]) {
     children[children.length - 1]!.emit("exit", 1, null);
     await Promise.resolve(); await Promise.resolve();
     timers.run(expected);
   }
-  assert.equal(children.length, 7);
+  assert.equal(children.length, 6);
+  assert.equal(supervisor.maintenance().enabled, false);
   supervisor.stop();
 });
 
@@ -297,6 +326,107 @@ test("maintenance drains leases and suppresses restart until disabled", async ()
   assert.equal(harness.timers.tasks.some((task) => task.delayMs === 2), false);
   await harness.supervisor.setMaintenance(false, "complete");
   assert.equal(harness.children.length, 2);
+  harness.supervisor.stop();
+});
+
+test("a fast child exit while CDP still answers is classified as a singleton forward", async () => {
+  let portChecks = 0;
+  const harness = supervisorHarness(undefined, {
+    cdpPortOccupied: async () => { portChecks++; return true; },
+  });
+  const logs = captureLogs();
+  try {
+    harness.supervisor.start();
+    harness.children[0]!.emit("exit", 0, null);
+    await flush();
+    assert.equal(portChecks, 1);
+    assert.match(logs.warns.join("\n"), /singleton forward/);
+    // Classification names the condition and feeds the breaker; it must not
+    // suppress the restart on its own.
+    harness.timers.run(2);
+    assert.equal(harness.children.length, 2);
+  } finally {
+    logs.restore();
+    harness.supervisor.stop();
+  }
+});
+
+test("a fast child exit with a dead CDP port stays an ordinary crash", async () => {
+  const harness = supervisorHarness(undefined, { cdpPortOccupied: async () => false });
+  const logs = captureLogs();
+  try {
+    harness.supervisor.start();
+    harness.children[0]!.emit("exit", 1, null);
+    await flush();
+    assert.equal(logs.warns.join("\n").includes("singleton forward"), false);
+    harness.timers.run(2);
+    assert.equal(harness.children.length, 2);
+  } finally {
+    logs.restore();
+    harness.supervisor.stop();
+  }
+});
+
+test("more than five restarts inside the flap window trip the breaker into maintenance", async () => {
+  const harness = supervisorHarness();
+  const logs = captureLogs();
+  try {
+    harness.supervisor.start();
+    for (const delayMs of [2, 5, 15, 30, 60]) {
+      harness.children[harness.children.length - 1]!.emit("exit", 1, null);
+      await flush();
+      harness.timers.run(delayMs);
+    }
+    assert.equal(harness.children.length, 6, "five restarts stay under the limit");
+    assert.equal(harness.supervisor.maintenance().enabled, false);
+
+    harness.children[5]!.emit("exit", 1, null);
+    await flush();
+    assert.equal(harness.timers.tasks.some((task) => task.delayMs === 60), false, "the sixth restart is not scheduled");
+    assert.equal(harness.children.length, 6);
+    assert.equal(harness.supervisor.maintenance().enabled, true);
+    assert.match(harness.supervisor.maintenance().reason ?? "", /circuit breaker/);
+    assert.match(logs.errors.join("\n"), /flap breaker tripped/);
+
+    // browserctl maintenance off is the whole re-arm: it relaunches and the
+    // breaker starts a fresh window.
+    await harness.supervisor.setMaintenance(false, "operator re-arm");
+    assert.equal(harness.children.length, 7);
+    harness.children[6]!.emit("exit", 1, null);
+    await flush();
+    assert.equal(harness.supervisor.maintenance().enabled, false, "one restart after re-arm must not re-trip");
+  } finally {
+    logs.restore();
+    harness.supervisor.stop();
+  }
+});
+
+test("heartbeat seeds a page target when the probe reports an empty listener", async () => {
+  let pages = 0;
+  let seeds = 0;
+  const harness = supervisorHarness(
+    async () => pages > 0 ? { state: "ready", pages } : { state: "empty", pages: 0 },
+    { ensurePage: async () => { seeds++; pages = 1; return true; } },
+  );
+  harness.supervisor.start();
+  await harness.supervisor.heartbeatNow();
+  assert.equal(seeds, 1, "--no-startup-window leaves zero page targets; the heartbeat seeds the first");
+  assert.equal(harness.supervisor.status().cdp.state, "ready");
+  await harness.supervisor.heartbeatNow();
+  assert.equal(seeds, 1, "a ready listener is never re-seeded");
+  harness.supervisor.stop();
+});
+
+test("heartbeat never seeds when the target list was unreadable", async () => {
+  let seeds = 0;
+  const harness = supervisorHarness(
+    async () => ({ state: "empty", pages: 0, reason: "list probe failed" }),
+    { ensurePage: async () => { seeds++; return true; } },
+  );
+  harness.supervisor.start();
+  await harness.supervisor.heartbeatNow();
+  assert.equal(seeds, 0, "an unreadable list is transient — mutating on it is the documented mistake");
+  assert.equal(harness.supervisor.status().cdp.reason, "list probe failed");
   harness.supervisor.stop();
 });
 

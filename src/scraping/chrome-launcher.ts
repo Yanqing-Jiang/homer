@@ -21,6 +21,10 @@ const CDP_POLL_INTERVAL_MS = 1_000;
 const CDP_POLL_MAX_MS = 15_000;
 const CDP_HEARTBEAT_MS = 60_000;
 const CDP_RESTART_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
+/** A child gone this fast never finished starting — see settleFastExit. */
+const CHROME_FAST_EXIT_MS = 5_000;
+const RESTART_FLAP_WINDOW_MS = 300_000;
+const RESTART_FLAP_LIMIT = 5;
 const CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const runtimePaths = getRuntimePaths();
 const PROFILE_SOURCE = runtimePaths.chromeProfileRoot;
@@ -58,6 +62,14 @@ export interface ResidentChromeChild {
 export interface ChromeSupervisorDeps {
   spawnChrome: () => ResidentChromeChild;
   probe: () => Promise<CdpProbe>;
+  /**
+   * Seeds a page target on a listener that has none. Injected rather than
+   * imported so the class stays fake-driven; the wiring below points it at
+   * ensurePageTarget, the one sanctioned seeder.
+   */
+  ensurePage?: () => Promise<boolean>;
+  /** True while :9222 still answers /json/version — used to classify a fast child exit. */
+  cdpPortOccupied?: () => Promise<boolean>;
   ensureProfile: () => void;
   nextGeneration: () => number;
   drainLeases: () => Promise<void>;
@@ -83,6 +95,8 @@ export class ResidentChromeSupervisor {
   private maintenanceReason: string | null = null;
   private lastProbe: CdpProbe = { state: "absent", pages: 0 };
   private restartCount = 0;
+  /** Wall-clock of each scheduled restart inside the flap window — see tripFlapBreaker. */
+  private restartTimestamps: number[] = [];
   /**
    * Re-registers the long-lived surface targets after a Chrome restart. A restart
    * calls beginGeneration(), which clears the broker registry, but nothing else
@@ -145,7 +159,15 @@ export class ResidentChromeSupervisor {
 
   async heartbeatNow(): Promise<void> {
     if (!this.running || this.maintenanceEnabled) return;
-    const result = await this.deps.probe();
+    let result = await this.deps.probe();
+    // A cleanly launched Chrome now opens NO window (--no-startup-window), so its
+    // first probe is empty-without-reason. Seed the page target here instead of
+    // waiting for a scrape to demand one, otherwise status/health sit at "empty"
+    // for a browser that is perfectly healthy. `reason` set means the target list
+    // was unreadable — transient, and never a licence to mutate browser state.
+    if (result.state === "empty" && !result.reason && this.deps.ensurePage) {
+      if (await this.deps.ensurePage()) result = await this.deps.probe();
+    }
     this.lastProbe = result; this.transition();
     if (result.state !== "absent" && !result.reason) {
       await this.deps.observeTargets?.();
@@ -173,6 +195,7 @@ export class ResidentChromeSupervisor {
     try {
       this.deps.ensureProfile();
       this.generation = this.deps.nextGeneration();
+      const spawnedAt = Date.now();
       const child = this.deps.spawnChrome();
       this.child = child;
       this.lastProbe = { state: "empty", pages: 0, reason: "Chrome starting" }; this.transition();
@@ -180,7 +203,12 @@ export class ResidentChromeSupervisor {
         if (this.child !== child) return;
         this.child = undefined;
         this.lastProbe = { state: "absent", pages: 0, reason: "Chrome exited" }; this.transition();
-        this.scheduleRestart("unexpected child exit");
+        const elapsedMs = Date.now() - spawnedAt;
+        if (elapsedMs >= CHROME_FAST_EXIT_MS || !this.deps.cdpPortOccupied) {
+          this.scheduleRestart("unexpected child exit");
+          return;
+        }
+        void this.settleFastExit(elapsedMs);
       };
       child.once("exit", settle);
       child.once("error", settle);
@@ -189,6 +217,32 @@ export class ResidentChromeSupervisor {
       logger.error({ err, generation: this.generation }, "Resident Chrome launch failed");
       this.scheduleRestart("launch failed");
     }
+  }
+
+  /**
+   * A child that dies within CHROME_FAST_EXIT_MS while :9222 keeps answering did
+   * not crash: Chrome's ProcessSingleton found another instance holding the
+   * profile lock, forwarded our command line to it and exited 0 (2026-08-18).
+   * Relaunching cannot win that race, so the classification exists to name the
+   * condition in the log and feed the flap breaker fast. It still schedules a
+   * restart — adopting or killing the squatter is a separate fix.
+   */
+  private async settleFastExit(elapsedMs: number): Promise<void> {
+    let occupied = false;
+    try {
+      occupied = (await this.deps.cdpPortOccupied?.()) ?? false;
+    } catch (err) {
+      logger.warn({ err }, "CDP port check after fast Chrome exit failed");
+    }
+    if (!occupied) {
+      this.scheduleRestart("unexpected child exit");
+      return;
+    }
+    logger.warn(
+      { elapsedMs, port: CDP_PORT, generation: this.generation, profile: RESIDENT_CDP_PROFILE },
+      "Resident Chrome exited immediately while CDP stayed up — another Chrome owns the profile (singleton forward)",
+    );
+    this.scheduleRestart("singleton forward — another Chrome owns the profile");
   }
 
   private scheduleRestart(reason: string): void {
@@ -202,6 +256,7 @@ export class ResidentChromeSupervisor {
       const child = this.child;
       this.child = undefined;
       child?.kill("SIGTERM");
+      if (this.tripFlapBreaker(reason)) return;
       const delayMs = this.deps.backoffMs[Math.min(this.restartAttempt, this.deps.backoffMs.length - 1)]!;
       this.restartAttempt++;
       this.restartCount++; this.transition();
@@ -211,6 +266,36 @@ export class ResidentChromeSupervisor {
         this.launch();
       }, delayMs);
     });
+  }
+
+  /**
+   * Relaunching only ever fixes a Chrome that CAN come back. More than
+   * RESTART_FLAP_LIMIT restarts inside RESTART_FLAP_WINDOW_MS means the relaunch
+   * itself has become the failure (2026-08-18: every relaunch was forwarded to a
+   * squatting Chrome, 19 restarts and 14 stray tabs in ten minutes). Entering
+   * maintenance is the safe stop — it drains leases, suppresses launch(), and
+   * `browserctl maintenance off` both re-arms and relaunches, so no new plumbing.
+   * Returns true when the breaker tripped and the caller must NOT schedule.
+   *
+   * DEBT: the trip is only visible as an error log and in status.maintenance —
+   * this module has no operator-alert dependency and the scheduler's Telegram
+   * path is not reachable from here without a cycle; upgrade when the supervisor
+   * gains an alert dep.
+   */
+  private tripFlapBreaker(reason: string): boolean {
+    const now = Date.now();
+    this.restartTimestamps = this.restartTimestamps.filter((at) => now - at < RESTART_FLAP_WINDOW_MS);
+    this.restartTimestamps.push(now);
+    if (this.restartTimestamps.length <= RESTART_FLAP_LIMIT) return false;
+    logger.error(
+      { reason, restarts: this.restartTimestamps.length, windowMs: RESTART_FLAP_WINDOW_MS, restartCount: this.restartCount, generation: this.generation },
+      "Resident Chrome restart flap breaker tripped — entering maintenance instead of relaunching",
+    );
+    // Cleared here so maintenance-off re-arms the breaker with a fresh window.
+    this.restartTimestamps = [];
+    void this.setMaintenance(true, "restart flap circuit breaker — manual browserctl maintenance off to re-arm")
+      .catch((err) => logger.error({ err }, "Entering maintenance after restart flap breaker failed"));
+    return true;
   }
 
   private scheduleHeartbeat(): void {
@@ -238,9 +323,16 @@ export const residentChromeSupervisor = new ResidentChromeSupervisor({
     "--profile-directory=Default",
     "--no-first-run",
     "--no-default-browser-check",
-    "about:blank",
+    // No positional URL and no startup window. If ProcessSingleton forwards this
+    // command line to a Chrome already holding the profile lock, the forward is a
+    // no-op instead of another about:blank tab — the 2026-08-18 tab storm was a
+    // relaunch loop each of whose forwards opened one. The cost is that a clean
+    // launch has zero page targets; heartbeatNow seeds the first one via ensurePage.
+    "--no-startup-window",
   ], { stdio: "ignore" }),
   probe: () => probeCdp(CDP_PORT),
+  ensurePage: () => ensurePageTarget(CDP_PORT),
+  cdpPortOccupied: () => isCDPAvailable(CDP_PORT),
   ensureProfile: () => {
     mkdirSync(RESIDENT_CDP_PROFILE, { recursive: true, mode: 0o700 });
     chmodSync(RESIDENT_CDP_PROFILE, 0o700);
@@ -338,12 +430,19 @@ async function countCdpPageTargets(port: number): Promise<number | null> {
 }
 
 /**
- * When Chrome answers /json/version but has zero page targets, seed about:blank
- * via PUT /json/new (GET is rejected). Returns true if ≥1 page target exists after.
+ * When Chrome answers /json/version but has EXACTLY zero page targets, seed
+ * about:blank via PUT /json/new (GET is rejected). An unreadable list (null) is
+ * transient, and probeCdp's contract holds a mutating consumer to sparing it —
+ * so report false without seeding rather than PUT blind at a browser whose real
+ * target count we do not know. Returns true if ≥1 page target exists after.
  */
 async function ensurePageTarget(port: number): Promise<boolean> {
   const existing = await countCdpPageTargets(port);
-  if (existing != null && existing > 0) return true;
+  if (existing == null) {
+    logger.warn({ port }, "CDP page-target list unreadable — not seeding");
+    return false;
+  }
+  if (existing > 0) return true;
 
   logger.warn(
     { port, pages: existing },
