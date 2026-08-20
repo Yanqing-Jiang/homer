@@ -22,9 +22,15 @@ export async function runAgentBrowserBindingSelfTest(): Promise<void> {
     let targetId: string | undefined;
     try {
       await execFileAsync(AGENT_BROWSER, ["--session", session, "connect", "9222"], { timeout: 15_000 });
+      // On a cold boot Chrome registers its own startup tab *after* the lease baseline is
+      // captured, so counting against that baseline alone attributed Chrome's blank tab to
+      // this session and failed the test deterministically. Re-read the target list here so
+      // only tabs opened by the `tab new` below are counted as session-created.
+      const preCreate = await fetch("http://127.0.0.1:9222/json/list").then((response) => response.json()) as Array<{ id: string; type: string; url: string }>;
+      const ignoredTargetIds = new Set([...reserved.baselineTargetIds, ...preCreate.filter((target) => target.type === "page").map((target) => target.id)]);
       await execFileAsync(AGENT_BROWSER, ["--session", session, "tab", "new", marker], { timeout: 15_000 });
       const targets = await fetch("http://127.0.0.1:9222/json/list").then((response) => response.json()) as Array<{ id: string; type: string; url: string }>;
-      const created = targets.filter((target) => target.type === "page" && !reserved.baselineTargetIds.includes(target.id));
+      const created = targets.filter((target) => target.type === "page" && !ignoredTargetIds.has(target.id));
       if (created.length !== 1 || created[0]!.url !== marker) throw new Error(`session ${i} created ${created.length} distinguishable targets`);
       targetId = created[0]!.id;
       await browserLeaseBroker.registerExternalTarget(reserved.leaseId, created[0]!.id);

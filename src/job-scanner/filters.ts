@@ -7,7 +7,7 @@
  * that blocklist was the proven part of the old pipeline.
  */
 
-import { matchTitleToFamily } from "./taxonomy.js";
+import { matchTitleToFamily, normalizeTitle } from "./taxonomy.js";
 import type { NormalizedJob } from "./types.js";
 
 // $250-350K target: only a LISTED band whose max is below this is
@@ -81,6 +81,21 @@ export function applyRules(job: NormalizedJob): RulesVerdict {
 
   const match = matchTitleToFamily(job.title);
   if (!match) return fail("title outside role families");
+
+  // Pure product-management and program-management tracks are out: TPM/program
+  // titles unconditionally, PM titles unless the title itself carries an
+  // analytics/data domain (Yanqing, 2026-08-19). normalizeTitle expands
+  // Amazon's PM-T idiom so it can't slip past the regex.
+  const normTitle = normalizeTitle(job.title);
+  if (/\b(technical program manager|program manager|tpm)\b/.test(normTitle)) {
+    return fail("TPM/program-management title excluded");
+  }
+  if (
+    /\bproduct (manager|management|lead|owner)\b/.test(normTitle) &&
+    !/\b(analytics?|insights?|data|business intelligence|experimentation|measurement)\b/.test(normTitle)
+  ) {
+    return fail("pure product-management title (analytics/data PM only)");
+  }
 
   if (/\b(intern|junior|jr\.|entry.level|new grad)\b/i.test(job.title)) {
     return fail("junior/intern title");

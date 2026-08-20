@@ -32,6 +32,7 @@ person:
     work_authorization: authorized to work in the US
     requires_sponsorship: false
     veteran_status: protected veteran (US Army 2015-2020)
+    security_clearance: "Secret, held during US Army service (2015-2020), now expired/inactive; holds no clearance currently"  # level confirmed by Yanqing 2026-08-19. 'Currently hold' = No; 'ever held' = Yes (Secret, expired). Never claim Top Secret/TS-SCI or imply it is active.
     gender: Male
     race_ethnicity: Asian (Not Hispanic or Latino)
     disability: false
@@ -320,6 +321,14 @@ experience:
         added_via: fit-analysis
         added_date: "2026-05-04"
         parent_bullet: pg-amazon-direct-reports
+      - id: pg-amazon-talent-promotion
+        claim: "Hires, develops, and promotes engineering and analytics talent on P&G's Amazon Sales team — runs hiring-loop interviews, owns formal performance reviews and career-path development, and has advanced a team member to promotion."
+        metrics: []
+        skills: [hiring, talent development, promotion, engineering talent, people development, coaching, mentorship, performance management, communal leadership signal]
+        added_via: fit-analysis
+        added_date: "2026-08-19"
+        parent_bullet: pg-amazon-full-mgmt-cycle
+        source_note: "Confirmed by Yanqing 2026-08-19 during the AWS Data Engineering Manager (req 10500044) gap interview: yes, someone he managed was promoted. Count not stated — never render a number of promotions."
       - id: pg-amazon-ltv
         claim: "Built lifetime-value (LTV/CLV) models on the $200M+ Amazon upper-funnel program — scoring audiences by predicted customer lifetime value to prioritize high-LTV segments in budget allocation, contributing to doubled audience reach year over year."
         metrics: ["$200M+ Amazon upper-funnel program", "doubled audience reach YOY"]

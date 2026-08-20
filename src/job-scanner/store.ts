@@ -218,14 +218,15 @@ export function recordRun(
   );
 }
 
-/** Hours since the last successfully sent scanner email, or null if none. */
-export function hoursSinceLastSentEmail(db: Database.Database): number | null {
+/** Whether a scanner email already went out today (local calendar day).
+ * sent_at is stored in UTC, so convert before comparing. */
+export function sentDigestToday(db: Database.Database): boolean {
   const row = db
     .prepare(
-      "SELECT (julianday('now') - julianday(MAX(sent_at))) * 24 AS hrs FROM job_scan_emails WHERE status = 'sent'",
+      "SELECT 1 AS hit FROM job_scan_emails WHERE status = 'sent' AND date(sent_at, 'localtime') = date('now', 'localtime') LIMIT 1",
     )
-    .get() as { hrs: number | null };
-  return row.hrs;
+    .get();
+  return row !== undefined;
 }
 
 export function recordEmail(

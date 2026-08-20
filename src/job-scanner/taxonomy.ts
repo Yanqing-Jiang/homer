@@ -1,8 +1,9 @@
 /**
  * Role families for the job scanner, tuned to Yanqing's 2026 targets:
- * management/leadership only (DS/Analytics Mgr+, ML/AI Eng Mgr, AI PM,
- * Principal/Sr TPM, Director-level). IC roles — including all software
- * engineering ICs — are out entirely (Yanqing, 2026-08-18).
+ * management/leadership only (DS/Analytics Mgr+, ML/AI Eng Mgr, analytics-
+ * domain PM, Director-level). IC roles — including all software engineering
+ * ICs — are out entirely (Yanqing, 2026-08-18). Pure PM and all TPM/program
+ * roles are out (Yanqing, 2026-08-19).
  *
  * Matching approach salvaged from the retired src/job-hunt/taxonomy.ts
  * (curated title substrings first, regex fallback second — no LLM here).
@@ -46,41 +47,34 @@ export const ROLE_FAMILIES: Record<string, RoleFamily> = {
     pattern: /\b(ml|machine learning|ai|artificial intelligence)\b.*\b(engineering manager|eng manager)\b|\b(engineering manager|manager|head)\b.*\b(ml|machine learning|ai|applied science)\b/i,
     weight: 1.0,
   },
-  "ai-product": {
-    queries: ['"ai product manager"', '"product manager, ai"', '"principal product manager" ai', '"product manager tech"'],
+  // PM roles survive only with an analytics/data domain in the title — pure
+  // product management (AI or otherwise) is excluded at the rules gate
+  // (Yanqing, 2026-08-19).
+  "analytics-product": {
+    queries: ['"product manager" analytics', '"product manager, analytics"', '"product manager tech"'],
     titles: [
-      "ai product manager", "product manager, ai", "product manager - ai",
-      "product manager, machine learning", "product manager, ml",
-      "senior product manager, ai", "principal product manager, ai",
-      "product lead, ai", "group product manager, ai",
+      "product manager, analytics", "product manager - analytics",
+      "analytics product manager", "data product manager",
+      "product manager, data", "product manager, insights",
       // Amazon's PM-T idiom ("Principal Product Manager Tech", "Principal PMT")
-      // — normalizeTitle expands "pmt" to "product manager tech".
+      // — normalizeTitle expands "pmt" to "product manager tech". The rules
+      // gate still drops PM-Ts without an analytics/data domain in the title.
       "product manager tech", "product manager - tech", "product manager, tech",
     ],
-    pattern: /\bproduct manager\b.*\b(ai|ml|machine learning|artificial intelligence|genai|gen ai|llm|agents?|agentic|copilot)\b|\b(ai|genai)\b.*\bproduct manager\b/i,
+    pattern: /\bproduct manager\b.*\b(analytics?|insights?|data|experimentation|measurement)\b|\b(analytics?|data)\b.*\bproduct manager\b/i,
     weight: 0.9,
   },
   "ai-agents": {
     queries: ['"agentic" manager', '"ai agents" product', '"generative ai" director'],
     titles: [
       "director of agents", "head of agents", "agent platform",
-      "product manager, agents", "product manager, agentic",
     ],
     pattern: /\b(agent(s|ic)?|gen(erative)?\s?ai|genai)\b.*\b(product manager|manager|director|lead|head)\b|\b(head|director)\b.*\bagents?\b/i,
     weight: 1.0,
   },
-  "tpm": {
-    queries: ['"principal technical program manager"', '"senior technical program manager"'],
-    titles: [
-      "principal technical program manager", "senior technical program manager",
-      "principal tpm", "senior tpm", "technical program manager, ai",
-      "technical program manager, machine learning", "technical program manager, data",
-    ],
-    pattern: /\b(principal|senior|sr\.?)\b.*\btechnical program manager\b/i,
-    // Deprioritized (Yanqing, 2026-08-18): TPM stays discoverable but ranks
-    // below every analytics/AI leadership family and AI PM.
-    weight: 0.6,
-  },
+  // TPM family removed entirely — program-management roles are not a fit
+  // (Yanqing, 2026-08-19); the rules gate also rejects any TPM title that
+  // sneaks in through another family's pattern.
   "director": {
     queries: ['"director of data science"', '"director of analytics"', '"director, data"', '"director of machine learning"'],
     titles: [

@@ -24,7 +24,7 @@ import {
   upsertPosting, markFiltered, setCategory, setVerification,
   setFitScore, setRankScore, getEmailCandidates, getPostingsNeedingScore,
   getRecentlyEmailedFingerprints, getDismissedKeys, markEmailed, recordRun, recordEmail,
-  hoursSinceLastSentEmail,
+  sentDigestToday,
 } from "../../job-scanner/store.js";
 import { buildScoringPrompt, computeRankScore, FitScoreSchema } from "../../job-scanner/scoring.js";
 import { renderDigestHtml, renderDigestText, renderQuietDayHtml, renderQuietDayText } from "../../job-scanner/digest.js";
@@ -141,7 +141,10 @@ export async function runJobScanner(
     const toScore: NormalizedJob[] = [];
     for (const row of needingScore) {
       try {
-        const job = normalizeHit(JSON.parse(row.raw_json) as Record<string, unknown>);
+        const raw = JSON.parse(row.raw_json) as Record<string, unknown>;
+        // raw_json shape depends on the discovery source; the wrong normalizer
+        // returns null and strands the posting on the heuristic score forever.
+        const job = row.id.startsWith("trueup___") ? normalizeTrueUpHit(raw) : normalizeHit(raw);
         if (job) toScore.push(job);
       } catch { /* unparseable raw payload: leave for heuristic */ }
     }
@@ -213,12 +216,15 @@ export async function runJobScanner(
     // fresh candidate into a top 10, or one "no qualifying roles" status
     // when nothing clears the bar. Morning/evening runs stay silent and let
     // candidates queue for the next midday send (Yanqing, 2026-08-18).
+    // Once-a-day is a local-calendar-day gate, not a rolling cooldown, so a
+    // manual or late send never suppresses the next day's midday digest.
     const now = new Date();
     const isMiddayRun = now.getHours() >= 11 && now.getHours() < 14;
-    const sinceLastSent = hoursSinceLastSentEmail(db);
-    const sentWithin20h = sinceLastSent !== null && sinceLastSent < 20;
-    if (!isMiddayRun || sentWithin20h) {
-      stats.emailStatus = ranked.length === 0 ? "skipped:no_candidates" : "skipped:awaiting_midday";
+    const alreadySentToday = sentDigestToday(db);
+    if (!isMiddayRun || alreadySentToday) {
+      stats.emailStatus = alreadySentToday
+        ? "skipped:already_sent_today"
+        : ranked.length === 0 ? "skipped:no_candidates" : "skipped:awaiting_midday";
     } else if (ranked.length === 0) {
       const nearMisses: RankedJob[] = candidates
         .filter((p) => !emailedKeys.has(digestKeyFromFingerprint(p.fingerprint)))
