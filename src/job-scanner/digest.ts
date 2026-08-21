@@ -115,11 +115,14 @@ export function renderQuietDayHtml(nearMisses: RankedJob[], dayLabel: string, st
       return `
       <tr>
         <td style="padding:10px 12px;border-bottom:1px solid #e6e6e6;">
-          <div style="font-size:14px;font-weight:600;color:#1a1a1a;">${esc(j.title)}</div>
+          <div style="font-size:14px;font-weight:600;color:#1a1a1a;">
+            ${j.apply_url ? `<a href="${esc(j.apply_url)}" style="color:#1a1a1a;text-decoration:none;">${esc(j.title)}</a>` : esc(j.title)}
+          </div>
           <div style="font-size:13px;color:#555;margin-top:2px;">
             ${esc(j.company)} &middot; ${esc(j.location ?? "location n/a")}
             &middot; ${compLabel(j.yearly_min_comp, j.yearly_max_comp, j.comp_transparent)}
             &middot; rank ${r.rankScore.toFixed(0)}/100 &middot; ${ageLabel(j.first_seen_at, j.publish_date)}
+            ${j.apply_url ? `&middot; <a href="${esc(j.apply_url)}" style="color:#0b57d0;text-decoration:none;font-weight:600;">View &rarr;</a>` : ""}
           </div>
         </td>
       </tr>`;
@@ -148,7 +151,7 @@ export function renderQuietDayText(nearMisses: RankedJob[], dayLabel: string): s
   if (nearMisses.length === 0) return `${head}\nThe queue is empty.`;
   const lines = nearMisses.map(
     (r) =>
-      `- ${r.job.title} — ${r.job.company} (${r.job.location ?? "n/a"}) | rank ${r.rankScore.toFixed(0)}/100`,
+      `- ${r.job.title} — ${r.job.company} (${r.job.location ?? "n/a"}) | rank ${r.rankScore.toFixed(0)}/100\n  ${r.job.apply_url ?? ""}`,
   );
   return `${head}\nClosest below-the-bar roles:\n${lines.join("\n")}`;
 }
