@@ -262,6 +262,14 @@ async function executeKimiJob(
  * Flash- and pro-tagged models run on opencode Gemini 3.5 Flash (High).
  * Non-Gemini models fall back to Claude Sonnet.
  */
+// Scheduled Claude runs are one-shot `claude --print` sessions. Claude Code reaps
+// Bash tasks started with run_in_background when the turn ends (ox-vc-monitor lost
+// its 2.5h OX pull this way on 2026-08-19/20). Tell every scheduled agent so.
+const SCHEDULED_LIFECYCLE_NOTE =
+  "LIFECYCLE: this is a one-shot scheduled session. Claude Code kills any Bash task started with " +
+  "run_in_background (or a trailing &) the moment this turn ends. Never background work that must " +
+  "outlive the turn; hand it to a durable supervisor (launchd/launchctl kickstart) and report its PID.";
+
 async function executeGeminiJob(
   job: RegisteredJob,
   startedAt: Date,
@@ -641,7 +649,7 @@ async function executeClaudeJob(
       model,
       signal: options?.signal,
       timeout,
-      appendSystemPrompt: contextPrompt || undefined,
+      appendSystemPrompt: [contextPrompt, SCHEDULED_LIFECYCLE_NOTE].filter(Boolean).join("\n\n"),
       entrypoint: "homer-scheduler",
       preferLongestText: true,
       cleanOutput: true,
