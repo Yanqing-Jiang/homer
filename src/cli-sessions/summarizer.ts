@@ -34,7 +34,7 @@ export async function summarizeSession(
 /**
  * Free template summary for small sessions
  */
-function templateSummary(session: ParsedSession): string {
+export function templateSummary(session: ParsedSession): string {
   const firstUser = findFirstSubstantiveUser(session);
   const lastAssistant = session.messages
     .slice()
