@@ -68,7 +68,7 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
   { id: "[redacted]", name: "Job Scanner", kind: "internal", handler: "job_scanner", handlerFile: "[redacted]", expectedInSchedule: true, note: "discover→verify→rank; scans 3x/day, one daily midday top-10 digest email to <owner-email>; management roles only; notify-only, no auto-apply" },
   { id: "link-processor", name: "Link Processor", kind: "internal", handler: "link_processor", handlerFile: "link-processor", expectedInSchedule: true },
   { id: "memory-embeddings", name: "Memory Embeddings", kind: "internal", handler: "memory_embeddings", handlerFile: "memory-embeddings", expectedInSchedule: true, note: "event-triggered; cron is safety net" },
-  { id: "memory-reindex", name: "Memory Reindex", kind: "internal", handler: "memory_reindex", handlerFile: "memory-reindex", expectedInSchedule: true, note: "event-triggered; cron is safety net" },
+  { id: "memory-reindex", name: "Memory Search Reindex", kind: "internal", handler: "memory_reindex", handlerFile: "memory-reindex", expectedInSchedule: true, note: "DB documents + allow-listed files; event-triggered, cron is safety net" },
   { id: "nightly-code-push", name: "Nightly Code Push", kind: "internal", handler: "nightly_code_push", handlerFile: "nightly-code-push", expectedInSchedule: true, note: "preview-before-act (Phase 1.4)" },
   { id: "nightly-memory", name: "Nightly Memory", kind: "internal", handler: "nightly_memory", handlerFile: "nightly-memory", expectedInSchedule: true },
   { id: "outcome-tracker", name: "Outcome Tracker", kind: "internal", handler: "outcome_tracker", handlerFile: "outcome-tracker", expectedInSchedule: true },
@@ -81,7 +81,7 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
  * These are the sources of taxonomy drift Codex's review flagged.
  */
 const SCHEDULED_WITH_ALIASED_HANDLER_FILE: JobEntry[] = [
-  { id: "weekly-memory-consolidation", name: "Weekly Memory Consolidation", kind: "internal", handler: "weekly_consolidation", handlerFile: "weekly-consolidation", expectedInSchedule: true, note: "alias: schedule id prefixes 'weekly-memory-'" },
+  { id: "weekly-memory-consolidation", name: "Weekly Memory Synthesis", kind: "internal", handler: "weekly_consolidation", handlerFile: "weekly-consolidation", expectedInSchedule: true, note: "retains narrative + passive cross-day claims; lint is advisory-only" },
 ];
 
 /**

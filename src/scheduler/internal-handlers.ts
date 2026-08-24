@@ -674,10 +674,10 @@ async function runHandler(
       case "weekly_consolidation": {
         const result = await runWeeklyConsolidation(job, startedAt, 7, ctx.stateManager);
 
-        // Lint findings demote their matching claims to the passive tier — still
-        // searchable, no longer injectable, and no review is delivered.
-        if (result.success && result.lintFindings && result.lintFindings.length > 0) {
-          logger.info({ count: result.lintFindings.length }, "Lint findings demoted matching claims to the passive tier");
+        // Lint is advisory-only and retained with the weekly narrative. This
+        // autonomous path never edits or demotes user-confirmed memory.
+        if (result.success && result.lintFindings && result.lintFindings > 0) {
+          logger.info({ count: result.lintFindings }, "Weekly memory-lint findings retained as advisory narrative content");
         }
 
         return buildResult(
@@ -791,9 +791,9 @@ async function runHandler(
         let morningReviewError: string | undefined;
         for (let attempt = 1; attempt <= 2; attempt++) {
           try {
-            await sendMorningReview(ctx.bot, ctx.chatId, ctx.stateManager);
+            const delivery = await sendMorningReview(ctx.bot, ctx.chatId, ctx.stateManager);
             morningReviewSent = true;
-            parts.push("morning review sent");
+            parts.push(delivery === "sent" ? "morning review sent" : "morning review: nothing pending");
             break;
           } catch (err) {
             morningReviewError = err instanceof Error ? err.message : String(err);
@@ -1043,6 +1043,8 @@ async function runHandler(
         }
         const outputParts = ["Daemon cleanup completed"];
         const logParts: string[] = [];
+        if (cleanup.killed > 0) outputParts.push(`terminated ${cleanup.killed} cleanup target(s)`);
+        if (cleanup.spared > 0) outputParts.push(`spared ${cleanup.spared} protected/active target(s)`);
         if (cleanup.logMaintenance.rotated > 0) logParts.push(`rotated ${cleanup.logMaintenance.rotated} log(s)`);
         if (cleanup.logMaintenance.pruned > 0) logParts.push(`pruned ${cleanup.logMaintenance.pruned} retained log(s)`);
         if (cleanup.logMaintenance.errors.length > 0) {

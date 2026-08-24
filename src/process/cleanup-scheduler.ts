@@ -79,6 +79,42 @@ const MIB = 1024 * 1024;
 const LOG_RETENTION_AGE_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
 const LOG_RETENTION_MAX_FILES = 200;
 
+interface ConfiguredGuiCleanupTarget {
+  label: string;
+  bundleId: string;
+  executablePath: string;
+  quitScript: string;
+  /** Finder is a desktop-shell refresh: launchservices normally relaunches it. */
+  relaunches: boolean;
+}
+
+// User-approved GUI apps that should not remain resident between manual uses.
+// Exact executable paths are required so cleanup cannot signal a similarly named
+// process. The frontmost app is always spared to avoid interrupting active work.
+const CONFIGURED_GUI_CLEANUP_TARGETS: readonly ConfiguredGuiCleanupTarget[] = [
+  {
+    label: "Microsoft Azure Storage Explorer",
+    bundleId: "com.microsoft.StorageExplorer",
+    executablePath: "/Applications/Microsoft Azure Storage Explorer.app/Contents/MacOS/Microsoft Azure Storage Explorer",
+    quitScript: 'tell application id "com.microsoft.StorageExplorer" to quit',
+    relaunches: false,
+  },
+  {
+    label: "Pages",
+    bundleId: "com.apple.iWork.Pages",
+    executablePath: "/Applications/Pages.app/Contents/MacOS/Pages",
+    quitScript: 'tell application id "com.apple.iWork.Pages" to quit saving yes',
+    relaunches: false,
+  },
+  {
+    label: "Finder",
+    bundleId: "com.apple.finder",
+    executablePath: "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder",
+    quitScript: 'tell application id "com.apple.finder" to quit',
+    relaunches: true,
+  },
+];
+
 interface CleanupAction {
   pid: number;
   command: string;
@@ -230,6 +266,10 @@ export class CleanupScheduler {
       // F: Log lifecycle maintenance. Copy-truncate keeps launchd/cloudflared
       // file descriptors valid without booting anything.
       logMaintenance = this.maintainLogs();
+
+      // G: Terminate user-approved GUI apps that are only opened on demand.
+      // Finder is included as a refresh target and is expected to relaunch.
+      actions.push(...this.cleanupConfiguredGuiApps());
 
       scanned = actions.length;
       killed = actions.filter((a) => a.action === "killed").length;
@@ -1018,8 +1058,9 @@ export class CleanupScheduler {
   }
 
   /**
-   * The only process.kill call in this module. Re-check identity and topology
-   * immediately before every PID or process-group signal, including escalation.
+   * The only general process-tree signal path in this module. Re-check identity
+   * and topology before every PID or process-group signal, including escalation.
+   * User-approved exact-path GUI targets use graceful Apple Events instead.
    */
   private guardedSignal(
     expected: ProcessIdentity,
@@ -1100,6 +1141,83 @@ export class CleanupScheduler {
     }
   }
 
+  private cleanupConfiguredGuiApps(): CleanupAction[] {
+    const actions: CleanupAction[] = [];
+    const processTable = readProcessCommands();
+    const frontmostBundleId = readFrontmostBundleIdentifier();
+
+    if (!processTable) {
+      logger.warn("Skipping configured GUI cleanup — process table could not be read");
+      return actions;
+    }
+
+    for (const target of CONFIGURED_GUI_CLEANUP_TARGETS) {
+      const pids = [...processTable.entries()]
+        .filter(([, command]) => command === target.executablePath)
+        .map(([pid]) => pid);
+
+      for (const pid of pids) {
+        if (!frontmostBundleId) {
+          actions.push({
+            pid,
+            command: target.executablePath,
+            action: "spared",
+            reason: `Configured GUI target spared: could not verify frontmost app (${target.label})`,
+          });
+          continue;
+        }
+
+        if (frontmostBundleId === target.bundleId) {
+          actions.push({
+            pid,
+            command: target.executablePath,
+            action: "spared",
+            reason: `Configured GUI target spared while frontmost (${target.label})`,
+          });
+          continue;
+        }
+
+        // Re-read the exact command immediately before signaling to close the
+        // PID-reuse window between the table snapshot and this action.
+        if (readCommandForPid(pid) !== target.executablePath) {
+          actions.push({
+            pid,
+            command: target.executablePath,
+            action: "spared",
+            reason: `Configured GUI target spared after identity changed (${target.label})`,
+          });
+          continue;
+        }
+
+        const quit = spawnSync("/usr/bin/osascript", ["-e", target.quitScript], {
+          encoding: "utf-8",
+          timeout: 10_000,
+        });
+        if (quit.error || quit.status !== 0 || readCommandForPid(pid) === target.executablePath) {
+          const detail = quit.stderr?.trim() || quit.error?.message || `exit ${quit.status}`;
+          actions.push({
+            pid,
+            command: target.executablePath,
+            action: "spared",
+            reason: `Configured GUI target did not quit (${target.label}): ${detail}`,
+          });
+          continue;
+        }
+
+        actions.push({
+          pid,
+          command: target.executablePath,
+          action: "killed",
+          reason: target.relaunches
+            ? `Configured GUI refresh target quit; relaunch expected (${target.label})`
+            : `Configured on-demand GUI target quit (${target.label})`,
+        });
+      }
+    }
+
+    return actions;
+  }
+
   private maintainLogs(): LogMaintenanceSummary {
     const summary = emptyLogMaintenanceSummary();
     const runtimePaths = getRuntimePaths();
@@ -1144,6 +1262,47 @@ export class CleanupScheduler {
 
     return summary;
   }
+}
+
+function readProcessCommands(): Map<number, string> | null {
+  const result = spawnSync("/bin/ps", ["-axo", "pid=,command="], {
+    encoding: "utf-8",
+    timeout: 5000,
+  });
+  if (result.error || result.status !== 0) return null;
+
+  const processes = new Map<number, string>();
+  for (const line of result.stdout.split("\n")) {
+    const match = line.match(/^\s*(\d+)\s+(.+)$/);
+    if (!match) continue;
+    processes.set(Number(match[1]), match[2]!.trim());
+  }
+  return processes;
+}
+
+function readCommandForPid(pid: number): string | null {
+  const result = spawnSync("/bin/ps", ["-p", String(pid), "-o", "command="], {
+    encoding: "utf-8",
+    timeout: 2000,
+  });
+  if (result.error || result.status !== 0) return null;
+  return result.stdout.trim() || null;
+}
+
+function readFrontmostBundleIdentifier(): string | null {
+  const front = spawnSync("/usr/bin/lsappinfo", ["front"], {
+    encoding: "utf-8",
+    timeout: 2000,
+  });
+  const asn = front.stdout?.trim();
+  if (front.error || front.status !== 0 || !asn) return null;
+
+  const info = spawnSync("/usr/bin/lsappinfo", ["info", "-only", "bundleid", asn], {
+    encoding: "utf-8",
+    timeout: 2000,
+  });
+  if (info.error || info.status !== 0) return null;
+  return info.stdout.match(/"CFBundleIdentifier"="([^"]+)"/)?.[1] ?? null;
 }
 
 function emptyLogMaintenanceSummary(): LogMaintenanceSummary {

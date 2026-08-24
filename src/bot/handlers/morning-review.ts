@@ -16,7 +16,6 @@ import { Bot } from "grammy";
 import { logger } from "../../utils/logger.js";
 import type { StateManager } from "../../state/manager.js";
 import {
-  getPendingCandidates,
   type KnowledgeClaim,
 } from "../../memory/claims.js";
 
@@ -39,8 +38,23 @@ export interface MorningReviewSummary {
 export function gatherPendingItems(sm: StateManager): MorningReviewSummary {
   const db = sm.getDb();
 
-  // All pending candidates (capped for morning review)
-  const allCandidates = getPendingCandidates(db, 30);
+  // Query reviewable types directly. A global top-N candidate slice starved
+  // cleanup and skill rows behind hundreds of higher-confidence passive facts.
+  const allCandidates = db.prepare(`
+    SELECT
+      id, content, content_hash as contentHash, target_file as targetFile, section,
+      claim_type as claimType, confidence, status, review_at as reviewAt,
+      telegram_message_id as telegramMessageId, created_at as createdAt,
+      decided_at as decidedAt, decided_by as decidedBy
+    FROM knowledge_claims
+    WHERE status = 'candidate'
+      AND (
+        claim_type = 'skill'
+        OR (section = 'cleanup' AND claim_type IN ('replace', 'remove'))
+      )
+    ORDER BY created_at ASC
+    LIMIT 30
+  `).all() as KnowledgeClaim[];
 
   // Cleanup proposals are replace/remove claims staged under section='cleanup'
   // by weekly-consolidation — a whole-file rewrite nobody should auto-apply.
@@ -75,12 +89,12 @@ export async function sendMorningReview(
   bot: Bot,
   chatId: number,
   sm: StateManager,
-): Promise<void> {
+): Promise<"sent" | "empty"> {
   const summary = gatherPendingItems(sm);
 
   if (summary.totalItems === 0) {
     logger.debug("Morning review: nothing pending");
-    return;
+    return "empty";
   }
 
   const headerSuffix = `— ${summary.dateLabel}`;
@@ -125,6 +139,7 @@ export async function sendMorningReview(
     skills: summary.skillCandidates.length,
     total: summary.totalItems,
   }, "Sent morning review (cleanup + skills only)");
+  return "sent";
 }
 
 /**

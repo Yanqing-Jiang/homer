@@ -125,12 +125,6 @@ export const INTERNAL_JOB_HARNESS_BASELINES = {
         cwdOverride: HOME_DIR,
         timeoutOverride: 600_000,
       },
-      cleanup: {
-        executor: "codex",
-        model: "gpt-5.6-sol-medium",
-        cwdOverride: HOME_DIR,
-        timeoutOverride: 600_000,
-      },
     },
   },
   "link-processor": {
