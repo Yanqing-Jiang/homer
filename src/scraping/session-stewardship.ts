@@ -42,6 +42,14 @@ class Cdp {
   close(): void { this.ws.close(); }
 }
 
+
+// Scheme+host+path only: Amazon sign-in and console URLs carry openid/session
+// parameters in the query string, and these values reach logs and status JSON.
+function redactUrl(url: string): string {
+  try { const u = new URL(url); return `${u.origin}${u.pathname}`; }
+  catch { return String(url).split("?")[0]?.split("#")[0]?.slice(0, 200) ?? "unknown"; }
+}
+
 export class SessionStewardship {
   private crons: Cron[] = []; private delayed = new Set<ReturnType<typeof setTimeout>>();
   private failures = new Map<string, number>(); private backoffUntil = new Map<string, number>();
@@ -85,11 +93,11 @@ export class SessionStewardship {
           : event.method === "Network.requestWillBeSent" && String(event.params?.request?.url ?? "").includes("a9g-api-gateway/amc") && Object.keys(event.params?.request?.headers ?? {}).some((key) => key.toLowerCase() === "amazon-advertising-api-csrf-token"));
       }
       const after = await this.urlAndHuman(cdp); const origin = new URL(after.url).origin;
-      if (/\/ap\/|signin/i.test(after.url) || !cfg.origins.some((allowed) => allowed === origin) || !proof) throw new Error(`validation failed: url=${after.url} proof=${proof}`);
+      if (/\/ap\/|signin/i.test(after.url) || !cfg.origins.some((allowed) => allowed === origin) || !proof) throw new Error(`validation failed: url=${redactUrl(after.url)} proof=${proof}`);
       await cdp.call("Runtime.evaluate", { expression: `(()=>{if(!window.__homerHumanActivityInstalled){window.__homerHumanActivityInstalled=true;window.__homerLastHumanActivity=0;for(const e of ['pointerdown','keydown','touchstart'])addEventListener(e,()=>window.__homerLastHumanActivity=Date.now(),{capture:true,passive:true})}})()` });
       const afterCookies = await cdp.call("Network.getCookies", { urls: cfg.origins });
       const max = (x: any) => Math.max(0, ...(x.cookies ?? []).map((cookie: any) => Number(cookie.expires) || 0));
-      const result = { surface, skipped: false, lastTouchAt: new Date(now).toISOString(), resultingUrl: after.url,
+      const result = { surface, skipped: false, lastTouchAt: new Date(now).toISOString(), resultingUrl: redactUrl(after.url),
         validation: surface === "amazon.vc" ? "non-/ap + observed GetUserContext" : `observed a9g/CSRF${deep ? " (Sunday deep)" : ""}`,
         cookieExpiryMovementSeconds: max(afterCookies) - max(beforeCookies) };
       this.failures.set(surface, 0); this.backoffUntil.set(surface, 0);
