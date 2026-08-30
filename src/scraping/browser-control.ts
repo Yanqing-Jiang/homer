@@ -213,8 +213,19 @@ export class BrowserLeaseBroker {
   }
   private expireLeases(): void {
     const now = this.now();
-    if (this.externalReservation && this.externalReservation.expiresAt <= now) this.externalReservation = null;
-    for (const record of this.records.values()) if (record.leaseExpiresAt !== null && record.leaseExpiresAt <= now) this.clearLease(record);
+    if (this.externalReservation && (this.externalReservation.expiresAt <= now || this.ownerIsDead(this.externalReservation.owner))) this.externalReservation = null;
+    for (const record of this.records.values()) {
+      if (record.leaseExpiresAt !== null && record.leaseExpiresAt <= now) this.clearLease(record);
+      else if (record.leaseId && this.ownerIsDead(record.owner)) this.clearLease(record);
+    }
+  }
+  /** A `browserctl-agent:<pid>` lease whose process is gone (killed collector) is
+   *  reclaimed at once instead of blocking every agent.* surface for its full TTL
+   *  (2026-08-29: a killed query-competitor collector left a 3h lease behind). */
+  private ownerIsDead(owner: string | null): boolean {
+    const m = owner ? /^browserctl-agent:(\d+)$/.exec(owner) : null;
+    if (!m) return false;
+    try { process.kill(Number(m[1]), 0); return false; } catch (err) { return (err as NodeJS.ErrnoException).code === "ESRCH"; }
   }
   private clearLease(record: TargetRecord): void {
     record.owner = null; record.leaseId = null; record.leaseExpiresAt = null; record.lastActivityAt = this.now();

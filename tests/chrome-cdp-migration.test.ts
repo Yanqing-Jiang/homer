@@ -571,6 +571,32 @@ test("external agent target creation is serialized, registered exactly, and clea
   await assert.rejects(() => broker.reserveExternal("agent.blocked", "wrapper", 30), /automation degraded/);
 });
 
+test("a browserctl-agent lease whose owner pid is dead is reclaimed before its TTL", async () => {
+  const targets = new Map<string, { id: string; type: string; url: string; webSocketDebuggerUrl: string }>();
+  const client: BrowserTargetClient = {
+    list: async () => [...targets.values()],
+    create: async () => { throw new Error("not used"); },
+    close: async (targetId) => { targets.delete(targetId); },
+  };
+  const broker = new BrowserLeaseBroker(client);
+  broker.beginGeneration(10);
+  // A pid that cannot exist on macOS/Linux (pid_max is far below this).
+  const dead = await broker.reserveExternal("agent.dead", "browserctl-agent:2147483000", 3600) as { leaseId: string };
+  targets.set("external-dead", { id: "external-dead", type: "page", url: "about:blank#dead", webSocketDebuggerUrl: "ws://test/external-dead" });
+  await broker.registerExternalTarget(dead.leaseId, "external-dead");
+  // Our own pid is alive: the reclaim must not touch a live owner.
+  const live = await broker.reserveExternal("agent.live-check", `browserctl-agent:${process.pid}`, 3600) as { leaseId: string };
+  assert.equal(broker.snapshot().find((r) => r.surface === "agent.dead")?.leaseId, null);
+  await broker.release(live.leaseId);
+  await assert.rejects(
+    async () => { await broker.registerExternalTarget(dead.leaseId, "external-dead"); },
+    /unknown or expired/,
+  );
+  const reserved = await broker.reserveExternal("agent.next", "wrapper-next", 30) as { leaseId: string };
+  assert.ok(reserved.leaseId);
+  await broker.release(reserved.leaseId);
+});
+
 test("agent-browser degradation does not block exact-target reconcile and acquire", async () => {
   const targets = new Map<string, { id: string; type: string; url: string; webSocketDebuggerUrl: string }>();
   const client: BrowserTargetClient = {
