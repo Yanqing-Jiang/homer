@@ -963,6 +963,35 @@ async function recycleLocked(port: number, headed: boolean): Promise<CDPHandle> 
 }
 
 /**
+ * Launch a dedicated lean-profile Chrome on its OWN port for jobs that must not
+ * contend for the broker's globally serialized shared-:9222 agent lease (a
+ * long-running agent.* collector otherwise blocks them entirely). The caller
+ * owns the returned handle and MUST call cleanup() — this Chrome is never
+ * supervised, never adopted by the resident supervisor, and never touches
+ * activeCDPHandle. A leftover Homer-owned listener on the port (crashed prior
+ * run) is killed first; a non-Homer listener aborts the launch.
+ */
+export async function launchIsolatedCdp(port: number, opts: { headed?: boolean } = {}): Promise<CDPHandle> {
+  if (port === CDP_PORT) throw new Error("launchIsolatedCdp must not target the shared CDP port");
+  const headed = opts.headed ?? true;
+  return withCdpLock(async () => {
+    if (await isCDPAvailable(port)) {
+      logger.warn({ port }, "Isolated CDP port occupied — recycling leftover Homer Chrome");
+      if (!(await killCDPOnPort(port))) {
+        throw new Error(`isolated CDP port ${port} is occupied by a non-Homer listener`);
+      }
+      await waitForPortClosed(port, 10_000);
+    }
+    const handle = await launchChrome(port, !headed);
+    if (!(await waitForCDP(port))) {
+      handle.cleanup();
+      throw new Error(`isolated Chrome did not become CDP-ready on port ${port}`);
+    }
+    return handle;
+  });
+}
+
+/**
  * Tear down the live CDP Chrome IF it has been idle (no scrape) for at least
  * idleThresholdMs — the cleanup scheduler's one sanctioned reaper for a session
  * whose tabs have piled up. Re-checks idleness INSIDE the lock to close the race
