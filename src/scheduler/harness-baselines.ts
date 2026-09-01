@@ -1,6 +1,6 @@
 import { PATHS } from "../config/paths.js";
 import type { ExecutorKind } from "../executors/fallback-orchestrator.js";
-import { join } from "node:path";
+import { getPrivateOverlay } from "../private-overlay.js";
 import type {
   HarnessSelection,
   InternalHarnessCallProfile,
@@ -57,45 +57,7 @@ function youtubeStage(
 const youtubeClassifyStage: InternalHarnessCallProfile = youtubeStage(900_000);
 const youtubeAnalyzeStage: InternalHarnessCallProfile = youtubeStage(300_000); // 5 min — Opus medium deep analysis
 
-export const INTERNAL_JOB_HARNESS_BASELINES = {
-  "[redacted]": {
-    executor: "claude",
-    model: CLAUDE_OPUS_MODEL,
-    stages: {
-      // Batched fit-scoring of up to 25 postings; Opus medium, Codex fallback.
-      score: {
-        executor: "claude",
-        model: CLAUDE_OPUS_MODEL,
-        cwdOverride: TMP_DIR,
-        timeoutOverride: 300_000,
-        fallbackChain: ["codex"],
-        fallbackModels: { codex: CODEX_FALLBACK_MODEL },
-      },
-    },
-  },
-  "abvp-refresh": {
-    executor: "codex",
-    model: "gpt-5.6-sol-medium",
-    stages: {
-      download: codexStage("<warehouse-volume>/<portal-dataset> raw", 6_000_000, "medium"),
-    },
-  },
-  "freshness-escalation": {
-    executor: "claude",
-    model: "opus[high]",
-    fallbackChain: [],
-    fallbackModels: { claude: "opus[high]" },
-    stages: {
-      remediate: {
-        executor: "claude",
-        model: "opus[high]",
-        cwdOverride: join(HOME_DIR, "Desktop", "<data-pipeline>"),
-        timeoutOverride: 3_600_000,
-        fallbackChain: [],
-        fallbackModels: { claude: "opus[high]" },
-      },
-    },
-  },
+const PUBLIC_JOB_HARNESS_BASELINES = {
   "ideas-explore": {
     executor: "codex",
     model: CODEX_MODEL,
@@ -182,12 +144,22 @@ export const INTERNAL_JOB_HARNESS_BASELINES = {
   },
 } satisfies Record<string, InternalJobHarnessBaseline>;
 
-export type InternalHarnessSwappableJobId = keyof typeof INTERNAL_JOB_HARNESS_BASELINES;
+/** Baselines declared by the private overlay manifest (`harnessBaselines`), keyed by job id. */
+function privateJobHarnessBaselines(): Record<string, InternalJobHarnessBaseline> {
+  return (getPrivateOverlay()?.manifest.harnessBaselines ?? {}) as Record<string, InternalJobHarnessBaseline>;
+}
+
+export const INTERNAL_JOB_HARNESS_BASELINES: Record<string, InternalJobHarnessBaseline> = {
+  ...PUBLIC_JOB_HARNESS_BASELINES,
+  ...privateJobHarnessBaselines(),
+};
+
+export type InternalHarnessSwappableJobId = string;
 
 export function getInternalJobHarnessBaseline(
   jobId: string,
 ): InternalJobHarnessBaseline | undefined {
-  return INTERNAL_JOB_HARNESS_BASELINES[jobId as InternalHarnessSwappableJobId];
+  return INTERNAL_JOB_HARNESS_BASELINES[jobId];
 }
 
 export function requireInternalJobHarnessBaseline(jobId: string): InternalJobHarnessBaseline {

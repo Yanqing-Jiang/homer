@@ -24,7 +24,11 @@ export interface ScheduledJobConfig {
   timeout?: number; // ms, defaults to 600000 (10 min)
   model?: string; // e.g. "sonnet", "haiku", "opus" - defaults to sonnet
   executor?: "claude" | "codex" | "kimi" | "gemini" | "opencode" | "internal"; // defaults to claude; opencode = GLM-5.2 edit harness; internal for daemon handlers
-  handler?: "bookmark_ingest" | "session_harvester" | "memory_embeddings" | "memory_reindex" | "weekly_consolidation" | "ideas_explore" | "nightly_memory" | "morning_review" | "nightly_code_push" | "db_backup" | "document_ingest" | "outcome_tracker" | "preference_updater" | "content_scraper" | "archive_verify" | "health_check" | "architecture_updater" | "daemon_cleanup" | "session_maintenance" | "reminder_check" | "link_processor" | "telegram_registry_cleanup" | "docker_restart" | "abvp_refresh" | "delta_upgrade_watch" | "job_scanner" | "freshness_escalation";
+  /**
+   * Internal handler key. The listed keys ship with the daemon; any other value is
+   * dispatched to the private overlay's handler table (see src/private-overlay.ts).
+   */
+  handler?: KnownInternalHandler | (string & {});
   contextFiles?: string[]; // files to load and inject as system prompt context
   streamProgress?: boolean; // stream tool usage to Telegram (default: false)
   notifyOnSuccess?: boolean; // defaults to true
@@ -41,6 +45,13 @@ export interface ScheduledJobConfig {
 /**
  * Registered job with runtime metadata
  */
+export type KnownInternalHandler =
+  | "bookmark_ingest" | "session_harvester" | "memory_embeddings" | "memory_reindex" | "weekly_consolidation"
+  | "ideas_explore" | "nightly_memory" | "morning_review" | "nightly_code_push" | "db_backup" | "document_ingest"
+  | "outcome_tracker" | "preference_updater" | "content_scraper" | "archive_verify" | "health_check"
+  | "architecture_updater" | "daemon_cleanup" | "session_maintenance" | "reminder_check" | "link_processor"
+  | "telegram_registry_cleanup" | "docker_restart";
+
 export interface RegisteredJob {
   config: ScheduledJobConfig;
   sourceFile: string;
@@ -68,6 +79,34 @@ export interface JobExecutionResult {
   fallbackUsed?: boolean;
   notificationIntent?: NotificationIntent;
   sideEffectDelivered?: boolean;
+  /**
+   * Third disposition beside success and failure. `deferred` means the job did not run
+   * to completion because a resource it needs was held; nothing is broken and nothing
+   * was produced. The scheduler records it as its own outcome and arms a one-shot
+   * re-fire at `retryAt`; it does not touch last_success_at or the failure counters,
+   * does not fire success dependencies, and does not enter failure takeover.
+   * Absent means "classify by `success`", which is every job except the first deferring producer today.
+   *
+   * `halted` is the fourth: the job refused to start work (a ceiling it enforces itself was
+   * reached, or it failed closed on state it will not trust). It is a failure for run history
+   * and notification, but NOT for the circuit breaker: the producer's own ceilings already
+   * stopped it, and a second uncoordinated stop (`consecutive_failures`) disabling the job
+   * would leave its armed retries inert and the next cadence unfired. Never touches
+   * `consecutive_failures`, never enters failure takeover.
+   */
+  outcome?: "deferred" | "halted";
+  /** ISO instant for the scheduler-owned one-shot re-fire. Required when outcome is "deferred". */
+  retryAt?: string;
+  /** Machine-actionable reason recorded beside the retry (e.g. `browser_leased:...`). */
+  retryReason?: string;
+  /**
+   * This fire opened a new unit of work (for a weekly portal pull: a fresh cadence slot), so failures before
+   * it belong to an earlier unit. A failure carrying this starts the streak at 1 instead of
+   * incrementing it; a deferral/halt carrying it resets the streak to 0. Without it three
+   * failed attempts one week plus the first failure of the next disabled the job at the
+   * breaker's threshold of five, and the third week's cron never fired.
+   */
+  resetFailureStreak?: boolean;
 }
 
 /**

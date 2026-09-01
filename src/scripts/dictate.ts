@@ -259,7 +259,7 @@ async function main(): Promise<void> {
     });
     log(`logged to ${file}`);
   } catch (e) {
-    // Never let a logging problem cost Yanqing the text.
+    // Never let a logging problem cost the user the text.
     log(`WARNING: could not append dictation log: ${errText(e)}`);
   }
 

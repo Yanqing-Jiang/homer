@@ -28,7 +28,7 @@ fi
 newer_source=""
 for source_path in src package.json tsconfig.json scripts/write-build-version.mjs; do
   if [ -e "$source_path" ]; then
-    newer_source="$(find "$source_path" -type f -newer dist/.build-version -print -quit)"
+    newer_source="$(find -L "$source_path" -type f -newer dist/.build-version -print -quit)"
     [ -n "$newer_source" ] && break
   fi
 done

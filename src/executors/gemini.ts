@@ -265,7 +265,7 @@ export async function executeGeminiAPI(
 
 /**
  * Route Flash text generation directly through Antigravity CLI (`agy`).
- * Single-account keychain auth (<owner-google-account>); rotation removed.
+ * Single-account keychain auth (OWNER_GOOGLE_ACCOUNT); rotation removed.
  *
  * Compatible return type with executeGeminiAPI for easy swapping.
  */

@@ -16,6 +16,7 @@
 
 // @ts-ignore
 import type Database from "better-sqlite3";
+import { OWNER } from "../config/owner.js";
 import { createHash, randomBytes } from "crypto";
 import { logger } from "../utils/logger.js";
 
@@ -368,7 +369,7 @@ function emitLessonOnDone(db: Database.Database, row: TodoRow): void {
     const id = `claim_${randomBytes(8).toString("hex")}`;
 
     // Passive tier ('candidate'): a todo-derived claim is assembled by this hook,
-    // not stated by Yanqing, so it stays searchable but never injectable. Only
+    // not stated by the owner, so it stays searchable but never injectable. Only
     // approved + user_explicit=1 rows reach memory_context.
     db.prepare(`
       INSERT INTO knowledge_claims (
@@ -397,13 +398,13 @@ function emitCommitmentIfP1(db: Database.Database, row: TodoRow): void {
     `).get(sourceUrl) as { id: string } | undefined;
     if (existing) return;
 
-    const content = `Yanqing committed to: ${row.title}. Priority: P1. Category: ${row.category === "W" ? "Work" : "Life"}. Todo: ${row.id}.`;
+    const content = `${OWNER.displayName} committed to: ${row.title}. Priority: P1. Category: ${row.category === "W" ? "Work" : "Life"}. Todo: ${row.id}.`;
     const targetFile = row.category === "W" ? "work" : "me";
     const contentHash = createHash("md5").update(`${content}\n${targetFile}\nTo-Dos`).digest("hex");
     const id = `claim_${randomBytes(8).toString("hex")}`;
 
     // Passive tier ('candidate'): a todo-derived claim is assembled by this hook,
-    // not stated by Yanqing, so it stays searchable but never injectable. Only
+    // not stated by the owner, so it stays searchable but never injectable. Only
     // approved + user_explicit=1 rows reach memory_context.
     db.prepare(`
       INSERT INTO knowledge_claims (

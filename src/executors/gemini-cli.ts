@@ -3,7 +3,8 @@
  *
  * Invokes `agy` directly against the single macOS Keychain OAuth entry
  * (service=gemini, account=antigravity). Multi-account rotation via
- * `agy-rotate` has been removed; the live account is <owner-google-account>.
+ * `agy-rotate` has been removed; the live account is OWNER_GOOGLE_ACCOUNT (or
+ * AGY_ACCOUNT_EMAIL) from the environment.
  *
  * Prompt delivery: pass `-p <prompt>` as an argv value. Current agy (1.1.7)
  * treats `-p -` as the literal prompt "-", so stdin piping is not used.
@@ -20,8 +21,8 @@ export const GEMINI_CLI_FLASH_MODEL = "gemini-3-flash-preview";
 export const GEMINI_CLI_PRO_MODEL = "gemini-3.1-pro-preview";
 export const PRO_TOKEN_SOFT_LIMIT = 800_000;
 
-/** Sole Antigravity account wired into the local keychain. */
-export const AGY_ACCOUNT_EMAIL = "<owner-google-account>";
+/** Sole Antigravity account wired into the local keychain (from the environment). */
+export const AGY_ACCOUNT_EMAIL = process.env.AGY_ACCOUNT_EMAIL?.trim() || process.env.OWNER_GOOGLE_ACCOUNT?.trim() || "";
 
 const AGY_MODEL_ALIASES: Record<string, string> = {
   [GEMINI_CLI_FLASH_MODEL]: "gemini-3.6-flash-high",

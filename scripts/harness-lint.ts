@@ -37,6 +37,9 @@ const BASELINE = new Set<string>([
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const e of readdirSync(dir)) {
+    // The private overlay (src/private, see src/private-overlay.ts) is operator code
+    // outside this repository's harness-independence gate.
+    if (dir === SRC && e === "private") continue;
     const p = join(dir, e);
     if (statSync(p).isDirectory()) walk(p, out);
     else if (p.endsWith(".ts")) out.push(p);

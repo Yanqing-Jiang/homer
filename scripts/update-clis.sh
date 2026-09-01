@@ -2,9 +2,9 @@
 # Auto-update CLI tools daily at 5:00 AM
 # Managed by: com.homer.cli-update.plist
 
-export PATH="/opt/homebrew/bin:/usr/local/bin:/Users/yj/.local/bin:$PATH"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 
-LOG="/Users/yj/homer/logs/cli-update.log"
+LOG="${HOMER_ROOT:-$HOME/homer}/logs/cli-update.log"
 exec >> "$LOG" 2>&1
 
 echo "=== CLI Update $(date '+%Y-%m-%d %H:%M:%S') ==="
@@ -32,6 +32,6 @@ echo "[kimi] $(kimi --version 2>/dev/null)"
 # Antigravity CLI (agy) — replaces retired Gemini CLI.
 # Standalone Mach-O binary at ~/.local/bin/agy; no package-manager auto-update.
 # Update manually by replacing the binary; this just reports the installed version.
-echo "[agy] $(/Users/yj/.local/bin/agy --version 2>/dev/null) (Antigravity CLI — manual update)"
+echo "[agy] $("$HOME/.local/bin/agy" --version 2>/dev/null) (Antigravity CLI — manual update)"
 
 echo "=== Done ==="

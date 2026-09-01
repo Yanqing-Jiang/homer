@@ -57,8 +57,8 @@ test("structurally classifies agent-browser daemon without prompt false positive
 
 test("artifact filename filter allows only agent-browser session control files", () => {
   for (const name of [
-    "homer-agent-abvp-81191736.sock",
-    "homer-agent-abvp-81191736.pid",
+    "homer-agent-portal-81191736.sock",
+    "homer-agent-portal-81191736.pid",
     "agent-browser-session-123.sock",
     "agent-browser-session-123.pid",
   ]) assert.equal(isAgentBrowserArtifactFilename(name), true, name);
@@ -66,7 +66,7 @@ test("artifact filename filter allows only agent-browser session control files",
   for (const name of [
     "after-send.png",
     "settings-snap.txt",
-    "homer-agent-abvp-81191736.png",
+    "homer-agent-portal-81191736.png",
     "homer-agent.sock.bak",
     "unrelated.sock",
     "../homer-agent-x.sock",

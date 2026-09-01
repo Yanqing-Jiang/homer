@@ -4,6 +4,12 @@
  *
  *   1. If the working tree has changes → `git add -A` + Codex-generated commit.
  *   2. If there are unpushed commits → `git push origin main` (with retries).
+ *
+ * The private overlay checkout (HOMER_PRIVATE_ROOT, see src/private-overlay.ts) is
+ * committed the same way but never pushed: it has no remote and must not get one.
+ * For the public repository, staged paths are checked against the overlay's link
+ * table and a deny-list before committing, so a .gitignore regression can never
+ * publish overlay files or symlinks.
  */
 
 import { execSync, spawn } from "child_process";
@@ -13,6 +19,7 @@ import type { Bot } from "grammy";
 import { logger } from "../../utils/logger.js";
 import type { StateManager } from "../../state/manager.js";
 import { PROJECT_DIR } from "../code-push-proposal.js";
+import { getPrivateOverlay } from "../../private-overlay.js";
 import type { RegisteredJob } from "../types.js";
 import { runInternalJobHarness } from "../executor.js";
 
@@ -23,12 +30,53 @@ const MAX_DIFF_CHARS = 12_000;
 interface CodePushRepo {
   name: string;
   dir: string;
+  /** false = commit locally only (no remote, never pushed) */
+  push: boolean;
+  /** true = refuse to commit overlay/private paths (the public shell repository) */
+  guardPrivatePaths: boolean;
 }
 
-const CODE_PUSH_REPOS: CodePushRepo[] = [
-  { name: "homer", dir: PROJECT_DIR },
-  { name: "homer-web", dir: process.env.HOMER_WEB_PROJECT_DIR ?? join(dirname(PROJECT_DIR), "homer-web") },
-];
+function codePushRepos(): CodePushRepo[] {
+  const repos: CodePushRepo[] = [
+    { name: "homer", dir: PROJECT_DIR, push: true, guardPrivatePaths: true },
+    { name: "homer-web", dir: process.env.HOMER_WEB_PROJECT_DIR ?? join(dirname(PROJECT_DIR), "homer-web"), push: true, guardPrivatePaths: false },
+  ];
+  const overlay = getPrivateOverlay();
+  if (overlay) repos.push({ name: "homer-private", dir: overlay.root, push: false, guardPrivatePaths: false });
+  return repos;
+}
+
+/**
+ * Paths that must never be committed to the public repository: every overlay link
+ * plus the structural private locations. Matched as path prefixes.
+ */
+function privatePathPrefixes(): string[] {
+  const prefixes = new Set<string>([
+    "src/private/", "tests/private/", "scripts/private/",
+    "skills/skills/", "skills/commands/", "skills/agents/", "skills/dist/",
+    "generated/", "run/", "tools/", "archive/",
+  ]);
+  for (const link of getPrivateOverlay()?.manifest.links ?? []) prefixes.add(link.link.replace(/\/+$/, ""));
+  return [...prefixes];
+}
+
+/** Return the staged paths that would publish private material (empty = safe). */
+export function findPrivateStagedPaths(stagedRaw: string, prefixes = privatePathPrefixes()): string[] {
+  const offenders: string[] = [];
+  for (const line of stagedRaw.split("\n")) {
+    if (!line.trim()) continue;
+    // `git diff --cached --raw` line: :<old mode> <new mode> <old sha> <new sha> <status>\t<path>
+    const match = line.match(/^:(\d{6}) (\d{6}) \S+ \S+ (\S+)\t(.+)$/);
+    if (!match) continue;
+    const newMode = match[2] ?? "";
+    const status = match[3] ?? "";
+    const file = match[4] ?? "";
+    if (!file || status.startsWith("D")) continue;
+    if (newMode === "120000") { offenders.push(`${file} (symlink)`); continue; }
+    if (prefixes.some((prefix) => file === prefix || file.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`))) offenders.push(file);
+  }
+  return offenders;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -226,6 +274,17 @@ async function runNightlyCodePushForRepo(repo: CodePushRepo, deps: CodePushDeps)
       logger.info({ fileCount: lines.length }, `${prefix} Staging + committing locally...`);
       execSync("git add -A", { cwd: repo.dir, timeout: 30_000 });
 
+      if (repo.guardPrivatePaths) {
+        const stagedRaw = execSync("git diff --cached --raw", { cwd: repo.dir, encoding: "utf-8", timeout: 10_000 });
+        const offenders = findPrivateStagedPaths(stagedRaw);
+        if (offenders.length > 0) {
+          execSync("git reset -q", { cwd: repo.dir, timeout: 30_000 });
+          const error = `refusing to commit private paths to the public repo: ${offenders.slice(0, 10).join(", ")}${offenders.length > 10 ? ` (+${offenders.length - 10} more)` : ""}`;
+          logger.error({ offenders }, `${prefix} ${error}`);
+          return { success: false, output: "", error };
+        }
+      }
+
       commitMsg = await generateCommitMessage(repo, date, lines.length, deps.job, deps.startedAt, deps.signal);
 
       execSync(`git commit -F -`, {
@@ -234,6 +293,10 @@ async function runNightlyCodePushForRepo(repo: CodePushRepo, deps: CodePushDeps)
         input: commitMsg,
       });
       logger.info(`${prefix} Committed locally: ${commitMsg.split("\n")[0]}`);
+    }
+
+    if (!repo.push) {
+      return { success: true, output: commitMsg ? `Committed locally (no remote): ${commitMsg.split("\n")[0]}` : "No changes to commit (local-only repo)" };
     }
 
     const unpushedRaw = execSync("git rev-list --count origin/main..HEAD", {
@@ -272,7 +335,7 @@ export async function runNightlyCodePush(deps: CodePushDeps = {}): Promise<{
   error?: string;
 }> {
   const results: Array<{ repo: CodePushRepo; success: boolean; output: string; error?: string }> = [];
-  for (const repo of CODE_PUSH_REPOS) {
+  for (const repo of codePushRepos()) {
     results.push({ repo, ...(await runNightlyCodePushForRepo(repo, deps)) });
   }
 

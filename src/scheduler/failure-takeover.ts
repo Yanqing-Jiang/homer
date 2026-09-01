@@ -9,6 +9,7 @@ import type { RegisteredJob, JobExecutionResult } from "./types.js";
 import type { StateManager } from "../state/manager.js";
 import type { Bot } from "grammy";
 import { PATHS } from "../config/paths.js";
+import { getPrivateOverlay } from "../private-overlay.js";
 
 // ============================================
 // Types
@@ -101,6 +102,9 @@ function resetDailyCountIfNeeded(): void {
 // ============================================
 
 const HANDLER_SOURCE_MAP: Record<string, string> = {
+  // Overlay handlers (src/private-overlay.ts) register their own source files
+  // through the manifest's job entries; see privateHandlerSourceMap() below.
+
   ideas_explore: "src/scheduler/jobs/ideas-explore.ts",
   nightly_memory: "src/scheduler/jobs/nightly-memory.ts",
   session_harvester: "src/scheduler/jobs/session-harvester.ts",
@@ -113,8 +117,16 @@ const HANDLER_SOURCE_MAP: Record<string, string> = {
   nightly_code_push: "src/scheduler/jobs/nightly-code-push.ts",
   db_backup: "src/scheduler/jobs/db-backup.ts",
   content_scraper: "src/scheduler/jobs/content-scraper.ts",
-  delta_upgrade_watch: "src/scheduler/jobs/delta-upgrade-watch.ts",
 };
+
+/** handler -> source file for jobs contributed by the private overlay manifest. */
+function privateHandlerSourceMap(): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const entry of getPrivateOverlay()?.manifest.jobs ?? []) {
+    if (entry.handler && entry.sourceFile) map[entry.handler] = entry.sourceFile;
+  }
+  return map;
+}
 
 // ============================================
 // Context gathering
@@ -137,7 +149,7 @@ function getRecentRuns(stateManager: StateManager, jobId: string): string {
 }
 
 function getHandlerSource(handler: string): string | null {
-  const relativePath = HANDLER_SOURCE_MAP[handler];
+  const relativePath = HANDLER_SOURCE_MAP[handler] ?? privateHandlerSourceMap()[handler];
   if (!relativePath) return null;
 
   const fullPath = join(PATHS.homerRoot, relativePath);

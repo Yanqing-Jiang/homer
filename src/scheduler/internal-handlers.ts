@@ -31,6 +31,8 @@ import { BROWSER_STATUS_PATH } from "../scraping/browser-control.js";
 import { checkAndFlushExpiringSessions } from "../memory/flush.js";
 import { config } from "../config/index.js";
 import { runInternalJobHarness } from "./executor.js";
+import { getPrivateJobHandler } from "../private-overlay.js";
+import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 interface InternalJobContext {
   stateManager: StateManager;
@@ -62,6 +64,10 @@ const HEALTH_ALERT_SEND_ATTEMPTS = 2;
 interface BuildResultOptions {
   notificationIntent?: NotificationIntent;
   sideEffectDelivered?: boolean;
+  outcome?: "deferred" | "halted";
+  retryAt?: string;
+  retryReason?: string;
+  resetFailureStreak?: boolean;
 }
 
 function toMillis(value: string | null | undefined): number | null {
@@ -277,6 +283,10 @@ function buildResult(
     duration: completedAt.getTime() - startedAt.getTime(),
     notificationIntent: options.notificationIntent,
     sideEffectDelivered: options.sideEffectDelivered,
+    outcome: options.outcome,
+    retryAt: options.retryAt,
+    retryReason: options.retryReason,
+    resetFailureStreak: options.resetFailureStreak,
   };
 }
 
@@ -350,8 +360,7 @@ async function runHealthCheck(
   }
 
   // Credential checks
-  // (Gmail credential check removed — job-hunt was archived/disabled and its
-  // token path /Users/yj/job-hunt/gmail/token.json no longer exists.)
+  // (Gmail credential check removed with the retired job-hunt subsystem.)
   const ghToken = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
   if (!ghToken) {
     issues.push("🟡 GitHub: GH_TOKEN not set");
@@ -903,80 +912,6 @@ async function runHandler(
           result.success ? { notificationIntent: "operational_status" } : {}
         );
       }
-      case "delta_upgrade_watch": {
-        const { runDeltaUpgradeWatch } = await import("./jobs/delta-upgrade-watch.js");
-        const result = await runDeltaUpgradeWatch(ctx.signal);
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          { notificationIntent: result.notificationIntent ?? (result.success ? "operational_status" : "failure_alert") },
-        );
-      }
-      case "abvp_refresh": {
-        const { runAbvpRefresh } = await import("./jobs/abvp-refresh.js");
-        const result = await runAbvpRefresh({
-          db: ctx.stateManager.getDb(),
-          bot: ctx.bot,
-          chatId: ctx.chatId,
-          jobRunId: ctx.jobRunId,
-          signal: ctx.signal,
-          job,
-          startedAt,
-        });
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          {
-            notificationIntent: result.notificationIntent,
-            sideEffectDelivered: result.sideEffectDelivered,
-          },
-        );
-      }
-      case "freshness_escalation": {
-        const { runFreshnessEscalation } = await import("./jobs/freshness-escalation.js");
-        const result = await runFreshnessEscalation({
-          db: ctx.stateManager.getDb(),
-          job,
-          startedAt,
-          jobRunId: ctx.jobRunId,
-          signal: ctx.signal,
-        });
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          { notificationIntent: result.notificationIntent },
-        );
-      }
-      case "job_scanner": {
-        const { runJobScanner } = await import("./jobs/[redacted].js");
-        const result = await runJobScanner({
-          stateManager: ctx.stateManager,
-          jobRunId: ctx.jobRunId,
-          signal: ctx.signal,
-          job,
-          startedAt,
-        });
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          {
-            notificationIntent: result.success ? "operational_status" : "failure_alert",
-            sideEffectDelivered: result.sideEffectDelivered,
-          },
-        );
-      }
       // idea_synthesizer and idea_expiry were deleted 2026-07-26 with the rest
       // of the idea subsystem. The scrapes corpus is the reading material now.
       case "link_processor": {
@@ -1064,14 +999,14 @@ async function runHandler(
       }
       case "docker_restart": {
         // Weekly restart of Docker Desktop to reclaim leaked engine memory, then
-        // bring yanqing.app backend containers back so portfolio-api stays reachable.
-        // Quitting Docker Desktop alone leaves portfolio-backend/redis down until a
-        // later monitor cycle (~4h), so this handler waits for the daemon and runs
-        // `docker compose up -d` before reporting success.
+        // bring the operator's compose stack back (HOMER_DOCKER_COMPOSE_DIR) so its
+        // services stay reachable. Quitting Docker Desktop alone leaves them down
+        // until a later monitor cycle, so this handler waits for the daemon and runs
+        // `docker compose up -d`, then polls HOMER_DOCKER_HEALTH_URL before reporting success.
         const exec = promisify(execFile);
-        const { getRuntimePaths } = await import("../utils/runtime-paths.js");
-        const portfolioDir = path.join(getRuntimePaths().homeDir, "portfolio");
-        const localHealth = "http://localhost:8100/health";
+        const composeDirRaw = process.env.HOMER_DOCKER_COMPOSE_DIR?.trim() ?? "";
+        const portfolioDir = composeDirRaw.startsWith("~/") ? path.join(getRuntimePaths().homeDir, composeDirRaw.slice(2)) : composeDirRaw;
+        const localHealth = process.env.HOMER_DOCKER_HEALTH_URL?.trim() ?? "";
         const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
         const dockerReady = async (): Promise<boolean> => {
           try {
@@ -1124,6 +1059,17 @@ async function runHandler(
           }
           steps.push("docker daemon ready");
 
+          if (!portfolioDir) {
+            return buildResult(
+              job,
+              startedAt,
+              true,
+              `Docker Desktop restarted (${steps.join(" → ")}); HOMER_DOCKER_COMPOSE_DIR unset, no compose stack to bring up`,
+              undefined,
+              { notificationIntent: "operational_status" },
+            );
+          }
+
           try {
             await exec("docker", ["compose", "up", "-d"], {
               cwd: portfolioDir,
@@ -1142,8 +1088,8 @@ async function runHandler(
             );
           }
 
-          const backendUp = await waitUntil(
-            "portfolio-backend health",
+          const backendUp = !localHealth || await waitUntil(
+            "compose stack health",
             () => healthOk(localHealth),
             24,
             5_000,
@@ -1158,13 +1104,13 @@ async function runHandler(
               { notificationIntent: "operational_status" },
             );
           }
-          steps.push("portfolio-backend healthy");
+          steps.push(localHealth ? "compose stack healthy" : "compose up (no health URL configured)");
 
           return buildResult(
             job,
             startedAt,
             true,
-            `Docker Desktop restarted; yanqing.app backend restored (${steps.join(" → ")})`,
+            `Docker Desktop restarted; compose stack restored (${steps.join(" → ")})`,
             undefined,
             { notificationIntent: "operational_status" },
           );
@@ -1293,6 +1239,31 @@ async function runHandler(
         );
       }
       default: {
+        // Handlers the daemon does not implement itself are served by the private
+        // overlay's handler table (src/private-overlay.ts). No overlay, no handler.
+        const handlerName = job.config.handler ?? "";
+        const privateHandler = handlerName ? await getPrivateJobHandler(handlerName) : undefined;
+        if (privateHandler) {
+          const result = await privateHandler({
+            handler: handlerName,
+            job,
+            startedAt,
+            db: ctx.stateManager.getDb(),
+            stateManager: ctx.stateManager,
+            bot: ctx.bot,
+            chatId: ctx.chatId,
+            jobRunId: ctx.jobRunId,
+            signal: ctx.signal,
+          });
+          return buildResult(job, startedAt, result.success, result.output, result.error, {
+            notificationIntent: result.notificationIntent,
+            sideEffectDelivered: result.sideEffectDelivered,
+            outcome: result.outcome,
+            retryAt: result.retryAt,
+            retryReason: result.retryReason,
+            resetFailureStreak: result.resetFailureStreak,
+          });
+        }
         return buildResult(job, startedAt, false, "", `Unknown internal handler: ${job.config.handler}`);
       }
     }

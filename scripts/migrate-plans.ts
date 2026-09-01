@@ -14,7 +14,7 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, copyFileSync } fr
 import { join, basename } from "path";
 import YAML from "yaml";
 
-const MEMORY_PATH = process.env.MEMORY_PATH ?? "/Users/yj/memory";
+const MEMORY_PATH = process.env.MEMORY_PATH ?? `${process.env.HOME ?? ""}/memory`;
 const PLANS_DIR = join(MEMORY_PATH, "plans");
 
 const dryRun = process.argv.includes("--dry-run");

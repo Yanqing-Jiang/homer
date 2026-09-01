@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS knowledge_claim_reviews (
   claim_id TEXT NOT NULL REFERENCES knowledge_claims(id),
   action TEXT NOT NULL
     CHECK(action IN ('promote','demote','archive','skip','edit','defer')),
-  actor TEXT NOT NULL DEFAULT 'yanqing',
+  actor TEXT NOT NULL DEFAULT 'owner',
   surface TEXT NOT NULL
     CHECK(surface IN ('morning','sunday','manual','auto','telegram')),
   reason TEXT,

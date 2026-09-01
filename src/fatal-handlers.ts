@@ -34,7 +34,7 @@ const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS ?? "30000",
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID ?? "";
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN ?? "";
 const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER ?? "";
-const YANQING_PHONE = process.env.OWNER_PHONE ?? "";
+const OWNER_PHONE = process.env.OWNER_PHONE ?? "";
 const SMS_MAX_LENGTH = 300;
 
 let exiting = false;
@@ -95,7 +95,7 @@ function sendSmsSyncViaCurl(message: string): void {
     spawnSync("curl", [
       "-s", "-X", "POST", url,
       "-u", auth,
-      "-d", `To=${encodeURIComponent(YANQING_PHONE)}`,
+      "-d", `To=${encodeURIComponent(OWNER_PHONE)}`,
       "-d", `From=${encodeURIComponent(TWILIO_PHONE_NUMBER)}`,
       "-d", `Body=${encodeURIComponent(body)}`,
     ], { timeout: 5000 });

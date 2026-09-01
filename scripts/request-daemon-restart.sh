@@ -35,7 +35,7 @@ if [[ ! "$supervisor_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$supervisor_pid" 2>/dev/n
 fi
 
 # A daemon restart cycles the browser broker and destroys every active
-# agent-browser lease mid-run (bit twice on 2026-08-18: an <portal-dataset> portal pull and
+# agent-browser lease mid-run (bit twice on 2026-08-18: a portal data pull and
 # a cross-session job-application flow). Refuse while any unexpired lease is
 # live; fail open if the broker itself cannot report (a restart may be the fix).
 if [[ "$FORCE" != "1" ]]; then

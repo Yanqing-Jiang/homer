@@ -39,7 +39,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "export PATH=\"$PWD/bin:$PATH\"; rm -rf dist && npx tsc && mkdir -p dist/state/migrations dist/executors/scrape-scripts && cp src/state/migrations/*.sql dist/state/migrations/ && cp src/executors/scrape-scripts/*.js dist/executors/scrape-scripts/ && node scripts/write-build-version.mjs",
+    "build": "export PATH=\"$PWD/bin:$PATH\"; node scripts/private-overlay.mjs link --if-present && rm -rf dist && npx tsc && mkdir -p dist/state/migrations dist/executors/scrape-scripts && cp src/state/migrations/*.sql dist/state/migrations/ && if [ -d src/private/state/migrations ]; then cp src/private/state/migrations/*.sql dist/state/migrations/; fi && cp src/executors/scrape-scripts/*.js dist/executors/scrape-scripts/ && node scripts/write-build-version.mjs",
     "skills:render": "tsx scripts/render-harness-assets.ts render",
     "skills:check": "tsx scripts/render-harness-assets.ts check",
     "skills:install": "tsx scripts/render-harness-assets.ts render --install",
@@ -49,11 +49,11 @@
     "test": "npm run check && npm run test:cdp",
     "test:cdp": "tsx --test tests/chrome-cdp-migration.test.ts",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts",
+    "dev": "NODE_OPTIONS=--preserve-symlinks tsx src/index.ts",
     "tui": "tsx src/tui/index.ts",
     "mcp": "tsx src/mcp/index.ts",
-    "bridge:public": "tsx src/public-bridge/index.ts",
-    "test:public-bridge": "tsx --test tests/public-bridge/*.test.ts",
+    "private:link": "node scripts/private-overlay.mjs link",
+    "private:status": "node scripts/private-overlay.mjs status",
     "typecheck": "npx tsc --noEmit",
     "backup:drill": "tsx src/scripts/backup-restore-drill.ts",
     "migrate": "tsx scripts/run-migrations.ts",

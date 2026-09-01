@@ -1,4 +1,4 @@
--- ⛔ HELD — NOT REGISTERED, NOT APPLIED. Requires Yanqing's explicit go.
+-- ⛔ HELD — NOT REGISTERED, NOT APPLIED. Requires the owner's explicit go.
 --
 -- Phase 3 of the memory + ideas streamline: drop the retired idea subsystem.
 -- Everything in these tables is already archived in
@@ -7,7 +7,7 @@
 -- / 350 packet_scrapes links, content_hash
 -- cae3cc19a61c62c7625fea4820235ca483ef25aee2fe4ae643c446fbce576566.
 --
--- HOW TO APPLY (only after Yanqing confirms the archive verification counts):
+-- HOW TO APPLY (only after the owner confirms the archive verification counts):
 --   mv src/state/migrations/pending/116_drop_idea_tables.sql.hold \
 --      src/state/migrations/116_drop_idea_tables.sql
 --   npm run migrate && npm run build && npm run restart

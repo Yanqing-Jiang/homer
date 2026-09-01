@@ -8,6 +8,7 @@
 
 import { fileURLToPath } from "url";
 import { dirname, resolve } from "path";
+import { existsSync, readFileSync } from "fs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, "..");
@@ -39,6 +40,19 @@ const modules = [
   "dist/scraping/scrape-store.js",
   "dist/feedback/events.js",
 ];
+
+// Modules contributed by the private overlay (see src/private-overlay.ts).
+try {
+  const manifestPath = resolve(process.env.HOMER_PRIVATE_ROOT || resolve(root, "..", "homer-private"), "homer-overlay.json");
+  if (process.env.HOMER_PRIVATE_ROOT !== "" && existsSync(manifestPath)) {
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    for (const rel of manifest.smokeModules ?? []) modules.push(`dist/private/${rel}`);
+    console.log(`  (overlay) ${manifestPath}: ${manifest.smokeModules?.length ?? 0} module(s)`);
+  }
+} catch (err) {
+  console.error(`  FAIL  private overlay manifest: ${err.message}`);
+  process.exit(1);
+}
 
 let failed = 0;
 

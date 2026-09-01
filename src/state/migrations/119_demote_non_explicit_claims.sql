@@ -1,5 +1,5 @@
 -- Trust-boundary repair: the two-tier model says the proactive (injectable) tier
--- is exactly "Yanqing stated it himself or explicitly promoted it". Status was
+-- is exactly "the owner stated it themselves or explicitly promoted it". Status was
 -- never that gate: 213 rows reached status='approved' with user_explicit=0 via
 -- backfill, nightly extraction, tool-side promotion, todo/lesson hooks and weekly
 -- consolidation. They were labelled approved, ranked at approved weight, self-

@@ -327,7 +327,7 @@ export const residentChromeSupervisor = new ResidentChromeSupervisor({
     // the query-competitor collector 2026-08-27: an in-page setTimeout pacing gate
     // asking for 1250ms between requests delivered ~1.02x right after navigation,
     // 2.26x one batch later, then 3.49x — the collector was offering ~0.23 req/s
-    // against a server allowance near 0.89, and the decay looked like Amazon
+    // against a server allowance near 0.89, and the decay looked like server-side
     // throttling when it was self-inflicted. Any long-running agent page paced from
     // JS has the same problem, so this belongs on the resident browser.
     "--disable-background-timer-throttling",

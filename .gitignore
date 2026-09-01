@@ -8,6 +8,8 @@ build/
 .env.local
 .env.production
 .env.*.local
+.env.bak*
+.env.*.bak
 
 # Credentials by filename (defence in depth — never commit these)
 *.pem
@@ -29,13 +31,37 @@ logs/
 uploads/
 night_mode/
 output/
+/run
+/homer.db
 
-# config/ — specific sensitive subdirs only. The rest of config/ (notably
-# config/com.homer.daemon.plist.template) DOES ship so the installer works
-# on a fresh clone. Real secrets live in .env, never in tracked config files.
-config/auth/
-config/codesign/
-config/.DS_Store
+# ---------------------------------------------------------------------------
+# Private overlay (see src/private-overlay.ts and scripts/private-overlay.mjs).
+# Operator-specific code is linked into these locations from a separate,
+# unpublished checkout. Rules are structural on purpose: a fresh link can never
+# become trackable by name, and nightly-code-push refuses these paths as well.
+# ---------------------------------------------------------------------------
+/src/private
+/tests/private
+/scripts/private
+# bin/ is allow-listed: only the generic tools ship; everything else (managed
+# Node runtime, operator bins, caches) stays local.
+/bin/*
+!/bin/browserctl
+!/bin/tmux
+# skills/: only the alias table and layout docs ship. Skills, commands, agents
+# and rendered views are generated per operator (see README "Skills").
+/skills/skills
+/skills/commands
+/skills/agents
+/skills/dist
+/generated
+# config/: only placeholder templates and the pinned runtime manifest ship.
+/config/*
+!/config/*.template
+!/config/*.example
+!/config/node-runtime.env
+/tools
+/archive
 
 # Documentation & non-code files (user rule: no docs in nightly push)
 *.md
@@ -59,12 +85,6 @@ AGENTS.md
 # Skill definitions — never publish, even if the *.md rule above is ever narrowed
 **/skill.md
 **/SKILL.md
-# [redacted] login skills: whole dirs (their config.json describes the
-# keychain + Telegram-MFA login workflow and must not ship either)
-skills/skills/vc-login/
-skills/skills/amc-login/
-generated/harness/*/skills/vc-login/
-generated/harness/*/skills/amc-login/
 
 # Browser profiles
 profiles/
@@ -73,6 +93,7 @@ profiles/
 backups/
 *.backup.*
 *.bak
+*.bak-*
 *.backup
 *.db
 *.db-journal
@@ -82,9 +103,9 @@ backups/
 *.sqlite
 *.sqlite3
 
-# Binary blobs (use scripts/update-node-runtime.sh to install locally)
-bin/node
-bin/node.prev
+# Python bytecode
+__pycache__/
+*.pyc
 
 # OS files
 .DS_Store
@@ -107,6 +128,12 @@ _inspect_*.py
 tmpclaude-*/
 .traces/
 scratch/
+/tmp/
+/assets/
+/youtube-venv/
+/~/
+opencode.json
+.w37*
 
 # Test artifacts (tests themselves are not tracked in this public repo)
 coverage/
@@ -178,17 +205,4 @@ workspaces/
 /src/state/migrations/081_wedding_rsvps.sql
 /src/state/migrations/089_outbound_call_intents.sql
 /src/state/migrations/096_drop_idea_index.sql
-.env.bak*
-.env.*.bak
-/archive/
 /src/scripts/ranking-eval-golden.json
-
-# [redacted] / <employer> report and [redacted]s live outside the homer project (ruled 2026-09-01).
-skills/skills/vc-query-competitors/
-skills/skills/b4-report/
-skills/skills/tailor-resume/
-skills/skills/auto-apply/
-generated/harness/*/skills/vc-query-competitors/
-generated/harness/*/skills/b4-report/
-generated/harness/*/skills/tailor-resume/
-generated/harness/*/skills/auto-apply/

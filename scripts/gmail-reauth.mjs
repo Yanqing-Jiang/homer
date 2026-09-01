@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
- * One-command Gmail OAuth re-auth for the <owner-google-account> sender.
+ * One-command Gmail OAuth re-auth for the configured sender account
+ * (GMAIL_REAUTH_LOGIN_HINT, falling back to OWNER_GOOGLE_ACCOUNT).
  *
  * Reuses the installed-app client in ~/.gmail-mcp/gcp-oauth.keys.json,
  * opens the consent URL in the default browser, catches the redirect on
  * localhost, and rewrites ~/.gmail-mcp/credentials.json in the same shape
- * the gmail-mcp connector and the portfolio booking backend expect.
+ * the gmail-mcp connector and other consumers of that file expect.
  *
- * IMPORTANT: sign in as <owner-google-account> in the consent screen.
+ * IMPORTANT: sign in as that account in the consent screen.
  * If the OAuth client is still in "Testing" publishing status, the new
  * refresh token dies in 7 days — publish it to production first
  * (Google Cloud Console → APIs & Services → OAuth consent screen → Publish).
@@ -19,6 +20,7 @@ import { join } from "node:path";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 
+const LOGIN_HINT = process.env.GMAIL_REAUTH_LOGIN_HINT ?? process.env.OWNER_GOOGLE_ACCOUNT ?? "";
 const KEYS_PATH = join(homedir(), ".gmail-mcp", "gcp-oauth.keys.json");
 const CREDS_PATH = join(homedir(), ".gmail-mcp", "credentials.json");
 const PORT = 8765;
@@ -37,7 +39,7 @@ const authUrl =
     scope: SCOPES,
     access_type: "offline",
     prompt: "consent",
-    login_hint: "<owner-google-account>",
+    login_hint: LOGIN_HINT,
   }).toString();
 
 const server = createServer(async (req, res) => {
@@ -84,7 +86,7 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log("Opening Google consent screen (sign in as <owner-google-account>)...");
+  console.log(`Opening Google consent screen (sign in as ${LOGIN_HINT || "the sender account"})...`);
   console.log(`If the browser does not open, visit:\n${authUrl}`);
   execFile("open", [authUrl]);
 });

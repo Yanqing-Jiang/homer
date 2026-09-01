@@ -15,6 +15,7 @@
  */
 
 import { randomUUID } from "crypto";
+import { OWNER } from "../../config/owner.js";
 import { saveTodo, getTodo, listTodos, type SaveTodoInput, type TodoFilter, type TodoRow } from "../../todos/dao.js";
 import type { ToolResult, ToolDeps, ToolDefinition } from "./types.js";
 
@@ -171,6 +172,6 @@ function buildTodoContext(t: TodoRow): string {
   if (t.notes && t.notes.length > 0) {
     parts.push("## Notes", "", t.notes, "");
   }
-  parts.push("---", "You are helping Yanqing work through this to-do. Stay focused on what it asks.");
+  parts.push("---", `You are helping ${OWNER.displayName} work through this to-do. Stay focused on what it asks.`);
   return parts.join("\n");
 }

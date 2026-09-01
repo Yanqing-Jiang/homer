@@ -2,7 +2,7 @@
  * Morning Review Orchestrator — "things awaiting your decision".
  *
  * Phase 4 (2026-07-26) removed memory review from this surface entirely: extracted
- * claims now land in a trust tier automatically (active if Yanqing said it, passive
+ * claims now land in a trust tier automatically (active if the owner said it, passive
  * otherwise) and are never queued for a human. What remains is work that genuinely
  * cannot be auto-applied — file cleanup proposals and skill drafts. Code-push
  * approvals keep their own flow in code-push-approval.ts.
@@ -83,7 +83,7 @@ function escapeHtml(s: string): string {
 /**
  * Send the morning review: cleanup proposals + skill drafts awaiting a decision.
  * Listed inline with their claim IDs — there is no review UI left to link to, so
- * the message has to carry enough for Yanqing to act on it in chat.
+ * the message has to carry enough for the owner to act on it in chat.
  */
 export async function sendMorningReview(
   bot: Bot,

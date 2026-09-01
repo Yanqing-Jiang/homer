@@ -74,7 +74,7 @@ test("URL enumeration can return a target that disappears before WebSocket attac
     response.end(JSON.stringify([{
       id: activeTarget,
       type: "page",
-      url: "https://<ads-portal-host>/",
+      url: "https://portal.example.test/",
       webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/${activeTarget}`,
     }]));
     activeTarget = "page-b";
@@ -138,14 +138,14 @@ test("agent-browser binding hazard: independent processes contend on default.soc
   await mkdir(join(home, ".agent-browser"));
   const env = { ...process.env, HOME: home };
   const first = spawn(process.execPath, ["-e", fakeAgentBrowser], {
-    env: { ...env, AGENT_BROWSER_SESSION: "amazon-vc" }, stdio: ["ignore", "pipe", "pipe"],
+    env: { ...env, AGENT_BROWSER_SESSION: "portal-alpha" }, stdio: ["ignore", "pipe", "pipe"],
   });
   try {
     const firstResult = await readLine(first);
     assert.equal(firstResult.state, "listening");
 
     const second = spawn(process.execPath, ["-e", fakeAgentBrowser], {
-      env: { ...env, AGENT_BROWSER_SESSION: "amazon-amc" }, stdio: ["ignore", "pipe", "pipe"],
+      env: { ...env, AGENT_BROWSER_SESSION: "portal-beta" }, stdio: ["ignore", "pipe", "pipe"],
     });
     const secondResult = await readLine(second);
     assert.notEqual(secondResult.session, firstResult.session);
@@ -486,29 +486,29 @@ test("cross-process leases exclude same surface, allow different surfaces, and r
   try {
     assert.equal((await stat(dir)).mode & 0o777, 0o700);
     assert.equal((await stat(socketPath)).mode & 0o777, 0o600);
-    for (const surface of ["amazon.vc", "amazon.amc"]) {
+    for (const surface of ["portal.alpha", "portal.beta"]) {
       const result = await runBrowserctl(socketPath, "reconcile", surface, "https://example.test", "https://example.test/bootstrap");
       assert.equal(result.code, 0, result.stderr);
     }
     const contenders = await Promise.all([
-      runBrowserctl(socketPath, "acquire", "amazon.vc", "process-one", "5"),
-      runBrowserctl(socketPath, "acquire", "amazon.vc", "process-two", "5"),
+      runBrowserctl(socketPath, "acquire", "portal.alpha", "process-one", "5"),
+      runBrowserctl(socketPath, "acquire", "portal.alpha", "process-two", "5"),
     ]);
     const vc1 = contenders.find((result) => result.code === 0)!;
     const vc2 = contenders.find((result) => result.code === 1)!;
     assert.ok(vc1);
     assert.ok(vc2);
     assert.match(vc2.stderr, /leased by process-(one|two)/);
-    const amc = await runBrowserctl(socketPath, "acquire", "amazon.amc", "process-three", "5");
+    const amc = await runBrowserctl(socketPath, "acquire", "portal.beta", "process-three", "5");
     assert.equal(amc.code, 0, amc.stderr);
     assert.equal(JSON.parse(amc.stdout).generation, 41);
     const lease = JSON.parse(vc1.stdout).leaseId as string;
     assert.equal((await runBrowserctl(socketPath, "release", lease)).code, 0);
 
-    const short = await runBrowserctl(socketPath, "acquire", "amazon.vc", "crashed-process", "0.1");
+    const short = await runBrowserctl(socketPath, "acquire", "portal.alpha", "crashed-process", "0.1");
     assert.equal(short.code, 0, short.stderr);
     await new Promise((resolve) => setTimeout(resolve, 150));
-    const recovered = await runBrowserctl(socketPath, "acquire", "amazon.vc", "recovery-process", "5");
+    const recovered = await runBrowserctl(socketPath, "acquire", "portal.alpha", "recovery-process", "5");
     assert.equal(recovered.code, 0, recovered.stderr);
     console.log("cross-process: same-surface=excluded different-surface=concurrent expired-lease=recovered");
   } finally {
@@ -529,8 +529,8 @@ test("restart generation invalidates prior targets and leases across processes",
   const socketPath = join(dir, "control.sock");
   let broker = await startBroker(socketPath, 7);
   try {
-    assert.equal((await runBrowserctl(socketPath, "reconcile", "amazon.vc", "https://example.test", "https://example.test/")).code, 0);
-    const acquired = await runBrowserctl(socketPath, "acquire", "amazon.vc", "generation-seven", "30");
+    assert.equal((await runBrowserctl(socketPath, "reconcile", "portal.alpha", "https://example.test", "https://example.test/")).code, 0);
+    const acquired = await runBrowserctl(socketPath, "acquire", "portal.alpha", "generation-seven", "30");
     assert.equal(acquired.code, 0, acquired.stderr);
     const old = JSON.parse(acquired.stdout);
     await stopBroker(broker);
@@ -611,9 +611,9 @@ test("agent-browser degradation does not block exact-target reconcile and acquir
   const broker = new BrowserLeaseBroker(client);
   broker.beginGeneration(10);
   broker.setDegraded("named-session binding mismatch");
-  const reconciled = await broker.reconcile("amazon.vc", ["https://example.test"], "https://example.test/bootstrap");
+  const reconciled = await broker.reconcile("portal.alpha", ["https://example.test"], "https://example.test/bootstrap");
   assert.equal(reconciled.targetId, "direct-1");
-  const acquired = await broker.acquire("amazon.vc", "direct-client", 30) as { targetId: string; webSocketDebuggerUrl: string };
+  const acquired = await broker.acquire("portal.alpha", "direct-client", 30) as { targetId: string; webSocketDebuggerUrl: string };
   assert.equal(acquired.targetId, "direct-1");
   assert.equal(acquired.webSocketDebuggerUrl, "ws://test/direct-1");
 });
@@ -627,7 +627,7 @@ test("touch scheduler bounds independent jitter and backs off exponentially", ()
 
 test("touch scheduler skips leases, recent human activity, and active backoff", () => {
   const now = 1_000_000_000;
-  const record = { surface: "amazon.vc", generation: 1, targetId: "vc", expectedOrigins: ["https://example.test"], currentUrl: "https://example.test", lastVerifiedUrl: "https://example.test", owner: null, leaseId: null, leaseExpiresAt: null, lastActivityAt: 0 };
+  const record = { surface: "portal.alpha", generation: 1, targetId: "vc", expectedOrigins: ["https://example.test"], currentUrl: "https://example.test", lastVerifiedUrl: "https://example.test", owner: null, leaseId: null, leaseExpiresAt: null, lastActivityAt: 0 };
   assert.match(stewardshipSkip({ ...record, owner: "collector", leaseId: "lease" }, null, now, 0)!, /leased/);
   assert.match(stewardshipSkip(record, now - 29 * 60_000, now, 0)!, /human activity/);
   assert.match(stewardshipSkip(record, null, now, now + 1)!, /backoff/);
@@ -650,10 +650,10 @@ test("browserctl status applies 90-second service and 8-hour surface staleness",
   const now = Date.now();
   const status: ChromeStatus = { schema: 1, updatedAt: new Date(now).toISOString(), generation: 3, supervisorPid: 1, chromePid: 2,
     profilePath: "/profile", cdp: { state: "ready", pages: 2, restartCount: 0, reason: null }, maintenance: { enabled: false, reason: null },
-    surfaces: { "amazon.vc": { state: "authenticated", lastProbeAt: new Date(now - 7 * 60 * 60_000).toISOString(), lastOkAt: null, lastTouchAt: null, reason: null, targetId: "vc", lease: null } } };
+    surfaces: { "portal.alpha": { state: "authenticated", lastProbeAt: new Date(now - 7 * 60 * 60_000).toISOString(), lastOkAt: null, lastTouchAt: null, reason: null, targetId: "vc", lease: null } } };
   try {
     writeStatusAtomic(path, status);
-    const healthy = await runBrowserctlStatus(path, "amazon.vc");
+    const healthy = await runBrowserctlStatus(path, "portal.alpha");
     assert.equal(healthy.code, 0, healthy.stderr);
     assert.equal(JSON.parse(healthy.stdout).state, "healthy");
 
@@ -664,9 +664,9 @@ test("browserctl status applies 90-second service and 8-hour surface staleness",
     assert.match(JSON.parse(staleService.stdout).reasons.join(" "), /> 90s/);
 
     status.updatedAt = new Date(now).toISOString();
-    status.surfaces["amazon.vc"]!.lastProbeAt = new Date(now - (8 * 60 * 60_000 + 1_000)).toISOString();
+    status.surfaces["portal.alpha"]!.lastProbeAt = new Date(now - (8 * 60 * 60_000 + 1_000)).toISOString();
     writeStatusAtomic(path, status);
-    const staleSurface = await runBrowserctlStatus(path, "amazon.vc");
+    const staleSurface = await runBrowserctlStatus(path, "portal.alpha");
     assert.equal(staleSurface.code, 1);
     assert.match(JSON.parse(staleSurface.stdout).reasons.join(" "), /> 8h/);
   } finally { await rm(dir, { recursive: true, force: true }); }

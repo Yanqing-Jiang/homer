@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_DIR="${APP_DIR:-/Users/yj/Applications/Homer.app}"
+APP_DIR="${APP_DIR:-$HOME/Applications/Homer.app}"
 HOMER_BIN="$APP_DIR/Contents/MacOS/Homer"
 SERVICE_LABEL="${SERVICE_LABEL:-com.homer.daemon}"
 LEGACY_PLIST="${LEGACY_PLIST:-$HOME/Library/LaunchAgents/com.homer.daemon.plist}"

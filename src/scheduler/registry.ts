@@ -6,6 +6,10 @@
  *   2. `src/scheduler/jobs/*.ts`         — handler files
  *   3. `src/scheduler/internal-handlers.ts` — switch/case on handler name
  *
+ * A private overlay (src/private-overlay.ts) may contribute further entries
+ * through its manifest; they are merged into JOB_REGISTRY below and their
+ * handler files are expected under src/private/scheduler/jobs/.
+ *
  * They drift. This module declares one authoritative registry and validates it
  * against the three sources at daemon startup. On mismatch we emit a structured
  * warning so the drift is visible instead of silent.
@@ -15,9 +19,10 @@
  * surfacing drift, not enforcing perfection on first run.
  */
 
-import { readdirSync } from "fs";
+import { existsSync, readdirSync } from "fs";
 import { resolve } from "path";
 import { logger } from "../utils/logger.js";
+import { getPrivateOverlay } from "../private-overlay.js";
 
 // ── Entry types ─────────────────────────────────────────────
 
@@ -49,6 +54,8 @@ export interface JobEntry {
   expectedInSchedule: boolean;
   /** Short free-text note explaining quirks (aliasing, disabled rationale, etc.) */
   note?: string;
+  /** Source file (relative to the repo root) for failure-takeover diagnostics. */
+  sourceFile?: string;
 }
 
 // ── Registry ─────────────────────────────────────────────────
@@ -58,14 +65,11 @@ export interface JobEntry {
  * Handler file name is derived from id unless noted.
  */
 const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
-  { id: "abvp-refresh", name: "<portal-dataset> + Search Rank Weekly Refresh", kind: "internal", handler: "abvp_refresh", handlerFile: "abvp-refresh", expectedInSchedule: true, note: "Tue 7 AM cadence + next_due_at weekly (SR weekly, Brand/ASIN fortnightly via dedupe); 28-day portal window" },
   { id: "archive-verify", name: "Archive Verify", kind: "internal", handler: "archive_verify", handlerFile: "archive-verify", expectedInSchedule: true },
   { id: "content-scraper", name: "Content Scraper", kind: "internal", handler: "content_scraper", handlerFile: "content-scraper", expectedInSchedule: true },
   { id: "db-backup", name: "DB Backup", kind: "internal", handler: "db_backup", handlerFile: "db-backup", expectedInSchedule: true },
   { id: "document-ingest", name: "Document Ingest", kind: "internal", handler: "document_ingest", handlerFile: "document-ingest", expectedInSchedule: true, note: "every 15 min; also called inline at the start of link-processor" },
-  { id: "freshness-escalation", name: "Amazon Freshness Escalation", kind: "internal", handler: "freshness_escalation", handlerFile: "freshness-escalation", expectedInSchedule: true, note: "hourly exception-only remediation; deterministic alert_state gate, at most one Opus-high dispatch per tick" },
   { id: "ideas-explore", name: "Ideas Explore", kind: "internal", handler: "ideas_explore", handlerFile: "ideas-explore", expectedInSchedule: true },
-  { id: "[redacted]", name: "Job Scanner", kind: "internal", handler: "job_scanner", handlerFile: "[redacted]", expectedInSchedule: true, note: "discover→verify→rank; scans 3x/day, one daily midday top-10 digest email to <owner-email>; management roles only; notify-only, no auto-apply" },
   { id: "link-processor", name: "Link Processor", kind: "internal", handler: "link_processor", handlerFile: "link-processor", expectedInSchedule: true },
   { id: "memory-embeddings", name: "Memory Embeddings", kind: "internal", handler: "memory_embeddings", handlerFile: "memory-embeddings", expectedInSchedule: true, note: "event-triggered; cron is safety net" },
   { id: "memory-reindex", name: "Memory Search Reindex", kind: "internal", handler: "memory_reindex", handlerFile: "memory-reindex", expectedInSchedule: true, note: "DB documents + allow-listed files; event-triggered, cron is safety net" },
@@ -89,7 +93,7 @@ const SCHEDULED_WITH_ALIASED_HANDLER_FILE: JobEntry[] = [
  */
 const SCHEDULED_INLINE_ONLY: JobEntry[] = [
   { id: "daemon-cleanup", name: "Daemon Cleanup", kind: "internal", handler: "daemon_cleanup", expectedInSchedule: true },
-  { id: "docker-restart-weekly", name: "Weekly Docker Desktop Restart", kind: "internal", handler: "docker_restart", expectedInSchedule: true, note: "Tue 5 AM — restarts Docker Desktop, then compose-up ~/ai-portfolio and wait for portfolio-backend health" },
+  { id: "docker-restart-weekly", name: "Weekly Docker Desktop Restart", kind: "internal", handler: "docker_restart", expectedInSchedule: true, note: "Tue 5 AM — restarts Docker Desktop, then compose-up HOMER_DOCKER_COMPOSE_DIR (when set) and waits for HOMER_DOCKER_HEALTH_URL" },
   { id: "health-check", name: "Health Check", kind: "internal", handler: "health_check", expectedInSchedule: true },
   { id: "bookmark-ingest", name: "Bookmark Ingest", kind: "internal", handler: "bookmark_ingest", expectedInSchedule: true },
   { id: "morning-review", name: "Morning Review", kind: "internal", handler: "morning_review", expectedInSchedule: true },
@@ -101,7 +105,6 @@ const SCHEDULED_INLINE_ONLY: JobEntry[] = [
  * Jobs dispatched via external CLI (no internal handler needed).
  */
 const SCHEDULED_CLI_JOBS: JobEntry[] = [
-  { id: "delta-upgrade-watch", name: "Delta D1 Upgrade Watch", kind: "cli", handler: "claude", handlerFile: "delta-upgrade-watch", expectedInSchedule: true, note: "4:05 AM PT CLI skill before morning-brief; module at jobs/delta-upgrade-watch.ts remains the preferred deterministic path" },
   { id: "morning-brief", name: "Morning Brief", kind: "cli", handler: "claude", expectedInSchedule: true },
   { id: "morning-reads", name: "Morning Reads", kind: "cli", handler: "claude", expectedInSchedule: true },
   { id: "home-cleanup", name: "Home Cleanup", kind: "cli", handler: "claude", expectedInSchedule: true },
@@ -117,12 +120,18 @@ const UNSCHEDULED_HANDLER_FILES: JobEntry[] = [
   { id: "artifact-store", name: "Artifact Store (helper)", kind: "helper", handlerFile: "artifact-store", expectedInSchedule: false, note: "helper module, NOT a job — retire from portfolio vocabulary in Phase 4" },
 ];
 
+/** Entries contributed by the private overlay manifest (empty without an overlay). */
+function privateJobEntries(): JobEntry[] {
+  return (getPrivateOverlay()?.manifest.jobs ?? []).map((entry) => ({ ...entry }));
+}
+
 export const JOB_REGISTRY: readonly JobEntry[] = Object.freeze([
   ...SCHEDULED_WITH_HANDLER_FILE,
   ...SCHEDULED_WITH_ALIASED_HANDLER_FILE,
   ...SCHEDULED_INLINE_ONLY,
   ...SCHEDULED_CLI_JOBS,
   ...UNSCHEDULED_HANDLER_FILES,
+  ...privateJobEntries(),
 ]);
 
 // ── Lookup helpers ──────────────────────────────────────────
@@ -168,17 +177,23 @@ export function validateRegistry(opts: {
   // Pull handler files from jobs dir. Accept `<name>.ts` (dev) or `<name>.js`
   // (prod — daemon runs from dist/scheduler/jobs/). Explicitly exclude
   // declaration files, source maps, tests, and dotfiles.
+  // The private overlay's handler files sit beside ours under private/scheduler/jobs
+  // (src/ or dist/ layout is identical), so scan that directory too when it exists.
+  const privateJobsDir = resolve(opts.jobsDir, "..", "..", "private", "scheduler", "jobs");
+  const jobsDirs = existsSync(privateJobsDir) ? [opts.jobsDir, privateJobsDir] : [opts.jobsDir];
   let handlerFiles: Set<string> = new Set();
-  try {
-    for (const f of readdirSync(opts.jobsDir)) {
-      if (f.startsWith(".")) continue;
-      if (f.endsWith(".d.ts") || f.endsWith(".d.ts.map") || f.endsWith(".js.map")) continue;
-      if (f.endsWith(".test.ts") || f.endsWith(".test.js")) continue;
-      if (f.endsWith(".ts")) handlerFiles.add(f.replace(/\.ts$/, ""));
-      else if (f.endsWith(".js")) handlerFiles.add(f.replace(/\.js$/, ""));
+  for (const dir of jobsDirs) {
+    try {
+      for (const f of readdirSync(dir)) {
+        if (f.startsWith(".")) continue;
+        if (f.endsWith(".d.ts") || f.endsWith(".d.ts.map") || f.endsWith(".js.map")) continue;
+        if (f.endsWith(".test.ts") || f.endsWith(".test.js")) continue;
+        if (f.endsWith(".ts")) handlerFiles.add(f.replace(/\.ts$/, ""));
+        else if (f.endsWith(".js")) handlerFiles.add(f.replace(/\.js$/, ""));
+      }
+    } catch (err) {
+      logger.warn({ err, path: dir }, "Registry validator: could not list jobs dir");
     }
-  } catch (err) {
-    logger.warn({ err, path: opts.jobsDir }, "Registry validator: could not list jobs dir");
   }
 
   const registryIds = new Set(JOB_REGISTRY.map((e) => e.id));

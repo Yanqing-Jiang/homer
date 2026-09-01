@@ -20,4 +20,4 @@ fi
 
 # Export the token and run Claude
 export CLAUDE_CODE_OAUTH_TOKEN="$ACCESS_TOKEN"
-exec /Users/yj/.local/bin/claude "$@"
+exec "${CLAUDE_BIN:-$HOME/.local/bin/claude}" "$@"

@@ -1,19 +1,20 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import { execFile, spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import readline from "node:readline";
 
 const socketPath = process.env.HOMER_BROWSER_CONTROL_SOCKET
-  ?? "/Users/yj/Library/Application Support/Homer/cdp-state/browser-control.sock";
+  ?? `${homedir()}/Library/Application Support/Homer/cdp-state/browser-control.sock`;
 const statusPath = process.env.HOMER_BROWSER_STATUS_FILE
-  ?? "/Users/yj/Library/Application Support/Homer/cdp-state/status.json";
+  ?? `${homedir()}/Library/Application Support/Homer/cdp-state/status.json`;
 const agentBrowser = process.env.HOMER_AGENT_BROWSER_BIN ?? "/opt/homebrew/bin/agent-browser";
 const cdpBase = process.env.HOMER_CDP_HTTP ?? "http://127.0.0.1:9222";
 const [command, ...args] = process.argv.slice(2);
 
-function usage() { throw new Error("usage: browserctl status [surface] | acquire <surface> <owner> <ttl-seconds> | renew <leaseId> <ttl-seconds> | release <leaseId> | reconcile <surface> <origin[,origin...]> <bootstrapUrl> | touch <amazon.vc|amazon.amc> | maintenance <on|off> [reason] | agent [agent.surface] [--ttl seconds] [--rpc | -- <workflow command...>]"); }
+function usage() { throw new Error("usage: browserctl status [surface] | acquire <surface> <owner> <ttl-seconds> | renew <leaseId> <ttl-seconds> | release <leaseId> | reconcile <surface> <origin[,origin...]> <bootstrapUrl> | touch <surface> | maintenance <on|off> [reason] | agent [agent.surface] [--ttl seconds] [--rpc | -- <workflow command...>]"); }
 
 async function readStatus(surface) {
   const now = Date.now();

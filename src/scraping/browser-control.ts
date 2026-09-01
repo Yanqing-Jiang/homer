@@ -232,7 +232,7 @@ export class BrowserLeaseBroker {
   }
 }
 type ControlRequest = { verb: string; surface?: string; owner?: string; ttl?: number; leaseId?: string; targetId?: string; closeTarget?: boolean; expectedOrigin?: string[]; bootstrapUrl?: string; enabled?: boolean; reason?: string };
-export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenance: (enabled: boolean, reason: string) => Promise<void>, socketPath = BROWSER_CONTROL_SOCKET, touch?: (surface: "amazon.vc" | "amazon.amc") => Promise<unknown>): Server {
+export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenance: (enabled: boolean, reason: string) => Promise<void>, socketPath = BROWSER_CONTROL_SOCKET, touch?: (surface: string) => Promise<unknown>): Server {
   const stateDir = dirname(socketPath);
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   chmodSync(stateDir, 0o700);
@@ -256,7 +256,7 @@ export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenanc
         else if (request.verb === "register-external-target") result = await broker.registerExternalTarget(request.leaseId!, request.targetId!);
         else if (request.verb === "renew") result = broker.renew(request.leaseId!, request.ttl!);
         else if (request.verb === "release") result = await broker.release(request.leaseId!, request.closeTarget, request.targetId);
-        else if (request.verb === "touch" && touch && (request.surface === "amazon.vc" || request.surface === "amazon.amc")) result = await touch(request.surface);
+        else if (request.verb === "touch" && touch && request.surface) result = await touch(request.surface);
         else if (request.verb === "maintenance") {
           await maintenance(Boolean(request.enabled), request.reason ?? "browserctl");
           if (!request.enabled) broker.resume();

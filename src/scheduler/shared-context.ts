@@ -1,9 +1,9 @@
 /**
  * Shared scheduler context builder
  *
- * Reads Yanqing's full context (soul, identity, career, tools, architecture,
+ * Reads the owner's full context (soul, identity, career, tools, architecture,
  * preferences, recent activity) and assembles it into a system prompt that
- * lets any scheduler job "know Yanqing" — not follow frozen instructions.
+ * lets any scheduler job "know the owner" — not follow frozen instructions.
  *
  * Used by weekly consolidation and related memory maintenance steps.
  */
@@ -14,6 +14,7 @@ import { StateManager, type SessionSummaryRow } from "../state/manager.js";
 import { PATHS } from "../config/paths.js";
 import { getCurrentFocus } from "../memory/session-bootstrap.js";
 import { readDocumentStandalone } from "../memory/documents.js";
+import { OWNER } from "../config/owner.js";
 import { logger } from "../utils/logger.js";
 
 // Re-export for backward compatibility (function lives in job-outputs.ts)
@@ -112,8 +113,8 @@ export interface SchedulerContextOptions {
 }
 
 /**
- * Build a rich system prompt from Yanqing's live context files.
- * This is the "know Yanqing" builder — no hardcoded bios.
+ * Build a rich system prompt from the owner's live context files.
+ * This is the "know the owner" builder — no hardcoded bios.
  */
 export async function buildSchedulerContext(
   options?: SchedulerContextOptions
@@ -137,7 +138,7 @@ export async function buildSchedulerContext(
   // Environment bootstrap — gives sub-agents runtime awareness
   sections.push(buildBootstrapPreamble());
 
-  sections.push(`You are HOMER — Yanqing's personal AI operating system.
+  sections.push(`You are HOMER — ${OWNER.displayName}'s personal AI operating system.
 
 # CLAUDE.md (Homer's Soul & Operating Manual)
 
@@ -167,7 +168,7 @@ ${claudeMd}`);
         logEntries.push(`### ${date}\n${content}`);
       }
       sections.push(
-        `# This Week's Activity\n\nWhat Yanqing actually did recently:\n\n${logEntries.join("\n\n---\n\n")}`
+        `# This Week's Activity\n\nWhat ${OWNER.displayName} actually did recently:\n\n${logEntries.join("\n\n---\n\n")}`
       );
     }
   }
@@ -227,7 +228,7 @@ export async function extractActiveProjects(): Promise<string> {
 }
 
 /**
- * Build a condensed "know Yanqing" context (~2K chars) for swarm agents
+ * Build a condensed "know the owner" context (~2K chars) for swarm agents
  * that can't afford the full 30K buildSchedulerContext().
  *
  * Extracts: role, active goals, active projects, key preferences.
@@ -241,7 +242,7 @@ export async function buildCondensedContext(): Promise<string> {
 
   // Extract role from the me document's first line or ## Career section
   const meMd = readDocumentStandalone("me");
-  let roleSnippet = "Yanqing Jiang";
+  let roleSnippet = OWNER.fullName;
   if (meMd) {
     const roleMatch = meMd.match(/(?:^|\n)(.+?(?:Senior|Director|Manager|Engineer|Lead).+?)(?:\n|$)/i);
     if (roleMatch) roleSnippet = roleMatch[1]!.trim();
@@ -256,7 +257,7 @@ export async function buildCondensedContext(): Promise<string> {
   }
 
   const sections = [
-    `## Who is Yanqing\n${roleSnippet}`,
+    `## Who is ${OWNER.displayName}\n${roleSnippet}`,
     `## Current Goals\n${goals.slice(0, 1200)}`,
     `## Active Projects\n${projects.slice(0, 800)}`,
   ];
