@@ -182,3 +182,13 @@ workspaces/
 .env.*.bak
 /archive/
 /src/scripts/ranking-eval-golden.json
+
+# [redacted] / <employer> report and [redacted]s live outside the homer project (ruled 2026-09-01).
+skills/skills/vc-query-competitors/
+skills/skills/b4-report/
+skills/skills/tailor-resume/
+skills/skills/auto-apply/
+generated/harness/*/skills/vc-query-competitors/
+generated/harness/*/skills/b4-report/
+generated/harness/*/skills/tailor-resume/
+generated/harness/*/skills/auto-apply/
