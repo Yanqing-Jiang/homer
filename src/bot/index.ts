@@ -29,6 +29,19 @@ import { StateManager } from "../state/manager.js";
 import { saveTodo } from "../todos/dao.js";
 import { sendThinkingIndicator, editWithResponse, TelegramDraftStream, sendFinalResponse, TelegramTypingLoop } from "./streaming.js";
 import { loadBootstrapFiles } from "../memory/loader.js";
+import { receiveInboundTelegramText } from "./relay-inbox.js";
+import { claimLaneAdmission, type LaneAdmission } from "./lane-admission.js";
+import {
+  describeTelegramError,
+  getTelegramPollingStatus,
+  isTelegramConflict,
+  shouldAnnouncePollingRecovery,
+  setTelegramPollingStatus,
+  telegramPollBackoffMs,
+  telegramPollingWanted,
+} from "./polling-health.js";
+import { BROWSER_STATUS_PATH } from "../scraping/browser-control.js";
+import { readFileSync } from "node:fs";
 import { getMemoryIndexer } from "../memory/indexer.js";
 import { transcribeWithFallback, synthesizeSpeech, truncateForTTS } from "../voice/index.js";
 import type { VoiceConfig, SynthesisOptions } from "../voice/types.js";
@@ -209,6 +222,10 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
         "/cancel <id>\n\n" +
         "*Search:*\n" +
         "/search <query>\n\n" +
+        "*Amazon logins:*\n" +
+        "/vc-login - [redacted]\n" +
+        "/amc-login - [redacted]\n" +
+        "_Reply here with just the 4-8 digit code when asked._\n\n" +
         "*Overnight Work:*\n" +
         "/overnight - View queued tasks\n" +
         '"work on xyz tonight" - Queue prototype\n' +
@@ -247,6 +264,25 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
       }
     }
     statusText += `\nJobs: ${jobStats.pending} pending, ${jobStats.running} running`;
+
+    // M4: both degraded modes the hardening introduced are otherwise invisible — the
+    // daemon survives them silently, which is worse for detection than crashing did.
+    const polling = getTelegramPollingStatus();
+    const pollingLine = polling.state === "degraded"
+      ? `DEGRADED — ${polling.reason ?? "unknown"} (${polling.consecutiveFailures} failures)`
+      : polling.state === "healthy" ? "healthy"
+      : polling.state === "stopped" ? "stopped (shutting down)"
+      : polling.reason ?? "starting";
+    statusText += `\nTelegram polling: ${pollingLine}`;
+    try {
+      const browser = JSON.parse(readFileSync(BROWSER_STATUS_PATH, "utf8")) as {
+        cdp?: { state?: string }; ownership?: string; degradedReason?: string | null;
+      };
+      statusText += `\nBrowser: CDP ${browser.cdp?.state ?? "unknown"}, ownership ${browser.ownership ?? "unknown"}`;
+      if (browser.degradedReason) statusText += `\nAgent-browser: DEGRADED — ${browser.degradedReason}`;
+    } catch {
+      statusText += "\nBrowser: status.json unreadable";
+    }
 
     try {
       await ctx.reply(statusText, { parse_mode: "Markdown" });
@@ -840,7 +876,7 @@ ${checksStr}`;
 
           const attachments = [...pending, filePath];
           pendingAttachments.delete(lane);
-          await handleNewExecution(ctx, parsed, stateManager, runManager, false, attachments);
+          dispatchExecution(ctx, parsed, stateManager, runManager, false, attachments);
           return;
         }
 
@@ -978,7 +1014,7 @@ ${checksStr}`;
 
         const attachments = [...pending, filePath];
         pendingAttachments.delete(lane);
-        await handleNewExecution(ctx, parsed, stateManager, runManager, false, attachments);
+        dispatchExecution(ctx, parsed, stateManager, runManager, false, attachments);
         return;
       }
 
@@ -1059,6 +1095,7 @@ ${checksStr}`;
     // user sees no feedback while the (often multi-second) pipeline runs.
     const typingLoop = new TelegramTypingLoop(ctx.chat.id, ctx.api);
     typingLoop.start();
+    let handedOff = false;
 
     try {
       const file = await ctx.getFile();
@@ -1115,58 +1152,22 @@ ${checksStr}`;
         return;
       }
 
-      const responseText = await handleNewExecution(ctx, parsed, stateManager, runManager, true, [], true);
-
-      // Voice in = voice out: always reply with voice
-      if (voiceConfig.elevenLabsApiKey && responseText) {
-        // Parse spoken and summary sections from response
-        const spokenMatch = responseText.match(/<spoken>([\s\S]*?)<\/spoken>/);
-        const summaryMatch = responseText.match(/<summary>([\s\S]*?)<\/summary>/);
-        const spokenText = spokenMatch?.[1]?.trim() || responseText.replace(/<\/?(?:spoken|summary)>/g, "").trim();
-        const summaryText = summaryMatch?.[1]?.trim() || null;
-
-        // Log transcription + response locally for future DB indexing
-        logger.info(
-          { transcription: transcription.text, response: spokenText.slice(0, 500) },
-          "Voice exchange logged"
-        );
-
-        try {
-          const ttsText = truncateForTTS(spokenText);
-          // Use DG Instant Clone voice for spoken output
-          const ttsVoiceConfig: VoiceConfig = {
-            ...voiceConfig,
-            elevenLabsVoiceId: "TqZYQPtYO1r4L4de7HwG",
-            elevenLabsModel: "eleven_turbo_v2",
-          };
-          const ttsOptions: SynthesisOptions = { format: "ogg_opus" };
-          const synthesis = await synthesizeSpeech(ttsText, ttsVoiceConfig, ttsOptions);
-          await ctx.replyWithVoice(new InputFile(synthesis.audio, "response.ogg"));
-
-          // Send the bullet-point summary after the voice reply
-          if (summaryText) {
-            try {
-              await ctx.reply(summaryText, { parse_mode: "Markdown" });
-            } catch {
-              try { await ctx.reply(summaryText); } catch { /* non-critical */ }
-            }
-          }
-        } catch (ttsError) {
-          logger.warn({ error: ttsError }, "TTS failed, falling back to text");
-          for (const chunk of chunkMessage(responseText)) {
-            await ctx.reply(chunk);
-          }
-        }
-      } else if (responseText) {
-        for (const chunk of chunkMessage(responseText)) {
-          await ctx.reply(chunk);
-        }
-      }
+      // The turn is dispatched WITHOUT awaiting, like text: an awaited turn froze the poller
+      // for its whole length, so an MFA code sent during a running /vc-login could not even
+      // be fetched. The typing loop is handed to the continuation, which stops it.
+      handedOff = true;
+      void dispatchExecution(ctx, parsed, stateManager, runManager, true, [], true)
+        .then((responseText) => deliverVoiceResponse(ctx, typeof responseText === "string" ? responseText : "", voiceConfig, transcription.text))
+        .catch(async (error) => {
+          logger.error({ error }, "Voice processing failed");
+          await ctx.reply(`Voice error: ${error instanceof Error ? error.message : "Unknown"}`).catch(() => undefined);
+        })
+        .finally(() => typingLoop.stop());
     } catch (error) {
       logger.error({ error }, "Voice processing failed");
       await ctx.reply(`Voice error: ${error instanceof Error ? error.message : "Unknown"}`);
     } finally {
-      typingLoop.stop();
+      if (!handedOff) typingLoop.stop();
     }
   });
 
@@ -1174,6 +1175,60 @@ ${checksStr}`;
   bot.on("message:text", async (ctx) => {
     const text = ctx.message.text;
     const lane = telegramLane(ctx.chat.id);
+
+    // ---- Receipt. Persist FIRST, decide anything else after.
+    //
+    // The MFA relay ([redacted], homer_db source) polls
+    // thread_messages every 3s for the operator's answer and never touches getUpdates, so the
+    // daemon's write is the whole transport. It used to happen inside handleNewExecution,
+    // after the thinking indicator, the bootstrap read and the "queued" reply. It happens
+    // here now, before any queueing decision, so a code lands in the table within one
+    // relay poll even while a session turn is running.
+    const replyWrapper = buildReplyWrapper(ctx, stateManager);
+    let preRecordedMessageId: string | null = null;
+    // Slash commands keep their previous behaviour (persisted only if they reach an
+    // execution) so /status, /jobs and friends do not become conversation history.
+    let inbound: ReturnType<typeof receiveInboundTelegramText> | null = null;
+    if (!text.trim().startsWith("/")) {
+      try {
+        inbound = receiveInboundTelegramText(stateManager, {
+          lane,
+          chatId: ctx.chat.id,
+          text,
+          wrappedContent: replyWrapper ? replyWrapper.wrapper + text : null,
+          replyToText: replyWrapper?.quoted ?? null,
+          replyToDateSeconds: ctx.message.reply_to_message?.date ?? null,
+        });
+        preRecordedMessageId = inbound.threadMessageId;
+      } catch (error) {
+        logger.warn({ error }, "Inbound Telegram message persistence failed (continuing)");
+      }
+    }
+    // M2: the acknowledgement is sent OUTSIDE the persistence try. Sending it from inside
+    // meant a Telegram 5xx on ctx.reply skipped the `return`, was swallowed as a
+    // "persistence" warning, and let the OTP fall through into the Claude session — the
+    // exact leak this branch exists to close. A failed ack is logged and we still return.
+    if (inbound?.relay) {
+      // The relay consumes the row we just wrote and overwrites it afterwards. Feeding the
+      // same code to the Claude session would copy a live OTP into a transcript the relay
+      // cannot redact, so acknowledge and stop here instead of queueing it.
+      const nonceSuffix = inbound.relay.nonce ? ` (relay [#${inbound.relay.nonce}])` : "";
+      // N10: a code that quotes a different prompt than the one waiting will be ignored by
+      // the relay, so say that rather than claiming it was delivered.
+      const ackText = inbound.relay.mismatched
+        ? "code received and withheld from the session, but it quotes an older prompt — the waiting login may not accept it; send the code as a new message if it stalls"
+        : `code received — handing it to the login${nonceSuffix}`;
+      logger.info(
+        { nonce: inbound.relay.nonce, digits: inbound.relay.digits, source: inbound.relay.source, mismatched: inbound.relay.mismatched },
+        "MFA relay code received from Telegram — acknowledged, not forwarded to the session",
+      );
+      try {
+        await ctx.reply(ackText);
+      } catch (error) {
+        logger.error({ error }, "Failed to acknowledge an MFA relay code (still withheld from the session)");
+      }
+      return;
+    }
 
     // Check for bare YouTube URLs first — queue for overnight summary
     try {
@@ -1183,7 +1238,7 @@ ${checksStr}`;
       logger.warn({ error }, "YouTube URL handling failed, falling back to normal flow");
     }
 
-    // Check for phone call requests (e.g., "call [redacted] and tell him dinner's at 5:30")
+    // Check for phone call requests (e.g., "call +15550100 and tell him dinner's at 5:30")
     try {
       const wasCallRequest = await handleCallRequest(ctx, text, stateManager);
       if (wasCallRequest) return;
@@ -1191,7 +1246,7 @@ ${checksStr}`;
       logger.warn({ error }, "Phone call handling failed, falling back to normal flow");
     }
 
-    // Check for SMS requests (e.g., "text [redacted] hey what's up")
+    // Check for SMS requests (e.g., "text +15550100 hey what's up")
     try {
       const wasSmsRequest = await handleSmsRequest(ctx, text);
       if (wasSmsRequest) return;
@@ -1261,7 +1316,7 @@ ${checksStr}`;
       resetExecutorSessionForLane(lane, stateManager, runManager);
       if (parsed.query) {
         const attachments = consumePendingAttachments(lane);
-        await handleNewExecution(ctx, parsed, stateManager, runManager, false, attachments);
+        void dispatchExecution(ctx, parsed, stateManager, runManager, false, attachments, false, preRecordedMessageId);
       } else {
         await ctx.reply(`Fresh session started. Executor reset to the default (${stateManager.resolveDefaultExecutor()}).`);
       }
@@ -1272,32 +1327,14 @@ ${checksStr}`;
     // explicit reply context. Earlier handlers (approval.ts reply dispatch for
     // plan revisions / discussions / instruction requests) already ran and
     // `return`'d for their matches; we only reach here for generic conversation.
-    const replyMsg = ctx.message.reply_to_message;
-    if (replyMsg && parsed.query && parsed.query.trim()) {
-      const registryRow = stateManager.getTelegramMessage(ctx.chat.id, replyMsg.message_id);
-      const quotedText = registryRow?.messageText
-        ?? ("text" in replyMsg ? replyMsg.text : undefined)
-        ?? ("caption" in replyMsg ? replyMsg.caption : undefined);
-      const fromBot = replyMsg.from?.is_bot === true;
-
-      if (quotedText && (registryRow || fromBot)) {
-        const MAX_QUOTE = 1800;
-        const clipped = quotedText.length > MAX_QUOTE
-          ? quotedText.slice(0, MAX_QUOTE) + "\n…[truncated]"
-          : quotedText;
-        const attrs = [`source="telegram"`, `message_id="${replyMsg.message_id}"`];
-        if (registryRow?.threadId) attrs.push(`thread_id="${registryRow.threadId}"`);
-        if (registryRow?.runId) attrs.push(`run_id="${registryRow.runId}"`);
-        parsed.query = `<replying-to ${attrs.join(" ")}>\n${clipped}\n</replying-to>\n\n${parsed.query}`;
-        logger.info(
-          {
-            telegramMessageId: replyMsg.message_id,
-            registryHit: Boolean(registryRow),
-            threadId: registryRow?.threadId,
-          },
-          "Injected Telegram reply context"
-        );
-      }
+    // Wrapper computed at receipt (buildReplyWrapper) so the persisted row and the query
+    // handed to the executor carry the same quoted block.
+    if (replyWrapper && parsed.query && parsed.query.trim()) {
+      parsed.query = replyWrapper.wrapper + parsed.query;
+      logger.info(
+        { telegramMessageId: ctx.message.reply_to_message?.message_id },
+        "Injected Telegram reply context"
+      );
     }
 
     // Handle pure executor switch (no query)
@@ -1329,7 +1366,7 @@ ${checksStr}`;
 
       // Execute the query with the new executor
       const attachments = consumePendingAttachments(lane);
-      await handleNewExecution(ctx, parsed, stateManager, runManager, false, attachments);
+      void dispatchExecution(ctx, parsed, stateManager, runManager, false, attachments, false, preRecordedMessageId);
       return;
     }
 
@@ -1340,7 +1377,7 @@ ${checksStr}`;
     }
 
     const attachments = consumePendingAttachments(lane);
-    await handleNewExecution(ctx, parsed, stateManager, runManager, false, attachments);
+    void dispatchExecution(ctx, parsed, stateManager, runManager, false, attachments, false, preRecordedMessageId);
   });
 
   return bot;
@@ -1366,6 +1403,123 @@ A bullet-point summary (using • or -) of the key takeaways. This is a separate
 IMPORTANT: You MUST include both <spoken> and <summary> tags. The spoken section is for audio playback. The summary is a complementary text reference with the main points.
 </voice-mode>`;
 
+const MAX_QUOTE = 1800;
+
+/**
+ * Build the `<replying-to …>` prefix for a quote-reply, or null when the message is not
+ * a usable quote-reply. Computed at RECEIPT so the exact text we persist to
+ * thread_messages is the wrapped form the MFA relay's split_reply() expects — the nonce
+ * check that stops a late answer being typed into a new login depends on it.
+ */
+function buildReplyWrapper(ctx: Context, stateManager: StateManager): { wrapper: string; quoted: string } | null {
+  const replyMsg = ctx.message?.reply_to_message;
+  if (!replyMsg || !ctx.chat) return null;
+  const registryRow = stateManager.isOpen ? stateManager.getTelegramMessage(ctx.chat.id, replyMsg.message_id) : null;
+  const quotedText = registryRow?.messageText
+    ?? ("text" in replyMsg ? replyMsg.text : undefined)
+    ?? ("caption" in replyMsg ? replyMsg.caption : undefined);
+  const fromBot = replyMsg.from?.is_bot === true;
+  if (!quotedText || !(registryRow || fromBot)) return null;
+  const clipped = quotedText.length > MAX_QUOTE ? quotedText.slice(0, MAX_QUOTE) + "\n…[truncated]" : quotedText;
+  const attrs = [`source="telegram"`, `message_id="${replyMsg.message_id}"`];
+  if (registryRow?.threadId) attrs.push(`thread_id="${registryRow.threadId}"`);
+  if (registryRow?.runId) attrs.push(`run_id="${registryRow.runId}"`);
+  return { wrapper: `<replying-to ${attrs.join(" ")}>\n${clipped}\n</replying-to>\n\n`, quoted: clipped };
+}
+
+/**
+ * Run a turn WITHOUT blocking grammy's update loop.
+ *
+ * grammy's built-in long polling handles updates strictly sequentially
+ * (`Bot.handleUpdates`: "handle updates sequentially (!)") and does not issue the next
+ * getUpdates until the current batch's middleware has settled. Awaiting a full executor
+ * turn inside the handler therefore froze the entire chat for the length of the turn:
+ * the "queued — will reply after current turn" branch had never once fired in the daemon
+ * log, and an MFA code sent during a running /vc-login session was not even fetched from
+ * Telegram — let alone written to thread_messages — until that session had finished, so
+ * the relay always timed out.
+ *
+ * Per-lane ordering is still guaranteed downstream: CLIRunManager.startRun chains runs on
+ * the lane, and the user turn is already persisted at receipt, in arrival order.
+ *
+ * The media handlers (document / photo / voice) dispatch the same way since round 4; voice
+ * chains its TTS delivery onto the returned promise. Rejections are logged here and the
+ * returned promise resolves to undefined, so callers chain `.then` without their own catch.
+ */
+function dispatchExecution(
+  ctx: Context,
+  parsed: ParsedCommand,
+  stateManager: StateManager,
+  runManager: CLIRunManager,
+  returnResponse: boolean,
+  attachments: string[] = [],
+  voiceMode = false,
+  preRecordedMessageId: string | null = null,
+): Promise<string | void> {
+  const lane = ctx.chat ? telegramLane(ctx.chat.id) : "tg:unknown";
+  // N13: getActiveRun reads `activeRuns`, which _executeRun populates — a run sitting in the
+  // lane CHAIN is not there yet, so a message arriving between one turn ending and the next
+  // chained turn starting saw an idle lane and opened a draft it should not have.
+  const admission = claimLaneAdmission(
+    lane,
+    (l) => runManager.getActiveRun(l) !== null || runManager.getQueueDepth(l) > 0,
+  );
+  return handleNewExecution(
+    ctx, parsed, stateManager, runManager, returnResponse, attachments, voiceMode, preRecordedMessageId, admission,
+  )
+    .catch((error) => { logger.error({ error }, "Telegram execution dispatch failed"); })
+    .finally(() => admission.release());
+}
+
+/** Voice in = voice out: the TTS reply (with text fallback) for a dispatched voice turn. */
+async function deliverVoiceResponse(ctx: Context, responseText: string, voiceConfig: VoiceConfig, transcriptionText: string): Promise<void> {
+  // Voice in = voice out: always reply with voice
+  if (voiceConfig.elevenLabsApiKey && responseText) {
+    // Parse spoken and summary sections from response
+    const spokenMatch = responseText.match(/<spoken>([\s\S]*?)<\/spoken>/);
+    const summaryMatch = responseText.match(/<summary>([\s\S]*?)<\/summary>/);
+    const spokenText = spokenMatch?.[1]?.trim() || responseText.replace(/<\/?(?:spoken|summary)>/g, "").trim();
+    const summaryText = summaryMatch?.[1]?.trim() || null;
+
+    // Log transcription + response locally for future DB indexing
+    logger.info(
+      { transcription: transcriptionText, response: spokenText.slice(0, 500) },
+      "Voice exchange logged"
+    );
+
+    try {
+      const ttsText = truncateForTTS(spokenText);
+      // Use DG Instant Clone voice for spoken output
+      const ttsVoiceConfig: VoiceConfig = {
+        ...voiceConfig,
+        elevenLabsVoiceId: "TqZYQPtYO1r4L4de7HwG",
+        elevenLabsModel: "eleven_turbo_v2",
+      };
+      const ttsOptions: SynthesisOptions = { format: "ogg_opus" };
+      const synthesis = await synthesizeSpeech(ttsText, ttsVoiceConfig, ttsOptions);
+      await ctx.replyWithVoice(new InputFile(synthesis.audio, "response.ogg"));
+
+      // Send the bullet-point summary after the voice reply
+      if (summaryText) {
+        try {
+          await ctx.reply(summaryText, { parse_mode: "Markdown" });
+        } catch {
+          try { await ctx.reply(summaryText); } catch { /* non-critical */ }
+        }
+      }
+    } catch (ttsError) {
+      logger.warn({ error: ttsError }, "TTS failed, falling back to text");
+      for (const chunk of chunkMessage(responseText)) {
+        await ctx.reply(chunk);
+      }
+    }
+  } else if (responseText) {
+    for (const chunk of chunkMessage(responseText)) {
+      await ctx.reply(chunk);
+    }
+  }
+}
+
 async function handleNewExecution(
   ctx: Context,
   parsed: ParsedCommand,
@@ -1373,7 +1527,14 @@ async function handleNewExecution(
   runManager: CLIRunManager,
   returnResponse: boolean,
   attachments: string[] = [],
-  voiceMode: boolean = false
+  voiceMode: boolean = false,
+  /**
+   * Row already written to thread_messages by receiveInboundTelegramText at receipt.
+   * When set we reuse it instead of writing a second copy of the same user turn.
+   */
+  preRecordedMessageId: string | null = null,
+  /** Per-lane admission claimed by dispatchExecution; absent for awaited callers. */
+  admission: LaneAdmission | null = null,
 ): Promise<string | void> {
   if (!ctx.chat) {
     if (returnResponse) return "Error: chat context unavailable.";
@@ -1415,7 +1576,19 @@ async function handleNewExecution(
   let compositeStreamContent = "";
   const toolSteps: Array<{ label: string; labelDone: string; id?: string; completed: boolean }> = [];
 
-  if (!returnResponse) {
+  // Now that the poller no longer blocks on a turn (see dispatchExecution), a second
+  // message really can arrive mid-turn — so this branch is reachable for the first time.
+  // Do NOT open a streaming draft and a typing loop for a turn that will sit in the lane
+  // queue for minutes; the final answer goes out via sendFinalResponse instead.
+  // DEBT (N12): `admission.queued` is decided synchronously at dispatch — which is the whole
+  // point — but read here after several awaits, so a message whose predecessor finished in
+  // the meantime still gets "queued — will reply after current turn" and no streaming draft.
+  // Cosmetic only. Upgrade by re-checking `runManager.getActiveRun(lane)` here once the
+  // admission wait has resolved, if the stale notice ever confuses anyone.
+  const queuedBehindActiveRun = !returnResponse
+    && (admission ? admission.queued : runManager.getActiveRun(lane) !== null);
+
+  if (!returnResponse && !queuedBehindActiveRun) {
     if (ENABLE_STREAMING) {
       streamingMsg = await sendThinkingIndicator(ctx);
       if (streamingMsg) {
@@ -1452,12 +1625,20 @@ async function handleNewExecution(
 
     // Queue behind any in-flight run on this lane (CLIRunManager chains turns
     // per lane; new message is injected into the same Claude process via stdin).
-    if (runManager.getActiveRun(lane)) {
+    if (queuedBehindActiveRun) {
       await ctx.reply("queued — will reply after current turn");
     }
 
-    let userMessageId: string | null = null;
-    if (parsed.query && parsed.query.trim()) {
+    // The row is normally written at RECEIPT (receiveInboundTelegramText), before the
+    // queueing decision above, so the MFA relay can read it while a turn is still
+    // running. Only paths that did not pre-record (media captions, /search) write here.
+    let userMessageId: string | null = preRecordedMessageId;
+    // L7: the pre-recorded row was written before attachments were consumed, so carry the
+    // attachment metadata onto it rather than losing it for pre-recorded text turns.
+    if (userMessageId && attachments.length > 0) {
+      stateManager.setThreadMessageMetadata(userMessageId, { attachments });
+    }
+    if (!userMessageId && parsed.query && parsed.query.trim()) {
       userMessageId = randomUUID();
       stateManager.createThreadMessage({
         id: userMessageId,
@@ -1470,6 +1651,9 @@ async function handleNewExecution(
 
     const finalQuery = memoryContext + (voiceMode ? `${VOICE_MODE_INSTRUCTION}\n\n${parsed.query}` : parsed.query);
 
+    // Enter the lane chain in arrival order (see claimLaneAdmission), then release the
+    // next dispatch as soon as startRun has claimed the lane — not when the turn ends.
+    if (admission) await admission.wait;
     const { runId, result } = await runManager.startRun({
       lane,
       query: finalQuery,
@@ -1517,6 +1701,7 @@ async function handleNewExecution(
           }
         : undefined,
     });
+    admission?.release();
 
     const runResult = await result;
 
@@ -1611,7 +1796,26 @@ function formatRelativeTime(date: Date): string {
   return "just now";
 }
 
+/** Last polling error, for the recovery notice. Never contains message content. */
+let lastPollingError: unknown = null;
+
 export async function startBot(bot: Bot): Promise<void> {
+  // Long-polling is exclusive: a second getUpdates consumer makes Telegram return 409 and
+  // the live daemon crash-loops. On 2026-09-01 a test/build run under the live daemon did
+  // exactly that. Nothing that is not the daemon may ever touch this bot token, so refuse
+  // under the node:test runner (NODE_TEST_CONTEXT is set by it) or an explicit opt-out.
+  //
+  // This MUST be the first statement: it used to sit after `deleteWebhook`, which is a live
+  // Bot API call against the production token, so a test that reached startBot already
+  // mutated the real bot's webhook state before being refused.
+  if (process.env.NODE_TEST_CONTEXT || process.env.HOMER_NO_TELEGRAM === "1") {
+    throw new Error(
+      "refusing to start Telegram polling: running under a test runner (NODE_TEST_CONTEXT=" +
+        `${process.env.NODE_TEST_CONTEXT ?? ""} HOMER_NO_TELEGRAM=${process.env.HOMER_NO_TELEGRAM ?? ""}). ` +
+        "A second poller would 409 the live daemon.",
+    );
+  }
+
   logger.info("Starting H.O.M.E.R bot...");
 
   // Clear any existing webhooks to prevent 409 conflicts after restart
@@ -1625,20 +1829,85 @@ export async function startBot(bot: Bot): Promise<void> {
   bot.catch((err) => {
     logger.error({ error: err }, "Bot error");
   });
-  await bot.start({
-    onStart: (botInfo) => {
-      logger.info({ username: botInfo.username }, "Bot started");
-      // Startup ping — replaces watchdog escalation alerts. Non-circular: bot
-      // is alive by the time this fires, so delivery succeeds.
-      const chatId = process.env.ALLOWED_CHAT_ID ?? process.env.TELEGRAM_CHAT_ID;
-      if (chatId) {
-        bot.api
-          .sendMessage(chatId, `🟢 Homer restarted at ${new Date().toISOString()}`)
-          .catch((err) => logger.warn({ error: err }, "Startup ping failed"));
+
+  // Polling failures degrade the BOT, never the daemon.
+  //
+  // 2026-09-01 19:41Z: a second getUpdates consumer appeared, Telegram answered the live
+  // daemon's poll with 409 Conflict, grammy rejected bot.start(), and because this was the
+  // last awaited statement in main() the rejection reached `main().catch` → process.exit(1).
+  // That killed the scheduler, memory, telephony and every job — and, because that exit path
+  // runs no shutdown tasks, orphaned the resident Chrome, which then made all 63 supervisor
+  // restarts fail. A 409 is a recoverable, self-clearing condition (the other poller stops):
+  // log it, publish the flag, back off, try again. Only a deliberate stop ends the loop.
+  let attempt = 0;
+  let degradedSince: number | null = null;
+  // M7: the ping is the RESTART signal. onStart runs on every iteration of the supervised
+  // loop, so without this flag a 409 that clears after one 5 s backoff would announce a
+  // restart that never happened — a lie in exactly the situation this loop exists to make
+  // survivable. Fires once per process, on the first successful start.
+  let announcedProcessStart = false;
+  for (;;) {
+    try {
+      await bot.start({
+        onStart: (botInfo) => {
+          const failures = attempt;
+          const downMs = degradedSince === null ? 0 : Date.now() - degradedSince;
+          const recovered = failures > 0;
+          // A single 409 that clears on the first 5 s retry (the MFA relay's `auto` probe does
+          // exactly that once per ask) is logged but not announced — see polling-health.
+          const announce = recovered && shouldAnnouncePollingRecovery({ failures, downMs });
+          attempt = 0;
+          degradedSince = null;
+          setTelegramPollingStatus({ healthy: true, reason: null, consecutiveFailures: 0 });
+          logger.info({ username: botInfo.username, recovered, failures, downMs, announced: announce }, recovered ? "Telegram polling recovered" : "Bot started");
+          // Startup ping — replaces watchdog escalation alerts. Non-circular: bot
+          // is alive by the time this fires, so delivery succeeds.
+          const chatId = process.env.ALLOWED_CHAT_ID ?? process.env.TELEGRAM_CHAT_ID;
+          if (chatId && !announcedProcessStart) {
+            announcedProcessStart = true;
+            bot.api
+              .sendMessage(chatId, `🟢 Homer restarted at ${new Date().toISOString()}`)
+              .catch((err) => logger.warn({ error: err }, "Startup ping failed"));
+          } else if (chatId && announce) {
+            bot.api
+              .sendMessage(chatId, `🟡 Telegram polling recovered after ${failures} failure(s) over ${Math.round(downMs / 1000)}s: ${describeTelegramError(lastPollingError)}`)
+              .catch((err) => logger.warn({ error: err }, "Polling-recovery ping failed"));
+          }
+        },
+      });
+      // bot.start() resolves only when polling stops — i.e. a deliberate bot.stop().
+      setTelegramPollingStatus({ healthy: false, reason: "polling stopped", consecutiveFailures: 0, state: "stopped" });
+      logger.info("Telegram polling stopped");
+      return;
+    } catch (error) {
+      const reason = describeTelegramError(error);
+      lastPollingError = error;
+      attempt++;
+      if (degradedSince === null) degradedSince = Date.now();
+      setTelegramPollingStatus({ healthy: false, reason, consecutiveFailures: attempt });
+      const delayMs = telegramPollBackoffMs(attempt);
+      logger.error(
+        { err: reason, attempt, delayMs, conflict: isTelegramConflict(error) },
+        "Telegram polling failed — bot degraded, daemon continues; retrying",
+      );
+      // M4: Telegram is the alert channel, so a Telegram outage cannot alert through
+      // Telegram. One SMS at the third consecutive failure — that is ~20 s of downtime,
+      // well past a transient blip and well before the 5 min backoff plateau.
+      if (attempt === 3) {
+        void import("../telephony/emergency-sms.js")
+          .then(({ sendEmergencySms }) => sendEmergencySms(`Homer Telegram polling down: ${reason}`))
+          .catch(() => { /* best effort — the daemon is still up */ });
       }
-    },
-  });
+      if (!telegramPollingWanted()) return;
+      // L12: unref'd so a stray path where main() returns cannot be held open for up to
+      // five minutes by a pending backoff.
+      await new Promise<void>((resolve) => { setTimeout(resolve, delayMs).unref?.(); });
+      if (!telegramPollingWanted()) return;
+    }
+  }
 }
+
+
 
 export function getReminderManager(): ReminderManager | null {
   return reminderManagerRef;

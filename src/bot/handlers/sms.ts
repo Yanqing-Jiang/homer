@@ -11,7 +11,7 @@ import { config } from "../../config/index.js";
 
 const TWILIO_API_BASE = "https://api.twilio.com/2010-04-01";
 
-// Pattern: "text +1XXXXXXXXXX hey what's up" or "sms [redacted] meeting at 3"
+// Pattern: "text +1XXXXXXXXXX hey what's up" or "sms +15550100 meeting at 3"
 // Captures: (phone number) (message body)
 const SMS_PATTERN =
   /^(?:text|sms)\s+(\+?1?\s*[-.()\s]*\d[\d\s\-().]*\d)\s+([\s\S]+)/i;
