@@ -34,6 +34,14 @@ const sentinelPath = process.env.HOMER_DRAIN_SENTINEL ?? path.join(appSupport, "
 const runtimeStampPath = process.env.HOMER_RUNTIME_STAMP ?? path.join(cwd, "run", "daemon-build.json");
 const diskBuildPath = process.env.HOMER_DISK_BUILD ?? path.join(cwd, "dist", ".build-version");
 const policyHelper = process.env.HOMER_RESTART_POLICY ?? path.join(cwd, "scripts", "pre-restart-check.sh");
+// F9 crash breaker: this many crashes inside the window park the supervisor (SIGHUP re-arms)
+// and send ONE SMS. Before this the loop was unbounded and silent — 63 restarts on
+// 2026-09-01 with nothing but log lines, because the "Homer restarted" ping needs a
+// successful bot.start and a daemon that dies in main() never gets there.
+const crashBreakerLimit = positiveInt("HOMER_CRASH_BREAKER_LIMIT", 5);
+const crashBreakerWindowMs = positiveInt("HOMER_CRASH_BREAKER_WINDOW_MS", 600_000);
+const twilioApiBase = process.env.HOMER_TWILIO_API_BASE ?? "https://api.twilio.com/2010-04-01";
+const dotEnvPath = process.env.HOMER_DOTENV ?? path.join(cwd, ".env");
 
 const actions = new EventEmitter();
 let stopping = false;
@@ -67,6 +75,62 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// The daemon loads its secrets from .env via dotenv; launchd gives this supervisor none of
+// them. Same file, same precedence (a real env var wins), read only for the alert keys and
+// never copied into process.env — the child still resolves .env itself.
+const ALERT_KEYS = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER", "OWNER_PHONE"];
+async function alertConfig() {
+  const values = {};
+  let fileVars = {};
+  try {
+    const text = await readFile(dotEnvPath, "utf8");
+    for (const raw of text.split("\n")) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+      if (!match) continue;
+      let value = match[2].trim();
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+      fileVars[match[1]] = value;
+    }
+  } catch { fileVars = {}; }
+  for (const key of ALERT_KEYS) values[key] = process.env[key] || fileVars[key] || "";
+  return values;
+}
+
+/**
+ * The same transport as `[HOMER ALERT]` in src/telephony/emergency-sms.ts and
+ * src/fatal-handlers.ts (Twilio REST, Basic auth, 300-char cap) — reimplemented here
+ * because the supervisor must not import the daemon's build. Never throws.
+ */
+async function sendAlertSms(message) {
+  const { TWILIO_ACCOUNT_SID: sid, TWILIO_AUTH_TOKEN: token, TWILIO_PHONE_NUMBER: from, OWNER_PHONE: to } = await alertConfig();
+  if (!sid || !token || !from || !to) {
+    log("alert SMS skipped: Twilio or OWNER_PHONE not configured", { dotEnvPath });
+    return false;
+  }
+  const prefix = "[HOMER ALERT] ";
+  const maxBody = 300 - prefix.length;
+  const clean = String(message).replace(/\s+/g, " ").trim();
+  const body = prefix + (clean.length > maxBody ? `${clean.slice(0, maxBody - 3)}...` : clean);
+  try {
+    const response = await fetch(`${twilioApiBase}/Accounts/${sid}/Messages.json`, {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString("base64")}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ To: to, From: from, Body: body }).toString(),
+      signal: AbortSignal.timeout(10_000),
+    });
+    log(response.ok ? "alert SMS sent" : "alert SMS failed", { status: response.status });
+    return response.ok;
+  } catch (error) {
+    log("alert SMS threw", { error: error instanceof Error ? error.message : String(error) });
+    return false;
+  }
+}
+
 function childExit(child) {
   if (child.exitCode !== null || child.signalCode !== null) {
     return Promise.resolve({ type: "exit", code: child.exitCode, signal: child.signalCode });
@@ -97,6 +161,7 @@ function watchHealth(child) {
     try {
       const response = await fetch(healthUrl, { signal: AbortSignal.timeout(healthTimeoutMs) });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (failures > 0) log("health check recovered", { pid: child.pid, failures });
       failures = 0;
     } catch (error) {
       failures += 1;
@@ -118,7 +183,17 @@ function watchHealth(child) {
 function waitForAction(timeoutMs = requestPollMs) {
   return new Promise((resolve) => {
     let timer = null;
-    const done = (type) => { if (timer) clearTimeout(timer); actions.off("action", done); resolve({ type }); };
+    // A parked wait (timeoutMs === null) must keep the event loop alive: signal listeners
+    // alone do not, so without this handle Node exits the moment the last child is gone,
+    // launchd (KeepAlive) respawns the supervisor ~10 s later, and the "park" is a slower
+    // loop — one SMS per breaker trip, forever. Verified on Node 26 on 2026-09-01.
+    const keepAlive = timeoutMs === null ? setInterval(() => {}, 60_000) : null;
+    const done = (type) => {
+      if (timer) clearTimeout(timer);
+      if (keepAlive) clearInterval(keepAlive);
+      actions.off("action", done);
+      resolve({ type });
+    };
     if (timeoutMs !== null) timer = setTimeout(() => done("poll"), timeoutMs);
     actions.once("action", done);
   });
@@ -238,6 +313,7 @@ async function evaluatePlanned(child) {
 
 async function main() {
   let crashCount = 0;
+  let crashTimes = [];
   const existingSentinel = await readJson(sentinelPath);
   let activation = null;
   if (existingSentinel?.owner === "homer-supervisor") {
@@ -307,7 +383,7 @@ async function main() {
     }
     health.cancel();
     if (stopping) break;
-    if (deliberateRestart) { crashCount = 0; continue; }
+    if (deliberateRestart) { crashCount = 0; crashTimes = []; continue; }
 
     const exit = outcome?.type === "exit" ? outcome : await childExit(child);
     log("daemon exited", { pid: child.pid, code: exit.code, signal: exit.signal });
@@ -322,6 +398,25 @@ async function main() {
     }
     const runtimeMs = Date.now() - startedAt;
     crashCount = runtimeMs >= stableRuntimeMs ? 1 : crashCount + 1;
+    const now = Date.now();
+    crashTimes = crashTimes.filter((at) => now - at < crashBreakerWindowMs);
+    crashTimes.push(now);
+    if (crashTimes.length >= crashBreakerLimit) {
+      const windowMin = Math.round(crashBreakerWindowMs / 60_000);
+      log("crash breaker tripped; parked until SIGHUP", {
+        crashes: crashTimes.length, windowMs: crashBreakerWindowMs, lastCode: exit.code, lastSignal: exit.signal, supervisorPid: process.pid,
+      });
+      await sendAlertSms(
+        `Homer daemon crash loop: ${crashTimes.length} exits in ${windowMin} min (last exit ${exit.code ?? exit.signal}); supervisor PARKED, Homer is DOWN. `
+        + `Fix, then wake it: kill -HUP ${process.pid}. Log: ~/homer/logs/stdout.log`,
+      );
+      const parked = await waitForAction(null);
+      if (parked.type === "stop") break;
+      crashTimes = [];
+      crashCount = 0;
+      log("crash breaker re-armed by wake-up");
+      continue;
+    }
     const backoffMs = Math.min(1_000 * (2 ** Math.min(crashCount - 1, 10)), maxBackoffMs);
     log("daemon restart scheduled", { runtimeMs, crashCount, backoffMs });
     const backoff = await waitForAction(backoffMs);

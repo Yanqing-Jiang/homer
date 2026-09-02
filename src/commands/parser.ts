@@ -7,7 +7,7 @@
  * - Legacy commands (/g, /x, /k) with deprecation warnings
  */
 
-import { getCommand, isDeprecated, type ExecutorType, type CommandDefinition } from "./registry.js";
+import { getCommand, isDeprecated, skillInvocationQuery, type ExecutorType, type CommandDefinition } from "./registry.js";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 const HOME = getRuntimePaths().homeDir;
@@ -54,6 +54,12 @@ export interface ParsedCommand {
   unknownCommand?: boolean;
 
   /**
+   * Name of the Claude Code skill this command invokes (category "skill"). `query` has
+   * already been rewritten into the invocation, so callers route it like any other turn.
+   */
+  skill?: string;
+
+  /**
    * Deprecation warning message (if command is deprecated)
    */
   deprecationWarning?: string;
@@ -85,9 +91,13 @@ export function parseCommand(message: string): ParsedCommand | null {
     return result;
   }
 
-  // Extract command and remaining query
+  // Extract command and remaining query. L11: Telegram appends `@BotName` when a command
+  // is picked from the menu or sent in a group, and the registry holds bare names — strip
+  // the suffix the way the /harness handler already does, or every menu tap on
+  // /vc-login@Homer_mini_bot answers "Unknown command".
   const spaceIndex = trimmed.indexOf(" ");
-  const commandPart = spaceIndex > 0 ? trimmed.slice(0, spaceIndex) : trimmed;
+  const rawCommandPart = spaceIndex > 0 ? trimmed.slice(0, spaceIndex) : trimmed;
+  const commandPart = rawCommandPart.replace(/@\w+$/, "");
   const queryPart = spaceIndex > 0 ? trimmed.slice(spaceIndex + 1).trim() : "";
 
   // Look up command in registry
@@ -123,6 +133,16 @@ export function parseCommand(message: string): ParsedCommand | null {
     case "session":
       if (cmdDef.name === "/new") {
         result.isNewSession = true;
+      }
+      break;
+
+    // A skill command is just a session turn with a query naming the skill: same executor,
+    // same permissions, same per-lane queue as any other message — and therefore the same
+    // MFA-relay behaviour, since the code reply is an ordinary inbound message.
+    case "skill":
+      if (cmdDef.skill) {
+        result.skill = cmdDef.skill;
+        result.query = skillInvocationQuery(cmdDef.skill, queryPart);
       }
       break;
 

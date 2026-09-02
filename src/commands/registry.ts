@@ -15,6 +15,7 @@ export type CommandCategory =
   | "search"     // Search commands
   | "system"     // System commands (status, debug, etc.)
   | "deprecated" // Deprecated commands with migration messages
+  | "skill"      // Runs a named Claude Code skill in the lane's session
   | "utility";   // Other utilities
 
 export interface CommandDefinition {
@@ -26,6 +27,24 @@ export interface CommandDefinition {
   deprecatedMessage?: string;
   aliases?: string[];
   model?: string; // Default model for this executor
+  /**
+   * For category "skill": the Claude Code skill this command invokes. The parser turns
+   * the command into an ordinary session query naming that skill, so the turn runs on
+   * exactly the same path (executor, permissions, lane queue) as the non-slash phrasing
+   * Yanqing used before — "log back into vendor central" and friends.
+   */
+  skill?: string;
+}
+
+/**
+ * The query a "skill" command becomes. Names the skill explicitly and echoes the slash
+ * trigger, both of which appear in the skill's own trigger list, so the session matches
+ * the intended skill rather than guessing from a paraphrase.
+ */
+export function skillInvocationQuery(skill: string, args = ""): string {
+  const base = `Run the ${skill} skill now (Telegram /${skill}).`;
+  const extra = args.trim();
+  return extra ? `${base} ${extra}` : base;
 }
 
 /**
@@ -226,6 +245,24 @@ export const COMMANDS: CommandDefinition[] = [
     name: "/todo",
     category: "utility",
     description: "Quick-add a to-do — /todo <title> [P1|P2|P3] [W|L]",
+  },
+
+  // Skill commands. Before 2026-09-01 these fell through to "Unknown command. Type /start
+  // for help." because they exist only as Claude Code skills, not as bot commands — so the
+  // MFA relay flow could only ever be started by typing a sentence.
+  {
+    name: "/vc-login",
+    category: "skill",
+    skill: "vc-login",
+    aliases: ["/vc_login"],
+    description: "Recover the Vendor Central + AMC sessions (asks for the MFA code here)",
+  },
+  {
+    name: "/amc-login",
+    category: "skill",
+    skill: "amc-login",
+    aliases: ["/amc_login"],
+    description: "Log back into advertising.amazon.com for AMC/ABVP (asks for the MFA code here)",
   },
 ];
 

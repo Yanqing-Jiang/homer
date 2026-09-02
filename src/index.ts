@@ -5,13 +5,14 @@
 import "dotenv/config";
 
 // Install fatal handlers FIRST - before any other imports that might throw
-import { installFatalHandlers, registerShutdownTask } from "./fatal-handlers.js";
+import { installFatalHandlers, registerFatalExitTask, registerShutdownTask, sendStartupFailureSms } from "./fatal-handlers.js";
 installFatalHandlers();
 
 // Import daemon lock
 import { acquireDaemonLock, releaseDaemonLock } from "./daemon/lock.js";
 
 import { createBot, startBot, setScheduler, setMeetingManager } from "./bot/index.js";
+import { markTelegramDisabled, stopTelegramPolling } from "./bot/polling-health.js";
 import { logger } from "./utils/logger.js";
 import { StateManager } from "./state/manager.js";
 import { config } from "./config/index.js";
@@ -29,7 +30,7 @@ import { staleMapCleaner } from "./utils/stale-map-cleaner.js";
 import { processRegistry } from "./process/registry.js";
 import { SessionTimeoutManager } from "./process/timeout-manager.js";
 import { cleanupScheduler } from "./process/cleanup-scheduler.js";
-import { browserLeaseBroker, residentChromeSupervisor, RESIDENT_CDP_PROFILE } from "./scraping/chrome-launcher.js";
+import { browserLeaseBroker, reapResidentChromeOnFatalExit, residentChromeSupervisor, RESIDENT_CDP_PROFILE } from "./scraping/chrome-launcher.js";
 import { startBrowserControlServer, stopBrowserControlServer } from "./scraping/browser-control.js";
 import { BrowserStatusService } from "./scraping/browser-status.js";
 import { SessionStewardship } from "./scraping/session-stewardship.js";
@@ -119,11 +120,28 @@ async function main(): Promise<void> {
   cleanupScheduler.init(stateManager.getDb());
   residentChromeSupervisor.start();
   registerShutdownTask(() => residentChromeSupervisor.stop());
+  // Crash-only: SIGTERM the Chrome WE launched (bounded), unless the lease ledger shows
+  // a live external holder — then leave it up for the next generation to adopt.
+  registerFatalExitTask(() => reapResidentChromeOnFatalExit("uncaught-fatal"));
   const browserStatus = new BrowserStatusService(() => {
     const status = residentChromeSupervisor.status();
     return { generation: status.generation, supervisorPid: process.pid, chromePid: status.chromePid,
+      ownership: status.ownership, degradedReason: browserLeaseBroker.degraded(),
+      adoptionGraceUntil: (() => { const at = browserLeaseBroker.adoptionGraceUntil(); return at ? new Date(at).toISOString() : null; })(),
+      externalReservation: (() => {
+        const r = browserLeaseBroker.externalReservationSummary();
+        return r ? { surface: r.surface, owner: r.owner, expiresAt: new Date(r.expiresAt).toISOString(), granted: r.granted } : null;
+      })(),
       profilePath: RESIDENT_CDP_PROFILE,
-      cdp: { state: status.cdp.state, pages: status.cdp.pages, restartCount: status.cdp.restartCount, reason: status.cdp.reason ?? null },
+      cdp: {
+        state: status.cdp.state, pages: status.cdp.pages, restartCount: status.cdp.restartCount, restartDeferrals: status.cdp.restartDeferrals,
+        // F9: while maintenance is on the supervisor neither probes nor relaunches, and the
+        // only consumer that pages anyone (the hourly health check) prints `cdp.reason`.
+        // Name the way out there, in the exact form the operator must type.
+        reason: status.maintenance.enabled
+          ? `MAINTENANCE${status.maintenance.reason ? ` (${status.maintenance.reason})` : ""} — no probing or relaunch until: bin/browserctl maintenance off`
+          : status.cdp.reason ?? null,
+      },
       maintenance: status.maintenance, records: browserLeaseBroker.snapshot() };
   });
   const publishBrowserStatus = () => { try { browserStatus.publish(); } catch (err) { logger.warn({ err }, "Chrome status publication failed"); } };
@@ -138,18 +156,224 @@ async function main(): Promise<void> {
     (surface) => stewardship.touch(surface, true),
   );
   registerShutdownTask(() => stopBrowserControlServer(browserControlServer));
-  try {
-    await runAgentBrowserBindingSelfTest();
+  /**
+   * Bring the browser up, but NEVER let it decide whether Homer runs.
+   *
+   * 2026-09-01: `stewardship.ensureSurfaces()` threw "broker is draining leases" (the
+   * supervisor had started a drain after the singleton forward), the rejection reached
+   * `main().catch`, and the daemon exited 1 — 63 times in 70 minutes. The scheduler, the
+   * Telegram bot, memory, telephony and every non-browser job were all healthy and all
+   * went down with it.
+   *
+   * ALLOWED WHILE THE BROWSER IS DEGRADED: everything that does not drive Chrome —
+   * the scheduler and all non-browser jobs, the Telegram bot, memory indexing/search,
+   * telephony, the queue worker, the browser-control socket (so `browserctl status` and
+   * `browserctl maintenance` still answer), and status publication.
+   * REFUSED WHILE DEGRADED: agent-browser reservations — BrowserLeaseBroker.reserveExternal
+   * throws on `degradedReason`, so browser-driven jobs fail fast with a clear reason
+   * instead of attaching to a browser we could not verify.
+   */
+  //
+  // Logging is deliberately rate limited (M5): the retry runs every 60 s and an
+  // unthrottled pair of ERROR lines per attempt is ~2,880/day into stdout.log, which buries
+  // the one line that matters. First three attempts at error, then one warn every 10 min
+  // while the reason is unchanged, and one info on recovery.
+  const BROWSER_RETRY_MS = 60_000;
+  const BROWSER_LOUD_ATTEMPTS = 3;
+  const BROWSER_QUIET_LOG_MS = 10 * 60_000;
+  const BROWSER_SMS_AFTER_MS = 10 * 60_000;
+  let browserAttempt = 0;
+  let browserLastLoggedReason: string | null = null;
+  let browserLastLoggedAt = 0;
+  let browserDegradedSince: number | null = null;
+  let browserSmsSent = false;
+
+  // M4: a degradation that outlives BROWSER_SMS_AFTER_MS gets ONE SMS. Telegram is not a
+  // reliable channel for it — the same daemon may also be failing to poll. Never called on a
+  // healthy-but-reserved browser, so a fence cannot raise a false alarm.
+  const maybeSendBrowserDegradedSms = (): void => {
+    if (browserSmsSent || browserDegradedSince === null) return;
+    if (Date.now() - browserDegradedSince < BROWSER_SMS_AFTER_MS) return;
+    browserSmsSent = true;
+    void import("./telephony/emergency-sms.js")
+      .then(({ sendEmergencySms }) => sendEmergencySms(`Homer agent-browser degraded >10m: ${browserLeaseBroker.degraded() ?? "unknown"}`))
+      .catch(() => { /* best effort */ });
+  };
+
+  const noteBrowserFailure = (reason: string, phase: "startup" | "retry"): void => {
+    browserAttempt++;
+    if (browserDegradedSince === null) browserDegradedSince = Date.now();
+    const changed = reason !== browserLastLoggedReason;
+    const quietElapsed = Date.now() - browserLastLoggedAt >= BROWSER_QUIET_LOG_MS;
+    if (browserAttempt <= BROWSER_LOUD_ATTEMPTS || changed) {
+      logger.error({ err: reason, phase, attempt: browserAttempt }, "Agent-browser automation degraded (daemon continues)");
+    } else if (quietElapsed) {
+      logger.warn({ err: reason, phase, attempt: browserAttempt, degradedForMs: Date.now() - browserDegradedSince },
+        "Agent-browser automation still degraded");
+    } else {
+      return; // suppressed entirely; the next 10-minute tick reports it
+    }
+    browserLastLoggedReason = reason;
+    browserLastLoggedAt = Date.now();
+  };
+
+  /**
+   * The serialized-binding self-test verdict, tracked SEPARATELY from the CDP probe (F3).
+   * A CDP probe says nothing about whether agent-browser can bind, so an external holder
+   * appearing must never be allowed to clear a real self-test failure, and "healthy but
+   * reserved" must never cancel the retry that would eventually re-run the test (F4).
+   */
+  let browserSelfTest: "untested" | "passed" | "failed" = "untested";
+
+  const runBrowserSelfTest = async (phase: "startup" | "retry"): Promise<boolean> => {
+    try {
+      await runAgentBrowserBindingSelfTest();
+      browserSelfTest = "passed";
+      browserLeaseBroker.setDegraded(null);
+      logger.info({ sessions: 2, policy: "globally-serialized", concurrentCreationRefused: true }, "Agent-browser startup serialized-binding self-test passed");
+      return true;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      browserSelfTest = "failed";
+      browserLeaseBroker.setDegraded(reason);
+      noteBrowserFailure(`serialized-binding self-test: ${reason}`, phase);
+      return false;
+    }
+  };
+
+  /**
+   * N4: a browser that is HEALTHY BUT RESERVED is not degraded.
+   *
+   * `runAgentBrowserBindingSelfTest` opens with `reserveExternal`, which the adoption fence
+   * refuses outright and which the global agent-browser serialization refuses while an
+   * external holder is live. So on any restart that adopts a Chrome — the normal outcome now
+   * that the exit paths leave it for QC's backfill — the self-test failed, the broker was
+   * flagged degraded, `/status` and the health check reported a fault that did not exist, and
+   * the 10-minute clock could fire a false `agent-browser degraded >10m` SMS. The self-test is
+   * an assertion we cannot make without taking the browser from its holder, so it is deferred
+   * and health is judged on the CDP probe alone — but only for a browser that has not ALREADY
+   * failed the test for a real reason (F3).
+   */
+  const browserIsReserved = (): { reserved: boolean; fencedUntil: number | null; externalHolders: number } => {
+    const fencedUntil = browserLeaseBroker.adoptionGraceUntil();
+    const externalHolders = browserLeaseBroker.externalLeaseCount();
+    return { reserved: fencedUntil !== null || externalHolders > 0, fencedUntil, externalHolders };
+  };
+  const markBrowserHealthy = (): void => {
+    if (browserDegradedSince !== null) {
+      logger.info({ degradedForMs: Date.now() - browserDegradedSince, attempts: browserAttempt },
+        "Agent-browser automation recovered; broker no longer degraded");
+    }
     browserLeaseBroker.setDegraded(null);
-    logger.info({ sessions: 2, policy: "globally-serialized", concurrentCreationRefused: true }, "Agent-browser startup serialized-binding self-test passed");
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
-    browserLeaseBroker.setDegraded(reason);
-    logger.error({ err: reason }, "Agent-browser startup serialized-binding self-test failed; agent-browser automation degraded");
-  }
-  await residentChromeSupervisor.heartbeatNow();
-  await stewardship.ensureSurfaces(); stewardship.start(); registerShutdownTask(() => stewardship.stop());
+    browserAttempt = 0; browserDegradedSince = null; browserSmsSent = false;
+    browserLastLoggedReason = null; browserLastLoggedAt = 0;
+  };
+
+  /**
+   * `armRetry` — keep (or start) the 60 s recovery loop. False ONLY when the self-test has
+   * actually passed, so a deferred test is always re-run once the holder releases (F4).
+   * `degraded` — whether anything is genuinely wrong; drives the startup log line.
+   */
+  const bringBrowserUp = async (phase: "startup" | "retry"): Promise<{ armRetry: boolean; degraded: boolean }> => {
+    const reservation = browserIsReserved();
+    if (!reservation.reserved) {
+      const selfTestOk = await runBrowserSelfTest(phase);
+      try {
+        await residentChromeSupervisor.heartbeatNow();
+        await stewardship.ensureSurfaces();
+        if (selfTestOk) {
+          markBrowserHealthy();
+          return { armRetry: false, degraded: false };
+        }
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        browserLeaseBroker.setDegraded(reason);
+        noteBrowserFailure(`surface reconcile: ${reason}`, phase);
+      }
+      maybeSendBrowserDegradedSms();
+      return { armRetry: true, degraded: true };
+    }
+
+    // Reserved. Judge on the CDP probe FIRST, so a transient reconcile error cannot pre-empt
+    // the healthy-but-reserved verdict and start the degraded clock for a healthy browser (F7).
+    let cdpState: "ready" | "empty" | "absent" = "absent";
+    let cdpReason: string | null = null;
+    try {
+      await residentChromeSupervisor.heartbeatNow();
+      const cdp = residentChromeSupervisor.status().cdp;
+      cdpState = cdp.state;
+      cdpReason = cdp.reason ?? null;
+    } catch (err) {
+      cdpReason = err instanceof Error ? err.message : String(err);
+    }
+
+    if (cdpState !== "ready") {
+      const reason = `CDP ${cdpState}${cdpReason ? ` (${cdpReason})` : ""} while the browser is reserved`;
+      browserLeaseBroker.setDegraded(reason);
+      noteBrowserFailure(reason, phase);
+      maybeSendBrowserDegradedSms();
+      return { armRetry: true, degraded: true };
+    }
+
+    // Reconcile is best-effort on a reserved-healthy browser: a failure here is logged, not
+    // treated as a degradation of agent-browser automation (F7).
+    try {
+      await stewardship.ensureSurfaces();
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : String(err), phase },
+        "Surface reconcile failed on a reserved but healthy browser — retrying on the next tick");
+    }
+
+    if (browserSelfTest === "failed") {
+      // F3: agent-browser is genuinely broken and a holder merely appeared. Keep the existing
+      // degradation and the retry; a CDP probe is no evidence that binding works.
+      logger.warn(
+        { phase, externalHolders: reservation.externalHolders, degradedReason: browserLeaseBroker.degraded() },
+        "Browser reserved, but the serialized-binding self-test has already FAILED — degradation retained",
+      );
+      maybeSendBrowserDegradedSms();
+      return { armRetry: true, degraded: true };
+    }
+
+    markBrowserHealthy();
+    logger.info(
+      { phase, externalHolders: reservation.externalHolders,
+        fencedUntil: reservation.fencedUntil ? new Date(reservation.fencedUntil).toISOString() : null },
+      "Browser healthy but reserved by an external holder — serialized-binding self-test deferred, NOT degraded; it will run once the holder releases",
+    );
+    // F4: armRetry stays true so the deferred test is actually re-run later.
+    return { armRetry: true, degraded: false };
+  };
+
+  const startupBrowser = await bringBrowserUp("startup");
+  stewardship.start(); registerShutdownTask(() => stewardship.stop());
   residentChromeSupervisor.setSurfaceReconciler(() => stewardship.ensureSurfaces());
+  if (startupBrowser.armRetry) {
+    // Keep retrying in the background so a browser that recovers (Chrome relaunched, an
+    // orphan adopted, `browserctl maintenance off`) re-arms automation without a daemon
+    // restart, AND so a self-test deferred because the browser was reserved is actually run
+    // once the holder releases (F4). An ordinary supervisor relaunch calls beginGeneration(),
+    // which clears the broker's `draining` flag, so even the "broker is draining leases"
+    // failure recovers here; only maintenance mode is permanent, and the loop skips that.
+    const retryTimer: ReturnType<typeof setInterval> = setInterval(() => {
+      void (async () => {
+        if (residentChromeSupervisor.maintenance().enabled) return;
+        // The self-test is never run against a browser an EXTERNAL holder is driving —
+        // taking the agent surface from QC's backfill mid-run is the interruption we are
+        // avoiding — but bringBrowserUp handles that itself now (N4). The interval is
+        // cleared ONLY once the self-test has actually passed, never on a CDP probe (F3).
+        const result = await bringBrowserUp("retry");
+        if (!result.armRetry) clearInterval(retryTimer);
+      })();
+    }, BROWSER_RETRY_MS);
+    retryTimer.unref?.();
+    registerShutdownTask(() => clearInterval(retryTimer));
+    if (startupBrowser.degraded) {
+      logger.error({ retryMs: BROWSER_RETRY_MS }, "Starting H.O.M.E.R with agent-browser DEGRADED — scheduler, bot and non-browser jobs run normally");
+    } else {
+      logger.info({ retryMs: BROWSER_RETRY_MS }, "Starting H.O.M.E.R with the serialized-binding self-test deferred (browser reserved) — it will run once the holder releases");
+    }
+  }
   initFallbackChain(stateManager.getDb());
   initTraceWriter(stateManager.getDb());
   rehydrateHealth(stateManager.getDb());
@@ -204,6 +428,7 @@ async function main(): Promise<void> {
   if (config.telegram.enabled) {
     bot = createBot(stateManager, cliRunManager);
   } else {
+    markTelegramDisabled();
     logger.warn("Telegram disabled: set TELEGRAM_BOT_TOKEN and ALLOWED_CHAT_ID to enable chat, reminders, and push notifications");
   }
 
@@ -286,6 +511,9 @@ async function main(): Promise<void> {
   registerShutdownTask(async () => {
     logger.info("Phase 1: Stopping bot and telephony server...");
     if (bot) {
+      // Tell the polling supervisor this stop is deliberate, so its backoff loop does
+      // not restart the poller while the daemon is shutting down.
+      stopTelegramPolling();
       await bot.stop();
     }
     if (telephonyServer) {
@@ -382,6 +610,19 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  logger.fatal({ error }, "Failed to start H.O.M.E.R");
-  process.exit(1);
+  logger.fatal({ err: error, error }, "Failed to start H.O.M.E.R");
+  // F9: a startup failure used to be silent — the supervisor restarts forever with a 30 s
+  // backoff cap and the "Homer restarted" ping needs a successful bot.start, so a rejected
+  // startup await (port busy, migration error) could loop all night unheard. One SMS,
+  // rate-limited on disk across restarts so the loop itself cannot page 63 times.
+  sendStartupFailureSms(error);
+  // This path calls process.exit directly and therefore never runs the registered
+  // shutdown tasks — which is how the 2026-09-01 Chrome orphan outlived its daemon.
+  // Reap it here (lease-ledger aware) before exiting, with a hard cap so a wedged
+  // Chrome cannot hold the exit open.
+  void Promise.race([
+    reapResidentChromeOnFatalExit("main-catch"),
+    new Promise<void>((r) => setTimeout(r, 8_000)),
+  ]).catch(() => { /* already fatal — never let the reaper mask the exit */ })
+    .finally(() => process.exit(1));
 });

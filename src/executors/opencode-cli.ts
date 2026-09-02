@@ -331,7 +331,9 @@ async function executeOpenCodeCLIOnce(
     if (browserOnly) mkdirSync(effectiveCwd, { recursive: true });
 
     const child: ChildProcess = spawn(browserOnly ? "browserctl" : "opencode", browserOnly ? ["agent", "--", "opencode", ...args] : args, {
-      stdio: ["pipe", "pipe", "pipe"],
+      // opencode run treats stdin as extra message content and creates no session
+      // until stdin reaches EOF; the prompt is already in argv, so give it no stdin.
+      stdio: ["ignore", "pipe", "pipe"],
       cwd: effectiveCwd,
       detached: true, // own process group so SIGTERM kills all children
       env: opencodeChildEnv(model),
@@ -396,8 +398,6 @@ async function executeOpenCodeCLIOnce(
         signal.addEventListener("abort", abortHandler, { once: true });
       }
     }
-
-    child.stdin?.end();
 
     // Parse streaming NDJSON output
     const rl = readline.createInterface({
@@ -797,7 +797,7 @@ export async function* streamOpenCodeCLI(
   ];
 
   const child = spawn("opencode", args, {
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"], // see the stdin note at the primary spawn site
     cwd: cwd || runtimeHome,
     env: opencodeChildEnv(model),
   });
@@ -809,8 +809,6 @@ export async function* streamOpenCodeCLI(
     timeoutMs: 20 * 60 * 1000,
     source: "cli-runner",
   });
-
-  child.stdin?.end();
 
   const rl = readline.createInterface({
     input: child.stdout!,

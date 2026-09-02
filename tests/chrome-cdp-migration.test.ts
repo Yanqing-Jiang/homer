@@ -586,7 +586,12 @@ test("a browserctl-agent lease whose owner pid is dead is reclaimed before its T
   await broker.registerExternalTarget(dead.leaseId, "external-dead");
   // Our own pid is alive: the reclaim must not touch a live owner.
   const live = await broker.reserveExternal("agent.live-check", `browserctl-agent:${process.pid}`, 3600) as { leaseId: string };
-  assert.equal(broker.snapshot().find((r) => r.surface === "agent.dead")?.leaseId, null);
+  // The reclaim now DELETES the record of a dead agent.* adopter and closes its tab (G13):
+  // clearing the lease alone left one leaked tab per reclaim for the life of the browser.
+  assert.equal(broker.snapshot().find((r) => r.surface === "agent.dead"), undefined,
+    "the reclaimed agent record is removed, not left behind with a null lease");
+  await broker.__flushPendingClosesForTest();
+  assert.equal(targets.has("external-dead"), false, "and its abandoned tab is closed");
   await broker.release(live.leaseId);
   await assert.rejects(
     async () => { await broker.registerExternalTarget(dead.leaseId, "external-dead"); },

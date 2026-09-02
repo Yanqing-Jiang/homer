@@ -8,7 +8,27 @@ export type SurfaceHealth = {
 };
 export type ChromeStatus = {
   schema: 1; updatedAt: string; generation: number; supervisorPid: number; chromePid: number | null;
-  profilePath: string; cdp: { state: "ready" | "empty" | "absent"; pages: number; restartCount: number; reason: string | null };
+  /** How this daemon came to be pointed at the live Chrome — see ChromeOwnership. */
+  ownership: "launched" | "adopted" | "foreign" | "none";
+  /** Non-null while agent-browser automation is refused; the daemon still runs everything else. */
+  degradedReason: string | null;
+  /**
+   * ISO deadline of the post-adoption fence, or null. Non-null means this generation adopted
+   * a Chrome whose external holder it could not reconstruct and is refusing new agent
+   * reservations until then — the one thing an operator cannot otherwise tell from the file.
+   */
+  adoptionGraceUntil: string | null;
+  /** The live external (agent-browser) reservation, if any. */
+  externalReservation: { surface: string; owner: string; expiresAt: string; granted: boolean } | null;
+  profilePath: string;
+  /**
+   * `restartDeferrals` counts heartbeat restarts the supervisor DEFERRED because an external
+   * holder was driving a browser that still answered CDP (F8) — a rising count with a
+   * non-ready state is a deliberate wait, not a stuck supervisor. `reason` carries the
+   * `bin/browserctl maintenance off` command while maintenance is on (F9), so the hourly
+   * health check's `CDP <state> (<reason>)` line names the way out.
+   */
+  cdp: { state: "ready" | "empty" | "absent"; pages: number; restartCount: number; restartDeferrals?: number; reason: string | null };
   maintenance: { enabled: boolean; reason: string | null };
   surfaces: Record<string, SurfaceHealth & { targetId: string | null; lease: { owner: string; expiresAt: string } | null }>;
 };

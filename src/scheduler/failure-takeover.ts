@@ -142,7 +142,9 @@ function getRecentRuns(stateManager: StateManager, jobId: string): string {
   if (runs.length === 0) return "(no recent runs)";
 
   return runs.map(r => {
-    const status = r.success ? "SUCCESS" : "FAIL";
+    // A `deferred` row has success = 0 but is not a failure — it is "did not run, retry
+    // armed". Labelling it FAIL would have the takeover diagnose a fault that never happened.
+    const status = r.success ? "SUCCESS" : r.outcome === "deferred" ? "DEFERRED" : "FAIL";
     const errSnippet = r.error ? ` | ${truncate(r.error, 200)}` : "";
     return `- [${status}] ${r.startedAt}${errSnippet}`;
   }).join("\n");

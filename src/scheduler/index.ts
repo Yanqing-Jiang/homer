@@ -1,5 +1,6 @@
 import type { Bot } from "grammy";
 import { logger } from "../utils/logger.js";
+import { selectRetriesToFire, selectRestartRetries, RESTART_RETRY_DELAY_MS, RESTART_RETRY_REASON } from "./retry-selection.js";
 import { loadAllSchedules, getAllJobs, ScheduleWatcher } from "./loader.js";
 import { CronManager } from "./manager.js";
 import { executeScheduledJob } from "./executor.js";
@@ -79,9 +80,9 @@ export class Scheduler {
     if (clearedFlags > 0) {
       logger.warn({ count: clearedFlags }, "Cleared stale scheduled job run flags");
     }
-    const orphanedRuns = this.stateManager.cleanupOrphanedJobRuns();
-    if (orphanedRuns > 0) {
-      logger.warn({ count: orphanedRuns }, "Marked orphaned job runs as failed (scheduler boot)");
+    const orphaned = this.stateManager.cleanupOrphanedJobRuns();
+    if (orphaned.count > 0) {
+      logger.warn({ count: orphaned.count, jobIds: orphaned.jobIds }, "Marked orphaned job runs as failed (scheduler boot)");
     }
 
     // Phase 1: Snapshot due jobs from DB BEFORE registration overwrites next_run_at_ms
@@ -126,7 +127,21 @@ export class Scheduler {
       jobs.map(j => ({ jobId: j.id, enabled: j.enabled }))
     );
 
-    // Phase 5: Trigger catch-up — jobs are registered, getJob() works now
+    // Phase 4c: a run this restart cut down gets a wake-up. Flipping its run row (Phase 0)
+    // armed nothing, so an ABVP run killed mid-download rested until the next weekly cron
+    // and was superseded there — a lost week, no message. Armed before Phase 5 so the same
+    // fireDueRetries path that honours every other retry sees it; its own ceilings bound it.
+    for (const jobId of selectRestartRetries(orphaned.jobIds, jobs)) {
+      const retryAt = new Date(Date.now() + RESTART_RETRY_DELAY_MS).toISOString();
+      this.stateManager.setJobRetryAt(jobId, retryAt, RESTART_RETRY_REASON);
+      logger.warn({ jobId, retryAt, reason: RESTART_RETRY_REASON }, "Orphaned run: armed a restart retry");
+    }
+
+    // Phase 5: Trigger catch-up — jobs are registered, getJob() works now.
+    // Retries armed by a `deferred` outcome are reconciled first: they are durable in
+    // scheduled_job_state and survive a daemon restart, and unlike missed-fire
+    // compensation they are not gated on autoCompensate.
+    this.fireDueRetries();
     this.triggerDueJobs(dueJobIds);
 
     // Start file watcher for hot reload
@@ -137,7 +152,10 @@ export class Scheduler {
     logger.info({ totalJobs: jobs.length, enabledJobs: enabledCount }, "Scheduler started");
 
     // Periodic catch-up every 10 minutes
-    this.compensateInterval = setInterval(() => this.compensateMissedFires(), 10 * 60 * 1000);
+    this.compensateInterval = setInterval(() => {
+      this.fireDueRetries();
+      this.compensateMissedFires();
+    }, 10 * 60 * 1000);
 
     // Start observability (heartbeat + zombie watchdog)
     startHeartbeat(this.cronManager);
@@ -207,6 +225,47 @@ export class Scheduler {
     this.cronManager.stop();
     this.isRunning = false;
     logger.info("Scheduler stopped");
+  }
+
+  /**
+   * Fire one-shot retries armed by a `deferred` outcome.
+   *
+   * Deliberately independent of compensateMissedFires: a retry is an explicit
+   * scheduler-owned re-fire the job asked for, not a compensation for a missed cron
+   * tick, so it is NOT gated on `autoCompensate`. `retry_at` is durable in
+   * scheduled_job_state, so a retry armed before a daemon restart is honoured after it;
+   * this runs at boot and every compensation cycle. `recordScheduledJobStart` clears
+   * `retry_at`, which is what keeps it one-shot.
+   */
+  private fireDueRetries(): void {
+    try {
+      const due = this.stateManager.getDueRetries();
+      const selected = selectRetriesToFire(due, {
+        now: Date.now(),
+        lastRunAt: (jobId) => {
+          const st = this.stateManager.getScheduledJobState(jobId);
+          // Whichever happened later. `fireDueRetries` writes lastTriggeredAt for every retry
+          // it fires, so a retry that never reached recordScheduledJobStart is still deduped.
+          const candidates = [st?.lastRunAt, st?.lastTriggeredAt].filter(Boolean) as string[];
+          if (!candidates.length) return null;
+          return candidates.sort().at(-1)!;
+        },
+        isFireable: (jobId) => {
+          const job = this.cronManager.getJob(jobId);
+          return Boolean(job && job.config.enabled);
+        },
+      });
+      for (const row of selected) {
+        logger.warn(
+          { jobId: row.jobId, retryAt: row.retryAt, reason: row.retryReason },
+          "Firing scheduler-owned retry for a deferred job",
+        );
+        this.stateManager.recordCompensationTrigger(row.jobId);
+        this.cronManager.triggerJob(row.jobId, false);
+      }
+    } catch (err) {
+      logger.error({ error: err }, "fireDueRetries failed");
+    }
   }
 
   /**
@@ -600,6 +659,12 @@ export class Scheduler {
         ).finally(() => { settled = true; });
         result = await Promise.race([execPromise, hangPromise]);
       } catch (hangError) {
+        // DEBT: when the watchdog wins this race the handler's own result — its `retryAt`,
+        // `outcome` and `resetFailureStreak` — is discarded, so an ABVP run aborted here rests
+        // until the next weekly cron even though state.json carries a bounded resume_after. Bounded
+        // by the job's 6 h timeout and by the flock the unsettled handler still holds. Upgrade
+        // (read `resume_after` from the handler's state, or let the settled result win) the first
+        // time a >6 h ABVP hang is observed.
         const msg = hangError instanceof Error ? hangError.message : String(hangError);
         logger.warn({ jobId: job.config.id, jobName: job.config.name }, msg);
         // Timeout must mean cancellation: the controller is already aborted, so give
@@ -637,6 +702,67 @@ export class Scheduler {
         );
       }
 
+      // A job may ask for a one-shot re-fire on ANY disposition: a cadence catch-up that left
+      // its own next-due instant in the past (success), or a retryable failure whose bounded
+      // resume_after would otherwise have no tick to land on. `deferred` arms its own retry
+      // inside recordScheduledJobDeferred. Every arming happens INSIDE the same transaction
+      // that releases the run lock, so a new run cannot start in the gap and inherit a stale
+      // retry from the run that just finished.
+      const requestedRetry = result.retryAt
+        ? { retryAt: result.retryAt, reason: result.retryReason ?? "requested_retry" }
+        : { retryAt: null, reason: null };
+      if (result.retryAt) {
+        logger.info(
+          { jobId: job.config.id, retryAt: result.retryAt, reason: result.retryReason, success: result.success },
+          "Job requested a one-shot re-fire",
+        );
+      }
+      // See JobExecutionResult.resetFailureStreak: the fire that opens a new unit of work
+      // starts the failure streak over, in the DB counter and the in-memory one the breaker reads.
+      // Computed BEFORE the deferred branch: the slot-opening fire is exactly the one most likely
+      // to defer (a QC lease at 14:00Z), and dropping the reset there let two bad weeks reach the
+      // breaker through the run's own retry ticks.
+      const streak = { resetFailureStreak: result.resetFailureStreak === true };
+      if (streak.resetFailureStreak) this.cronManager.resetFailureStreak(job.config.id);
+
+      // === DEFERRED PATH ===
+      // A third disposition beside success and failure: the job did not run to
+      // completion because a resource it needs was held. Nothing is broken, so this must
+      // not enter failure takeover or the circuit breaker; nothing was produced, so it
+      // must not write last_success_at, reset consecutive_failures, or fire success
+      // dependencies. The producer owns its own user-facing notification (rate-limited),
+      // so notifyJobResult is deliberately skipped.
+      if (result.outcome === "deferred") {
+        const retryAt = result.retryAt ?? new Date(Date.now() + 30 * 60 * 1000).toISOString();
+        const reason = result.retryReason ?? "deferred";
+        this.stateManager.recordScheduledJobDeferred(
+          runId, job.config.id, result.output, retryAt, reason, streak,
+        );
+        logger.warn(
+          { jobId: job.config.id, retryAt, reason },
+          "Job deferred; scheduler armed a one-shot retry",
+        );
+        return;
+      }
+
+      // === HALTED PATH ===
+      // The job refused to start work: one of ITS OWN ceilings was reached, or it failed closed
+      // on state it will not trust. A failure for history and notification, but it must not feed
+      // the circuit breaker — ABVP's ceilings (3 attempts, 6 deferrals, 3 runs per slot) are the
+      // stop, and a second uncoordinated stop here would disable the job with its retries
+      // armed and inert. No takeover either: nothing ran, so there is nothing to take over.
+      if (result.outcome === "halted") {
+        this.stateManager.recordScheduledJobHalted(
+          runId, job.config.id, result.output, result.error, requestedRetry, streak,
+        );
+        logger.warn(
+          { jobId: job.config.id, error: result.error, resetFailureStreak: streak.resetFailureStreak },
+          "Job halted on its own ceiling; not counted toward the circuit breaker",
+        );
+        await notifyJobResult(this.bot, this.chatId, this.stateManager.getDb(), result, job, runId);
+        return;
+      }
+
       // === FAILURE + TAKEOVER PATH ===
       if (!result.success && takeoverEnabled && bot && !originalStillRunning) {
         // Record failure but keep is_running lock held
@@ -661,9 +787,9 @@ export class Scheduler {
             // Fall through to normal failure handling
             this.stateManager.recordScheduledJobComplete(
               runId, job.config.id, false,
-              result.output, result.error, result.exitCode
+              result.output, result.error, result.exitCode, requestedRetry, streak
             );
-            this.cronManager.updateJobState(job.config.id, false);
+            this.cronManager.updateJobState(job.config.id, false, streak);
             await this.checkCircuitBreaker(job.config.id, job.config.name);
             await notifyJobResult(this.bot, this.chatId, this.stateManager.getDb(), result, job, runId);
             return;
@@ -673,7 +799,7 @@ export class Scheduler {
             // Takeover saved it — record as success
             this.stateManager.recordScheduledJobComplete(
               runId, job.config.id, true,
-              takeoverResult.retryResult?.output ?? result.output, undefined, 0
+              takeoverResult.retryResult?.output ?? result.output, undefined, 0, requestedRetry, streak
             );
             this.cronManager.updateJobState(job.config.id, true);
             this.fireDependencyTriggers(job.config.id);
@@ -692,9 +818,9 @@ export class Scheduler {
           // Takeover didn't fix it after retries — record as failure and ALWAYS alert.
           this.stateManager.recordScheduledJobComplete(
             runId, job.config.id, false,
-            result.output, result.error, result.exitCode
+            result.output, result.error, result.exitCode, requestedRetry, streak
           );
-          this.cronManager.updateJobState(job.config.id, false);
+          this.cronManager.updateJobState(job.config.id, false, streak);
           await this.checkCircuitBreaker(job.config.id, job.config.name);
 
           // Escalation alert is unconditional (spec: always push the error on escalation).
@@ -729,9 +855,9 @@ export class Scheduler {
           logger.error({ jobId: job.config.id, error: takeoverError }, "Failure takeover crashed");
           this.stateManager.recordScheduledJobComplete(
             runId, job.config.id, false,
-            result.output, result.error, result.exitCode
+            result.output, result.error, result.exitCode, requestedRetry, streak
           );
-          this.cronManager.updateJobState(job.config.id, false);
+          this.cronManager.updateJobState(job.config.id, false, streak);
           await this.checkCircuitBreaker(job.config.id, job.config.name);
           await notifyJobResult(this.bot, this.chatId, this.stateManager.getDb(), result, job, runId);
           return;
@@ -741,9 +867,10 @@ export class Scheduler {
       // === SUCCESS PATH (or failure with takeover disabled) ===
       this.stateManager.recordScheduledJobComplete(
         runId, job.config.id, result.success,
-        result.output, result.error, result.exitCode
+        result.output, result.error, result.exitCode, requestedRetry, streak
       );
-      this.cronManager.updateJobState(job.config.id, result.success);
+      this.cronManager.updateJobState(job.config.id, result.success, streak);
+
 
       if (!result.success) {
         await this.checkCircuitBreaker(job.config.id, job.config.name);
@@ -842,6 +969,9 @@ export class Scheduler {
       }
 
       // Update failure state
+      // DEBT: a throw out of the job carries no result, so `resetFailureStreak` is unknown here and
+      // a fire that opened a new slot still increments the streak. Exception path only; upgrade
+      // if a handler is ever seen throwing on its slot-opening tick.
       this.cronManager.updateJobState(job.config.id, false);
       await this.checkCircuitBreaker(job.config.id, job.config.name);
 
@@ -860,7 +990,10 @@ export class Scheduler {
           false,
           "",
           errorMessage,
-          1
+          1,
+          // The job threw before returning a result, so there is no request to honour. The run
+          // is over, which consumes whatever retry it was started for.
+          { retryAt: null, reason: null },
         );
       }
 

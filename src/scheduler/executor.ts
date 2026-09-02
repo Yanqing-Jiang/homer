@@ -99,6 +99,17 @@ export interface RunJobHarnessOptions extends InternalHarnessCallProfile {
   emitCompletedEvent?: boolean;
   singleExecutor?: ExecutorKind;
   skipDiagnosis?: boolean;
+  /**
+   * Hard cap on CLI launches for this call, across the whole fallback chain.
+   *
+   * Without it the chain allows `chain.length * MAX_RETRIES_PER_EXECUTOR + 1` launches, so a
+   * one-entry fallback chain is FIVE launches — and for a stage that drives a live Amazon portal
+   * for up to 100 minutes each, the run-level retry budget is the thing that should be counting,
+   * not the executor ladder.
+   */
+  maxHarnessLaunches?: number;
+  /** Same-executor retries before the chain switches; 1 makes `maxHarnessLaunches: 2` mean primary + fallback. */
+  retriesPerExecutor?: number;
   scheduledRunId?: number;
   memoryJob?: boolean;
   signal?: AbortSignal;
@@ -1019,6 +1030,8 @@ export async function runJobHarness(
       runExecutor,
       notify,
       skipDiagnosis: options.skipDiagnosis,
+      maxAttempts: options.maxHarnessLaunches,
+      retriesPerExecutor: options.retriesPerExecutor,
       jobMeta: { deep: config.deep },
     });
 

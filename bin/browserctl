@@ -14,7 +14,7 @@ const agentBrowser = process.env.HOMER_AGENT_BROWSER_BIN ?? "/opt/homebrew/bin/a
 const cdpBase = process.env.HOMER_CDP_HTTP ?? "http://127.0.0.1:9222";
 const [command, ...args] = process.argv.slice(2);
 
-function usage() { throw new Error("usage: browserctl status [surface] | acquire <surface> <owner> <ttl-seconds> | renew <leaseId> <ttl-seconds> | release <leaseId> | reconcile <surface> <origin[,origin...]> <bootstrapUrl> | touch <surface> | maintenance <on|off> [reason] | agent [agent.surface] [--ttl seconds] [--rpc | -- <workflow command...>]"); }
+function usage() { throw new Error("usage: browserctl status [surface] | acquire <surface> <owner> <ttl-seconds> | acquire-external <agent.surface> <owner> <ttl-seconds> [--grant] | capabilities | release-grant <leaseId> | renew <leaseId> <ttl-seconds> | release <leaseId> | reconcile <surface> <origin[,origin...]> <bootstrapUrl> | touch <surface> | maintenance <on|off> [reason] | agent [agent.surface] [--ttl seconds] [--adopt <leaseId>] [--rpc | -- <workflow command...>]"); }
 
 async function readStatus(surface) {
   const now = Date.now();
@@ -125,28 +125,70 @@ async function runAgent(agentArgs) {
   let ttl = 3600;
   let rpc = false;
   let workflow = [];
+  let adoptLeaseId = null;
   let i = 0;
   if (agentArgs[0] && !agentArgs[0].startsWith("-")) surface = agentArgs[i++];
   while (i < agentArgs.length) {
     if (agentArgs[i] === "--ttl") { ttl = Number(agentArgs[++i]); i++; }
+    else if (agentArgs[i] === "--adopt") { adoptLeaseId = agentArgs[++i]; i++; }
     else if (agentArgs[i] === "--rpc") { rpc = true; i++; }
     else if (agentArgs[i] === "--") { workflow = agentArgs.slice(i + 1); break; }
     else usage();
   }
   const owner = `browserctl-agent:${process.pid}`;
+  // A caller that already reserved the browser (ABVP does, so the agent stage cannot be
+  // spent on a browser someone else took between the check and the launch) passes its
+  // leaseId as a grant. We ADOPT that reservation rather than racing for a new one.
+  //
+  // Two delivery channels, because relying on an LLM to reproduce a CLI flag verbatim is not
+  // a mechanism: an explicit `--adopt <id>`, and HOMER_BROWSER_GRANT inherited from the
+  // holder's environment. An explicit flag FAILS CLOSED if adoption is refused (the caller
+  // asked for this lease and nothing else will do). An inherited env grant falls back to a
+  // normal reservation, so an unrelated job that merely inherited the variable still works;
+  // the broker binds the grant to its surface, so it cannot be stolen either way.
+  const explicitGrant = adoptLeaseId ?? null;
+  const envGrant = process.env.HOMER_BROWSER_GRANT ?? null;
+  const grant = explicitGrant ?? envGrant;
   // Short suffix: agent-browser session names become socket paths (103-byte
   // cap), and the default surface already carries a full UUID.
   const session = `homer-${surface.replace(/[^a-zA-Z0-9_-]/g, "-")}-${randomUUID().slice(0, 8)}`;
   let leaseId;
   let targetId;
   let renewTimer;
+  let adoptedGrant = false;
   const stop = () => { stopRequested = true; activeWorkflowChild?.kill("SIGTERM"); process.stdin.destroy(); };
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
   try {
-    const reserved = await requestBroker({ verb: "reserve-external", surface, owner, ttl });
-    leaseId = reserved.leaseId;
-    const baseline = new Set(reserved.baselineTargetIds);
+    let baselineTargetIds;
+    let adopted = null;
+    if (grant) {
+      try {
+        adopted = await requestBroker({ verb: "adopt-external", leaseId: grant, owner, surface });
+      } catch (error) {
+        // An OLD daemon answers "unknown verb: adopt-external". Say so explicitly rather than
+        // failing with an opaque message after the caller has already paid for a reservation.
+        if (/unknown verb/.test(error.message ?? "")) {
+          throw new Error(
+            `this browserctl supports browser grants but the running daemon does not ` +
+              `(${error.message}). Restart the Homer daemon to pick up the new broker, or run without a grant.`,
+          );
+        }
+        if (explicitGrant) throw error;   // asked for this lease explicitly: fail closed
+        adopted = null;                   // merely inherited the env: fall back below
+      }
+    }
+    if (adopted) {
+      leaseId = adopted.leaseId;
+      surface = adopted.surface ?? surface;
+      adoptedGrant = adopted.granted === true;
+      baselineTargetIds = (await listPageTargets()).map((target) => target.id);
+    } else {
+      const reserved = await requestBroker({ verb: "reserve-external", surface, owner, ttl });
+      leaseId = reserved.leaseId;
+      baselineTargetIds = reserved.baselineTargetIds;
+    }
+    const baseline = new Set(baselineTargetIds);
     await runFile(agentBrowser, ["--session", session, "connect", "9222"], { timeout: 30_000 });
     const marker = `about:blank#homer-agent-${randomUUID()}`;
     await runFile(agentBrowser, ["--session", session, "tab", "new", marker], { timeout: 30_000 });
@@ -156,7 +198,7 @@ async function runAgent(agentArgs) {
     const currentUrl = (await runFile(agentBrowser, ["--session", session, "get", "url"], { timeout: 10_000 })).trim();
     if (currentUrl !== marker || created[0].url !== marker) throw new Error("named session did not remain bound to its created target");
     await requestBroker({ verb: "register-external-target", leaseId, targetId });
-    renewTimer = setInterval(() => { void requestBroker({ verb: "renew", leaseId, ttl }).catch(() => undefined); }, Math.min(30_000, ttl * 500));
+    if (!adoptedGrant) renewTimer = setInterval(() => { void requestBroker({ verb: "renew", leaseId, ttl }).catch(() => undefined); }, Math.min(30_000, ttl * 500));
     const env = { ...process.env, AGENT_BROWSER_SESSION: session, HOMER_BROWSER_SURFACE: surface, HOMER_BROWSER_TARGET_ID: targetId };
     const code = rpc ? await runRpc(session, env)
       : workflow.length ? await runChild(workflow[0], workflow.slice(1), env)
@@ -165,6 +207,9 @@ async function runAgent(agentArgs) {
   } finally {
     if (renewTimer) clearInterval(renewTimer);
     await runFile(agentBrowser, ["--session", session, "close"], { timeout: 10_000 }).catch(() => undefined);
+    // Release our tab. When the lease came from a GRANT the broker keeps the holder's
+    // reservation alive (it answers grantRetained), so the holder still has admission for
+    // its next phase and the agent can be relaunched — the MFA-recovery flow depends on it.
     if (leaseId) await requestBroker({ verb: "release", leaseId, closeTarget: Boolean(targetId), targetId }).catch(() => undefined);
     process.removeListener("SIGTERM", stop);
     process.removeListener("SIGINT", stop);
@@ -183,6 +228,12 @@ try {
     if (command === "acquire" && args.length === 3) request = { verb: command, surface: args[0], owner: args[1], ttl: Number(args[2]) };
     else if (command === "renew" && args.length === 2) request = { verb: command, leaseId: args[0], ttl: Number(args[1]) };
     else if (command === "release" && args.length === 1) request = { verb: command, leaseId: args[0] };
+    // Take an external agent reservation WITHOUT launching an agent, so a caller can reserve
+    // the browser first and hand the leaseId to the agent as a grant (`agent --adopt`).
+    else if (command === "capabilities" && args.length === 0) request = { verb: "capabilities" };
+    else if (command === "acquire-external" && (args.length === 3 || (args.length === 4 && args[3] === "--grant"))) request = { verb: "reserve-external", surface: args[0], owner: args[1], ttl: Number(args[2]), granted: args[3] === "--grant" };
+    // Drop a granted reservation. Only the holder calls this; an adopter's `release` keeps it.
+    else if (command === "release-grant" && args.length === 1) request = { verb: "release-grant", leaseId: args[0] };
     else if (command === "reconcile" && args.length === 3) request = { verb: command, surface: args[0], expectedOrigin: args[1].split(","), bootstrapUrl: args[2] };
     else if (command === "touch" && args.length === 1) request = { verb: command, surface: args[0] };
     else if (command === "maintenance" && args.length >= 1 && ["on", "off"].includes(args[0])) request = { verb: command, enabled: args[0] === "on", reason: args.slice(1).join(" ") || "browserctl" };

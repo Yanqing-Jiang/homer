@@ -125,7 +125,7 @@ export class CronManager extends EventEmitter {
   /**
    * Update job state after execution
    */
-  updateJobState(jobId: string, success: boolean): void {
+  updateJobState(jobId: string, success: boolean, opts: { resetFailureStreak?: boolean } = {}): void {
     const job = this.jobs.get(jobId);
     if (!job) return;
 
@@ -137,10 +137,26 @@ export class CronManager extends EventEmitter {
     if (success) {
       job.lastSuccess = new Date();
       job.consecutiveFailures = 0;
+    } else if (opts.resetFailureStreak) {
+      // The circuit breaker reads THIS counter; it must agree with the DB's streak reset
+      // (see JobExecutionResult.resetFailureStreak).
+      job.consecutiveFailures = 1;
     } else {
       job.consecutiveFailures++;
     }
 
+    this.emit("job:updated", job);
+  }
+
+  /**
+   * Zero the counter the circuit breaker reads, without recording a run. Used when a fire that
+   * opened a new unit of work ends in a deferral or a halt — dispositions that must not otherwise
+   * touch the counter (see JobExecutionResult.resetFailureStreak).
+   */
+  resetFailureStreak(jobId: string): void {
+    const job = this.jobs.get(jobId);
+    if (!job) return;
+    job.consecutiveFailures = 0;
     this.emit("job:updated", job);
   }
 

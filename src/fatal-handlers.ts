@@ -39,12 +39,27 @@ const SMS_MAX_LENGTH = 300;
 
 let exiting = false;
 const shutdownTasks: Array<() => Promise<void> | void> = [];
+const fatalOnlyTasks: Array<() => Promise<void> | void> = [];
 
 /**
  * Register a function to be called during graceful shutdown
  */
 export function registerShutdownTask(fn: () => Promise<void> | void): void {
   shutdownTasks.push(fn);
+}
+
+/**
+ * Register a function to run ONLY on an abnormal exit (uncaughtException /
+ * unhandledRejection), before the ordinary shutdown tasks. A deliberate
+ * SIGTERM/SIGINT never runs these.
+ *
+ * Exists because the resident-Chrome reap has to distinguish the two: on a crash the
+ * browser must be terminated (or explicitly left for adoption) so the next daemon
+ * generation does not inherit an orphan, while a deliberate shutdown already has its
+ * own ordered teardown.
+ */
+export function registerFatalExitTask(fn: () => Promise<void> | void): void {
+  fatalOnlyTasks.push(fn);
 }
 
 function ensureLogDir(): void {
@@ -104,6 +119,35 @@ function sendSmsSyncViaCurl(message: string): void {
   }
 }
 
+const STARTUP_SMS_STAMP = path.join(LOG_DIR, "startup-failure-sms.at");
+const STARTUP_SMS_MIN_INTERVAL_MS = parseInt(process.env.HOMER_STARTUP_SMS_MIN_INTERVAL_MS ?? String(6 * 60 * 60 * 1000), 10);
+
+/**
+ * One SMS for a daemon that failed to START (`main().catch`), rate-limited across
+ * process restarts through a stamp file: the supervisor relaunches a failed start
+ * forever, so an in-memory limit would page once per crash — 63 times on 2026-09-01.
+ * Synchronous (curl) because the caller exits right after. Never throws.
+ */
+export function sendStartupFailureSms(err: unknown, now: number = Date.now()): boolean {
+  try {
+    let lastAt = 0;
+    try { lastAt = Number(fs.readFileSync(STARTUP_SMS_STAMP, "utf8").trim()) || 0; } catch { /* first failure */ }
+    if (now - lastAt < STARTUP_SMS_MIN_INTERVAL_MS) {
+      logLine("WARN", `startup-failure SMS suppressed: last sent ${Math.round((now - lastAt) / 60_000)} min ago`);
+      return false;
+    }
+    ensureLogDir();
+    fs.writeFileSync(STARTUP_SMS_STAMP, `${now}\n`, { encoding: "utf8" });
+    const detail = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").slice(0, 140);
+    const msg = `Homer failed to start (pid ${process.pid}): ${detail}. Supervisor keeps retrying; check ~/homer/logs/stdout.log`;
+    logLine("ERROR", `startup-failure SMS: ${msg}`);
+    sendSmsSyncViaCurl(msg);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Send Telegram message asynchronously (best effort, for graceful shutdown)
  * DISABLED - notifications turned off
@@ -144,6 +188,17 @@ async function fatalExit(kind: string, err: unknown): Promise<void> {
 
   logLine("ERROR", msg);
   sendSmsSyncViaCurl(msg);
+
+  // Crash-only cleanup first (resident Chrome reap) — bounded so it cannot eat the
+  // whole shutdown budget, and run before the ordinary tasks tear its inputs down.
+  for (const fn of fatalOnlyTasks) {
+    try {
+      await Promise.race([
+        Promise.resolve(fn()),
+        new Promise<void>((resolve) => setTimeout(resolve, 8000)),
+      ]);
+    } catch { /* best effort — already fatal */ }
+  }
 
   // Best-effort shutdown with tight 10s cap
   try { await runShutdownTasks(10_000); } catch { /* best effort */ }

@@ -17,6 +17,7 @@ export {
   getExecutorModel,
   getClaudeDefaultModel,
   getAvailableCommands,
+  skillInvocationQuery,
   type ExecutorType,
   type CommandCategory,
   type CommandDefinition,

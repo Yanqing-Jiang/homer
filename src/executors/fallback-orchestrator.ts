@@ -403,6 +403,12 @@ export async function runWithFallbackChain<T extends ExecutorAttemptResult>(
     runExecutor: (executor: ExecutorKind, queryOverride?: string, modelOverride?: string) => Promise<T>;
     notify?: (message: string) => Promise<void>;
     maxAttempts?: number;
+    /**
+     * Same-executor retries before switching (default MAX_RETRIES_PER_EXECUTOR). A caller that
+     * caps `maxAttempts` at "primary then one fallback" needs 1 here, or the cap is spent on
+     * the primary twice and the fallback never runs.
+     */
+    retriesPerExecutor?: number;
     /** StateManager for building conversation context on fallback */
     stateManager?: StateManager;
     /** Skip per-executor LLM diagnosis calls — just switch_next on failure */
@@ -420,6 +426,7 @@ export async function runWithFallbackChain<T extends ExecutorAttemptResult>(
   let fallbackUsed = false;
   let notifiedFallback = false;
   let attemptsRemaining = maxAttempts ?? chain.length * MAX_RETRIES_PER_EXECUTOR + 1;
+  const retriesPerExecutor = params.retriesPerExecutor ?? MAX_RETRIES_PER_EXECUTOR;
 
   // Track per-executor retry count: retry up to MAX_RETRIES_PER_EXECUTOR times before switching
   const executorAttempts = new Map<ExecutorKind, number>();
@@ -545,10 +552,10 @@ export async function runWithFallbackChain<T extends ExecutorAttemptResult>(
       break;
     }
 
-    // Retry same executor up to MAX_RETRIES_PER_EXECUTOR times before switching
-    if (attemptNum < MAX_RETRIES_PER_EXECUTOR) {
+    // Retry same executor up to retriesPerExecutor times before switching
+    if (attemptNum < retriesPerExecutor) {
       logger.info(
-        { jobId: job.id, executor: current, attempt: attemptNum, maxRetries: MAX_RETRIES_PER_EXECUTOR },
+        { jobId: job.id, executor: current, attempt: attemptNum, maxRetries: retriesPerExecutor },
         "Retrying same executor before fallback"
       );
       queryOverride = buildRetryQuery(job.query, failure);

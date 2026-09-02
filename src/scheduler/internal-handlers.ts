@@ -28,6 +28,7 @@ import { getConnectivityMonitor } from "../heartbeat/index.js";
 import { processRegistry } from "../process/registry.js";
 import { cleanupScheduler } from "../process/cleanup-scheduler.js";
 import { BROWSER_STATUS_PATH } from "../scraping/browser-control.js";
+import { getTelegramPollingStatus } from "../bot/polling-health.js";
 import { checkAndFlushExpiringSessions } from "../memory/flush.js";
 import { config } from "../config/index.js";
 import { runInternalJobHarness } from "./executor.js";
@@ -436,10 +437,35 @@ async function runHealthCheck(
     const ageMs = now - Date.parse(status.updatedAt);
     if (!Number.isFinite(ageMs) || ageMs > 90_000) issues.push(`🔴 Chrome service: stale status.json (${Number.isFinite(ageMs) ? `${Math.round(ageMs / 1000)}s` : "invalid timestamp"})`);
     else if (status.cdp?.state !== "ready") issues.push(`🔴 Chrome service: CDP ${status.cdp?.state ?? "unknown"}${status.cdp?.reason ? ` (${status.cdp.reason})` : ""}`);
-    logger.debug({ state: status.cdp?.state, ageMs }, "Chrome service status");
+    // F9 (hardening round 4): maintenance mode is keyed on its own flag, not on cdp.state, so a
+    // manual `maintenance on` over a healthy Chrome is still announced with the exact off command.
+    if (status.maintenance?.enabled) issues.push(`🔴 Chrome service: MAINTENANCE — ${status.maintenance.reason ?? "no reason recorded"}; run: bin/browserctl maintenance off`);
+    // M4: the daemon now SURVIVES a browser failure by running degraded. Without these
+    // two lines that survival is silent — strictly worse detection than the 2026-09-01
+    // incident, which announced itself with 63 fatal exits.
+    if (status.degradedReason) issues.push(`🔴 Agent-browser degraded: ${String(status.degradedReason).slice(0, 160)}`);
+    if (status.ownership === "foreign") issues.push("🔴 Chrome service: :9222 owned by a browser Homer must not touch");
+    else if (status.ownership === "adopted") issues.push("🟡 Chrome service: running on an ADOPTED Chrome from a previous daemon generation");
+    logger.debug({ state: status.cdp?.state, ownership: status.ownership, ageMs }, "Chrome service status");
   } catch (err) {
     issues.push("🔴 Chrome service: status.json missing or unreadable");
     logger.warn({ error: err }, "Chrome service status read failed");
+  }
+
+  // Telegram polling. The alert channel IS Telegram, so a persistent 409 means nothing
+  // reaches Yanqing through the bot — this issue is what makes the health check's own SMS
+  // escalation the notification of last resort.
+  try {
+    const polling = getTelegramPollingStatus();
+    // "not-started" is neither healthy nor a fault: a token-less daemon stays there forever,
+    // and every daemon passes through it before its first onStart (N14).
+    if (polling.state === "degraded" && polling.consecutiveFailures >= 3) {
+      issues.push(`🔴 Telegram polling down (${polling.consecutiveFailures} consecutive failures): ${polling.reason ?? "unknown"}`);
+    } else if (polling.state === "degraded") {
+      issues.push(`🟡 Telegram polling degraded: ${polling.reason ?? "unknown"}`);
+    }
+  } catch (err) {
+    logger.warn({ error: err }, "Telegram polling status check failed");
   }
 
   // In production Homer must remain a child of the resident supervisor. If the

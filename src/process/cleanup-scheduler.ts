@@ -614,7 +614,12 @@ export class CleanupScheduler {
       for (const surface of Object.values(raw.surfaces ?? {})) {
         const owner = surface.lease?.owner;
         if (typeof owner !== "string") continue;
-        const match = owner.match(/^browserctl-agent:(\d+)$/);
+        // Owner-shape agnostic, matching the broker's own liveness rule
+        // (browser-control.ts ownerIsDead). Matching only `browserctl-agent:<pid>` left the pid
+        // behind an `abvp-refresh:<pid>:<run_id>` lease unprotected, even though the broker now
+        // treats that shape as a first-class holder identity. Protecting more pids is the safe
+        // direction for a cleanup fence.
+        const match = owner.match(/^[^:]+:(\d+)(?::|$)/);
         if (match && Number(match[1]) > 1) protectedPids.add(Number(match[1]));
       }
     } catch (err) {

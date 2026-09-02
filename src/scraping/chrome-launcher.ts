@@ -12,7 +12,26 @@ import Database from "better-sqlite3";
 import { logger } from "../utils/logger.js";
 import { processRegistry } from "../process/registry.js";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
-import { BrowserLeaseBroker, HttpBrowserTargetClient } from "./browser-control.js";
+import {
+  BROWSER_CONTROL_STATE_DIR,
+  BrowserLeaseBroker,
+  HttpBrowserTargetClient,
+  type ExternalReservation,
+  type TargetRecord,
+} from "./browser-control.js";
+import {
+  classifyPortOwner,
+  decideExitChromeAction,
+  decideRestartChromeAction,
+  decideSingletonForward,
+  inspectPortListeners,
+  isPidAlive,
+  readProfileLockPid,
+  terminatePidBounded,
+  type PortOwner,
+  type SingletonDecision,
+  type SingletonEnvironment,
+} from "./chrome-orphan.js";
 
 const CDP_PORT = 9222;
 const CDP_PROFILE_PREFIX = "/tmp/chrome-cdp-profile-";
@@ -74,11 +93,39 @@ export interface ChromeSupervisorDeps {
   nextGeneration: () => number;
   drainLeases: () => Promise<void>;
   observeTargets?: () => Promise<void>;
+  /**
+   * Who currently LISTENs on the CDP port. Injected (rather than imported) so the
+   * singleton-forward recovery below is driven by fixtures in tests and never
+   * shells out to lsof/ps from a unit test.
+   */
+  inspectOwner?: () => PortOwner;
+  /** Evidence the adoption decision needs: CDP health + the profile lock holder. */
+  singletonEnvironment?: () => Promise<SingletonEnvironment>;
+  /** Bounded SIGTERM → SIGKILL of an orphan we decided not to adopt. */
+  terminateOrphan?: (pid: number) => Promise<"terminated" | "killed" | "alive">;
+  /** Live EXTERNAL browser holders (never Homer's own stewardship leases). */
+  externalLeases?: () => number;
+  /** Persist whatever an external holder needs to survive this daemon generation. */
+  onLeaveForAdoption?: (kind: string) => void;
+  /** Called after adopting an orphan, so the broker can re-derive the external holder. */
+  onAdopt?: (pid: number) => void | Promise<void>;
+  /** Called after a CLEAN launch, so a handoff nothing will consume is not left on disk. */
+  onCleanLaunch?: () => void;
   setTimer: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
   clearTimer: (timer: ReturnType<typeof setTimeout>) => void;
   heartbeatMs: number;
   backoffMs: readonly number[];
 }
+
+/**
+ * "launched" — this daemon spawned the Chrome it is supervising.
+ * "adopted"  — the port was already held by an orphan of a PREVIOUS daemon generation
+ *              carrying our profile and our port; we took it over instead of fighting
+ *              Chrome's ProcessSingleton (the 2026-09-01 crash loop).
+ * "foreign"  — someone else's Chrome holds the port. We never signal it.
+ * "none"     — nothing supervised yet.
+ */
+export type ChromeOwnership = "launched" | "adopted" | "foreign" | "none";
 
 export const browserLeaseBroker = new BrowserLeaseBroker(new HttpBrowserTargetClient(CDP_PORT));
 export async function drainLeases(): Promise<void> { await browserLeaseBroker.drainLeases(); }
@@ -95,6 +142,20 @@ export class ResidentChromeSupervisor {
   private maintenanceReason: string | null = null;
   private lastProbe: CdpProbe = { state: "absent", pages: 0 };
   private restartCount = 0;
+  /**
+   * Restarts DEFERRED because an external holder was driving a browser that still answered
+   * CDP (F8). Published in status.json so "the heartbeat keeps failing but nothing restarts"
+   * is readable as a deliberate state rather than a stuck supervisor.
+   */
+  private restartDeferrals = 0;
+  /**
+   * pid of the child most recently SIGTERMed by the kill path. A relaunch that fires before
+   * Chrome has honoured the signal is forwarded into that dying Chrome, whose parent is this
+   * daemon — the in-place-orphan shape decideSingletonForward would adopt. Adopting a
+   * browser we just asked to die (and fencing agent reservations for it, see
+   * restoreExternalHolderAfterAdoption) is wrong, so the forward resolver terminates it instead.
+   */
+  private signalledPid: number | null = null;
   /** Wall-clock of each scheduled restart inside the flap window — see tripFlapBreaker. */
   private restartTimestamps: number[] = [];
   /**
@@ -107,6 +168,17 @@ export class ResidentChromeSupervisor {
   private reconcileSurfaces?: () => Promise<void>;
   private surfacesGeneration = 0;
   private transition: () => void = () => {};
+  /**
+   * How this daemon came to be pointed at the live Chrome. Published in status.json
+   * and the log so an operator can tell "we launched it" from "we inherited an orphan
+   * of a previous daemon generation" without reconstructing it from timestamps.
+   */
+  private ownership: ChromeOwnership = "none";
+  /** pid of an ADOPTED Chrome — one this daemon did not spawn and must not assume it owns. */
+  private adoptedPid: number | null = null;
+  private leaveForAdoption = false;
+  /** Generation whose clean launch has already been reported — see onCleanLaunch. */
+  private cleanLaunchGeneration = 0;
   generation = 0;
 
   constructor(private readonly deps: ChromeSupervisorDeps) {}
@@ -118,13 +190,59 @@ export class ResidentChromeSupervisor {
     this.scheduleHeartbeat();
   }
 
+  /**
+   * Deliberate shutdown. Lease-aware since the 2026-09-01 review: an ordinary
+   * `npm run restart` used to SIGTERM Chrome unconditionally, which would have ended the
+   * in-flight QC competitor backfill (a live `browserctl-agent:` lease) exactly the way
+   * the crash path was fixed not to. Same policy in both directions now — with a live
+   * EXTERNAL holder we leave the browser up and the next generation adopts it.
+   *
+   * `deps.externalLeases` is optional so a fake-driven supervisor keeps the old behaviour.
+   */
   stop(): void {
     this.running = false;
     this.clearTimers();
     const child = this.child;
     this.child = undefined;
-    child?.kill("SIGTERM");
+    // F2: key on the Chrome this daemon is RESPONSIBLE FOR, not on the one it spawned. Both
+    // exit paths used to read `this.child`, which is undefined for an adopted Chrome — so a
+    // generation running on an adopted browser returned here silently, wrote no handoff, and
+    // the generation after it adopted blind. Signalling is still gated separately: we never
+    // signal a Chrome we did not spawn.
+    const chromePid = child?.pid ?? this.adoptedPid;
+    if (chromePid == null) return;
+    if (this.leaveForAdoption) {
+      logger.warn({ pid: chromePid, ownership: this.ownership }, "Resident Chrome left running for adoption — not signalling on stop");
+      return;
+    }
+    let externalLeases = 0;
+    try { externalLeases = this.deps.externalLeases?.() ?? 0; } catch { externalLeases = 0; }
+    const decision = decideExitChromeAction({ deliberate: true, chromePid, externalLeases });
+    if (decision.action === "leave-for-adoption") {
+      this.leaveForAdoption = true;
+      this.deps.onLeaveForAdoption?.("deliberate-shutdown");
+      logger.warn(
+        { pid: chromePid, ownership: this.ownership, externalLeases, reason: decision.reason },
+        "Deliberate shutdown: leaving resident Chrome running for adoption by the next daemon generation (live external lease)",
+      );
+      return;
+    }
+    if (decision.action === "none") return;
+    if (!child) {
+      // Adopted: never signalled, but the next generation still needs whatever holder state
+      // exists — and the operator needs to know Chrome was left running at all.
+      this.deps.onLeaveForAdoption?.("deliberate-shutdown-adopted");
+      logger.warn(
+        { pid: chromePid, externalLeases },
+        "Deliberate shutdown: resident Chrome was ADOPTED, not spawned — leaving it running and never signalling it",
+      );
+      return;
+    }
+    child.kill("SIGTERM");
   }
+
+  /** Set by the fatal-exit reaper when a live lease means Chrome must survive this daemon. */
+  markLeaveForAdoption(): void { this.leaveForAdoption = true; }
 
   isActive(): boolean { return this.running; }
 
@@ -137,9 +255,13 @@ export class ResidentChromeSupervisor {
     this.reconcileSurfaces = reconcile;
     this.surfacesGeneration = this.generation;
   }
-  status(): { generation: number; chromePid: number | null; cdp: CdpProbe & { restartCount: number }; maintenance: { enabled: boolean; reason: string | null } } {
-    return { generation: this.generation, chromePid: this.child?.pid ?? null, cdp: { ...this.lastProbe, restartCount: this.restartCount }, maintenance: this.maintenance() };
+  status(): { generation: number; chromePid: number | null; ownership: ChromeOwnership; cdp: CdpProbe & { restartCount: number; restartDeferrals: number }; maintenance: { enabled: boolean; reason: string | null } } {
+    return { generation: this.generation, chromePid: this.child?.pid ?? this.adoptedPid, ownership: this.ownership,
+      cdp: { ...this.lastProbe, restartCount: this.restartCount, restartDeferrals: this.restartDeferrals }, maintenance: this.maintenance() };
   }
+
+  /** pid of the Chrome THIS daemon spawned — null when absent or merely adopted. */
+  launchedChromePid(): number | null { return this.child?.pid ?? null; }
 
   async setMaintenance(enabled: boolean, reason: string): Promise<void> {
     if (enabled) {
@@ -170,6 +292,13 @@ export class ResidentChromeSupervisor {
     }
     this.lastProbe = result; this.transition();
     if (result.state !== "absent" && !result.reason) {
+      // N15: a launch that reached a healthy probe without a singleton forward means no
+      // adoption happened, so any handoff on disk will never be consumed — drop it rather
+      // than leave it for an unrelated adoption up to four hours later.
+      if (this.ownership === "launched" && this.cleanLaunchGeneration !== this.generation) {
+        this.cleanLaunchGeneration = this.generation;
+        try { this.deps.onCleanLaunch?.(); } catch (err) { logger.warn({ err }, "Clean-launch handoff discard failed"); }
+      }
       await this.deps.observeTargets?.();
       if (this.reconcileSurfaces && this.surfacesGeneration !== this.generation) {
         try {
@@ -181,6 +310,7 @@ export class ResidentChromeSupervisor {
       }
       this.failedHeartbeats = 0;
       this.restartAttempt = 0;
+      this.signalledPid = null;
       return;
     }
     this.failedHeartbeats++;
@@ -198,6 +328,8 @@ export class ResidentChromeSupervisor {
       const spawnedAt = Date.now();
       const child = this.deps.spawnChrome();
       this.child = child;
+      this.ownership = "launched";
+      this.adoptedPid = null;
       this.lastProbe = { state: "empty", pages: 0, reason: "Chrome starting" }; this.transition();
       const settle = () => {
         if (this.child !== child) return;
@@ -242,11 +374,118 @@ export class ResidentChromeSupervisor {
       { elapsedMs, port: CDP_PORT, generation: this.generation, profile: RESIDENT_CDP_PROFILE },
       "Resident Chrome exited immediately while CDP stayed up — another Chrome owns the profile (singleton forward)",
     );
-    this.scheduleRestart("singleton forward — another Chrome owns the profile");
+    await this.resolveSingletonForward();
+  }
+
+  /**
+   * Decide what to do about the Chrome that already owns :9222, then do it.
+   *
+   * Before 2026-09-01 this path only ever scheduled another relaunch, and every
+   * relaunch was forwarded to the squatter again — 63 supervisor restarts in 70
+   * minutes. Now the owner is identified: our own orphan is adopted when it is
+   * healthy and demonstrably holds the profile lock, terminated (bounded) and
+   * relaunched when it is not, and a Chrome on ANY other profile is left strictly
+   * alone. Whichever path is taken is recorded in status.json (`ownership`) and the log.
+   */
+  private async resolveSingletonForward(): Promise<void> {
+    if (!this.deps.inspectOwner || !this.deps.singletonEnvironment) {
+      this.scheduleRestart("singleton forward — another Chrome owns the profile");
+      return;
+    }
+    let decision: SingletonDecision;
+    try {
+      const owner = this.deps.inspectOwner();
+      const env = await this.deps.singletonEnvironment();
+      decision = decideSingletonForward(owner, env);
+    } catch (err) {
+      logger.warn({ err }, "Singleton-forward owner inspection failed — falling back to restart");
+      this.scheduleRestart("singleton forward — owner inspection failed");
+      return;
+    }
+    if (decision.action === "adopt" && decision.pid !== null && decision.pid === this.signalledPid) {
+      // F8 guard: this is the child the kill path SIGTERMed moments ago and the relaunch
+      // outran it. It is dying, not orphaned — finish the job instead of adopting it.
+      decision = { action: "terminate", pid: decision.pid, reason: `Chrome ${decision.pid} was SIGTERMed by this daemon and has not exited yet — terminating rather than adopting a dying browser` };
+    }
+
+    if (decision.action === "adopt" && decision.pid !== null) {
+      this.ownership = "adopted";
+      this.adoptedPid = decision.pid;
+      this.restartAttempt = 0;
+      this.failedHeartbeats = 0;
+      // F5: `restartTimestamps` is deliberately NOT cleared, so a genuine relaunch → forward →
+      // adopt → relaunch cycle still accumulates towards the flap breaker. The window is
+      // self-expiring (RESTART_FLAP_WINDOW_MS), so a one-off startup adoption is unaffected.
+      // (The heartbeat restart under a live lease no longer relaunches at all — F8 — so it
+      // neither reaches this branch nor the breaker.)
+      logger.warn(
+        { pid: decision.pid, generation: this.generation, reason: decision.reason, profile: RESIDENT_CDP_PROFILE },
+        "Adopted orphaned resident Chrome",
+      );
+      this.transition();
+      // M8: beginGeneration() cleared the broker registry AND the external reservation, so
+      // without this the broker believes nothing holds a browser an external agent may
+      // still be driving. The hook restores the previous generation's reservation, or
+      // fences new agent reservations for a grace period when it cannot.
+      try { await this.deps.onAdopt?.(decision.pid); }
+      catch (err) { logger.error({ err, pid: decision.pid }, "External-holder restore after adoption failed"); }
+      // Re-probe and re-reconcile against the adopted browser: the failed launch
+      // already bumped the generation and cleared the broker registry, so the
+      // surfaces must be re-registered against the targets this Chrome actually has.
+      await this.heartbeatNow();
+      return;
+    }
+
+    if (decision.action === "terminate" && decision.pid !== null) {
+      logger.warn({ pid: decision.pid, reason: decision.reason }, "Terminating un-adoptable orphaned resident Chrome");
+      const outcome = this.deps.terminateOrphan
+        ? await this.deps.terminateOrphan(decision.pid).catch((err) => {
+            logger.warn({ err, pid: decision.pid }, "Orphan termination failed");
+            return "alive" as const;
+          })
+        : ("alive" as const);
+      logger.warn({ pid: decision.pid, outcome }, "Orphaned resident Chrome termination finished");
+      this.ownership = outcome === "alive" ? "foreign" : "none";
+      this.adoptedPid = null;
+      this.transition();
+      this.scheduleRestart(`orphan ${outcome} — relaunching resident Chrome`);
+      return;
+    }
+
+    if (decision.action === "leave-foreign" || decision.action === "leave-live-owner") {
+      this.ownership = "foreign";
+      this.adoptedPid = null;
+      logger.error({ pid: decision.pid, reason: decision.reason }, "CDP port owned by a Chrome we must not touch");
+      this.transition();
+    }
+    this.scheduleRestart(`singleton forward — ${decision.reason}`);
   }
 
   private scheduleRestart(reason: string): void {
     if (!this.running || this.maintenanceEnabled || this.restartTimer || this.restartDraining) return;
+    // N7: decide BEFORE drainLeases() — the drain force-clears every lease after 10 s.
+    let externalLeases = 0;
+    try { externalLeases = this.deps.externalLeases?.() ?? 0; } catch { externalLeases = 0; }
+    const restart = decideRestartChromeAction({
+      externalLeases, cdpState: this.lastProbe.state, trackedChrome: this.child !== undefined || this.adoptedPid !== null,
+    });
+    if (restart.action === "defer") {
+      // F8: nothing is signalled, drained, spawned or handed off. The child (or adopted pid)
+      // stays tracked, the lease ledger stays intact, and the flap breaker is not fed —
+      // there is no relaunch to flap. The next three failed heartbeats re-evaluate.
+      this.restartDeferrals++;
+      logger.warn(
+        { reason, externalLeases, cdpState: this.lastProbe.state, probeReason: this.lastProbe.reason ?? null,
+          chromePid: this.child?.pid ?? this.adoptedPid, ownership: this.ownership, deferrals: this.restartDeferrals, decision: restart.reason },
+        "Chrome restart deferred: an external holder is driving a browser that still answers CDP — keeping it, no relaunch, no lease drain",
+      );
+      this.transition();
+      return;
+    }
+    if (restart.action === "relaunch") {
+      logger.warn({ reason, externalLeases, cdpState: this.lastProbe.state, decision: restart.reason },
+        "Chrome restart: no tracked browser under a live external lease — relaunching so the singleton forward adopts the survivor");
+    }
     this.restartDraining = true;
     void this.deps.drainLeases().catch((err) => {
       logger.warn({ err }, "Browser lease drain failed before Chrome restart");
@@ -255,7 +494,10 @@ export class ResidentChromeSupervisor {
       if (!this.running || this.maintenanceEnabled || this.restartTimer) return;
       const child = this.child;
       this.child = undefined;
-      child?.kill("SIGTERM");
+      if (restart.action === "kill" && child) {
+        this.signalledPid = child.pid ?? null;
+        child.kill("SIGTERM");
+      }
       if (this.tripFlapBreaker(reason)) return;
       const delayMs = this.deps.backoffMs[Math.min(this.restartAttempt, this.deps.backoffMs.length - 1)]!;
       this.restartAttempt++;
@@ -277,10 +519,11 @@ export class ResidentChromeSupervisor {
    * `browserctl maintenance off` both re-arms and relaunches, so no new plumbing.
    * Returns true when the breaker tripped and the caller must NOT schedule.
    *
-   * DEBT: the trip is only visible as an error log and in status.maintenance —
-   * this module has no operator-alert dependency and the scheduler's Telegram
-   * path is not reachable from here without a cycle; upgrade when the supervisor
-   * gains an alert dep.
+   * DEBT: the trip itself sends no alert — this module has no operator-alert
+   * dependency and the scheduler's Telegram path is not reachable from here without
+   * a cycle. It is visible in status.json (`maintenance`, and `cdp.reason` names the
+   * `bin/browserctl maintenance off` command, F9) which the hourly health check reads;
+   * upgrade to a direct alert when the supervisor gains an alert dep.
    */
   private tripFlapBreaker(reason: string): boolean {
     const now = Date.now();
@@ -357,6 +600,21 @@ export const residentChromeSupervisor = new ResidentChromeSupervisor({
   },
   drainLeases,
   observeTargets: () => browserLeaseBroker.observeTargets(),
+  inspectOwner: () => classifyPortOwner(
+    inspectPortListeners(CDP_PORT),
+    // selfPid: a survivor parented by THIS daemon is an in-place orphan, adoptable (F8).
+    { profilePath: RESIDENT_CDP_PROFILE, port: CDP_PORT, selfPid: process.pid },
+    isPidAlive,
+  ),
+  singletonEnvironment: async () => ({
+    cdpHealthy: (await probeCdp(CDP_PORT)).state !== "absent",
+    profileLockPid: readProfileLockPid(RESIDENT_CDP_PROFILE),
+  }),
+  terminateOrphan: (pid) => terminatePidBounded(pid, { timeoutMs: 5_000 }),
+  externalLeases: () => browserLeaseBroker.externalLeaseCount(),
+  onLeaveForAdoption: (kind) => writeExternalReservationHandoff(kind),
+  onAdopt: (pid) => restoreExternalHolderAfterAdoption(pid),
+  onCleanLaunch: () => discardExternalReservationHandoff("clean launch"),
   setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
   clearTimer: (timer) => clearTimeout(timer),
   heartbeatMs: CDP_HEARTBEAT_MS,
@@ -365,6 +623,184 @@ export const residentChromeSupervisor = new ResidentChromeSupervisor({
 
 export function isResidentChromeSupervisionActive(): boolean {
   return residentChromeSupervisor.isActive();
+}
+
+/**
+ * Last-ditch reap of the resident Chrome on a daemon exit path that is NOT a
+ * deliberate shutdown (an uncaught fatal, or `main().catch`). `main().catch` calls
+ * `process.exit(1)` directly and therefore never runs the registered shutdown tasks —
+ * that is exactly how the 2026-09-01 orphan (Chrome 2876 reparented to launchd)
+ * survived its daemon and made every subsequent start fail on a singleton forward.
+ *
+ * The lease ledger is consulted FIRST: if an external holder (QC's agent-browser
+ * backfill) still has a live lease, killing Chrome would interrupt its run, so we
+ * deliberately leave the browser up and say so — the next daemon generation adopts it
+ * via decideSingletonForward instead.
+ *
+ * Only ever signals a Chrome THIS daemon spawned; an adopted Chrome is never killed here.
+ */
+export async function reapResidentChromeOnFatalExit(kind: string): Promise<void> {
+  // F2: the DECISION is made on the Chrome this daemon is responsible for (launched or
+  // adopted); only the SIGNAL is restricted to one we spawned. Keying both on
+  // launchedChromePid() meant a generation running on an adopted Chrome reported "nothing to
+  // reap" and wrote no handoff, so the generation after it adopted blind.
+  const status = residentChromeSupervisor.status();
+  const chromePid = status.chromePid;
+  const launchedPid = residentChromeSupervisor.launchedChromePid();
+  const externalLeases = browserLeaseBroker.externalLeaseCount();
+  const decision = decideExitChromeAction({ deliberate: false, chromePid, externalLeases });
+  if (decision.action === "none") {
+    logger.warn({ kind, reason: decision.reason }, "Fatal exit: no resident Chrome to reap");
+    return;
+  }
+  if (decision.action === "leave-for-adoption") {
+    residentChromeSupervisor.markLeaveForAdoption();
+    const handedOff = writeExternalReservationHandoff(kind);
+    logger.error(
+      { kind, chromePid, ownership: status.ownership, externalLeases, handedOff, reason: decision.reason },
+      "Fatal exit: leaving resident Chrome running for adoption by the next daemon generation (live external lease)",
+    );
+    return;
+  }
+  if (launchedPid === null) {
+    // Adopted. Never signalled — but hand off whatever holder state exists so the next
+    // generation is not blind, and say so.
+    const handedOff = writeExternalReservationHandoff(`${kind}-adopted`);
+    logger.error(
+      { kind, chromePid, handedOff },
+      "Fatal exit: resident Chrome was ADOPTED, not spawned — leaving it running and never signalling it",
+    );
+    return;
+  }
+  logger.error({ kind, chromePid: launchedPid, reason: decision.reason }, "Fatal exit: terminating resident Chrome so the next generation does not inherit an orphan");
+  const outcome = await terminatePidBounded(launchedPid, { timeoutMs: 3_000 });
+  logger.error({ kind, chromePid: launchedPid, outcome }, "Fatal exit: resident Chrome reap finished");
+}
+
+/**
+ * Hand-off file for M8: the EXTERNAL holder this generation was leaving behind when it left
+ * Chrome up for someone else. `beginGeneration()` clears both the records and the external
+ * reservation, so without this the adopting generation believes nothing holds a browser
+ * QC's agent-browser may still be driving — and the global agent-browser serialization that
+ * exists for the 0.21.4 concurrent-rebinding hazard is silently gone.
+ *
+ * It carries the whole holder (reservation AND `agent.*` lease records with their
+ * `adopterOwner`), not just the reservation: a `browserctl agent` holder's reservation is
+ * cleared by `registerExternalTarget`, so in production the record IS the holder (round-2
+ * review N2).
+ *
+ * Written on any path that leaves Chrome for another owner; consumed exactly once by the
+ * next generation's adopt path, and deleted on a clean launch so it can never resurrect a
+ * stale grant (round-2 review N15).
+ */
+const EXTERNAL_HANDOFF_PATH = join(BROWSER_CONTROL_STATE_DIR, "external-reservation-handoff.json");
+/** A handoff older than this is ignored outright, whatever its own expiry claims. */
+const EXTERNAL_HANDOFF_MAX_AGE_MS = 4 * 60 * 60 * 1000;
+/** How long new agent reservations are refused after adopting with no usable handoff. */
+const ADOPTION_GRACE_MS = 10 * 60 * 1000;
+
+interface ExternalHolderHandoff {
+  writtenAt?: number;
+  kind?: string;
+  holder?: { reservation: ExternalReservation | null; records: TargetRecord[] };
+}
+
+/** Returns true when a handoff was actually written, so callers can log the difference. */
+export function writeExternalReservationHandoff(kind: string): boolean {
+  try {
+    const holder = browserLeaseBroker.externalHolderSnapshot();
+    if (!holder) {
+      logger.warn({ kind }, "No external browser holder to hand off — the next generation will fence instead");
+      return false;
+    }
+    mkdirSync(dirname(EXTERNAL_HANDOFF_PATH), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      EXTERNAL_HANDOFF_PATH,
+      `${JSON.stringify({ writtenAt: Date.now(), kind, holder })}\n`,
+      { mode: 0o600 },
+    );
+    logger.warn(
+      { kind, reservationOwner: holder.reservation?.owner ?? null,
+        records: holder.records.map((r) => ({ surface: r.surface, owner: r.owner, adopterOwner: r.adopterOwner ?? null })) },
+      "External browser holder handed off to the next daemon generation",
+    );
+    return true;
+  } catch (err) {
+    logger.error({ err, kind }, "Failed to write the external-holder handoff");
+    return false;
+  }
+}
+
+/** Remove a handoff nothing will consume — a clean launch means no adoption happened. */
+export function discardExternalReservationHandoff(reason: string): void {
+  try {
+    if (!existsSync(EXTERNAL_HANDOFF_PATH)) return;
+    rmSync(EXTERNAL_HANDOFF_PATH, { force: true });
+    logger.info({ reason }, "Discarded a stale external-holder handoff (no adoption took place)");
+  } catch { /* best effort */ }
+}
+
+/**
+ * Restore the previous generation's external holder after adopting its Chrome, or fence new
+ * agent reservations for a grace period when that is not possible (a SIGKILLed daemon writes
+ * no handoff). The fence's error text is phrased as contention so callers that classify
+ * contention vs sickness defer instead of alerting.
+ */
+export async function restoreExternalHolderAfterAdoption(chromePid: number): Promise<void> {
+  let handoff: ExternalHolderHandoff | null = null;
+  try {
+    if (existsSync(EXTERNAL_HANDOFF_PATH)) {
+      handoff = JSON.parse(readFileSync(EXTERNAL_HANDOFF_PATH, "utf8")) as ExternalHolderHandoff;
+    }
+  } catch (err) {
+    logger.warn({ err }, "External-holder handoff unreadable");
+  }
+  // Consume it either way: a handoff we could not use must not be reconsidered later.
+  try { if (existsSync(EXTERNAL_HANDOFF_PATH)) rmSync(EXTERNAL_HANDOFF_PATH, { force: true }); } catch { /* best effort */ }
+
+  const fresh = Boolean(
+    handoff?.holder
+    && typeof handoff.writtenAt === "number"
+    && Date.now() - handoff.writtenAt < EXTERNAL_HANDOFF_MAX_AGE_MS,
+  );
+  if (fresh && handoff?.holder) {
+    const restored = await browserLeaseBroker.restoreExternalHolder(handoff.holder);
+    if (restored.outcome === "restored") {
+      logger.warn(
+        { chromePid, ...restored },
+        "Restored the previous generation's external browser holder onto the adopted Chrome",
+      );
+      return;
+    }
+    if (restored.outcome === "holders-gone") {
+      // POSITIVE evidence: every holder named in the handoff has a dead pid, so nothing
+      // external is driving this browser any more and no fence is warranted.
+      logger.info({ chromePid, ...restored }, "External-holder handoff found but every holder is gone — adopted Chrome is free");
+      return;
+    }
+    // F1: "restored nothing" is NOT "nothing is holding it". A failed /json/list (most likely
+    // exactly here, milliseconds after a ProcessSingleton forward), a live agent whose lease
+    // lapsed because its `browserctl renew` failure was swallowed, or a tab closed at this
+    // instant all land here — and every one of them means an agent may still be attached.
+    logger.error(
+      { chromePid, ...restored },
+      "External holder could not be reconstructed and may still be live — fencing agent reservations",
+    );
+  }
+
+  // No usable handoff means the previous daemon died without warning (SIGKILL), so we cannot
+  // tell whether an external agent is still attached to a tab. Fencing for the grace period
+  // is deliberately conservative: callers defer rather than fail, and 10 minutes is short
+  // next to a 2 h reservation TTL.
+  // DEBT: the fence is applied after ANY handoff-less adoption, including one where nothing
+  // external was ever attached; upgrade to inspecting the adopted browser's live targets for
+  // agent-surface tabs if a deferred ABVP run is ever traced to it.
+  const until = Date.now() + ADOPTION_GRACE_MS;
+  browserLeaseBroker.setAdoptionGrace(until, "adopted a Chrome whose external holder could not be reconstructed");
+  logger.error(
+    { chromePid, graceUntil: new Date(until).toISOString(), hadHandoff: Boolean(handoff?.holder) },
+    "Adopted Chrome without a usable external-holder handoff — refusing new agent reservations for the grace period",
+  );
 }
 
 /** Wall-clock (ms) of the most recent CDP scrape entry; 0 if none this process. */

@@ -14,11 +14,15 @@ export async function runAgentBrowserBindingSelfTest(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   await browserLeaseBroker.observeTargets();
+  // Owner labels carry this daemon's pid in the `<name>:<pid>` slot the broker's dead-owner
+  // reclaim parses. `startup-selftest:2` read as pid 2 (ESRCH on macOS), so the reservation
+  // was reclaimed between `tab new` and `registerExternalTarget` — a deterministic degraded
+  // start on 2026-09-01 22:09Z.
   for (let i = 1; i <= 2; i++) {
     const session = `homer-binding-selftest-${i}-${randomUUID()}`;
     const surface = `agent.binding-selftest-${i}`;
     const marker = `data:text/html,<title>homer-binding-${i}</title><p>${randomUUID()}</p>`;
-    const reserved = await browserLeaseBroker.reserveExternal(surface, `startup-selftest:${i}`, 60) as { leaseId: string; baselineTargetIds: string[] };
+    const reserved = await browserLeaseBroker.reserveExternal(surface, `startup-selftest:${process.pid}:${i}`, 60, false, { bypassDegraded: true }) as { leaseId: string; baselineTargetIds: string[] };
     let targetId: string | undefined;
     try {
       await execFileAsync(AGENT_BROWSER, ["--session", session, "connect", "9222"], { timeout: 15_000 });
@@ -38,7 +42,7 @@ export async function runAgentBrowserBindingSelfTest(): Promise<void> {
       const target = (await fetch("http://127.0.0.1:9222/json/list").then((response) => response.json()) as Array<{ id: string; url: string }>).find((item) => item.id === targetId);
       if (stdout.trim() !== marker || target?.url !== marker) throw new Error(`serialized named session binding mismatch for ${session}`);
       if (i === 1) {
-        await browserLeaseBroker.reserveExternal("agent.binding-selftest-concurrent", "startup-selftest:concurrent", 60)
+        await browserLeaseBroker.reserveExternal("agent.binding-selftest-concurrent", `startup-selftest:${process.pid}:concurrent`, 60, false, { bypassDegraded: true })
           .then(async (unexpected) => {
             await browserLeaseBroker.release(String(unexpected.leaseId));
             throw new Error("concurrent agent-browser session was not refused");

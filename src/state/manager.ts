@@ -566,6 +566,12 @@ export class StateManager {
          VALUES (?, ?, 0, ?)`
       ).run(jobId, sourceFile, now);
 
+      // The armed retry is deliberately NOT cleared here. Clearing it at start made delivery
+      // at-most-once: a crash between the start lock and the handler's return left the run
+      // dead on disk with no wake-up until the next weekly cron tick. `getDueRetries` already
+      // excludes a running job, so an armed retry is inert while the job runs; completion
+      // (success, failure, or a fresh deferral) is what consumes or replaces it, in the same
+      // transaction that releases the lock.
       const lock = this._db.prepare(
         `UPDATE scheduled_job_state
          SET source_file = ?, last_run_at = ?, is_running = 1, updated_at = ?
@@ -613,35 +619,165 @@ export class StateManager {
     jobId: string,
     success: boolean,
     output: string,
-    error?: string,
-    exitCode?: number
+    error: string | undefined,
+    exitCode: number | undefined,
+    /**
+     * REQUIRED, not optional. Three takeover branches and the outer error handler used to omit
+     * it, and an omitted argument silently CLEARS an armed retry — a trapdoor that would have
+     * deleted the whole failure-retry fix the day `failureTakeover` was turned on. Making it
+     * required forces every call site, present and future, to state its intent.
+     */
+    retry: { retryAt: string | null; reason: string | null },
+    /** See JobExecutionResult.resetFailureStreak. */
+    streak: { resetFailureStreak?: boolean } = {}
   ): void {
     const now = new Date().toISOString();
+    // Releasing the run lock and (re)arming the retry must be ONE transaction. Done
+    // separately, a cron or manual trigger could start the next run in the gap, and the
+    // finished run would then arm a stale retry over a live one.
+    const retryAt = retry.retryAt;
+    const retryReason = retry.retryAt ? retry.reason : null;
+    const resetStreak = streak.resetFailureStreak === true ? 1 : 0;
+    const txn = this._db.transaction(() => {
+      // Update the specific run by runId (not by job_id)
+      this._db.prepare(
+          `UPDATE scheduled_job_runs
+           SET completed_at = ?, success = ?, output = ?, error = ?, exit_code = ?
+           WHERE id = ?`
+        )
+        .run(now, success ? 1 : 0, output, error ?? null, exitCode ?? null, runId);
 
-    // Update the specific run by runId (not by job_id)
-    this._db.prepare(
+      // Update job state, clear is_running, and consume/replace the armed retry.
+      if (success) {
+        this._db.prepare(
+            `UPDATE scheduled_job_state
+             SET last_success_at = ?, consecutive_failures = 0, is_running = 0,
+                 retry_at = ?, retry_reason = ?, updated_at = ?
+             WHERE job_id = ?`
+          )
+          .run(now, retryAt, retryReason, now, jobId);
+      } else {
+        // A failure that opened a new unit of work is the FIRST failure of its streak.
+        this._db.prepare(
+            `UPDATE scheduled_job_state
+             SET consecutive_failures = CASE WHEN ? = 1 THEN 1 ELSE consecutive_failures + 1 END,
+                 is_running = 0, retry_at = ?, retry_reason = ?, updated_at = ?
+             WHERE job_id = ?`
+          )
+          .run(resetStreak, retryAt, retryReason, now, jobId);
+      }
+    });
+    txn();
+  }
+
+  /**
+   * Record a run that finished `halted`: the job refused to start work because a ceiling it
+   * enforces itself was reached, or it failed closed on state it will not trust. A failure for
+   * run history and notification, but it must NOT feed the circuit breaker: the producer's own
+   * ceilings are the stop, and `consecutive_failures` disabling the job on top of them leaves
+   * its armed retries inert (`getDueRetries` filters `enabled = 1`) and the next cadence unfired.
+   *
+   * Does not touch last_success_at. Touches consecutive_failures only to RESET it when the
+   * halt belongs to a new unit of work (see JobExecutionResult.resetFailureStreak).
+   */
+  // DEBT: a halt writes `retry_at` from the (always null) requested retry, so a halt fired BY an
+  // armed retry consumes it — correct for ceiling halts (keeping it would re-fire the same latched
+  // halt every cycle), but a transiently unreadable cadence.json (Warehouse unmounted) also wipes
+  // a legitimate retry until the next weekly cron. One alert is sent. Upgrade to "keep the retry
+  // for the cadence-load halt only" if that halt is ever observed on a mounted volume.
+  recordScheduledJobHalted(
+    runId: number,
+    jobId: string,
+    output: string,
+    error: string | undefined,
+    retry: { retryAt: string | null; reason: string | null },
+    streak: { resetFailureStreak?: boolean } = {}
+  ): void {
+    const now = new Date().toISOString();
+    const retryAt = retry.retryAt;
+    const retryReason = retry.retryAt ? retry.reason : null;
+    const resetStreak = streak.resetFailureStreak === true ? 1 : 0;
+    const txn = this._db.transaction(() => {
+      this._db.prepare(
         `UPDATE scheduled_job_runs
-         SET completed_at = ?, success = ?, output = ?, error = ?, exit_code = ?
+         SET completed_at = ?, success = 0, outcome = 'halted', output = ?, error = ?, exit_code = 1
          WHERE id = ?`
-      )
-      .run(now, success ? 1 : 0, output, error ?? null, exitCode ?? null, runId);
+      ).run(now, output, error ?? null, runId);
+      this._db.prepare(
+        `UPDATE scheduled_job_state
+         SET consecutive_failures = CASE WHEN ? = 1 THEN 0 ELSE consecutive_failures END,
+             is_running = 0, retry_at = ?, retry_reason = ?, updated_at = ?
+         WHERE job_id = ?`
+      ).run(resetStreak, retryAt, retryReason, now, jobId);
+    });
+    txn();
+  }
 
-    // Update job state and clear is_running flag
-    if (success) {
+  /**
+   * Record a run that finished `deferred`: it did not run to completion because a
+   * resource it needs was held, and the scheduler owns a one-shot retry at `retryAt`.
+   *
+   * Deliberately does NOT touch last_success_at or consecutive_failures. A deferral is
+   * neither a success (nothing was produced) nor a failure (nothing is broken), so it
+   * must not move either monitoring signal. The only state change is releasing the
+   * is_running lock and arming the retry.
+   */
+  recordScheduledJobDeferred(
+    runId: number,
+    jobId: string,
+    output: string,
+    retryAt: string,
+    reason: string,
+    /** See JobExecutionResult.resetFailureStreak: a deferral that opened a new unit of work zeroes the streak. */
+    streak: { resetFailureStreak?: boolean } = {}
+  ): void {
+    const now = new Date().toISOString();
+    const resetStreak = streak.resetFailureStreak === true ? 1 : 0;
+    const txn = this._db.transaction(() => {
       this._db.prepare(
-          `UPDATE scheduled_job_state
-           SET last_success_at = ?, consecutive_failures = 0, is_running = 0, updated_at = ?
-           WHERE job_id = ?`
-        )
-        .run(now, now, jobId);
-    } else {
+        `UPDATE scheduled_job_runs
+         SET completed_at = ?, success = 0, outcome = 'deferred', output = ?, error = NULL, exit_code = 0
+         WHERE id = ?`
+      ).run(now, output, runId);
       this._db.prepare(
-          `UPDATE scheduled_job_state
-           SET consecutive_failures = consecutive_failures + 1, is_running = 0, updated_at = ?
-           WHERE job_id = ?`
-        )
-        .run(now, jobId);
-    }
+        `UPDATE scheduled_job_state
+         SET consecutive_failures = CASE WHEN ? = 1 THEN 0 ELSE consecutive_failures END,
+             is_running = 0, retry_at = ?, retry_reason = ?, updated_at = ?
+         WHERE job_id = ?`
+      ).run(resetStreak, retryAt, reason, now, jobId);
+    });
+    txn();
+  }
+
+  /** Arm a one-shot scheduler retry without changing the run's disposition. */
+  setJobRetryAt(jobId: string, retryAt: string | null, reason: string | null): void {
+    this._db.prepare(
+      `UPDATE scheduled_job_state SET retry_at = ?, retry_reason = ?, updated_at = ? WHERE job_id = ?`
+    ).run(retryAt, retryAt ? reason : null, new Date().toISOString(), jobId);
+  }
+
+  /**
+   * One-shot retries that have come due. Unlike getDueJobs these are explicit
+   * scheduler-owned re-fires, so they are NOT gated on `autoCompensate`.
+   */
+  getDueRetries(nowIso: string = new Date().toISOString()): Array<{
+    jobId: string;
+    retryAt: string;
+    retryReason: string | null;
+  }> {
+    return this._db.prepare(
+      `SELECT job_id as jobId, retry_at as retryAt, retry_reason as retryReason
+       FROM scheduled_job_state
+       WHERE retry_at IS NOT NULL AND retry_at <= ? AND is_running = 0 AND enabled = 1
+       ORDER BY retry_at ASC`
+    ).all(nowIso) as Array<{ jobId: string; retryAt: string; retryReason: string | null }>;
+  }
+
+  getJobRetry(jobId: string): { retryAt: string | null; retryReason: string | null } | null {
+    const row = this._db.prepare(
+      `SELECT retry_at as retryAt, retry_reason as retryReason FROM scheduled_job_state WHERE job_id = ?`
+    ).get(jobId) as { retryAt: string | null; retryReason: string | null } | undefined;
+    return row ?? null;
   }
 
   deleteSuccessfulHeartbeatRun(runId: number, jobId: string): boolean {
@@ -708,7 +844,7 @@ export class StateManager {
     return this._db.prepare(
         `SELECT job_id as jobId, source_file as sourceFile, enabled,
                 last_run_at as lastRunAt, last_success_at as lastSuccessAt,
-                next_run_at as nextRunAt,
+                next_run_at as nextRunAt, last_triggered_at as lastTriggeredAt,
                 consecutive_failures as consecutiveFailures, updated_at as updatedAt
          FROM scheduled_job_state WHERE job_id = ?`
       )
@@ -719,7 +855,7 @@ export class StateManager {
     return this._db.prepare(
         `SELECT id, job_id as jobId, job_name as jobName, source_file as sourceFile,
                 started_at as startedAt, completed_at as completedAt,
-                success, output, error, exit_code as exitCode
+                success, outcome, output, error, exit_code as exitCode
          FROM scheduled_job_runs
          WHERE job_id = ?
          ORDER BY id DESC
@@ -1487,15 +1623,23 @@ export class StateManager {
    * Mark orphaned job runs (started but never completed) as failed.
    * Call on startup after clearing is_running flags.
    */
-  cleanupOrphanedJobRuns(): number {
-    const result = this._db.prepare(`
-      UPDATE scheduled_job_runs
-      SET completed_at = CURRENT_TIMESTAMP,
-          success = 0,
-          error = 'Daemon restarted before job completed'
-      WHERE completed_at IS NULL
-    `).run();
-    return result.changes;
+  cleanupOrphanedJobRuns(): { count: number; jobIds: string[] } {
+    // Which jobs were cut down matters: a job with a durable, resumable run state (ABVP) arms
+    // a restart retry from this list instead of resting until its next weekly cron.
+    const txn = this._db.transaction(() => {
+      const rows = this._db.prepare(
+        `SELECT DISTINCT job_id AS jobId FROM scheduled_job_runs WHERE completed_at IS NULL`
+      ).all() as Array<{ jobId: string }>;
+      const result = this._db.prepare(`
+        UPDATE scheduled_job_runs
+        SET completed_at = CURRENT_TIMESTAMP,
+            success = 0,
+            error = 'Daemon restarted before job completed'
+        WHERE completed_at IS NULL
+      `).run();
+      return { count: result.changes, jobIds: rows.map((r) => r.jobId) };
+    });
+    return txn();
   }
 
   // ============================================
@@ -2896,6 +3040,43 @@ export class StateManager {
     return row;
   }
 
+  /**
+   * Attach metadata to a thread message written earlier in the same turn. Used when an
+   * inbound Telegram message is persisted at RECEIPT (before attachments are consumed)
+   * and the attachment list only becomes known at execution time.
+   */
+  setThreadMessageMetadata(id: string, metadata: Record<string, unknown> | null): void {
+    if (!this._db || !this.isOpen) return;
+    try {
+      this._db.prepare(`UPDATE thread_messages SET metadata = ? WHERE id = ?`)
+        .run(metadata ? JSON.stringify(metadata) : null, id);
+    } catch (err) {
+      logger.warn({ err, id }, "setThreadMessageMetadata failed");
+    }
+  }
+
+  /**
+   * Outbound Telegram messages recorded for this chat since `sinceMs`, newest first.
+   * Used to spot a pending MFA-relay prompt (its nonce marker) when an inbound code
+   * arrives without an explicit reply-to.
+   */
+  findRecentTelegramMessages(chatId: number, sinceMs: number, limit = 25): TelegramMessageRecord[] {
+    if (!this._db || !this.isOpen) return [];
+    return this._db.prepare(
+      `SELECT chat_id as chatId, telegram_message_id as telegramMessageId, lane,
+              role, message_kind as messageKind, thread_id as threadId,
+              thread_message_id as threadMessageId,
+              run_id as runId, session_id as sessionId,
+              message_text as messageText, created_at as createdAt,
+              expires_at as expiresAt
+         FROM telegram_messages
+         WHERE chat_id = ? AND created_at >= ?
+           AND (expires_at IS NULL OR expires_at >= ?)
+         ORDER BY created_at DESC
+         LIMIT ?`
+    ).all(chatId, sinceMs, Date.now(), limit) as TelegramMessageRecord[];
+  }
+
   deleteExpiredTelegramMessages(): number {
     if (!this._db || !this.isOpen) return 0;
     const res = this._db.prepare(
@@ -3041,6 +3222,8 @@ export interface ScheduledJobState {
   lastRunAt: string | null;
   lastSuccessAt: string | null;
   nextRunAt: string | null;
+  /** Last compensation/retry trigger. A trigger that never became a run still counts. */
+  lastTriggeredAt: string | null;
   consecutiveFailures: number;
   updatedAt: string;
 }
@@ -3072,6 +3255,9 @@ export interface ScheduledJobRun {
   startedAt: string;
   completedAt: string | null;
   success: number;
+  /** Third disposition beside success/failure. `deferred` rows have success = 0 but are NOT
+   *  failures; any consumer that classifies on `success` alone must read this too. */
+  outcome: string | null;
   output: string | null;
   error: string | null;
   exitCode: number | null;
