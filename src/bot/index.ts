@@ -222,10 +222,6 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
         "/cancel <id>\n\n" +
         "*Search:*\n" +
         "/search <query>\n\n" +
-        "*Amazon logins:*\n" +
-        "/vc-login - [redacted]\n" +
-        "/amc-login - [redacted]\n" +
-        "_Reply here with just the 4-8 digit code when asked._\n\n" +
         "*Overnight Work:*\n" +
         "/overnight - View queued tasks\n" +
         '"work on xyz tonight" - Queue prototype\n' +
@@ -1178,8 +1174,8 @@ ${checksStr}`;
 
     // ---- Receipt. Persist FIRST, decide anything else after.
     //
-    // The MFA relay ([redacted], homer_db source) polls
-    // thread_messages every 3s for the operator's answer and never touches getUpdates, so the
+    // An external MFA relay (private overlay, homer_db source) polls thread_messages
+    // every 3s for the operator's answer and never touches getUpdates, so the
     // daemon's write is the whole transport. It used to happen inside handleNewExecution,
     // after the thinking indicator, the bootstrap read and the "queued" reply. It happens
     // here now, before any queueing decision, so a code lands in the table within one
