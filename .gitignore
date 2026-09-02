@@ -207,6 +207,3 @@ workspaces/
 /src/state/migrations/096_drop_idea_index.sql
 /src/scripts/ranking-eval-golden.json
 
-# career-pipeline migrations live in the private overlay
-src/state/migrations/126_job_applications_tracker.sql
-src/state/migrations/131_job_scanner_jd.sql
