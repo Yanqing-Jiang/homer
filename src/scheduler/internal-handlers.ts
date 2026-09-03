@@ -32,7 +32,7 @@ import { getTelegramPollingStatus } from "../bot/polling-health.js";
 import { checkAndFlushExpiringSessions } from "../memory/flush.js";
 import { config } from "../config/index.js";
 import { runInternalJobHarness } from "./executor.js";
-import { getPrivateJobHandler } from "../private-overlay.js";
+import { getPrivateJobHandler, getPrivateRetryableHandlers } from "../private-overlay.js";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 interface InternalJobContext {
@@ -211,7 +211,8 @@ async function sendHealthMessage(
   return result.decision === "sent";
 }
 
-// Handlers safe to retry (idempotent, no user-facing side effects)
+// Handlers safe to retry (idempotent, no user-facing side effects). Overlay jobs
+// opt in through their manifest entry's `retryable` flag instead of this list.
 const RETRYABLE_HANDLERS = new Set([
   "ideas_explore", "nightly_memory", "session_harvester", "memory_embeddings", "memory_reindex", "morning_review",
   "weekly_consolidation",
@@ -221,7 +222,6 @@ const RETRYABLE_HANDLERS = new Set([
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
   "docker_restart",
   "delta_upgrade_watch",
-  "youtube_channel_watch",
 ]);
 
 const TRANSIENT_PATTERNS = [
@@ -723,18 +723,6 @@ async function runHandler(
           result.output,
           result.error,
           result.success ? { notificationIntent: "user_info" } : {}
-        );
-      }
-      case "youtube_channel_watch": {
-        const { runYouTubeChannelWatch } = await import("./jobs/youtube-channel-watch.js");
-        const result = await runYouTubeChannelWatch(ctx.stateManager.getDb(), job, startedAt);
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          result.success ? { notificationIntent: "operational_status" } : {}
         );
       }
       case "ideas_explore": {
@@ -1332,7 +1320,8 @@ export async function executeInternalJob(
 
   // Retry once for retryable handlers on transient errors
   const handler = job.config.handler ?? "";
-  if (!result.success && RETRYABLE_HANDLERS.has(handler) && isTransientError(result.error)) {
+  const retryable = RETRYABLE_HANDLERS.has(handler) || getPrivateRetryableHandlers().has(handler);
+  if (!result.success && retryable && isTransientError(result.error)) {
     // Skip retry if the job was aborted by the hang watchdog
     if (ctx.signal?.aborted) {
       logger.warn({ jobId: job.config.id }, "Job aborted by timeout, skipping retry");

@@ -42,6 +42,8 @@ const JobEntrySchema = z.object({
   note: z.string().optional(),
   /** source file (relative to the public root) shown to failure-takeover agents */
   sourceFile: z.string().optional(),
+  /** opt in to the scheduler's one-shot retry on transient errors (public RETRYABLE_HANDLERS equivalent) */
+  retryable: z.boolean().optional(),
 });
 
 const ManifestSchema = z.object({
@@ -122,6 +124,15 @@ export function getPrivateJobHandlers(): Promise<Record<string, PrivateJobHandle
           .then((mod) => mod.handlers ?? {});
   }
   return handlersPromise;
+}
+
+/** Handler names the overlay marks `retryable` — the private counterpart of RETRYABLE_HANDLERS. */
+export function getPrivateRetryableHandlers(): Set<string> {
+  const names = new Set<string>();
+  for (const entry of getPrivateOverlay()?.manifest.jobs ?? []) {
+    if (entry.retryable && entry.handler) names.add(entry.handler);
+  }
+  return names;
 }
 
 export async function getPrivateJobHandler(handler: string): Promise<PrivateJobHandler | undefined> {

@@ -78,7 +78,6 @@ const SCHEDULED_WITH_HANDLER_FILE: JobEntry[] = [
   { id: "outcome-tracker", name: "Outcome Tracker", kind: "internal", handler: "outcome_tracker", handlerFile: "outcome-tracker", expectedInSchedule: true },
   { id: "session-harvester", name: "Session Harvester", kind: "internal", handler: "session_harvester", handlerFile: "session-harvester", expectedInSchedule: true },
   { id: "telegram-registry-cleanup", name: "Telegram Registry Cleanup", kind: "internal", handler: "telegram_registry_cleanup", handlerFile: "telegram-registry-cleanup", expectedInSchedule: true, note: "prunes expired rows from telegram_messages replyable registry" },
-  { id: "youtube-channel-watch", name: "YouTube Channel Watch", kind: "internal", handler: "youtube_channel_watch", handlerFile: "youtube-channel-watch", expectedInSchedule: true, note: "polls watched channels 4x/night; no-op runs make zero LLM calls" },
 ];
 
 /**

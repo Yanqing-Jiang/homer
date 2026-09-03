@@ -174,7 +174,6 @@ workspaces/
 /src/scheduler/jobs/link-processor.ts
 /src/scheduler/jobs/upload-email-ingest.ts
 /src/scheduler/jobs/overnight-youtube.ts
-/src/scheduler/jobs/youtube-channel-watch.ts
 /src/scheduler/jobs/mentor-layer.ts
 /src/scheduler/jobs/outcome-tracker.ts
 /src/scheduler/jobs/nightly-memory.ts
@@ -208,6 +207,3 @@ workspaces/
 /src/state/migrations/096_drop_idea_index.sql
 /src/scripts/ranking-eval-golden.json
 
-
-# Webull SDK writes a debug log next to the caller
-integrations/webull/*.log

@@ -50,7 +50,7 @@ export type KnownInternalHandler =
   | "ideas_explore" | "nightly_memory" | "morning_review" | "nightly_code_push" | "db_backup" | "document_ingest"
   | "outcome_tracker" | "preference_updater" | "content_scraper" | "archive_verify" | "health_check"
   | "architecture_updater" | "daemon_cleanup" | "session_maintenance" | "reminder_check" | "link_processor"
-  | "telegram_registry_cleanup" | "docker_restart" | "youtube_channel_watch";
+  | "telegram_registry_cleanup" | "docker_restart";
 
 export interface RegisteredJob {
   config: ScheduledJobConfig;
