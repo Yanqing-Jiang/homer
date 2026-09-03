@@ -58,6 +58,15 @@ const youtubeClassifyStage: InternalHarnessCallProfile = youtubeStage(900_000);
 const youtubeAnalyzeStage: InternalHarnessCallProfile = youtubeStage(300_000); // 5 min — Opus medium deep analysis
 
 const PUBLIC_JOB_HARNESS_BASELINES = {
+  "youtube-channel-watch": {
+    executor: "claude",
+    model: CLAUDE_OPUS_MODEL,
+    stages: {
+      // Single pass over a full ~30K-char transcript. 10 min: the note is the
+      // job's only deliverable and a truncated one is worse than a late one.
+      insight: youtubeStage(600_000),
+    },
+  },
   "ideas-explore": {
     executor: "codex",
     model: CODEX_MODEL,

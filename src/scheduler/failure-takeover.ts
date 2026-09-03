@@ -106,6 +106,7 @@ const HANDLER_SOURCE_MAP: Record<string, string> = {
   // through the manifest's job entries; see privateHandlerSourceMap() below.
 
   ideas_explore: "src/scheduler/jobs/ideas-explore.ts",
+  youtube_channel_watch: "src/scheduler/jobs/youtube-channel-watch.ts",
   nightly_memory: "src/scheduler/jobs/nightly-memory.ts",
   session_harvester: "src/scheduler/jobs/session-harvester.ts",
   memory_embeddings: "src/scheduler/jobs/memory-embeddings.ts",

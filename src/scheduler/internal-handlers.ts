@@ -221,6 +221,7 @@ const RETRYABLE_HANDLERS = new Set([
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
   "docker_restart",
   "delta_upgrade_watch",
+  "youtube_channel_watch",
 ]);
 
 const TRANSIENT_PATTERNS = [
@@ -722,6 +723,18 @@ async function runHandler(
           result.output,
           result.error,
           result.success ? { notificationIntent: "user_info" } : {}
+        );
+      }
+      case "youtube_channel_watch": {
+        const { runYouTubeChannelWatch } = await import("./jobs/youtube-channel-watch.js");
+        const result = await runYouTubeChannelWatch(ctx.stateManager.getDb(), job, startedAt);
+        return buildResult(
+          job,
+          startedAt,
+          result.success,
+          result.output,
+          result.error,
+          result.success ? { notificationIntent: "operational_status" } : {}
         );
       }
       case "ideas_explore": {
