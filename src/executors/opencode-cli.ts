@@ -45,6 +45,7 @@ export interface OpenCodeCLIOptions {
   signal?: AbortSignal;
   researchOnly?: boolean;
   browserOnly?: boolean;
+  browserInstance?: "downloads" | "interactive";
   cwd?: string;
   /** OpenCode agent mode: "build" (default) or "plan" */
   agent?: string;
@@ -330,7 +331,7 @@ async function executeOpenCodeCLIOnce(
 
     if (browserOnly) mkdirSync(effectiveCwd, { recursive: true });
 
-    const child: ChildProcess = spawn(browserOnly ? "browserctl" : "opencode", browserOnly ? ["agent", "--", "opencode", ...args] : args, {
+    const child: ChildProcess = spawn(browserOnly ? "browserctl" : "opencode", browserOnly ? ["agent", "--instance", options.browserInstance ?? "downloads", "--", "opencode", ...args] : args, {
       // opencode run treats stdin as extra message content and creates no session
       // until stdin reaches EOF; the prompt is already in argv, so give it no stdin.
       stdio: ["ignore", "pipe", "pipe"],

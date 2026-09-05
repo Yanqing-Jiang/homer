@@ -50,6 +50,7 @@ export async function executeBrowserScrape(
       timeout: claudeTimeout,
       signal,
       browserAgent: true,
+      browserInstance: options.browserInstance ?? "interactive",
     });
 
     const useful =
@@ -92,6 +93,7 @@ export async function executeBrowserScrape(
     model: fallbackModel,
     forceOpenCode: true,
     browserOnly: true,
+    browserInstance: options.browserInstance ?? "interactive",
   });
 
   return {

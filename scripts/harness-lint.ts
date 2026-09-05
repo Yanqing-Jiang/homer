@@ -33,6 +33,12 @@ const ALLOWED_PREFIX = ["executors/", "harness/"];
 const BASELINE = new Set<string>([
   "queue/worker.ts",
   "scheduler/executor.ts",
+  // Existing operator utilities, verified in the pre-refactor runtime checkout.
+  // Dictation deliberately uses a non-agent completion; image description uses
+  // file-reading vision. DEBT: migrate when the harness contract supports those
+  // capabilities without changing either workflow's execution semantics.
+  "scripts/dictate.ts",
+  "scraping/image-describe.ts",
 ]);
 
 function walk(dir: string, out: string[] = []): string[] {

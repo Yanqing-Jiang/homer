@@ -296,13 +296,13 @@ function renderCodex(a: CanonicalAsset, aliases: AliasTable): RenderedFile[] {
   const h = a.frontmatter.harness?.codex ?? {};
   const files: RenderedFile[] = [];
   const { body } = resolveBody(a.body, "codex", aliases);
-  // Codex has no ~/.codex/prompts: commands render as skills with a slash-trigger note in the body.
+  // Commands explicitly enabled for Codex render as skills with a slash-trigger note in the body.
   const emitSkill = h.emitSkill ?? (a.kind === "skill");
   if (emitSkill) {
     const targetDir = join(a.root.generatedDir, "codex", "skills", a.id);
     const installDir = join(HOME, ".codex", "skills", "homer", a.id);
     const slash = a.frontmatter.triggers?.slash?.[0];
-    const desc = a.kind === "command" && slash ? `${a.frontmatter.description} (invoke: ${slash})` : a.frontmatter.description;
+    const desc = a.kind === "command" && slash ? `${a.frontmatter.description} Invoke with ${slash}.` : a.frontmatter.description;
     const fm = yamlFrontmatter({ name: a.id, description: desc });
     files.push({
       path: join(targetDir, "SKILL.md"),

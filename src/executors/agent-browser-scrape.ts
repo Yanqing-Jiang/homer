@@ -617,7 +617,7 @@ export async function fetchLinkedInTimeline(_limit = 10, options?: ScrapeOptions
   const { buildLinkedInTopPostPrompt } = await import("../scraping/browser-prompts.js");
   const timeoutMs = options?.timeout ?? 600_000;
   try {
-    const r = await executeBrowserScrape(buildLinkedInTopPostPrompt(), "", { timeout: timeoutMs, signal: options?.signal });
+    const r = await executeBrowserScrape(buildLinkedInTopPostPrompt(), "", { timeout: timeoutMs, signal: options?.signal, browserInstance: "downloads" });
     const rawOut = (r.output ?? "").trim();
 
     if (r.exitCode !== 0) {

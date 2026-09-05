@@ -1,11 +1,25 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { dirname, join } from "node:path";
 import { logger } from "../utils/logger.js";
 export const BROWSER_CONTROL_STATE_DIR = "/Users/yj/Library/Application Support/Homer/cdp-state";
 export const BROWSER_CONTROL_SOCKET = join(BROWSER_CONTROL_STATE_DIR, "browser-control.sock");
 export const BROWSER_STATUS_PATH = join(BROWSER_CONTROL_STATE_DIR, "status.json");
+/** A killed lease wrapper is not gone while its persisted driver groups survive. */
+export function browserDriverAlive(owner: string | null | undefined, socketPath = BROWSER_CONTROL_SOCKET): boolean {
+  const match = owner?.match(/^browserctl-agent:(\d+)(?::|$)/);
+  if (!match) return false;
+  const file = `${socketPath}.drivers.${match[1]}.json`;
+  try {
+    const groups: number[] = JSON.parse(readFileSync(file, "utf8"));
+    return groups.some(pid => {
+      if (!Number.isInteger(pid) || pid <= 0) return true;
+      try { process.kill(-pid, 0); return true; }
+      catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+    });
+  } catch (error) { return (error as NodeJS.ErrnoException).code !== "ENOENT"; }
+}
 interface CdpTarget { id: string; type: string; url: string; webSocketDebuggerUrl: string }
 export interface TargetRecord {
   surface: string; generation: number; targetId: string; expectedOrigins: string[]; currentUrl: string;
@@ -90,7 +104,10 @@ export class BrowserLeaseBroker {
    */
   private previousTargets = new Map<string, string>();
   private transition: () => void = () => {};
-  constructor(private readonly targets: BrowserTargetClient, private readonly now = Date.now) {}
+  constructor(private readonly targets: BrowserTargetClient, private readonly now = Date.now, private readonly fenceLiveAgentExpiry = false) {}
+  hasLease(id: string): boolean {
+    return this.externalReservation?.leaseId === id || [...this.records.values()].some(record => record.leaseId === id);
+  }
   beginGeneration(generation: number): void {
     for (const record of this.records.values()) this.previousTargets.set(record.surface, record.targetId);
     this.generation = generation; this.records.clear(); this.draining = false;
@@ -205,6 +222,9 @@ export class BrowserLeaseBroker {
     return this.targets.create(url) as Promise<{ id: string; url: string }>;
   }
   async reserveExternal(surface: string, owner: string, ttl: number, granted = false, options: { bypassDegraded?: boolean } = {}): Promise<Record<string, unknown>> {
+    return this.withSurfaceLock("__external_admission", () => this.reserveExternalLocked(surface, owner, ttl, granted, options));
+  }
+  private async reserveExternalLocked(surface: string, owner: string, ttl: number, granted: boolean, options: { bypassDegraded?: boolean }): Promise<Record<string, unknown>> {
     this.expireLeases();
     // The startup self-test is the ONLY thing that clears a degradation, so it must not be refused
     // by it — otherwise one failed test (a dead agent pid holding a lease, 2026-09-01) locked the
@@ -447,7 +467,7 @@ export class BrowserLeaseBroker {
       const r = snapshot.reservation;
       const live = this.liveIdentity(r.owner, r.adopterOwner ?? null);
       if (live) {
-        if (!this.externalReservation && r.surface.startsWith("agent.") && r.expiresAt > this.now()) {
+        if (!this.externalReservation && r.surface.startsWith("agent.") && (r.expiresAt > this.now() || this.fenceLiveAgentExpiry)) {
           this.externalReservation = { ...r, owner: live };
           restoredReservation = true;
           liveOwners.push(live);
@@ -475,7 +495,7 @@ export class BrowserLeaseBroker {
         if (listFailed) { unresolvedLiveHolders++; continue; }
         if (this.records.has(record.surface)
           || !record.leaseId
-          || (record.leaseExpiresAt !== null && record.leaseExpiresAt <= this.now())
+          || (!this.fenceLiveAgentExpiry && record.leaseExpiresAt !== null && record.leaseExpiresAt <= this.now())
           || !liveTargetIds.has(record.targetId)) {
           unresolvedLiveHolders++;
           continue;
@@ -515,7 +535,7 @@ export class BrowserLeaseBroker {
       const pid = Number(match[1]);
       if (!Number.isInteger(pid) || pid <= 0) continue;
       try { process.kill(pid, 0); return owner; } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ESRCH") return owner; // EPERM: alive, not ours
+        if (browserDriverAlive(owner) || (err as NodeJS.ErrnoException).code !== "ESRCH") return owner; // EPERM: alive, not ours
       }
     }
     return null;
@@ -566,11 +586,12 @@ export class BrowserLeaseBroker {
   }
   private expireLeases(): void {
     const now = this.now();
-    if (this.externalReservation && (this.externalReservation.expiresAt <= now || this.ownerIsDead(this.externalReservation.owner))) this.externalReservation = null;
+    if (this.externalReservation && (this.ownerIsDead(this.externalReservation.owner) || (this.externalReservation.expiresAt <= now && !this.fenceLiveAgentExpiry))) this.externalReservation = null;
     /** agent.* surfaces reclaimed from a dead driver — their tab is deleted after the loop. */
     const abandoned: TargetRecord[] = [];
     for (const record of this.records.values()) {
-      if (record.leaseExpiresAt !== null && record.leaseExpiresAt <= now) {
+      if (record.leaseExpiresAt !== null && record.leaseExpiresAt <= now
+        && !(this.fenceLiveAgentExpiry && record.surface.startsWith("agent.") && !this.ownerIsDead(record.adopterOwner ?? record.owner))) {
         // A plain TTL expiry is routine and the tab must SURVIVE: a long-lived surface record
         // (amazon.vc / amazon.amc) is re-leased against the same targetId by reconcile.
         this.clearLease(record);
@@ -660,14 +681,22 @@ export class BrowserLeaseBroker {
     if (!m) return false;
     const pid = Number(m[1]);
     if (!Number.isInteger(pid) || pid <= 0) return false;
-    try { process.kill(pid, 0); return false; } catch (err) { return (err as NodeJS.ErrnoException).code === "ESRCH"; }
+    try { process.kill(pid, 0); return false; } catch (err) { return (err as NodeJS.ErrnoException).code === "ESRCH" && !browserDriverAlive(owner); }
   }
   private clearLease(record: TargetRecord): void {
     record.owner = null; record.leaseId = null; record.leaseExpiresAt = null; record.adopterOwner = null; record.lastActivityAt = this.now();
   }
 }
-type ControlRequest = { verb: string; surface?: string; owner?: string; ttl?: number; granted?: boolean; leaseId?: string; targetId?: string; closeTarget?: boolean; expectedOrigin?: string[]; bootstrapUrl?: string; enabled?: boolean; reason?: string };
-export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenance: (enabled: boolean, reason: string) => Promise<void>, socketPath = BROWSER_CONTROL_SOCKET, touch?: (surface: string) => Promise<unknown>): Server {
+export type ControlRequest = { instance?: string; verb: string; surface?: string; owner?: string; ttl?: number; granted?: boolean; leaseId?: string; targetId?: string; closeTarget?: boolean; expectedOrigin?: string[]; bootstrapUrl?: string; enabled?: boolean; reason?: string };
+export interface BrowserControlInstance {
+  id: string;
+  endpoint: string;
+  broker: BrowserLeaseBroker;
+  ready(): Promise<void>;
+  status(): Promise<unknown>;
+  changed(): void;
+}
+export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenance: (enabled: boolean, reason: string) => Promise<void>, socketPath = BROWSER_CONTROL_SOCKET, touch?: (surface: string) => Promise<unknown>, instances: BrowserControlInstance[] = []): Server {
   const stateDir = dirname(socketPath);
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   chmodSync(stateDir, 0o700);
@@ -684,22 +713,34 @@ export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenanc
       socket.pause();
       try {
         const request = JSON.parse(input.slice(0, input.indexOf("\n"))) as ControlRequest;
+        const byLease = request.leaseId ? instances.find(item => item.broker.hasLease(request.leaseId!)) : undefined;
+        const instanceId = request.instance ?? byLease?.id ?? "downloads";
+        const instance = instances.find(item => item.id === instanceId);
+        if (instanceId !== "downloads" && !instance) throw new Error("unknown browser instance");
+        if (byLease && byLease.id !== instanceId) throw new Error("lease instance mismatch");
+        if (instance && instance.id !== "downloads" && request.leaseId && broker.hasLease(request.leaseId)) throw new Error("lease instance mismatch");
+        if (instance && ["reserve-external", "reconcile", "acquire", "adopt-external"].includes(request.verb)) await instance.ready();
+        const selected = instance?.broker ?? broker;
         let result: unknown;
-        if (request.verb === "reconcile") result = await broker.reconcile(request.surface!, request.expectedOrigin!, request.bootstrapUrl!);
-        else if (request.verb === "acquire") result = await broker.acquire(request.surface!, request.owner!, request.ttl!);
-        else if (request.verb === "reserve-external") result = await broker.reserveExternal(request.surface!, request.owner!, request.ttl!, request.granted === true);
-        else if (request.verb === "capabilities") result = { verbs: ["reserve-external", "adopt-external", "release-grant", "acquire", "renew", "release", "reconcile", "touch", "maintenance"], grants: true };
-        else if (request.verb === "adopt-external") result = broker.adoptExternal(request.leaseId!, request.owner!, request.surface);
-        else if (request.verb === "release-grant") result = await broker.releaseGrant(request.leaseId!);
-        else if (request.verb === "register-external-target") result = await broker.registerExternalTarget(request.leaseId!, request.targetId!);
-        else if (request.verb === "renew") result = broker.renew(request.leaseId!, request.ttl!);
-        else if (request.verb === "release") result = await broker.release(request.leaseId!, request.closeTarget, request.targetId);
-        else if (request.verb === "touch" && touch && request.surface) result = await touch(request.surface);
+        if (request.verb === "status" && instance) result = await instance.status();
+        else if (request.verb === "reconcile") result = await selected.reconcile(request.surface!, request.expectedOrigin!, request.bootstrapUrl!);
+        else if (request.verb === "acquire") result = await selected.acquire(request.surface!, request.owner!, request.ttl!);
+        else if (request.verb === "reserve-external") result = await selected.reserveExternal(request.surface!, request.owner!, request.ttl!, request.granted === true);
+        else if (request.verb === "capabilities") result = { verbs: ["reserve-external", "adopt-external", "release-grant", "acquire", "renew", "release", "reconcile", "touch", "maintenance"], grants: true, instances: ["downloads", ...instances.map(item => item.id)] };
+        else if (request.verb === "adopt-external") result = selected.adoptExternal(request.leaseId!, request.owner!, request.surface);
+        else if (request.verb === "release-grant") result = await selected.releaseGrant(request.leaseId!);
+        else if (request.verb === "register-external-target") result = await selected.registerExternalTarget(request.leaseId!, request.targetId!);
+        else if (request.verb === "renew") result = selected.renew(request.leaseId!, request.ttl!);
+        else if (request.verb === "release") result = await selected.release(request.leaseId!, request.closeTarget, request.targetId);
+        else if (request.verb === "touch" && !instance && touch && request.surface) result = await touch(request.surface);
         else if (request.verb === "maintenance") {
+          if (instance) throw new Error("interactive maintenance cannot interrupt an owned workflow; release its lease first");
           await maintenance(Boolean(request.enabled), request.reason ?? "browserctl");
-          if (!request.enabled) broker.resume();
+          if (!request.enabled) selected.resume();
           result = { enabled: Boolean(request.enabled), reason: request.enabled ? request.reason ?? "browserctl" : null };
         } else throw new Error(`unknown verb: ${request.verb}`);
+        instance?.changed();
+        if (result && typeof result === "object") result = { ...result, instance: instanceId, cdpEndpoint: instance?.endpoint ?? "http://127.0.0.1:9222" };
         socket.end(`${JSON.stringify({ ok: true, result })}\n`);
       } catch (error) {
         socket.end(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`);

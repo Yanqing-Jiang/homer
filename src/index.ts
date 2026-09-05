@@ -31,6 +31,7 @@ import { processRegistry } from "./process/registry.js";
 import { SessionTimeoutManager } from "./process/timeout-manager.js";
 import { cleanupScheduler } from "./process/cleanup-scheduler.js";
 import { browserLeaseBroker, reapResidentChromeOnFatalExit, residentChromeSupervisor, RESIDENT_CDP_PROFILE } from "./scraping/chrome-launcher.js";
+import { InteractiveBrowser } from "./scraping/interactive-browser.js";
 import { startBrowserControlServer, stopBrowserControlServer } from "./scraping/browser-control.js";
 import { BrowserStatusService } from "./scraping/browser-status.js";
 import { SessionStewardship } from "./scraping/session-stewardship.js";
@@ -149,11 +150,15 @@ async function main(): Promise<void> {
   residentChromeSupervisor.setTransitionHandler(publishBrowserStatus);
   browserStatus.start(); registerShutdownTask(() => browserStatus.stop());
   const stewardship = new SessionStewardship(browserLeaseBroker, browserStatus);
+  const interactiveBrowser = new InteractiveBrowser();
+  await interactiveBrowser.initialize().catch(error => logger.warn({ error }, "Interactive browser unavailable; downloads and Homer remain independent"));
+  registerShutdownTask(() => interactiveBrowser.shutdown());
   const browserControlServer = startBrowserControlServer(
     browserLeaseBroker,
     (enabled, reason) => residentChromeSupervisor.setMaintenance(enabled, reason),
     undefined,
     (surface) => stewardship.touch(surface, true),
+    [interactiveBrowser],
   );
   registerShutdownTask(() => stopBrowserControlServer(browserControlServer));
   /**

@@ -67,6 +67,7 @@ export interface ClaudeExecutorOptions {
   cleanOutput?: boolean;
   /** Run the complete nested browser workflow under one browserctl agent lease. */
   browserAgent?: boolean;
+  browserInstance?: "downloads" | "interactive";
 }
 
 export interface ClaudeExecutorResult extends ExecutorResult {
@@ -253,7 +254,7 @@ export async function executeClaudeCommand(
 
   const claudeBin = resolveClaudePath();
   const spawnBin = options.browserAgent ? "browserctl" : claudeBin;
-  const spawnArgs = options.browserAgent ? ["agent", "--", claudeBin, ...args] : args;
+  const spawnArgs = options.browserAgent ? ["agent", "--instance", options.browserInstance ?? "downloads", "--", claudeBin, ...args] : args;
   return new Promise((resolve, reject) => {
     const proc = spawn(spawnBin, spawnArgs, {
       cwd,
