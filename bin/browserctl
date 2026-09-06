@@ -124,7 +124,22 @@ async function runRpc(session, env) {
     try {
       const request = JSON.parse(line);
       if (!Array.isArray(request.args)) throw new Error("rpc request requires args array");
-      const stdout = await runFile(agentBrowser, ["--session", session, ...request.args], { env, timeout: request.timeoutMs ?? 120_000 });
+      let commandArgs = request.args;
+      // Keep portal credentials out of RPC transcripts.  A caller may request a fill
+      // from a named macOS Keychain item; only the browser child receives its value.
+      if (request.keychainService) {
+        if (request.args.length !== 2 || request.args[0] !== "fill") {
+          throw new Error("keychainService may only be used with fill <selector>");
+        }
+        const password = await new Promise((resolve, reject) => execFile(
+          "/usr/bin/security",
+          ["find-generic-password", "-s", String(request.keychainService), "-w"],
+          { encoding: "utf8", maxBuffer: 16 * 1024 },
+          (error, stdout) => error ? reject(error) : resolve(stdout.replace(/\\r?\\n$/, "")),
+        ));
+        commandArgs = ["fill", request.args[1], password];
+      }
+      const stdout = await runFile(agentBrowser, ["--session", session, ...commandArgs], { env, timeout: request.timeoutMs ?? 120_000 });
       process.stdout.write(`${JSON.stringify({ id: request.id, ok: true, stdout })}\n`);
     } catch (error) {
       process.stdout.write(`${JSON.stringify({ id: (() => { try { return JSON.parse(line).id; } catch { return undefined; } })(), ok: false, error: error.message })}\n`);

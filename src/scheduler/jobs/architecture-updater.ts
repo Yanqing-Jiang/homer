@@ -190,7 +190,7 @@ Return a 2-sentence summary of what changed.`;
       source: "scheduler",
       mode: "scheduler-job",
       prompt,
-      explicit: { harness: "codex", model: "gpt-5.6-sol" },
+      explicit: { harness: "codex", model: "gpt-5.6-terra" },
       baselineProfile: {
         cwdOverride: HOMER_DIR,
         timeoutOverride: 1_200_000, // 20 min

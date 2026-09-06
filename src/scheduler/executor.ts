@@ -17,7 +17,7 @@ import {
 /**
  * Lazy read-only connection to read the global harness default (migration 104) without
  * spinning up a full StateManager (which would re-run migrations). Conservative: any
- * failure → Claude Opus at medium effort. Connection lives for the daemon lifetime.
+ * failure → Codex Terra at high effort. Connection lives for the daemon lifetime.
  */
 let _harnessDb: Database.Database | null = null;
 function harnessDefault(): { executor: ExecutorKind; model: string | null } {
@@ -29,9 +29,9 @@ function harnessDefault(): { executor: ExecutorKind; model: string | null } {
     if (row?.executor && isExecutorKind(row.executor)) {
       return { executor: row.executor, model: row.model };
     }
-    return { executor: "claude", model: "opus[medium]" };
+    return { executor: "codex", model: "gpt-5.6-terra" };
   } catch {
-    return { executor: "claude", model: "opus[medium]" };
+    return { executor: "codex", model: "gpt-5.6-terra" };
   }
 }
 
@@ -68,6 +68,7 @@ export interface HarnessExecutorOptions {
     reasoningEffort?: string;
   };
   opencode?: {
+    variant?: string;
     forceOpenCode?: boolean;
     researchOnly?: boolean;
     agent?: string;
@@ -442,6 +443,7 @@ async function executeOpenCodeJob(
     const result = await executeOpenCodeCLI(fullPrompt, "", {
       model,
       timeout,
+      variant: options?.executorOptions?.opencode?.variant,
       forceOpenCode: options?.executorOptions?.opencode?.forceOpenCode ?? true,
       researchOnly: options?.executorOptions?.opencode?.researchOnly ?? false,
       agent: options?.executorOptions?.opencode?.agent ?? "build",
@@ -962,7 +964,7 @@ export async function runJobHarness(
     ...explicitProfile.fallbackModels,
   };
   const executorOptions = mergeExecutorOptions(
-    baseline?.executorOptions,
+    mergeExecutorOptions(baseline?.executorOptions, plan?.profile.executorOptions),
     explicitProfile.executorOptions,
   );
 

@@ -1,11 +1,12 @@
-import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { BrowserLeaseBroker, HttpBrowserTargetClient, startBrowserControlServer, stopBrowserControlServer } from "./browser-control.js";
 import readline from "node:readline";
 import { launchIsolatedCdp, type CDPHandle } from "./chrome-launcher.js";
 
 type RpcResponse = { id?: number; ready?: boolean; ok?: boolean; stdout?: string; error?: string };
-
-const AGENT_BROWSER = process.env.HOMER_AGENT_BROWSER_BIN ?? "/opt/homebrew/bin/agent-browser";
 
 /** Common surface of BrokeredAgentSession and DedicatedAgentSession. */
 export interface AgentBrowserSession {
@@ -19,9 +20,11 @@ export class BrokeredAgentSession implements AgentBrowserSession {
   private readonly readyPromise: Promise<void>;
   private stderrTail = "";
 
-  constructor(surface?: string, signal?: AbortSignal) {
-    const args = ["agent", ...(surface ? [surface] : []), "--rpc"];
-    this.child = spawn("browserctl", args, { stdio: ["pipe", "pipe", "pipe"] });
+  constructor(surface?: string, signal?: AbortSignal, broker?: { instance: string; socketPath: string }) {
+    const args = ["agent", ...(surface ? [surface] : []), ...(broker ? ["--instance", broker.instance] : []), "--rpc"];
+    this.child = spawn("browserctl", args, { stdio: ["pipe", "pipe", "pipe"],
+      ...(broker ? { env: { ...process.env, HOMER_BROWSER_CONTROL_SOCKET: broker.socketPath } } : {}),
+    });
     this.child.stderr!.on("data", (chunk: Buffer) => {
       this.stderrTail = (this.stderrTail + chunk.toString()).slice(-500);
     });
@@ -84,56 +87,57 @@ export async function withBrokeredAgentSession<T>(surface: string | undefined, o
   try { return await operation(session); } finally { await session.close(); }
 }
 
-/**
- * Agent-browser session bound to a DEDICATED Chrome on its own CDP port — a
- * separate pid, profile, and tab from the shared :9222 browser. It never takes
- * (or waits on) the broker's globally serialized agent lease, so a long-running
- * shared-browser collector cannot block it. agent-browser's 0.21.4 concurrent
- * rebinding only bites sessions attached to the SAME browser; a separate
- * endpoint is safe to run alongside the shared one.
- */
+/** An isolated Chrome with a per-run broker; browserctl owns every browser command. */
 export class DedicatedAgentSession implements AgentBrowserSession {
   private constructor(
-    private readonly session: string,
+    private readonly session: BrokeredAgentSession,
     private readonly chrome: CDPHandle,
-    private readonly signal?: AbortSignal,
+    private readonly server: ReturnType<typeof startBrowserControlServer>,
+    private readonly socketPath: string,
+    private readonly directory: string,
   ) {}
 
   static async open(name: string, port: number, signal?: AbortSignal): Promise<DedicatedAgentSession> {
+    signal?.throwIfAborted();
     const chrome = await launchIsolatedCdp(port);
-    // Short suffix: session names become socket paths (103-byte cap).
-    const session = new DedicatedAgentSession(`homer-${name}-ded-${randomUUID().slice(0, 8)}`, chrome, signal);
+    const directory = mkdtempSync(join(tmpdir(), "hbr-"));
+    const socketPath = join(directory, "b.sock");
+    let server: ReturnType<typeof startBrowserControlServer> | undefined;
+    let session: BrokeredAgentSession | undefined;
     try {
-      await session.command(["connect", String(port)], 30_000);
-    } catch (err) {
-      chrome.cleanup();
-      throw err;
+      signal?.throwIfAborted();
+      const broker = new BrowserLeaseBroker(new HttpBrowserTargetClient(port));
+      server = startBrowserControlServer(broker, async () => {}, socketPath, undefined, [{
+        id: "downloads", endpoint: `http://127.0.0.1:${port}`, broker,
+        ready: async () => {}, status: async () => ({ state: "ready" }), changed: () => {},
+      }]);
+      if (!server.listening) await new Promise<void>((resolve, reject) => {
+        server!.once("listening", resolve); server!.once("error", reject);
+      });
+      session = new BrokeredAgentSession(`agent.${name}`, signal, { instance: "downloads", socketPath });
+      // Wait for lease acquisition before exposing the session to the scraper.
+      await session.command(["get", "url"], 30_000);
+      return new DedicatedAgentSession(session, chrome, server, socketPath, directory);
+    } catch (error) {
+      try { await session?.close(); } finally {
+        if (server) await stopBrowserControlServer(server, socketPath);
+        chrome.cleanup();
+        rmSync(directory, { recursive: true, force: true });
+      }
+      throw error;
     }
-    return session;
   }
 
   command(args: string[], timeoutMs = 120_000): Promise<string> {
-    return this.exec(args, timeoutMs, this.signal);
+    return this.session.command(args, timeoutMs);
   }
 
-  private exec(args: string[], timeoutMs: number, signal?: AbortSignal): Promise<string> {
-    return new Promise((resolve, reject) => {
-      execFile(
-        AGENT_BROWSER,
-        ["--session", this.session, ...args],
-        { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, timeout: timeoutMs, signal },
-        (error, stdout, stderr) => {
-          if (error) reject(new Error(`${error.message}${stderr ? `: ${stderr.slice(0, 400)}` : ""}`));
-          else resolve(stdout);
-        },
-      );
-    });
-  }
-
-  /** Close ignores the abort signal so teardown still runs after an abort. */
   async close(): Promise<void> {
-    await this.exec(["close"], 10_000).catch(() => undefined);
-    this.chrome.cleanup();
+    try { await this.session.close(); } finally {
+      await stopBrowserControlServer(this.server, this.socketPath);
+      this.chrome.cleanup();
+      rmSync(this.directory, { recursive: true, force: true });
+    }
   }
 }
 

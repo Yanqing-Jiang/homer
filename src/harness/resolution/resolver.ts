@@ -50,7 +50,7 @@ function scopeChain(scope: ResolveHarnessSelectionInput["scope"]): Array<{ type:
 
 /** Subscription-independent default for requests with no selection row at any scope. */
 function systemDefaultHarness(): HarnessId {
-  return HARNESS_IDS.includes("claude") ? "claude" : (HARNESS_IDS[0] ?? "claude");
+  return HARNESS_IDS.includes("codex") ? "codex" : (HARNESS_IDS[0] ?? "codex");
 }
 
 export function resolveHarnessSelection(

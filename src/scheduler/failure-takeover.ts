@@ -518,7 +518,9 @@ export async function runFailureTakeover(params: {
             prompt: decisionPrompt,
             scope: { jobId },
             cwd,
-            explicit: { harness },
+            explicit: { harness, ...(harness === "codex" ? {
+              model: needsAutoFix ? "gpt-5.6-terra-max" : "gpt-5.6-terra",
+            } : {}) },
             requiredCapabilities,
             timeoutMs: Math.max(remainingMs(), 0),
             signal: deadlineController.signal,

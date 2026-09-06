@@ -36,6 +36,8 @@ export interface InvocationProfile {
   browserOnly?: boolean;
   agent?: "build" | "plan" | string;
   sandbox?: boolean;
+  /** Codex read-only advisor: no writable sandbox or resumed session. */
+  readOnly?: boolean;
   yolo?: boolean;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh" | string;
   /** gemini adapter: true → native Gemini API (JSON/grounding); false/undefined → direct CLI. */

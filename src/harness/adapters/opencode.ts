@@ -23,6 +23,7 @@ async function run(req: PreparedHarnessRequest, resume?: string): Promise<Harnes
     researchOnly: req.invocation.researchOnly,
     browserOnly: req.invocation.browserOnly,
     agent: req.invocation.agent,
+    variant: req.invocation.reasoningEffort,
     forceOpenCode: req.invocation.forceOpenCode,
     yolo: req.invocation.yolo,
     sandbox: req.invocation.sandbox,

@@ -55,3 +55,22 @@ test("control socket routes leases, endpoints and cleanup to the issuing instanc
     assert.equal((await request(socketPath, { verb: "reserve-external", surface: "agent.other", owner: `fixture:${process.pid}`, ttl: 60 })).ok, false);
   } finally { await stopBrowserControlServer(server, socketPath); await rm(dir, { recursive: true }); }
 });
+test("a per-run broker can bind its default instance to an isolated endpoint", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "broker-isolated-"));
+  const socketPath = join(dir, "control.sock");
+  const broker = new BrowserLeaseBroker(new Targets());
+  const server = startBrowserControlServer(broker, async () => {}, socketPath, undefined, [{
+    id: "downloads", endpoint: "http://127.0.0.1:9223", broker,
+    ready: async () => {}, status: async () => ({ state: "ready" }), changed: () => {},
+  }]);
+  if (!server.listening) await new Promise<void>(resolve => server.once("listening", resolve));
+  try {
+    const reserved = await request(socketPath, { verb: "reserve-external", surface: "agent.delta", owner: `fixture:${process.pid}`, ttl: 60 });
+    assert.equal(reserved.ok, true);
+    assert.equal(reserved.result?.cdpEndpoint, "http://127.0.0.1:9223");
+    const renewed = await request(socketPath, { verb: "renew", leaseId: reserved.result?.leaseId, ttl: 60 });
+    assert.equal(renewed.ok, true);
+    assert.equal((await request(socketPath, { verb: "release", leaseId: reserved.result?.leaseId })).ok, true);
+    assert.equal(broker.externalHolderSnapshot(), null);
+  } finally { await stopBrowserControlServer(server, socketPath); await rm(dir, { recursive: true }); }
+});

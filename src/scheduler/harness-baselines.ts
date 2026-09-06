@@ -12,21 +12,18 @@ export interface InternalJobHarnessBaseline extends HarnessSelection {
 
 const HOME_DIR = process.env.HOME ?? process.cwd();
 const TMP_DIR = "/tmp";
-const CODEX_MODEL = "gpt-5.6-sol";
+const CODEX_MODEL = "gpt-5.6-terra";
 const CLAUDE_OPUS_MODEL = "opus[medium]";
-const CODEX_FALLBACK_MODEL = "gpt-5.6-sol-medium";
+const CODEX_FALLBACK_MODEL = "gpt-5.6-terra";
 const LINK_PROCESS_TIMEOUT = 300_000;
 const PROJECT_DIR = PATHS.homerRoot;
 
 function codexStage(
   cwdOverride: string,
   timeoutOverride: number,
-  reasoningEffort: "medium" | "high" | "xhigh" = "medium",
+  reasoningEffort: "high" = "high",
 ): InternalHarnessCallProfile {
-  const model =
-    reasoningEffort === "medium" ? "gpt-5.6-sol-medium" :
-    reasoningEffort === "xhigh" ? "gpt-5.6-sol-xhigh" :
-    CODEX_MODEL;
+  const model = CODEX_MODEL;
   return {
     executor: "codex",
     model,
@@ -62,30 +59,32 @@ const PUBLIC_JOB_HARNESS_BASELINES = {
     executor: "codex",
     model: CODEX_MODEL,
     stages: {
-      filter: codexStage(HOME_DIR, 180_000, "medium"),
+      filter: codexStage(HOME_DIR, 180_000, "high"),
     },
   },
   "nightly-memory": {
     executor: "codex",
-    model: "gpt-5.6-sol-medium",
+    model: "gpt-5.6-terra",
     stages: {
       extract: {
         executor: "codex",
-        model: "gpt-5.6-sol-medium",
+        model: "gpt-5.6-terra",
         cwdOverride: HOME_DIR,
         timeoutOverride: 600_000,
       },
     },
   },
   "weekly-memory-consolidation": {
-    executor: "codex",
-    model: "gpt-5.6-sol-medium",
+    executor: "opencode",
+    model: "github-copilot/claude-opus-5",
     stages: {
       consolidate: {
-        executor: "codex",
-        model: "gpt-5.6-sol-medium",
+        executor: "opencode",
+        model: "github-copilot/claude-opus-5",
         cwdOverride: HOME_DIR,
         timeoutOverride: 600_000,
+        executorOptions: { opencode: { variant: "high", forceOpenCode: true, researchOnly: false } },
+        fallbackChain: [],
       },
     },
   },
@@ -128,7 +127,7 @@ const PUBLIC_JOB_HARNESS_BASELINES = {
     executor: "codex",
     model: CODEX_MODEL,
     stages: {
-      extract: codexStage(HOME_DIR, 180_000, "medium"),
+      extract: codexStage(HOME_DIR, 180_000, "high"),
     },
   },
   "health-check": {

@@ -74,6 +74,7 @@ const CATALOG: Record<CatalogExecutor, HarnessCatalogEntry> = {
       { id: "opencode-go-2/kimi-k2.7-code", label: "Kimi K2.7 Code (account 2)" },
       { id: "opencode-go/deepseek-v4-flash", label: "DeepSeek V4 Flash" },
       { id: "github-copilot/claude-opus-4.8", label: "GitHub Copilot Opus 4.8 (high)" },
+      { id: "github-copilot/claude-opus-5", label: "GitHub Copilot Opus 5" },
     ],
   },
   gemini: {
@@ -100,9 +101,13 @@ const CATALOG: Record<CatalogExecutor, HarnessCatalogEntry> = {
     label: "Codex",
     scopes: SCHEDULED_AND_TELEGRAM,
     modelMode: "catalog",
-    defaultModel: "gpt-5.6-sol",
+    defaultModel: "gpt-5.6-terra",
     models: [
-      { id: "gpt-5.6-sol", label: "GPT-5.6 Sol (high)", default: true },
+      { id: "gpt-5.6-terra", label: "GPT-5.6 Terra (high)", default: true },
+      { id: "gpt-5.6-terra-max", label: "GPT-5.6 Terra (max)" },
+      { id: "gpt-5.6-luna-max", label: "GPT-5.6 Luna (max)" },
+      { id: "gpt-6-astra", label: "GPT-6 Astra" },
+      { id: "gpt-5.6-sol", label: "GPT-5.6 Sol (high)" },
       { id: "gpt-5.6-sol-medium", label: "GPT-5.6 Sol (medium)" },
       { id: "gpt-5.6-sol-xhigh", label: "GPT-5.6 Sol (xhigh)" },
     ],

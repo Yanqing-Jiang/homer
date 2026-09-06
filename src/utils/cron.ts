@@ -5,6 +5,14 @@ import { Cron } from "croner";
  * Uses croner as the underlying engine (replaces cron-parser)
  */
 export const CronUtils = {
+  /** Two scheduled opportunities must have elapsed, including the execution budget.
+   * Counting actual occurrences respects overnight, weekend and DST gaps. */
+  isOverdue(cron: string, lastCompletedAt: Date, now: Date, timeoutMs: number): boolean {
+    if (!Number.isFinite(lastCompletedAt.getTime())) return false;
+    const secondDue = CronUtils.getNextRuns(cron, 2, lastCompletedAt)[1];
+    return secondDue !== undefined && now.getTime() > secondDue.getTime() + timeoutMs;
+  },
+
   /**
    * Validates a cron expression.
    * Supports 5-part (minute-based) and 6-part (second-based) expressions.

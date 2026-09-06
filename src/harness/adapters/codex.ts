@@ -21,6 +21,7 @@ async function run(req: PreparedHarnessRequest, sessionId?: string): Promise<Har
     sessionId: sessionId ?? req.session?.sessionId,
     model: req.model ?? undefined,
     reasoningEffort: req.invocation.reasoningEffort,
+    readOnly: req.invocation.readOnly,
     runId: req.runId,
     onPartial: req.stream?.onPartial,
     onMessageChunk: req.stream?.onMessageChunk,

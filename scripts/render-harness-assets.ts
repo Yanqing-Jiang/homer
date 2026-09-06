@@ -282,7 +282,7 @@ function renderOpenCode(a: CanonicalAsset, aliases: AliasTable): RenderedFile[] 
     files.push(...renderResourceFiles(a, targetDir, installDir));
   }
   if ((a.kind === "command" && (h.emitCommand ?? true)) || (a.kind === "skill" && a.frontmatter.triggers?.slash && h.emitCommand)) {
-    const fm = yamlFrontmatter({ description: a.frontmatter.description, "argument-hint": a.frontmatter.arguments?.hint });
+    const fm = yamlFrontmatter({ description: a.frontmatter.description, "argument-hint": a.frontmatter.arguments?.hint, agent: h.agent, model: h.model });
     files.push({
       path: join(a.root.generatedDir, "opencode", "command", `${a.id}.md`),
       content: `${fm}\n\n${BANNER(a.sourceRel)}\n\n${body}`,
@@ -339,10 +339,17 @@ function renderAll(roots: CanonicalRoot[], configured: boolean): { files: Render
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────────────────────
-function cmdRender(install: boolean) {
+function cmdRender(install: boolean, onlyIds?: string[]) {
   const { roots, configured } = loadRoots();
-  const { files, assets } = renderAll(roots, configured);
-  for (const root of roots) {
+  let { files, assets } = renderAll(roots, configured);
+  if (onlyIds) {
+    for (const id of onlyIds) if (!assets.some(a => a.id === id)) throw new Error(`Unknown asset: ${id}`);
+    assets = assets.filter(a => onlyIds.includes(a.id));
+    const aliases = loadAliases(roots[0]!);
+    files = assets.flatMap(a => [...renderClaude(a, aliases), ...renderOpenCode(a, aliases), ...renderCodex(a, aliases), ...renderPlain(a, aliases)]);
+  }
+  // A scoped update must preserve unrelated generated assets and local changes.
+  for (const root of onlyIds ? [] : roots) {
     if (existsSync(root.generatedDir)) rmSync(root.generatedDir, { recursive: true, force: true });
   }
   for (const f of files) {
@@ -392,10 +399,14 @@ function cmdList() {
 
 const [cmd, ...rest] = process.argv.slice(2);
 try {
-  if (cmd === "render") cmdRender(rest.includes("--install"));
+  if (cmd === "render") {
+    const onlyAt = rest.indexOf("--only");
+    if (onlyAt !== -1 && !rest[onlyAt + 1]) throw new Error("--only requires comma-separated asset ids");
+    cmdRender(rest.includes("--install"), onlyAt === -1 ? undefined : rest[onlyAt + 1]!.split(","));
+  }
   else if (cmd === "check") process.exit(cmdCheck());
   else if (cmd === "list") cmdList();
-  else { console.error("usage: render-harness-assets.ts <render [--install] | check | list>"); process.exit(2); }
+  else { console.error("usage: render-harness-assets.ts <render [--install] [--only id,id] | check | list>"); process.exit(2); }
 } catch (e) {
   console.error(`render-harness-assets: ${e instanceof Error ? e.message : e}`);
   process.exit(1);

@@ -6,9 +6,9 @@ import { processRegistry } from "../process/registry.js";
 
 const DEFAULT_TIMEOUT = 1800_000; // 30 minutes
 const KILL_GRACE_MS = 5_000;
-const CODEX_CLI_MODEL = "gpt-5.6-sol";
+const CODEX_CLI_MODEL = "gpt-5.6-terra";
 
-function resolveCodexModelVariant(
+export function resolveCodexModelVariant(
   model: string | undefined,
   reasoningEffort: string | undefined,
 ): { model: string; reasoningEffort: string } {
@@ -20,14 +20,18 @@ function resolveCodexModelVariant(
     // gpt-5.5-* retained as back-compat aliases for any stale selection rows/chains.
     case "gpt-5.6-sol-medium":
     case "gpt-5.5-medium":
-      return { model: CODEX_CLI_MODEL, reasoningEffort: "medium" };
+      return { model: "gpt-5.6-sol", reasoningEffort: "medium" };
     case "gpt-5.6-sol-low":
-      return { model: CODEX_CLI_MODEL, reasoningEffort: "low" };
+      return { model: "gpt-5.6-sol", reasoningEffort: "low" };
     case "gpt-5.6-sol-xhigh":
     case "gpt-5.5-xhigh":
-      return { model: CODEX_CLI_MODEL, reasoningEffort: "xhigh" };
+      return { model: "gpt-5.6-sol", reasoningEffort: "xhigh" };
     case "gpt-5.5":
-      return { model: CODEX_CLI_MODEL, reasoningEffort: reasoningEffort ?? "high" };
+      return { model: "gpt-5.6-sol", reasoningEffort: reasoningEffort ?? "high" };
+    case "gpt-5.6-luna-max":
+      return { model: "gpt-5.6-luna", reasoningEffort: "max" };
+    case "gpt-5.6-terra-max":
+      return { model: "gpt-5.6-terra", reasoningEffort: "max" };
     default:
       return { model, reasoningEffort: reasoningEffort ?? "high" };
   }
@@ -40,6 +44,11 @@ export interface CodexCLIOptions {
   sessionId?: string;
   model?: string;
   reasoningEffort?: string;
+  /** Keep read-only advisors from changing local state. */
+  readOnly?: boolean;
+  /** One browserctl lease around the complete nested browser workflow. */
+  browserAgent?: boolean;
+  browserInstance?: "downloads" | "interactive";
   /** Homer run identifier — propagated into ProcessRegistry so watchdog/cleanup-scheduler
    *  can join managed_processes.run_id → cli_runs.id when reaping corpses. */
   runId?: string;
@@ -147,14 +156,16 @@ export async function executeCodexCLI(
 
   return new Promise((resolve, reject) => {
     const codexVariant = resolveCodexModelVariant(model, reasoningEffort);
-    const args: string[] = sessionId
-      ? [
-          "exec",
-          "resume",
-          "--json",
-          "--dangerously-bypass-approvals-and-sandbox",
-        ]
-      : ["exec", "--json", "--dangerously-bypass-approvals-and-sandbox"];
+    if (sessionId && options.readOnly) {
+      reject(new Error("Read-only advisors must start a fresh Codex session"));
+      return;
+    }
+    const args: string[] = sessionId ? ["exec", "resume", "--json"] : ["exec", "--json"];
+    // Scheduler jobs and browser workers deliberately run in HOME or /tmp.
+    args.push("--skip-git-repo-check");
+    args.push(...(options.readOnly
+      ? ["--ignore-user-config", "--sandbox", "read-only", "-c", 'approval_policy="never"']
+      : ["--dangerously-bypass-approvals-and-sandbox"]));
 
     args.push("-m", codexVariant.model);
     args.push("-c", `model_reasoning_effort="${codexVariant.reasoningEffort}"`);
@@ -167,7 +178,11 @@ export async function executeCodexCLI(
       args.push("--", prompt);
     }
 
-    const child = spawn("codex", args, {
+    const spawnBin = options.browserAgent ? "browserctl" : "codex";
+    const spawnArgs = options.browserAgent
+      ? ["agent", "--instance", options.browserInstance ?? "interactive", "--", "codex", ...args]
+      : args;
+    const child = spawn(spawnBin, spawnArgs, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,

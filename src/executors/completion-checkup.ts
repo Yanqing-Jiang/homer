@@ -84,6 +84,8 @@ async function runCheckupWithExecutor(
       const res = await executeCodexCLI(prompt, {
         cwd: runtimePaths.homeDir,
         timeout: 300000,
+        model: "gpt-5.6-luna-max",
+        readOnly: true,
       });
       return res.exitCode === 0 ? res.output : null;
     }
@@ -109,8 +111,8 @@ export async function runCompletionCheckup(
 ): Promise<CheckupResult | null> {
   const prompt = buildPrompt(params.name, params.id, params.query, params.output);
   const chain: ExecutorKind[] = params.isMemoryJob
-    ? ["gemini", "claude", "codex", "kimi"]
-    : ["claude", "gemini", "codex", "kimi"];
+    ? ["codex", "gemini", "claude", "kimi"]
+    : ["codex", "claude", "gemini", "kimi"];
 
   for (const executor of chain) {
     const output = await runCheckupWithExecutor(executor, prompt);

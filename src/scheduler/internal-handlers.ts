@@ -339,24 +339,12 @@ async function runHealthCheck(
 
     // Check overdue (skip for running jobs to avoid false positives)
     if (!runningRow?.is_running) {
-      const lastSuccessAt = state?.lastSuccessAt;
-      if (lastSuccessAt) {
-        const nextTwo = CronUtils.getNextRuns(jobConfig.cron, 2);
-        if (nextTwo.length === 2) {
-          const intervalMs = nextTwo[1]!.getTime() - nextTwo[0]!.getTime();
-          if ((now - new Date(lastSuccessAt).getTime()) > intervalMs * 2) {
-            issues.push(`🟡 <b>${jobConfig.id}</b> overdue (last success: ${lastSuccessAt})`);
-          }
-        }
-      } else if (state?.lastRunAt) {
-        // Never succeeded but has run — check if it's been too long
-        const nextTwo = CronUtils.getNextRuns(jobConfig.cron, 2);
-        if (nextTwo.length === 2) {
-          const intervalMs = nextTwo[1]!.getTime() - nextTwo[0]!.getTime();
-          if ((now - new Date(state.lastRunAt).getTime()) > intervalMs * 2) {
-            issues.push(`🟡 <b>${jobConfig.id}</b> overdue (last run: ${state.lastRunAt}, never succeeded)`);
-          }
-        }
+      const reference = state?.lastSuccessAt ?? state?.lastRunAt;
+      if (reference && CronUtils.isOverdue(jobConfig.cron, new Date(reference), new Date(now), timeoutMs)) {
+        const detail = state?.lastSuccessAt
+          ? `last success: ${reference}`
+          : `last run: ${reference}, never succeeded`;
+        issues.push(`🟡 <b>${jobConfig.id}</b> overdue (${detail})`);
       }
     }
   }

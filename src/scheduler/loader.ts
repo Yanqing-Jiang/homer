@@ -1,5 +1,6 @@
 import { readFile, watch } from "fs/promises";
 import { existsSync } from "fs";
+import { basename, dirname } from "node:path";
 import { logger } from "../utils/logger.js";
 import { CronUtils } from "../utils/cron.js";
 import {
@@ -213,8 +214,8 @@ export class ScheduleWatcher {
   }
 
   private async watchFile(path: string): Promise<void> {
-    if (!existsSync(path)) {
-      logger.debug({ path }, "Schedule file does not exist, not watching");
+    if (!existsSync(dirname(path))) {
+      logger.debug({ path }, "Schedule directory does not exist, not watching");
       return;
     }
 
@@ -222,10 +223,12 @@ export class ScheduleWatcher {
     this.watchers.set(path, controller);
 
     try {
-      const watcher = watch(path, { signal: controller.signal });
+      // Atomic schedule writers replace the file's inode. Watching its parent
+      // keeps subsequent replacements observable and also notices new files.
+      const watcher = watch(dirname(path), { signal: controller.signal });
 
       for await (const event of watcher) {
-        if (event.eventType === "change") {
+        if (event.filename === null || String(event.filename) === basename(path)) {
           logger.info({ path }, "Schedule file changed, reloading");
           this.scheduleReload();
         }

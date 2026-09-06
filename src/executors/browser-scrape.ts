@@ -1,7 +1,7 @@
 /**
  * Browser scrape executor.
  *
- * Primary:  Claude Code Sonnet (via `claude` CLI)
+ * Primary:  Codex Terra high, under a browserctl lease
  * Fallback: Gemini Flash 3.0 (gemini-3-flash-preview via Gemini CLI)
  *
  * Both paths are constrained to browser-only behavior via prompt injection.
@@ -9,15 +9,15 @@
  */
 
 import { mkdirSync } from "fs";
-import { executeClaudeCommand } from "./claude.js";
+import { executeCodexCLI } from "./codex-cli.js";
 import { executeOpenCodeCLI, type OpenCodeCLIOptions, type OpenCodeCLIResult } from "./opencode-cli.js";
 import { logger } from "../utils/logger.js";
 
 // Browser-scrape Gemini fallback runs on opencode Flash 3.5 (High), driving agent-browser.
 const FLASH_FALLBACK_MODEL = "google/gemini-3.5-flash";
 
-// Give Claude 90% of the total budget so there's time left for the fallback.
-const CLAUDE_TIMEOUT_RATIO = 0.9;
+// Reserve part of the total budget for the existing fallback.
+const PRIMARY_TIMEOUT_RATIO = 0.9;
 
 const SCRAPE_CWD = "/tmp/homer-scrape";
 
@@ -37,17 +37,18 @@ export async function executeBrowserScrape(
 ): Promise<OpenCodeCLIResult> {
   const { timeout = 600_000, signal } = options;
   const startTime = Date.now();
-  const claudeTimeout = Math.floor(timeout * CLAUDE_TIMEOUT_RATIO);
+  const primaryTimeout = Math.floor(timeout * PRIMARY_TIMEOUT_RATIO);
   const constrainedPrompt = `${BROWSER_ONLY_CONSTRAINT}\n${prompt}`;
 
-  // ── Primary: Claude Sonnet ────────────────────────────────────────────────
+  // Primary: Codex Terra high.
   try {
     mkdirSync(SCRAPE_CWD, { recursive: true });
 
-    const result = await executeClaudeCommand(constrainedPrompt, {
+    const result = await executeCodexCLI(constrainedPrompt, {
       cwd: SCRAPE_CWD,
-      model: "sonnet",
-      timeout: claudeTimeout,
+      model: "gpt-5.6-terra",
+      reasoningEffort: "high",
+      timeout: primaryTimeout,
       signal,
       browserAgent: true,
       browserInstance: options.browserInstance ?? "interactive",
@@ -60,25 +61,25 @@ export async function executeBrowserScrape(
       result.output !== "(No output)";
 
     if (useful) {
-      logger.debug({ outputLen: result.output.length, duration: result.duration }, "Browser scrape: Claude primary succeeded");
+      logger.debug({ outputLen: result.output.length, duration: result.duration }, "Browser scrape: Codex primary succeeded");
       return {
         output: result.output,
         exitCode: 0,
         duration: Date.now() - startTime,
-        executor: "claude",
-        sessionId: result.claudeSessionId ?? "",
-        model: "claude-sonnet-4-6",
+        executor: "codex",
+        sessionId: result.sessionId ?? "",
+        model: "gpt-5.6-terra",
         accountId: 0,
       };
     }
 
     logger.warn(
       { exitCode: result.exitCode, outputLen: result.output?.length },
-      "Browser scrape: Claude produced no useful output, falling back to Gemini Flash"
+      "Browser scrape: Codex produced no useful output, trying fallback"
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    logger.warn({ err: msg }, "Browser scrape: Claude failed, falling back to Gemini Flash");
+    logger.warn({ err: msg }, "Browser scrape: Codex failed, trying fallback");
   }
 
   // ── Fallback: opencode (caller may override the model; Flash by default) ──

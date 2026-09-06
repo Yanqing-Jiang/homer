@@ -32,6 +32,7 @@ export interface HarnessProfile {
   executorOptions?: {
     codex?: { reasoningEffort?: string };
     opencode?: {
+      variant?: string;
       forceOpenCode?: boolean;
       researchOnly?: boolean;
       browserOnly?: boolean;

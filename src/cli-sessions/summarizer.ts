@@ -6,9 +6,9 @@ import { logger } from "../utils/logger.js";
 /**
  * Smart session summarization with tiered strategy:
  * - ≤ 4 messages: template (free)
- * - 5+ messages: global-harness retrieval summary, capped at 50k chars
+ * - 5+ messages: Luna-max retrieval summary, capped at 50k chars
  * - Sub-agent: skip (no summary)
- * Model/harness is controlled by the `global` harness_selection row, not pinned here.
+ * Default is Codex Luna max; callers may explicitly select another harness.
  */
 export async function summarizeSession(
   session: ParsedSession,
@@ -22,7 +22,7 @@ export async function summarizeSession(
     return templateSummary(session);
   }
 
-  // Medium/large sessions: global harness
+  // Medium/large sessions: Codex Luna max
   try {
     return await harnessSummary(session, signal, explicit);
   } catch (error) {
@@ -48,7 +48,7 @@ export function templateSummary(session: ParsedSession): string {
 }
 
 /**
- * Global-harness summary for medium/large sessions
+ * Luna-max summary for medium/large sessions
  */
 async function harnessSummary(
   session: ParsedSession,
@@ -89,14 +89,14 @@ Messages: ${session.messageCount}
 
 ${conversationText}`;
 
-  // Follows the global harness switcher (no pin) — controlled by the `global` harness_selection row.
+  // Retrieval summaries use the explicit low-cost tier (Yanqing, 2026-09-05).
   const result = await executeResolvedHarness({
     source: "runtime",
     mode: "runtime-turn",
     prompt,
     timeoutMs: 900_000,
     signal,
-    explicit: explicit ?? undefined,
+    explicit: explicit ?? { harness: "codex", model: "gpt-5.6-luna-max" },
   });
 
   if (result.exitCode !== 0) {

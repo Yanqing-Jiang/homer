@@ -3,7 +3,7 @@
  *
  * Features:
  * - Enforcement enabled by default (PROCESS_TIMEOUT_ENFORCE=0 to disable)
- * - LLM triage via Claude Code (Sonnet) before killing executor processes > 30min
+ * - LLM triage via Codex Terra high before killing executor processes > 30min
  * - Hard kill ceiling: any process > 45min killed immediately regardless of LLM
  * - Circuit breaker: max 3 LLM triage calls per hour
  * - Piggybacks processRegistry.tickSnapshot() for DB persistence
@@ -12,7 +12,7 @@
 import { processRegistry } from "./registry.js";
 import type { ProcessRecord, ProcessType } from "./registry.js";
 import { logger } from "../utils/logger.js";
-import { execFile } from "child_process";
+import { executeResolvedHarness } from "../harness/dispatch.js";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 const CHECK_INTERVAL_MS = 30_000; // Check every 30s
@@ -164,7 +164,7 @@ export class SessionTimeoutManager {
   }
 
   /**
-   * LLM triage: ask Claude Code whether to kill, extend, or escalate.
+   * LLM triage: ask Codex Terra whether to kill, extend, or escalate.
    */
   private async triageBeforeKill(record: ProcessRecord, ageMs: number): Promise<void> {
     this.triagePending.add(record.pid);
@@ -199,7 +199,7 @@ Rules:
 - Default to "kill" if uncertain`;
 
     try {
-      const decision = await this.callClaude(prompt);
+      const decision = await this.callAdvisor(prompt);
 
       logger.info(
         { pid: record.pid, action: decision.action, reason: decision.reason },
@@ -229,46 +229,26 @@ Rules:
     }
   }
 
-  /**
-   * Call Claude Code CLI for triage decision.
-   */
-  private callClaude(prompt: string): Promise<TriageDecision> {
-    return new Promise((resolve) => {
-      const claudeBin = process.env.CLAUDE_BIN || process.env.CLAUDE_PATH || runtimePaths.claudeBinaryPath;
-      const child = execFile(
-        claudeBin,
-        ["-p", prompt, "--output-format", "text", "-m", "sonnet"],
-        { timeout: TRIAGE_TIMEOUT_MS, maxBuffer: 1024 * 64 },
-        (error, stdout) => {
-          if (error || !stdout) {
-            resolve({ action: "kill", reason: "CC unreachable or timed out" });
-            return;
-          }
-
-          try {
-            // Extract JSON from response
-            const match = stdout.match(/\{[^{}]*\}/);
-            if (match) {
-              const parsed = JSON.parse(match[0]) as { action?: string; reason?: string };
-              const action = parsed.action;
-              if (action === "kill" || action === "extend" || action === "escalate") {
-                resolve({ action, reason: parsed.reason || "No reason given" });
-                return;
-              }
-            }
-          } catch {
-            // Parse failed
-          }
-
-          resolve({ action: "kill", reason: "CC response unparseable" });
-        }
-      );
-
-      // Safety: kill claude process if it hangs
-      child.once("error", () => {
-        resolve({ action: "kill", reason: "CC process error" });
+  /** Read-only advisor; process control remains in this manager. */
+  private async callAdvisor(prompt: string): Promise<TriageDecision> {
+    try {
+      const result = await executeResolvedHarness({
+        source: "system", mode: "runtime-turn", prompt,
+        explicit: { harness: "codex", model: "gpt-5.6-terra" },
+        baselineProfile: { invocation: { readOnly: true, reasoningEffort: "high" } },
+        cwd: runtimePaths.homeDir, timeoutMs: TRIAGE_TIMEOUT_MS,
       });
-    });
+      if (result.exitCode === 0) {
+        const match = result.output.match(/\{[^{}]*\}/);
+        if (match) {
+          const parsed = JSON.parse(match[0]) as { action?: string; reason?: string };
+          if (parsed.action === "kill" || parsed.action === "extend" || parsed.action === "escalate") {
+            return { action: parsed.action, reason: parsed.reason || "No reason given" };
+          }
+        }
+      }
+    } catch { /* Preserve the existing fail-closed timeout policy. */ }
+    return { action: "kill", reason: "Advisor unavailable or response unparseable" };
   }
 
   /**
