@@ -15,6 +15,7 @@ import { getRuntimePaths } from "../utils/runtime-paths.js";
 
 interface OpenCodeStreamEvent {
   type: "step_start" | "text" | "tool_use" | "tool_result" | "step_finish" | "error";
+  error?: string | { name?: string; data?: { message?: string }; message?: string };
   timestamp?: number;
   sessionID?: string;
   part?: {
@@ -262,7 +263,7 @@ async function executeOpenCodeCLIOnce(
   // DeepSeek V4 Pro is only worth its premium at max reasoning effort (it's our
   // high-quality synthesis model — see eval 2026-06-22), so default it to --variant max
   // unless a caller explicitly overrides. Other models keep their opencode default.
-  const effectiveVariant = variant ?? suffixVariant ?? (model === "opencode-go/deepseek-v4-pro" ? "max" : undefined);
+  const effectiveVariant = variant ?? suffixVariant ?? (model === "opencode-go/deepseek-v4-pro" ? "max" : model === "github-copilot/claude-opus-5" ? "high" : undefined);
 
   // opencode-go/* models (GLM, DeepSeek, MiniMax, …) are first-class Zen models and must
   // never be diverted to the legacy Gemini CLI — guards against "deepseek-v4-pro" matching
@@ -358,6 +359,7 @@ async function executeOpenCodeCLIOnce(
     let totalCached = 0;
     let toolCallCount = 0;
     let stderrOutput = "";
+    let streamFailed = false;
     let timedOut = false;
     let aborted = false;
 
@@ -450,7 +452,11 @@ async function executeOpenCodeCLIOnce(
             break;
 
           case "error":
-            stderrOutput += (event.part?.error || "") + "\n";
+            streamFailed = true;
+            stderrOutput += (event.part?.error
+              || (typeof event.error === "string" ? event.error
+                : event.error?.data?.message || event.error?.message || JSON.stringify(event.error))
+              || "OpenCode stream error") + "\n";
             break;
         }
       } catch {
@@ -472,6 +478,9 @@ async function executeOpenCodeCLIOnce(
       const duration = Date.now() - startTime;
       const output = responseChunks.join("");
 
+      // Successful prose can discuss rate limits or auth failures. Only classify
+      // those phrases after the process or stream has actually reported failure.
+      const failed = code !== 0 || streamFailed;
       const allOutput = output + stderrOutput;
 
       if (aborted) {
@@ -495,7 +504,7 @@ async function executeOpenCodeCLIOnce(
         return;
       }
 
-      if (isQuotaError(allOutput)) {
+      if (failed && isQuotaError(allOutput)) {
         resolve({
           output: `Quota exhausted: ${stderrOutput}`,
           exitCode: 2,
@@ -509,7 +518,7 @@ async function executeOpenCodeCLIOnce(
         return;
       }
 
-      if (isAuthError(allOutput)) {
+      if (failed && isAuthError(allOutput)) {
         resolve({
           output: `Auth error: ${stderrOutput}`,
           exitCode: 3,
@@ -537,10 +546,10 @@ async function executeOpenCodeCLIOnce(
         return;
       }
 
-      if (code !== 0 || code === null) {
+      if (failed) {
         resolve({
           output: stderrOutput || `OpenCode CLI exited with code ${code ?? "null (signal kill)"}`,
-          exitCode: code ?? 1,
+          exitCode: code || 1,
           duration,
           executor: "opencode",
           sessionId,

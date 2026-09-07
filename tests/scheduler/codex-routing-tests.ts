@@ -24,6 +24,7 @@ process.stdout.write(JSON.stringify({type:'item.completed',item:{type:'agent_mes
       ["gpt-5.6-luna-max", "gpt-5.6-luna", "max"],
       ["gpt-5.6-terra-max", "gpt-5.6-terra", "max"],
       ["gpt-6-astra", "gpt-6-astra", "high"],
+      ["gpt-6-astra-low", "gpt-6-astra", "low"],
       ["gpt-5.6-sol-medium", "gpt-5.6-sol", "medium"],
     ]) {
       const result = await executeCodexCLI("---literal prompt", {

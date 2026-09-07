@@ -1,4 +1,3 @@
-import { executeClaudeCommand } from "./claude.js";
 import { executeOpenCodeCLI } from "./opencode-cli.js";
 import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
@@ -73,18 +72,12 @@ async function runCheckupWithExecutor(
       });
       return res.exitCode === 0 ? res.output : null;
     }
-    if (executor === "claude") {
-      const res = await executeClaudeCommand(prompt, {
-        cwd: runtimePaths.homeDir,
-        model: "sonnet",
-      });
-      return res.exitCode === 0 ? res.output : null;
-    }
     if (executor === "codex") {
       const res = await executeCodexCLI(prompt, {
         cwd: runtimePaths.homeDir,
         timeout: 300000,
-        model: "gpt-5.6-luna-max",
+        model: "gpt-5.6-terra",
+        reasoningEffort: "high",
         readOnly: true,
       });
       return res.exitCode === 0 ? res.output : null;
@@ -110,9 +103,7 @@ export async function runCompletionCheckup(
   }
 ): Promise<CheckupResult | null> {
   const prompt = buildPrompt(params.name, params.id, params.query, params.output);
-  const chain: ExecutorKind[] = params.isMemoryJob
-    ? ["codex", "gemini", "claude", "kimi"]
-    : ["codex", "claude", "gemini", "kimi"];
+  const chain: ExecutorKind[] = ["codex", "gemini", "kimi"];
 
   for (const executor of chain) {
     const output = await runCheckupWithExecutor(executor, prompt);

@@ -268,7 +268,7 @@ export class CLIRunManager {
 
     // GLM-5.2 (opencode) is text-only: route image-bearing turns to Claude (vision) for THIS
     // turn only — the lane's persisted executor/model stay opencode and its session is untouched.
-    const imageOverride = laneExecutor === "opencode" && hasImageAttachment(params.attachments);
+    const imageOverride = laneExecutor === "opencode" && laneModel?.includes("/glm-") === true && hasImageAttachment(params.attachments);
     const executor = imageOverride ? "claude" : laneExecutor;
     const model = imageOverride ? getClaudeDefaultModel(params.lane) : laneModel;
 
@@ -472,6 +472,7 @@ ${pendingContext.context}
           if (executorKind === "codex") {
             const result = await executeCodexCLI(prompt, {
               cwd: params.cwd,
+              model: executorKind === executor ? model ?? undefined : undefined,
               timeout: 1800000,
               signal: abortController.signal,
               sessionId: executorKind === executor ? sessionId ?? undefined : undefined,

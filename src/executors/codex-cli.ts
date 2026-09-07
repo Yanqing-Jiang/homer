@@ -32,6 +32,8 @@ export function resolveCodexModelVariant(
       return { model: "gpt-5.6-luna", reasoningEffort: "max" };
     case "gpt-5.6-terra-max":
       return { model: "gpt-5.6-terra", reasoningEffort: "max" };
+    case "gpt-6-astra-low":
+      return { model: "gpt-6-astra", reasoningEffort: "low" };
     default:
       return { model, reasoningEffort: reasoningEffort ?? "high" };
   }

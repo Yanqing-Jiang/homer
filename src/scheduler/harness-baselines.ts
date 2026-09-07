@@ -13,7 +13,7 @@ export interface InternalJobHarnessBaseline extends HarnessSelection {
 const HOME_DIR = process.env.HOME ?? process.cwd();
 const TMP_DIR = "/tmp";
 const CODEX_MODEL = "gpt-5.6-terra";
-const CLAUDE_OPUS_MODEL = "opus[medium]";
+const CONTENT_MODEL = "github-copilot/claude-opus-5";
 const CODEX_FALLBACK_MODEL = "gpt-5.6-terra";
 const LINK_PROCESS_TIMEOUT = 300_000;
 const PROJECT_DIR = PATHS.homerRoot;
@@ -35,13 +35,13 @@ function codexStage(
   };
 }
 
-/** Shared Claude Opus medium primary + Codex medium fallback for YouTube classify/analyze. */
+/** Shared Copilot Opus high primary + Terra high fallback for YouTube classify/analyze. */
 function youtubeStage(
   timeoutOverride: number,
 ): InternalHarnessCallProfile {
   return {
-    executor: "claude",
-    model: CLAUDE_OPUS_MODEL,
+    executor: "opencode",
+    model: CONTENT_MODEL,
     cwdOverride: HOME_DIR,
     timeoutOverride,
     fallbackChain: ["codex"],
@@ -52,23 +52,23 @@ function youtubeStage(
 }
 
 const youtubeClassifyStage: InternalHarnessCallProfile = youtubeStage(900_000);
-const youtubeAnalyzeStage: InternalHarnessCallProfile = youtubeStage(300_000); // 5 min — Opus medium deep analysis
+const youtubeAnalyzeStage: InternalHarnessCallProfile = youtubeStage(300_000); // 5 min — Copilot Opus high analysis
 
 const PUBLIC_JOB_HARNESS_BASELINES = {
   "ideas-explore": {
-    executor: "codex",
-    model: CODEX_MODEL,
+    executor: "opencode",
+    model: CONTENT_MODEL,
     stages: {
       filter: codexStage(HOME_DIR, 180_000, "high"),
     },
   },
   "nightly-memory": {
-    executor: "codex",
-    model: "gpt-5.6-terra",
+    executor: "opencode",
+    model: CONTENT_MODEL,
     stages: {
       extract: {
-        executor: "codex",
-        model: "gpt-5.6-terra",
+        executor: "opencode",
+        model: CONTENT_MODEL,
         cwdOverride: HOME_DIR,
         timeoutOverride: 600_000,
       },
@@ -89,12 +89,12 @@ const PUBLIC_JOB_HARNESS_BASELINES = {
     },
   },
   "link-processor": {
-    executor: "claude",
-    model: CLAUDE_OPUS_MODEL,
+    executor: "opencode",
+    model: CONTENT_MODEL,
     stages: {
       article: {
-        executor: "claude",
-        model: CLAUDE_OPUS_MODEL,
+        executor: "opencode",
+        model: CONTENT_MODEL,
         cwdOverride: TMP_DIR,
         timeoutOverride: LINK_PROCESS_TIMEOUT,
       },
@@ -124,19 +124,19 @@ const PUBLIC_JOB_HARNESS_BASELINES = {
     },
   },
   "content-scraper": {
-    executor: "codex",
-    model: CODEX_MODEL,
+    executor: "opencode",
+    model: CONTENT_MODEL,
     stages: {
       extract: codexStage(HOME_DIR, 180_000, "high"),
     },
   },
   "health-check": {
-    executor: "claude",
-    model: CLAUDE_OPUS_MODEL,
+    executor: "codex",
+    model: CODEX_MODEL,
     stages: {
       triage: {
-        executor: "claude",
-        model: CLAUDE_OPUS_MODEL,
+        executor: "codex",
+        model: CODEX_MODEL,
         timeoutOverride: 30_000,
       },
     },
