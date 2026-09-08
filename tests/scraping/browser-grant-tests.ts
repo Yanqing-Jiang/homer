@@ -30,8 +30,12 @@ function brokerWith(targets: Target[]) {
 test("a granted reservation can be adopted more than once", async () => {
   const broker = brokerWith([{ id: "t0", url: "about:blank" }]);
   const res = (await broker.reserveExternal("agent.abvp", "abvp:1", 600, true)) as { leaseId: string };
-  const first = broker.adoptExternal(res.leaseId, "browserctl-agent:100", "agent.abvp");
+  const first = broker.adoptExternal(res.leaseId, `browserctl-agent:${process.pid}`, "agent.abvp");
   assert.equal((first as { leaseId: string }).leaseId, res.leaseId);
+  // Even before registration, admission belongs to the first adopter alone.
+  assert.throws(() => broker.adoptExternal(res.leaseId, "second", "agent.abvp"), /already has a live adopter/);
+  const released = await broker.release(res.leaseId);
+  assert.equal(released.grantRetained, true);
   // The MFA-recovery flow releases and relaunches; adoption must work again.
   const second = broker.adoptExternal(res.leaseId, "browserctl-agent:200", "agent.abvp");
   assert.equal((second as { leaseId: string }).leaseId, res.leaseId);
@@ -48,7 +52,7 @@ test("a NON-granted reservation is consumed by registration, as before", async (
 test("a granted reservation survives registration and the adopter's release", async () => {
   const broker = brokerWith([{ id: "t0", url: "about:blank" }]);
   const res = (await broker.reserveExternal("agent.abvp", "abvp:1", 600, true)) as { leaseId: string };
-  broker.adoptExternal(res.leaseId, "browserctl-agent:100", "agent.abvp");
+  broker.adoptExternal(res.leaseId, `browserctl-agent:${process.pid}`, "agent.abvp");
   const created = await broker.__targetsForTest_create("https://advertising.amazon.com/bv");
   await broker.registerExternalTarget(res.leaseId, created.id);
 
@@ -81,7 +85,7 @@ test("a grant is bound to its surface, so an inherited env variable cannot steal
 test("a held reservation excludes every other agent surface", async () => {
   const broker = brokerWith([{ id: "t0", url: "about:blank" }]);
   await broker.reserveExternal("agent.abvp", "abvp:1", 600, true);
-  await assert.rejects(() => broker.reserveExternal("agent.sqpcheck", "b4-report", 600), /reserved by/);
+  await assert.rejects(() => broker.reserveExternal("agent.sqpcheck", "b4-report", 600), /agent capacity/);
 });
 
 test("a reservation expires on its TTL, so a crashed holder cannot hold the browser forever", async () => {

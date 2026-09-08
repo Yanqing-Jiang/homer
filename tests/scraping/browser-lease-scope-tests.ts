@@ -77,7 +77,7 @@ test("a granted reservation is snapshotted and restored across a generation", as
   await broker.reserveExternal("agent.vc-query-detail", HOLDER, 3600, true);
   const snapshot = broker.externalHolderSnapshot();
   assert.ok(snapshot);
-  assert.equal(snapshot!.reservation?.granted, true);
+  assert.equal(snapshot!.reservations[0]?.granted, true);
 
   // A new daemon generation: beginGeneration clears records AND the reservation.
   broker.beginGeneration(2);
@@ -86,8 +86,8 @@ test("a granted reservation is snapshotted and restored across a generation", as
 
   const restored = await broker.restoreExternalHolder(snapshot!);
   assert.equal(restored.reservation, true);
-  assert.equal(broker.externalLeaseCount(), 1, "the global agent-browser serialization is back");
-  await assert.rejects(() => broker.reserveExternal("agent.sqpcheck", "b4-report", 600), /reserved by/);
+  assert.equal(broker.externalLeaseCount(), 1, "the downloads capacity is restored");
+  await assert.rejects(() => broker.reserveExternal("agent.sqpcheck", "b4-report", 600), /agent capacity/);
 });
 
 /**
@@ -116,8 +116,8 @@ test("a live browserctl-agent holder survives a generation: honoured, and its re
   // The daemon dies; the agent keeps driving. Simulate the dead daemon by rewriting the
   // holder identity to a pid that is gone, exactly as N3 describes.
   const acrossRestart = {
-    reservation: snapshot!.reservation
-      ? { ...snapshot!.reservation, owner: "abvp-refresh:999999:run", adopterOwner: AGENT }
+    reservation: snapshot!.reservations[0]
+      ? { ...snapshot!.reservations[0], owner: "abvp-refresh:999999:run", adopterOwner: AGENT }
       : null,
     records: snapshot!.records.map((r) => ({ ...r, owner: "abvp-refresh:999999:run", adopterOwner: AGENT })),
   };
@@ -135,7 +135,7 @@ test("a live browserctl-agent holder survives a generation: honoured, and its re
   // Serialization is genuinely back: an unrelated agent cannot rebind this Chrome.
   await assert.rejects(
     () => broker.reserveExternal("agent.sqpcheck", "b4-report", 600),
-    /globally serialized|reserved by/,
+    /agent capacity|reserved by/,
   );
 
   // And the holder's own release still works by leaseId, across the generation boundary.
@@ -293,7 +293,7 @@ test("reclaiming a granted record also forgets the dead adopter on the reservati
 
   assert.equal(broker.externalReservationAdopterForTest(), null,
     "the grant survives, but it no longer names a pid that is gone");
-  assert.ok(broker.externalHolderSnapshot()?.reservation, "the holder's grant itself is retained");
+  assert.ok(broker.externalHolderSnapshot()?.reservations[0], "the holder's grant itself is retained");
   await broker.__flushPendingClosesForTest();
 });
 
@@ -365,12 +365,28 @@ test("a handoff whose holders are all dead really is holders-gone", async () => 
 test("the status summary exposes the fence and the reservation", async () => {
   const broker = brokerWith([]);
   broker.beginGeneration(1);
-  assert.equal(broker.externalReservationSummary(), null);
+  assert.deepEqual(broker.externalReservationSummary(), []);
   await broker.reserveExternal("agent.vc-query-detail", HOLDER, 600, true);
-  const summary = broker.externalReservationSummary();
+  const [summary] = broker.externalReservationSummary();
   assert.equal(summary?.surface, "agent.vc-query-detail");
   assert.equal(summary?.granted, true);
   assert.equal(broker.adoptionGraceUntil(), null);
   broker.setAdoptionGrace(Date.now() + 60_000, "fenced");
   assert.ok(broker.adoptionGraceUntil());
+});
+
+test("multi-holder recovery retries partial success idempotently and writes the array shape", async () => {
+  const targets = [{ id: "a", type: "page", url: "about:blank#a", webSocketDebuggerUrl: "ws://a" }];
+  const broker = new BrowserLeaseBroker({ list: async () => targets, create: async () => { throw new Error("not used"); }, close: async () => {} }, Date.now, false, 3);
+  const reservations = ["a", "b"].map(id => ({ surface: `agent.${id}`, owner: AGENT, leaseId: id, expiresAt: Date.now() + 60_000, granted: true }));
+  const records = reservations.map(r => ({ surface: r.surface, owner: AGENT, leaseId: r.leaseId, generation: 1, targetId: r.leaseId, expectedOrigins: [], currentUrl: "about:blank", lastVerifiedUrl: "about:blank", leaseExpiresAt: r.expiresAt, lastActivityAt: Date.now() }));
+  const first = await broker.restoreExternalHolder({ reservations, records });
+  assert.equal(first.outcome, "unknown"); assert.equal(first.records, 1); assert.equal(first.unresolvedLiveHolders, 1);
+  targets.push({ id: "b", type: "page", url: "about:blank#b", webSocketDebuggerUrl: "ws://b" });
+  const second = await broker.restoreExternalHolder({ reservations, records });
+  assert.equal(second.outcome, "restored"); assert.equal(second.unresolvedLiveHolders, 0);
+  assert.equal(broker.externalLeaseCount(), 2);
+  assert.equal((await broker.restoreExternalHolder({ reservations, records })).unresolvedLiveHolders, 0);
+  assert.equal(broker.externalHolderSnapshot()?.reservations.length, 2);
+  assert.ok(!("reservation" in broker.externalHolderSnapshot()!));
 });

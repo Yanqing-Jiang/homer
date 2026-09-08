@@ -1,76 +1,110 @@
-// Explicit local-fixture integration drill. Never connects to production :9222.
+// Opt-in only: one throwaway headless Chrome, a fixture broker, and no production CDP.
+import "../helpers/no-telegram.js";
+import test from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
+import { once } from "node:events";
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import readline from "node:readline";
-import { InteractiveBrowser } from "../../src/scraping/interactive-browser.js";
-import { startBrowserControlServer, stopBrowserControlServer, type BrowserControlInstance } from "../../src/scraping/browser-control.js";
+import { BrowserLeaseBroker, HttpBrowserTargetClient, startBrowserControlServer, stopBrowserControlServer } from "../../src/scraping/browser-control.js";
+import { runAgentBrowserBindingSelfTest } from "../../src/scraping/agent-browser-binding.js";
 
-const dir = await mkdtemp(join(tmpdir(), "amz-browsers-"));
-const output = process.env.AMZ_BROWSER_DRILL_OUTPUT ?? dir; await mkdir(output, { recursive: true });
-const http = createServer((_req, res) => { res.setHeader("Content-Type", "text/html"); res.end('<title>AMZ isolated fixture</title><input id="value"><p id="count">0</p>'); });
-await new Promise<void>(resolve => http.listen(0, "127.0.0.1", resolve));
-const address = http.address(); assert.ok(address && typeof address !== "string");
-const url = `http://127.0.0.1:${address.port}`;
-const download = new InteractiveBrowser(join(dir, "profile-download"), join(dir, "state-download.json"), 9441, 1000);
-const interactive = new InteractiveBrowser(join(dir, "profile-interactive"), join(dir, "state-interactive.json"), 9442, 1000);
-const fixtureDownload: BrowserControlInstance = { id: "downloads", endpoint: download.endpoint, broker: download.broker, ready: () => download.ready(), status: () => download.status(), changed: () => download.changed() };
-await Promise.all([download.initialize(), interactive.initialize()]);
-const socketPath = join(dir, "broker.sock");
-let server = startBrowserControlServer(download.broker, async () => { throw new Error("fixture never permits maintenance"); }, socketPath, undefined, [fixtureDownload, interactive]);
-await new Promise<void>(resolve => server.once("listening", resolve));
-function client(instance: string) {
-  const child = spawn(process.execPath, [join(process.cwd(), "bin/browserctl"), "agent", `agent.fixture-${instance}`, "--instance", instance, "--ttl", "300", "--rpc"], { env: { ...process.env, HOMER_BROWSER_CONTROL_SOCKET: socketPath }, stdio: ["pipe", "pipe", "pipe"] });
-  let n = 0; let stderr = "";
-  const pending = new Map<number, { resolve: (value: string) => void; reject: (error: Error) => void }>();
-  child.stderr.on("data", chunk => { stderr += chunk; });
-  let readyResolve: () => void; let readyReject: (error: Error) => void;
-  const ready = new Promise<void>((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
-  readline.createInterface({ input: child.stdout }).on("line", line => {
-    const r = JSON.parse(line); if (r.ready) { readyResolve(); return; }
-    const p = pending.get(r.id); if (!p) return; pending.delete(r.id);
-    if (r.ok) p.resolve(r.stdout); else p.reject(new Error(r.error));
-  });
-  child.on("exit", code => { const error = new Error(`fixture driver exited ${code}: ${stderr}`); readyReject(error); for (const p of pending.values()) p.reject(error); });
-  return { child, ready, async command(args: string[]) { await ready; const id = ++n; return new Promise<string>((resolve, reject) => { pending.set(id, { resolve, reject }); child.stdin.write(JSON.stringify({ id, args, timeoutMs: 20000 }) + "\n"); }); }, async close() { child.stdin.end(); if (child.exitCode === null) await new Promise<void>(resolve => child.once("exit", () => resolve())); } };
-}
-const a = client("downloads"); const b = client("interactive");
-const start = Date.now(); let operations = 0;
-try {
-  await Promise.all([a.ready, b.ready]); console.log("both fixture browsers ready", Date.now() - start);
-  await Promise.all([a.command(["open", url]), b.command(["open", url])]);
-  const expr = (label: string) => `(() => { const e=document.querySelector('#value'); e.value=${JSON.stringify(label)}; document.cookie='fixture='+e.value+'; path=/; max-age=86400'; const count=document.querySelector('#count'); count.textContent=String(Number(count.textContent)+1); return {value:e.value,count:Number(count.textContent),cookie:document.cookie}; })()`;
-  for (let i = 1; i <= 50; i++) {
-    const values = await Promise.all([a.command(["eval", expr("downloads")]), b.command(["eval", expr("interactive")])]);
-    for (let j = 0; j < 2; j++) { const value = JSON.parse(values[j]!); assert.equal(value.value, j === 0 ? "downloads" : "interactive"); assert.equal(value.count, i); assert.equal(value.cookie, `fixture=${value.value}`); }
-    operations += 2; if (i % 10 === 0) console.log("interleaved operations", operations);
+test("three pinned browserctl sessions share Chrome across commands, cleanup and broker recovery", { skip: process.env.HOMER_LIVE_BROWSER_TESTS !== "1", timeout: 180_000 }, async () => {
+  const root = process.env.HOMER_BROWSER_TEST_ROOT ?? tmpdir();
+  const dir = await mkdtemp(join(root, "b-"));
+  // Short names fit Darwin's 103-byte Unix socket path even under the operator's scratch root.
+  const socketDir = await mkdtemp(join(root, "s"));
+  const previousSocketDir = process.env.AGENT_BROWSER_SOCKET_DIR;
+  process.env.AGENT_BROWSER_SOCKET_DIR = socketDir;
+  const port = Number(process.env.HOMER_BROWSER_TEST_PORT ?? 9607);
+  assert.ok(port >= 9600, "live fixture ports must be >=9600");
+  const targets = new HttpBrowserTargetClient(port);
+  // Refuse an occupied fixture port rather than attaching to someone else's browser.
+  await assert.rejects(targets.list(), /fetch failed/);
+  const chrome = spawn("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", ["--headless=new", `--remote-debugging-port=${port}`, `--user-data-dir=${join(dir, "profile")}`, "--no-first-run", "--no-default-browser-check", "about:blank"], { stdio: "ignore" });
+  const http = createServer((_req, res) => { res.setHeader("Content-Type", "text/html"); res.end('<title>fixture</title><input id="value"><p id="count">0</p>'); });
+  let broker = new BrowserLeaseBroker(targets, Date.now, false, 3);
+  const socketPath = join(dir, "b.sock");
+  const startBroker = () => startBrowserControlServer(new BrowserLeaseBroker(targets), async () => { throw new Error("fixture refuses maintenance"); }, socketPath, undefined, [{ id: "interactive", endpoint: `http://127.0.0.1:${port}`, broker, ready: async () => {}, status: async () => ({ state: "ready", leases: broker.snapshot(), reservations: broker.externalReservationSummary() }), changed: () => {} }]);
+  let server: ReturnType<typeof startBroker> | undefined;
+  const clients: ReturnType<typeof client>[] = [];
+  function client(label: string) {
+    const child = spawn(process.execPath, ["bin/browserctl", "agent", `agent.${label}`, "--instance", "interactive", "--rpc"], { env: { ...process.env, HOMER_BROWSER_CONTROL_SOCKET: socketPath }, stdio: ["pipe", "pipe", "pipe"] });
+    let n = 0, stderr = "";
+    const pending = new Map<number, { resolve: (value: string) => void; reject: (error: Error) => void }>();
+    child.stderr.on("data", chunk => { stderr += chunk; });
+    let readyResolve!: (session: string) => void, readyReject!: (error: Error) => void;
+    const ready = new Promise<string>((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
+    readline.createInterface({ input: child.stdout }).on("line", line => {
+      const r = JSON.parse(line); if (r.ready) { readyResolve(r.session); return; }
+      const p = pending.get(r.id); if (!p) return; pending.delete(r.id);
+      if (r.ok) p.resolve(r.stdout); else p.reject(new Error(r.error));
+    });
+    child.on("exit", code => { const error = new Error(`fixture driver exited ${code}: ${stderr}`); readyReject(error); for (const p of pending.values()) p.reject(error); });
+    return { child, ready, async command(args: string[]) { await ready; const id = ++n; return new Promise<string>((resolve, reject) => { pending.set(id, { resolve, reject }); child.stdin.write(JSON.stringify({ id, args, timeoutMs: 20_000 }) + "\n"); }); }, async close() { child.stdin.end(); if (child.exitCode === null && child.signalCode === null) await once(child, "exit"); } };
   }
-  await Promise.all([a.command(["screenshot", join(output, "download-fixture.png")]), b.command(["screenshot", join(output, "interactive-fixture.png")])]);
-  const before = await download.status();
-  await b.close();
-  assert.match(await a.command(["eval", "document.querySelector('#value').value"]), /downloads/);
-  assert.deepEqual((await download.status() as { pid: number }).pid, (before as { pid: number }).pid);
-  await stopBrowserControlServer(server, socketPath);
-  interactive.shutdown();
-  // Recreate interactive admission state without recycling its persistent browser.
-  const restored = new InteractiveBrowser(interactive.profile, interactive.statePath, interactive.port, 1000);
-  await restored.initialize();
-  server = startBrowserControlServer(download.broker, async () => {}, socketPath, undefined, [fixtureDownload, restored]);
-  await new Promise<void>(resolve => server.once("listening", resolve));
-  const c = client("interactive"); await c.ready;
-  await c.command(["open", url]); assert.match(await c.command(["eval", "document.cookie"]), /fixture=interactive/);
-  await c.close(); await a.close();
-  await new Promise(resolve => setTimeout(resolve, 1500)); restored.shutdown();
-  await writeFile(join(output, "browser-concurrency-result.json"), JSON.stringify({ ok: true, operations, durationMs: Date.now() - start, fixtures: dir, ports: [9441, 9442], production9222Touched: false }, null, 2));
-  console.log("PASS: isolation, scoped close, control restart, persistent fixture cookie");
-} finally {
-  await Promise.allSettled([a.close(), b.close()]);
-  await stopBrowserControlServer(server, socketPath).catch(() => {});
-  await new Promise<void>(resolve => http.close(() => resolve()));
-  // Idle timers stop only the verified fixture browsers; profile artifacts stay available.
-  await new Promise(resolve => setTimeout(resolve, 2000));
-  download.shutdown(); interactive.shutdown();
-}
+  try {
+    const deadline = Date.now() + 20_000;
+    while (true) {
+      try { await targets.list(); break; } catch { if (Date.now() >= deadline) throw new Error("fixture Chrome startup timed out"); await new Promise(resolve => setTimeout(resolve, 100)); }
+    }
+    const initialTargetIds = (await targets.list()).map(t => t.id).sort();
+    await broker.reconcile("keeper.interactive", ["about:blank"], "about:blank");
+    await new Promise<void>(resolve => http.listen(0, "127.0.0.1", resolve));
+    const address = http.address(); assert.ok(address && typeof address !== "string");
+    const url = `http://127.0.0.1:${address.port}`;
+    server = startBroker(); await once(server, "listening");
+    clients.push(client("a"), client("b"), client("c"));
+    const sessions = await Promise.all(clients.map(c => c.ready));
+    const bindings = await Promise.all(sessions.map(async session => JSON.parse(await readFile(join(socketDir, `${session}.target`), "utf8"))));
+    assert.equal(new Set(bindings.map(b => b.targetId)).size, 3);
+    assert.ok(bindings.every(b => b.pinned === true));
+    assert.equal((await targets.list()).length, initialTargetIds.length + 3, "one page per session; no extra connect blanks");
+    const orphan = await targets.create("about:blank");
+    const cleanup = await promisify(execFile)(process.execPath, ["bin/browserctl", "cleanup-blanks", "--instance", "interactive"], { env: { ...process.env, HOMER_BROWSER_CONTROL_SOCKET: socketPath } });
+    const swept = JSON.parse(cleanup.stdout);
+    assert.ok(swept.closed.includes(orphan.id));
+    assert.ok(bindings.every(b => !swept.closed.includes(b.targetId)), "broker cleanup preserves active sessions even when they are blank");
+    assert.ok(initialTargetIds.every(id => !swept.closed.includes(id)), "the registered keeper survives cleanup");
+    assert.equal(await runAgentBrowserBindingSelfTest(broker, port, 3), "deferred");
+    assert.equal(broker.degraded(), null);
+    await Promise.all(clients.map((c, i) => c.command(["open", `${url}/#${i}`])));
+    for (let iteration = 0; iteration < 3; iteration++) {
+      const values = await Promise.all(clients.map((c, i) => c.command(["eval", `document.title='session-${i}'; document.querySelector('#value').value='${i}'; location.hash`])));
+      values.forEach((value, i) => assert.equal(JSON.parse(value), `#${i}`));
+      const titles = await Promise.all(clients.map(c => c.command(["get", "title"])));
+      titles.forEach((title, i) => assert.equal(title.trim(), `session-${i}`));
+      const urls = await Promise.all(clients.map(c => c.command(["get", "url"])));
+      urls.forEach((value, i) => assert.equal(value.trim(), `${url}/#${i}`));
+      await Promise.all(clients.map(c => c.command(["snapshot"])));
+    }
+    await assert.rejects(clients[0]!.command(["tab", "new"]), /isolation/);
+    const holder = broker.externalHolderSnapshot()!;
+    await stopBrowserControlServer(server, socketPath);
+    broker = new BrowserLeaseBroker(targets, Date.now, false, 3); broker.beginGeneration(2);
+    assert.equal((await broker.restoreExternalHolder(holder)).records, 3);
+    assert.equal((await broker.restoreExternalHolder(holder)).unresolvedLiveHolders, 0);
+    server = startBroker(); await once(server, "listening");
+    await clients[0]!.close();
+    assert.ok(!(await targets.list()).some(t => t.id === bindings[0].targetId));
+    assert.equal((await clients[1]!.command(["get", "title"])).trim(), "session-1");
+    assert.equal((await clients[2]!.command(["get", "title"])).trim(), "session-2");
+    await Promise.all(clients.slice(1).map(c => c.close()));
+    assert.equal(broker.externalLeaseCount(), 0);
+    assert.equal(await runAgentBrowserBindingSelfTest(broker, port, 3), "passed");
+    assert.equal(await runAgentBrowserBindingSelfTest(new BrowserLeaseBroker(targets), port, 1), "passed");
+    assert.deepEqual((await targets.list()).map(t => t.id).sort(), initialTargetIds, "sessions and startup self-tests must restore the exact original page set");
+    console.log(`PASS: three browserctl sessions, pinned isolation, recovery, scoped close, contention deferral and both self-tests on :${port}`);
+  } finally {
+    await Promise.allSettled(clients.map(c => c.close()));
+    if (server) await stopBrowserControlServer(server, socketPath).catch(() => {});
+    http.close();
+    if (chrome.exitCode === null) { const exited = once(chrome, "exit"); chrome.kill("SIGKILL"); await exited; }
+    if (previousSocketDir === undefined) delete process.env.AGENT_BROWSER_SOCKET_DIR; else process.env.AGENT_BROWSER_SOCKET_DIR = previousSocketDir;
+    await rm(dir, { recursive: true, force: true }); await rm(socketDir, { recursive: true, force: true });
+  }
+});

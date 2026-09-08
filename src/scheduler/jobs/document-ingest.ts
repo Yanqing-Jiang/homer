@@ -179,14 +179,14 @@ async function drainPending(
 export type DocumentIngestResult = DocumentIngestCounters & { errorReasons: Array<[string, number]> };
 
 /**
- * Serializes the two drain entry points. `claimPendingDocuments` is a plain
+ * Serializes overlapping drains. `claimPendingDocuments` is a plain
  * SELECT of status='pending' — no lease, no 'processing' state — and extraction
- * awaits child processes, so the 15-minute job and link-processor's inline
- * catch-up (both fire at 23:00) would otherwise interleave over the same rows:
+ * awaits child processes, so concurrent scheduled/manual invocations could
+ * otherwise interleave over the same rows:
  * two workers spending two of the three retry attempts in one cycle, or a late
  * failure stamping 'error' over text another worker already extracted.
  *
- * DEBT: single-process guard — both callers live in the daemon process, so a
+ * DEBT: single-process guard — callers live in the daemon process, so a
  * module-level promise is sufficient and honest. Upgrade to a DB-level lease
  * (claimed_at + owner, stale-lease recovery) the moment a second process drains
  * — homer-web, a CLI backfill, or a second daemon instance.
@@ -233,8 +233,7 @@ export function summarizeDocumentIngest(
 }
 
 /**
- * Scheduler entry point. Drains a larger batch than the inline link-processor
- * call because it owns the whole run.
+ * Scheduler entry point for the 15-minute document drain.
  */
 export async function runDocumentIngestJob(
   stateManager: StateManager,

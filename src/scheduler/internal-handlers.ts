@@ -218,7 +218,7 @@ const RETRYABLE_HANDLERS = new Set([
   "weekly_consolidation",
   "content_scraper", "outcome_tracker",
   "preference_updater", "nightly_code_push", "db_backup",
-  "link_processor", "archive_verify", "health_check", "document_ingest",
+  "archive_verify", "health_check", "document_ingest",
   "architecture_updater", "daemon_cleanup", "session_maintenance", "reminder_check",
   "docker_restart",
   "delta_upgrade_watch",
@@ -434,7 +434,6 @@ async function runHealthCheck(
     // incident, which announced itself with 63 fatal exits.
     if (status.degradedReason) issues.push(`🔴 Agent-browser degraded: ${String(status.degradedReason).slice(0, 160)}`);
     if (status.ownership === "foreign") issues.push("🔴 Chrome service: :9222 owned by a browser Homer must not touch");
-    else if (status.ownership === "adopted") issues.push("🟡 Chrome service: running on an ADOPTED Chrome from a previous daemon generation");
     logger.debug({ state: status.cdp?.state, ownership: status.ownership, ageMs }, "Chrome service status");
   } catch (err) {
     issues.push("🔴 Chrome service: status.json missing or unreadable");
@@ -929,18 +928,6 @@ async function runHandler(
       }
       // idea_synthesizer and idea_expiry were deleted 2026-07-26 with the rest
       // of the idea subsystem. The scrapes corpus is the reading material now.
-      case "link_processor": {
-        const { runLinkProcessor } = await import("./jobs/link-processor.js");
-        const result = await runLinkProcessor(ctx.stateManager, ctx.jobRunId, job, startedAt);
-        return buildResult(
-          job,
-          startedAt,
-          result.success,
-          result.output,
-          result.error,
-          result.success ? { notificationIntent: "operational_status" } : {}
-        );
-      }
       case "archive_verify": {
         const { runArchiveVerify } = await import("./jobs/archive-verify.js");
         const result = await runArchiveVerify(ctx.stateManager.getDb());

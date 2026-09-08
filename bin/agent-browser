@@ -1,0 +1,42 @@
+#!/usr/bin/env node
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+/** Shared with browserctl RPC: a lease owns one session and one immutable CDP target. */
+export function validateLeaseArgs(args, env = process.env) {
+  if (args.some(arg => ["--version", "--help", "-h", "-V"].includes(arg))) return;
+  if (!env.HOMER_BROWSER_SURFACE || !env.AGENT_BROWSER_SESSION || !env.AGENT_BROWSER_CDP) {
+    throw new Error("use browserctl agent to run agent-browser inside a pinned browser lease");
+  }
+  const words = [];
+  // Global flags can follow the command too; check them before locating tab/connect verbs.
+  const valued = new Set(["--session", "--cdp", "--profile", "--config", "--timeout", "--headers", "--user-agent", "--color-scheme", "--download-path", "--allowed-domains", "--action-policy", "--max-output"]);
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    const [flag, inline] = arg.split(/=(.*)/s);
+    if (["--profile", "--no-pin-tab", "--auto-connect", "--cdp-url", "--provider"].includes(flag) || (flag === "--pin-tab" && inline !== undefined && !["true", "1"].includes(inline))) {
+      throw new Error(`browser lease isolation forbids ${flag}`);
+    }
+    if (flag === "--session" || flag === "--cdp") {
+      const value = inline ?? args[++i];
+      const expected = flag === "--session" ? env.AGENT_BROWSER_SESSION : env.AGENT_BROWSER_CDP;
+      if (value !== expected) throw new Error(`browser lease isolation forbids conflicting ${flag}`);
+    } else if (valued.has(flag)) { if (inline === undefined) i++; }
+    else if (!arg.startsWith("-")) words.push(arg);
+  }
+  if (words[0] === "connect" || (words[0] === "tab" && words[1] && words[1] !== "list")) {
+    throw new Error("browser lease isolation forbids connect and tab mutation; use the leased tab");
+  }
+}
+
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    const args = process.argv.slice(2);
+    validateLeaseArgs(args);
+    const pinned = join(dirname(fileURLToPath(import.meta.url)), "..", "node_modules", ".bin", "agent-browser");
+    const binary = process.env.HOMER_AGENT_BROWSER_BIN ?? (existsSync(pinned) ? pinned : "/opt/homebrew/bin/agent-browser");
+    if (realpathSync(binary) === fileURLToPath(import.meta.url)) throw new Error("HOMER_AGENT_BROWSER_BIN must name the real agent-browser binary");
+    process.execve(binary, [binary, ...args], process.env);
+  } catch (error) { process.stderr.write(`${error.message}\n`); process.exitCode = 2; }
+}

@@ -254,7 +254,7 @@ export async function executeClaudeCommand(
 
   const claudeBin = resolveClaudePath();
   const spawnBin = options.browserAgent ? "browserctl" : claudeBin;
-  const spawnArgs = options.browserAgent ? ["agent", "--instance", options.browserInstance ?? "downloads", "--", claudeBin, ...args] : args;
+  const spawnArgs = options.browserAgent ? ["agent", "--instance", options.browserInstance ?? "interactive", "--", claudeBin, ...args] : args;
   return new Promise((resolve, reject) => {
     const proc = spawn(spawnBin, spawnArgs, {
       cwd,

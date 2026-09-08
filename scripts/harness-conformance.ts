@@ -27,7 +27,7 @@ for (const id of HARNESS_IDS) {
 }
 
 // 2. Round-trip reversibility over the in-memory store.
-const JOBS = ["nightly-memory", "ideas-explore", "link-processor"];
+const JOBS = ["nightly-memory", "ideas-explore", "document-ingest"];
 function globalRow(harness: HarnessId, model: string | null): HarnessSelectionRow {
   return { scopeType: "global", scopeId: "", harness, model, profileId: null, enabled: true, updatedAt: 0, updatedBy: "test", source: "test", reason: null };
 }

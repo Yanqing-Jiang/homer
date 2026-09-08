@@ -726,7 +726,7 @@ export async function fetchLinkedInTimeline(_limit = 10, options?: ScrapeOptions
 // LEGACY NO-OPs (callers we couldn't fully migrate yet)
 // ============================================
 
-// fetchYouTubeTranscript was OpenCLI-only and unused — link-processor handles YouTube via yt-dlp.
+// fetchYouTubeTranscript was OpenCLI-only and unused — youtube/transcript.ts handles YouTube via captions and yt-dlp.
 // Export a stub for any straggler import; mark deprecated.
 export async function fetchYouTubeTranscript(_url: string, _options?: ScrapeOptions): Promise<ScrapeResult<unknown[]>> {
   return {
@@ -738,6 +738,6 @@ export async function fetchYouTubeTranscript(_url: string, _options?: ScrapeOpti
     retryable: false,
     needsAuth: false,
     needsExtension: false,
-    error: "fetchYouTubeTranscript removed — use link-processor / yt-dlp instead",
+    error: "fetchYouTubeTranscript removed — use youtube/transcript.ts instead",
   };
 }

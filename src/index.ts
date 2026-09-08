@@ -129,10 +129,8 @@ async function main(): Promise<void> {
     return { generation: status.generation, supervisorPid: process.pid, chromePid: status.chromePid,
       ownership: status.ownership, degradedReason: browserLeaseBroker.degraded(),
       adoptionGraceUntil: (() => { const at = browserLeaseBroker.adoptionGraceUntil(); return at ? new Date(at).toISOString() : null; })(),
-      externalReservation: (() => {
-        const r = browserLeaseBroker.externalReservationSummary();
-        return r ? { surface: r.surface, owner: r.owner, expiresAt: new Date(r.expiresAt).toISOString(), granted: r.granted } : null;
-      })(),
+      externalReservations: browserLeaseBroker.externalReservationSummary().map(r => ({ ...r, expiresAt: new Date(r.expiresAt).toISOString() })),
+      maxAgents: browserLeaseBroker.maxAgents,
       profilePath: RESIDENT_CDP_PROFILE,
       cdp: {
         state: status.cdp.state, pages: status.cdp.pages, restartCount: status.cdp.restartCount, restartDeferrals: status.cdp.restartDeferrals,
@@ -223,25 +221,30 @@ async function main(): Promise<void> {
   };
 
   /**
-   * The serialized-binding self-test verdict, tracked SEPARATELY from the CDP probe (F3).
+   * The pinned-binding self-test verdict, tracked SEPARATELY from the CDP probe (F3).
    * A CDP probe says nothing about whether agent-browser can bind, so an external holder
    * appearing must never be allowed to clear a real self-test failure, and "healthy but
    * reserved" must never cancel the retry that would eventually re-run the test (F4).
    */
+  // DEBT: interactive Chrome is launched on demand; skip its boot binding check. Wire the
+  // capacity>1 self-test into readiness when a first-launch health hook is introduced.
   let browserSelfTest: "untested" | "passed" | "failed" = "untested";
 
   const runBrowserSelfTest = async (phase: "startup" | "retry"): Promise<boolean> => {
     try {
-      await runAgentBrowserBindingSelfTest();
+      if (await runAgentBrowserBindingSelfTest() === "deferred") {
+        logger.info({ phase }, "Agent-browser pinned-binding self-test deferred: agent capacity is occupied");
+        return false;
+      }
       browserSelfTest = "passed";
       browserLeaseBroker.setDegraded(null);
-      logger.info({ sessions: 2, policy: "globally-serialized", concurrentCreationRefused: true }, "Agent-browser startup serialized-binding self-test passed");
+      logger.info({ sessions: 1, policy: "pinned-cdp", maxAgents: browserLeaseBroker.maxAgents }, "Agent-browser startup pinned-binding self-test passed");
       return true;
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       browserSelfTest = "failed";
       browserLeaseBroker.setDegraded(reason);
-      noteBrowserFailure(`serialized-binding self-test: ${reason}`, phase);
+      noteBrowserFailure(`pinned-binding self-test: ${reason}`, phase);
       return false;
     }
   };
@@ -250,7 +253,7 @@ async function main(): Promise<void> {
    * N4: a browser that is HEALTHY BUT RESERVED is not degraded.
    *
    * `runAgentBrowserBindingSelfTest` opens with `reserveExternal`, which the adoption fence
-   * refuses outright and which the global agent-browser serialization refuses while an
+   * refuses outright and which the downloads agent capacity refuses while an
    * external holder is live. So on any restart that adopts a Chrome — the normal outcome now
    * that the exit paths leave it for QC's backfill — the self-test failed, the broker was
    * flagged degraded, `/status` and the health check reported a fault that did not exist, and
@@ -296,7 +299,7 @@ async function main(): Promise<void> {
         noteBrowserFailure(`surface reconcile: ${reason}`, phase);
       }
       maybeSendBrowserDegradedSms();
-      return { armRetry: true, degraded: true };
+      return { armRetry: true, degraded: browserLeaseBroker.degraded() !== null };
     }
 
     // Reserved. Judge on the CDP probe FIRST, so a transient reconcile error cannot pre-empt
@@ -334,7 +337,7 @@ async function main(): Promise<void> {
       // degradation and the retry; a CDP probe is no evidence that binding works.
       logger.warn(
         { phase, externalHolders: reservation.externalHolders, degradedReason: browserLeaseBroker.degraded() },
-        "Browser reserved, but the serialized-binding self-test has already FAILED — degradation retained",
+        "Browser reserved, but the pinned-binding self-test has already FAILED — degradation retained",
       );
       maybeSendBrowserDegradedSms();
       return { armRetry: true, degraded: true };
@@ -344,7 +347,7 @@ async function main(): Promise<void> {
     logger.info(
       { phase, externalHolders: reservation.externalHolders,
         fencedUntil: reservation.fencedUntil ? new Date(reservation.fencedUntil).toISOString() : null },
-      "Browser healthy but reserved by an external holder — serialized-binding self-test deferred, NOT degraded; it will run once the holder releases",
+      "Browser healthy but reserved by an external holder — pinned-binding self-test deferred, NOT degraded; it will run once the holder releases",
     );
     // F4: armRetry stays true so the deferred test is actually re-run later.
     return { armRetry: true, degraded: false };
@@ -376,7 +379,7 @@ async function main(): Promise<void> {
     if (startupBrowser.degraded) {
       logger.error({ retryMs: BROWSER_RETRY_MS }, "Starting H.O.M.E.R with agent-browser DEGRADED — scheduler, bot and non-browser jobs run normally");
     } else {
-      logger.info({ retryMs: BROWSER_RETRY_MS }, "Starting H.O.M.E.R with the serialized-binding self-test deferred (browser reserved) — it will run once the holder releases");
+      logger.info({ retryMs: BROWSER_RETRY_MS }, "Starting H.O.M.E.R with the pinned-binding self-test deferred (browser reserved) — it will run once the holder releases");
     }
   }
   initFallbackChain(stateManager.getDb());

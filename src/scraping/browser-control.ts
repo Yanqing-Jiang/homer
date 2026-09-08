@@ -70,13 +70,20 @@ export class HttpBrowserTargetClient implements BrowserTargetClient {
     if (!response.ok) throw new Error(`CDP target create failed: HTTP ${response.status}`);
     return await response.json() as CdpTarget;
   }
-  async close(targetId: string): Promise<void> { await fetch(`http://127.0.0.1:${this.port}/json/close/${encodeURIComponent(targetId)}`); }
+  async close(targetId: string): Promise<void> {
+    const response = await fetch(`http://127.0.0.1:${this.port}/json/close/${encodeURIComponent(targetId)}`);
+    if (!response.ok) throw new Error(`CDP target close failed: HTTP ${response.status}`);
+  }
 }
 function originOf(url: string): string { try { return new URL(url).origin; } catch { return ""; } }
+function isBlankTarget(url: string): boolean {
+  return url === "about:blank" || url === "chrome://newtab/" || /^about:blank#homer-agent-[\da-f-]+$/i.test(url);
+}
 export class BrowserLeaseBroker {
   private generation = 0;
   private records = new Map<string, TargetRecord>();
   private reconcileLock: Promise<unknown> = Promise.resolve();
+  private blankFirstSeen = new Map<string, { url: string; at: number }>();
   private surfaceLocks = new Map<string, Promise<unknown>>();
   private inFlightAcquires = 0;
   private inFlightReconciles = 0;
@@ -89,7 +96,7 @@ export class BrowserLeaseBroker {
    * (MFA recovery releases and reacquires) and across a later phase of the same run. It is
    * cleared only by release-grant, or by expiry.
    */
-  private externalReservation: ExternalReservation | null = null;
+  private externalReservations = new Map<string, ExternalReservation>();
   /** See setAdoptionGrace — set only after adopting a Chrome whose holder we cannot see. */
   private adoptionGrace: { until: number; reason: string } | null = null;
   /** Tabs abandoned by a reclaimed adopter, closed by a serialized sweep — see queueTargetClose. */
@@ -104,14 +111,17 @@ export class BrowserLeaseBroker {
    */
   private previousTargets = new Map<string, string>();
   private transition: () => void = () => {};
-  constructor(private readonly targets: BrowserTargetClient, private readonly now = Date.now, private readonly fenceLiveAgentExpiry = false) {}
+  constructor(private readonly targets: BrowserTargetClient, private readonly now = Date.now, private readonly fenceLiveAgentExpiry = false, readonly maxAgents = 1) {
+    if (!Number.isInteger(maxAgents) || maxAgents < 1) throw new Error("maxAgents must be a positive integer");
+  }
   hasLease(id: string): boolean {
-    return this.externalReservation?.leaseId === id || [...this.records.values()].some(record => record.leaseId === id);
+    return this.externalReservations.has(id) || [...this.records.values()].some(record => record.leaseId === id);
   }
   beginGeneration(generation: number): void {
+    this.blankFirstSeen.clear();
     for (const record of this.records.values()) this.previousTargets.set(record.surface, record.targetId);
     this.generation = generation; this.records.clear(); this.draining = false;
-    this.externalReservation = null; this.observedTargetIds = null; this.adoptionGrace = null;
+    this.externalReservations.clear(); this.observedTargetIds = null; this.adoptionGrace = null;
     this.transition();
   }
   setTransitionHandler(handler: () => void): void { this.transition = handler; }
@@ -176,14 +186,19 @@ export class BrowserLeaseBroker {
     const held = new Set([...this.records.values()].filter((record) => record.surface !== surface).map((record) => record.targetId));
     const candidates = listed.filter((target) => target.id !== excludeId && !held.has(target.id) && allowed.includes(originOf(target.url)));
     const previousId = this.previousTargets.get(surface);
-    const adopted = candidates.find((target) => target.id === previousId) ?? candidates.find((target) => target.url.startsWith(bootstrapUrl));
+    // Exact URL before prefix: `keeper.interactive` bootstraps at `about:blank`, and an agent
+    // marker in flight between reserve and register (`about:blank#homer-agent-…`) also starts
+    // with it. Adopting that marker as the keeper would fail the agent's registration.
+    const adopted = candidates.find((target) => target.id === previousId)
+      ?? candidates.find((target) => target.url === bootstrapUrl)
+      ?? candidates.find((target) => target.url.startsWith(bootstrapUrl));
     if (!adopted) {
       const created = await this.targets.create(bootstrapUrl);
       if (!created.id || !created.webSocketDebuggerUrl) throw new Error("CDP returned an invalid page target");
       return created;
     }
     logger.info({ surface, targetId: adopted.id, viaPrevious: adopted.id === previousId, url: adopted.url }, "Re-adopted existing surface tab");
-    const sweepable = this.adoptionGraceUntil() === null && this.externalReservation === null;
+    const sweepable = this.adoptionGraceUntil() === null && this.externalReservations.size === 0;
     for (const extra of candidates) {
       if (extra.id === adopted.id) continue;
       if (!sweepable) { logger.warn({ surface, targetId: extra.id, url: extra.url }, "Duplicate surface tab left open: browser may have an external holder"); continue; }
@@ -236,10 +251,13 @@ export class BrowserLeaseBroker {
       throw new Error(`agent target creation is reserved by the adopted browser's previous holder until ${new Date(graceUntil).toISOString()} (adoption grace)`);
     }
     if (!surface.startsWith("agent.")) throw new Error("external agent surfaces must start with agent.");
-    if (this.externalReservation) throw new Error(`agent target creation is reserved by ${this.externalReservation.owner}`);
-    // DEBT: agent-browser sessions are globally serialized due to 0.21.4 concurrent rebinding, upgrade when agent-browser exposes target-id attach.
-    const activeAgent = [...this.records.values()].find((record) => record.surface.startsWith("agent.") && record.leaseId);
-    if (activeAgent) throw new Error(`agent-browser session is globally serialized; active owner ${activeAgent.owner}`);
+    if (this.records.get(surface)?.leaseId || [...this.externalReservations.values()].some(r => r.surface === surface)) {
+      throw new Error(`surface ${surface} is already occupied or pending`);
+    }
+    if (this.externalLeaseCount() >= this.maxAgents) {
+      const owners = [...this.externalReservations.values(), ...this.records.values()].filter(r => r.leaseId).map(r => r.owner);
+      throw new Error(`agent capacity ${this.maxAgents} reached; reserved by active owners: ${[...new Set(owners)].join(", ")}`);
+    }
     // Take the baseline BEFORE publishing the reservation. Published first, a targets.list()
     // failure returned no leaseId to the caller while the broker kept the reservation — the
     // caller could not release what it never received, and its own retry then saw its own
@@ -247,7 +265,7 @@ export class BrowserLeaseBroker {
     const baselineTargetIds = (await this.targets.list()).map((target) => target.id);
     const leaseId = randomUUID();
     const expiresAt = this.expiry(ttl);
-    this.externalReservation = { surface, owner, leaseId, expiresAt, granted };
+    this.externalReservations.set(leaseId, { surface, owner, leaseId, expiresAt, granted });
     this.transition();
     return { leaseId, generation: this.generation, baselineTargetIds };
   }
@@ -269,27 +287,16 @@ export class BrowserLeaseBroker {
    */
   adoptExternal(leaseId: string, owner: string, surface?: string): Record<string, unknown> {
     this.expireLeases();
-    const reservation = this.externalReservation;
+    const reservation = this.externalReservations.get(leaseId);
     if (!reservation || reservation.leaseId !== leaseId) {
       throw new Error("unknown or expired external reservation");
     }
     if (surface && surface !== reservation.surface) {
       throw new Error(`grant is bound to surface ${reservation.surface}, not ${surface}`);
     }
-    // Re-entrant means SEQUENTIAL re-adoption (release -> login recovery -> reacquire), not
-    // concurrent adoption. Records are keyed by surface, so a second live adopter of the same
-    // grant would overwrite the first's record and the first's release would then close the
-    // SECOND agent's tab. Excluding any live agent record — including one holding this very
-    // lease — keeps the broker's global agent-browser serialization intact.
-    const activeAgent = [...this.records.values()].find(
-      (record) => record.surface.startsWith("agent.") && record.leaseId,
-    );
-    if (activeAgent) {
-      throw new Error(
-        activeAgent.leaseId === leaseId
-          ? `grant ${leaseId} already has a live adopter (${activeAgent.owner}); adoption is sequential, not concurrent`
-          : `agent-browser session is globally serialized; active owner ${activeAgent.owner}`,
-      );
+    // Claim adoption before target creation: two callers can otherwise overwrite the same surface.
+    if (reservation.adopterOwner || this.records.get(reservation.surface)?.leaseId) {
+      throw new Error(`grant ${leaseId} already has a live adopter (${reservation.adopterOwner ?? reservation.owner}); adoption is sequential, not concurrent`);
     }
     // A granted reservation keeps the HOLDER as its owner. Re-owning it to the adopter's
     // `browserctl-agent:<pid>` would make ownerIsDead reclaim the whole grant the moment the
@@ -304,8 +311,7 @@ export class BrowserLeaseBroker {
 
   /** Drop a granted reservation. Only the holder calls this; an adopter's release does not. */
   async releaseGrant(leaseId: string): Promise<Record<string, unknown>> {
-    const reservation = this.externalReservation;
-    if (reservation?.leaseId === leaseId) this.externalReservation = null;
+    this.externalReservations.delete(leaseId);
     const record = [...this.records.values()].find((candidate) => candidate.leaseId === leaseId);
     if (record) this.clearLease(record);
     this.transition();
@@ -313,9 +319,16 @@ export class BrowserLeaseBroker {
   }
 
   async registerExternalTarget(leaseId: string, targetId: string): Promise<Record<string, unknown>> {
-    const reservation = this.externalReservation;
+    const reservation = this.externalReservations.get(leaseId);
     if (!reservation || reservation.leaseId !== leaseId) throw new Error("unknown or expired external reservation");
+    const generation = this.generation;
+    const surface = reservation.surface;
     const live = (await this.targets.list()).find((target) => target.id === targetId);
+    // list() yields: release, expiry or a generation change must not resurrect a stale lease.
+    if (this.externalReservations.get(leaseId) !== reservation || reservation.surface !== surface
+      || generation !== this.generation || reservation.expiresAt <= this.now()) throw new Error("unknown or expired external reservation");
+    if ([...this.records.values()].some(record => record.targetId === targetId)) throw new Error("external target is already owned by another record");
+    if (this.records.get(surface)?.leaseId) throw new Error(`surface ${surface} is already occupied`);
     if (!live) throw new Error("external target is unavailable");
     const record: TargetRecord = {
       surface: reservation.surface, generation: this.generation, targetId: live.id,
@@ -325,19 +338,21 @@ export class BrowserLeaseBroker {
     };
     this.records.set(record.surface, record);
     // A granted reservation is the holder's admission token and outlives this target.
-    if (!reservation.granted) this.externalReservation = null;
+    if (!reservation.granted) this.externalReservations.delete(leaseId);
     this.transition();
     return { leaseId, generation: this.generation, targetId: live.id, currentUrl: live.url };
   }
   renew(leaseId: string, ttl: number): Record<string, unknown> {
     this.expireLeases();
-    if (this.externalReservation?.leaseId === leaseId) {
-      this.externalReservation.expiresAt = this.expiry(ttl);
+    const reservation = this.externalReservations.get(leaseId);
+    if (reservation) {
+      reservation.expiresAt = this.expiry(ttl);
       // A granted reservation and its registered target share a leaseId; renew both, or the
       // record expires under a live holder and the browser is taken mid-run.
       const bound = [...this.records.values()].find((candidate) => candidate.leaseId === leaseId);
       if (bound) { bound.leaseExpiresAt = this.expiry(ttl); bound.lastActivityAt = this.now(); }
-      return { leaseId, generation: this.generation, expiresAt: this.externalReservation.expiresAt };
+      this.transition();
+      return { leaseId, generation: this.generation, expiresAt: reservation.expiresAt };
     }
     const record = this.byLease(leaseId);
     record.leaseExpiresAt = this.expiry(ttl); record.lastActivityAt = this.now();
@@ -349,20 +364,26 @@ export class BrowserLeaseBroker {
     // adopter releasing its tab must close that tab and drop the record WITHOUT destroying
     // the holder's grant, or the holder loses admission halfway through its run.
     const bound = [...this.records.values()].find((candidate) => candidate.leaseId === leaseId);
-    if (bound && this.externalReservation?.leaseId === leaseId && this.externalReservation.granted) {
+    const reservation = this.externalReservations.get(leaseId);
+    if (bound && reservation?.granted) {
       if (closeTarget) { await this.targets.close(bound.targetId); this.records.delete(bound.surface); }
       else this.clearLease(bound);
       // The adopter is gone; the grant is not. Forgetting the adopter keeps a stale, already-dead
       // pid from being the thing a later reclaim decision is made on.
-      this.externalReservation.adopterOwner = null;
+      reservation.adopterOwner = null;
       this.transition();
       return { leaseId, released: true, grantRetained: true };
     }
-    if (this.externalReservation?.leaseId === leaseId) {
-      if (closeTarget && externalTargetId) await this.targets.close(externalTargetId);
-      this.externalReservation = null;
+    if (reservation) {
+      if (closeTarget && externalTargetId) {
+        if ([...this.records.values()].some(record => record.targetId === externalTargetId)) throw new Error("external target is already owned by another record");
+        await this.targets.close(externalTargetId);
+      }
+      // Setup can fail before registration; release the adopter, never its holder's grant.
+      if (reservation.granted) this.externalReservations.set(leaseId, { ...reservation, adopterOwner: null });
+      else this.externalReservations.delete(leaseId);
       this.transition();
-      return { leaseId, released: true };
+      return { leaseId, released: true, ...(reservation.granted ? { grantRetained: true } : {}) };
     }
     const record = this.byLease(leaseId);
     if (closeTarget) {
@@ -372,8 +393,48 @@ export class BrowserLeaseBroker {
     this.transition();
     return { leaseId, released: true };
   }
+  /** Broker maintenance, serialized against target adoption and external admission. */
+  async cleanupBlanks(automatic = false): Promise<{ closed: string[]; remaining: number; deferred: boolean }> {
+    return this.withSurfaceLock("__external_admission", async () => {
+      const run = this.reconcileLock.then(async () => {
+        const generation = this.generation;
+        const blocked = () => this.draining || generation !== this.generation
+          || this.adoptionGraceUntil() !== null || this.externalReservations.size > 0
+          || (automatic && this.externalLeaseCount() > 0);
+        const initial = await this.targets.list();
+        if (blocked()) return { closed: [], remaining: initial.length, deferred: true };
+        const closed: string[] = [];
+        for (const candidate of initial) {
+          if (!isBlankTarget(candidate.url)) continue;
+          const first = this.blankFirstSeen.get(candidate.id);
+          if (automatic && (!first || first.url !== candidate.url || this.now() - first.at < 60_000)) continue;
+          const current = await this.targets.list();
+          if (blocked()) return { closed, remaining: current.length, deferred: true };
+          if (current.length <= 1) break;
+          // All registered targets are protected, including idle portal surfaces. A pending
+          // reservation/adoption fences the entire sweep because its tab is not registered yet.
+          if ([...this.records.values()].some(record => record.targetId === candidate.id)) continue;
+          if (!current.some(target => target.id === candidate.id && target.url === candidate.url)) continue;
+          await this.targets.close(candidate.id);
+          closed.push(candidate.id);
+          this.blankFirstSeen.delete(candidate.id);
+          logger.info({ targetId: candidate.id, url: candidate.url }, "Closed unowned blank browser tab");
+        }
+        return { closed, remaining: (await this.targets.list()).length, deferred: false };
+      });
+      this.reconcileLock = run.then(() => undefined, () => undefined);
+      return run;
+    });
+  }
   async observeTargets(): Promise<void> {
-    const live = new Set((await this.targets.list()).map((target) => target.id));
+    const listed = await this.targets.list();
+    const live = new Set(listed.map((target) => target.id));
+    for (const target of listed) {
+      if (!isBlankTarget(target.url)) this.blankFirstSeen.delete(target.id);
+      else if (this.blankFirstSeen.get(target.id)?.url !== target.url) this.blankFirstSeen.set(target.id, { url: target.url, at: this.now() });
+    }
+    for (const id of this.blankFirstSeen.keys()) if (!live.has(id)) this.blankFirstSeen.delete(id);
+    await this.cleanupBlanks(true);
     if (this.observedTargetIds === null) { this.observedTargetIds = live; return; }
     const registered = new Set([...this.records.values()].map((record) => record.targetId));
     for (const targetId of live) {
@@ -408,7 +469,7 @@ export class BrowserLeaseBroker {
     const records = [...this.records.values()].filter((record) =>
       record.leaseId !== null
       && (record.surface.startsWith("agent.") || (record.owner ?? "").startsWith("browserctl-agent:")));
-    return records.length + (this.externalReservation ? 1 : 0);
+    return new Set([...this.externalReservations.keys(), ...records.map(r => r.leaseId!)]).size;
   }
   /**
    * Everything an EXTERNAL holder needs to survive a daemon generation.
@@ -420,15 +481,15 @@ export class BrowserLeaseBroker {
    * `browserctl-agent:<pid>`) — which `externalLeaseCount()` counts but the old snapshot
    * did not. Both halves are captured here.
    */
-  externalHolderSnapshot(): { reservation: ExternalReservation | null; records: TargetRecord[] } | null {
+  externalHolderSnapshot(): { reservations: ExternalReservation[]; records: TargetRecord[] } | null {
     this.expireLeases();
     const records = [...this.records.values()]
       .filter((record) => record.leaseId !== null
         && (record.surface.startsWith("agent.") || (record.owner ?? "").startsWith("browserctl-agent:")))
       .map((record) => ({ ...record }));
-    const reservation = this.externalReservation ? { ...this.externalReservation } : null;
-    if (!reservation && records.length === 0) return null;
-    return { reservation, records };
+    const reservations = [...this.externalReservations.values()].map(r => ({ ...r }));
+    if (!reservations.length && records.length === 0) return null;
+    return { reservations, records };
   }
 
   /**
@@ -448,7 +509,7 @@ export class BrowserLeaseBroker {
    * generation cannot resurrect as a phantom lease.
    */
   async restoreExternalHolder(
-    snapshot: { reservation: ExternalReservation | null; records: TargetRecord[] },
+    snapshot: { reservations?: ExternalReservation[]; reservation?: ExternalReservation | null; records: TargetRecord[] },
   ): Promise<RestoreExternalHolderResult> {
     this.expireLeases();
     const liveOwners: string[] = [];
@@ -463,12 +524,15 @@ export class BrowserLeaseBroker {
     let unresolvedLiveHolders = 0;
     let listFailed = false;
 
-    if (snapshot.reservation) {
-      const r = snapshot.reservation;
+    // Read the old singleton shape once; every subsequent snapshot writes the array.
+    for (const r of snapshot.reservations ?? (snapshot.reservation ? [snapshot.reservation] : [])) {
       const live = this.liveIdentity(r.owner, r.adopterOwner ?? null);
       if (live) {
-        if (!this.externalReservation && r.surface.startsWith("agent.") && (r.expiresAt > this.now() || this.fenceLiveAgentExpiry)) {
-          this.externalReservation = { ...r, owner: live };
+        const existing = this.externalReservations.get(r.leaseId);
+        const conflict = [...this.externalReservations.values()].some(row => row.surface === r.surface && row.leaseId !== r.leaseId)
+          || Boolean(this.records.get(r.surface)?.leaseId && this.records.get(r.surface)?.leaseId !== r.leaseId);
+        if ((!existing || existing.surface === r.surface) && !conflict && r.surface.startsWith("agent.") && (r.expiresAt > this.now() || this.fenceLiveAgentExpiry)) {
+          this.externalReservations.set(r.leaseId, { ...r, owner: live });
           restoredReservation = true;
           liveOwners.push(live);
         } else {
@@ -493,7 +557,9 @@ export class BrowserLeaseBroker {
         const live = this.liveIdentity(record.owner, record.adopterOwner ?? null);
         if (!live) continue; // the holder really is gone
         if (listFailed) { unresolvedLiveHolders++; continue; }
-        if (this.records.has(record.surface)
+        const existing = this.records.get(record.surface);
+        if ((existing && (existing.leaseId !== record.leaseId || existing.targetId !== record.targetId))
+          || [...this.records.values()].some(row => row.surface !== record.surface && row.targetId === record.targetId)
           || !record.leaseId
           || (!this.fenceLiveAgentExpiry && record.leaseExpiresAt !== null && record.leaseExpiresAt <= this.now())
           || !liveTargetIds.has(record.targetId)) {
@@ -507,9 +573,8 @@ export class BrowserLeaseBroker {
     }
 
     if (restoredReservation || restoredRecords > 0) this.transition();
-    const outcome: RestoreExternalHolderResult["outcome"] = restoredReservation || restoredRecords > 0
-      ? "restored"
-      : (listFailed || unresolvedLiveHolders > 0) ? "unknown" : "holders-gone";
+    const outcome: RestoreExternalHolderResult["outcome"] = listFailed || unresolvedLiveHolders > 0
+      ? "unknown" : restoredReservation || restoredRecords > 0 ? "restored" : "holders-gone";
     return { reservation: restoredReservation, records: restoredRecords, liveOwners, outcome, listFailed, unresolvedLiveHolders };
   }
 
@@ -544,20 +609,18 @@ export class BrowserLeaseBroker {
   /**
    * Refuse new agent reservations until `until`. Set when this daemon adopts a Chrome it
    * did not launch and could NOT reconstruct the previous holder's reservation: an
-   * external driver may still be attached to a tab, and agent-browser 0.21.4 cannot
-   * survive a concurrent rebind. The message deliberately reads as contention ("reserved
+   * external driver may still be attached to an unaccounted tab, so its capacity slot
+   * and target ownership remain unknown. The message deliberately reads as contention ("reserved
    * by") so callers that classify contention vs sickness defer instead of alerting.
    */
   setAdoptionGrace(until: number, reason: string): void {
     this.adoptionGrace = until > this.now() ? { until, reason } : null;
     this.transition();
   }
-  /** Read-only view of the external reservation for status publication (F12). */
-  externalReservationSummary(): { surface: string; owner: string; expiresAt: number; granted: boolean } | null {
+  /** Read-only reservations for status publication; grants and pending setup both matter. */
+  externalReservationSummary(): ExternalReservation[] {
     this.expireLeases();
-    if (!this.externalReservation) return null;
-    const { surface, owner, expiresAt, granted } = this.externalReservation;
-    return { surface, owner, expiresAt, granted };
+    return [...this.externalReservations.values()].map(r => ({ ...r }));
   }
   adoptionGraceUntil(): number | null {
     if (this.adoptionGrace && this.adoptionGrace.until <= this.now()) this.adoptionGrace = null;
@@ -582,11 +645,14 @@ export class BrowserLeaseBroker {
   }
   private activeLeaseCount(): number {
     this.expireLeases();
-    return [...this.records.values()].filter((r) => r.leaseId).length + (this.externalReservation ? 1 : 0);
+    return new Set([...this.externalReservations.keys(), ...[...this.records.values()].flatMap(r => r.leaseId ? [r.leaseId] : [])]).size;
   }
   private expireLeases(): void {
     const now = this.now();
-    if (this.externalReservation && (this.ownerIsDead(this.externalReservation.owner) || (this.externalReservation.expiresAt <= now && !this.fenceLiveAgentExpiry))) this.externalReservation = null;
+    for (const [id, reservation] of this.externalReservations) {
+      if (this.ownerIsDead(reservation.owner) || (reservation.expiresAt <= now && !this.fenceLiveAgentExpiry)) this.externalReservations.delete(id);
+      else if (this.ownerIsDead(reservation.adopterOwner ?? null)) reservation.adopterOwner = null;
+    }
     /** agent.* surfaces reclaimed from a dead driver — their tab is deleted after the loop. */
     const abandoned: TargetRecord[] = [];
     for (const record of this.records.values()) {
@@ -605,7 +671,8 @@ export class BrowserLeaseBroker {
         // G12: release()'s grant-retaining branch forgets the adopter; this path did not, so a
         // grant whose adopter was SIGKILLed kept naming a dead pid on the reservation — the very
         // thing a later reclaim decision reads.
-        if (this.externalReservation?.leaseId === leaseId) this.externalReservation.adopterOwner = null;
+        const reservation = this.externalReservations.get(leaseId);
+        if (reservation) reservation.adopterOwner = null;
         // G13: clearLease nulls the lease fields and leaves targetId, so every reclaimed adopter
         // leaked one tab for the life of the browser. Round 4 made this path routine, so the leak
         // became routine too. Only agent.* tabs are closed: they are created per-adopter via
@@ -656,7 +723,7 @@ export class BrowserLeaseBroker {
 
   /** Test seam: the adopter currently named on the external reservation. */
   externalReservationAdopterForTest(): string | null {
-    return this.externalReservation?.adopterOwner ?? null;
+    return this.externalReservations.values().next().value?.adopterOwner ?? null;
   }
   /**
    * A lease whose owning process is gone is reclaimed at once instead of blocking every
@@ -723,10 +790,11 @@ export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenanc
         const selected = instance?.broker ?? broker;
         let result: unknown;
         if (request.verb === "status" && instance) result = await instance.status();
+        else if (request.verb === "cleanup-blanks") result = await selected.cleanupBlanks();
         else if (request.verb === "reconcile") result = await selected.reconcile(request.surface!, request.expectedOrigin!, request.bootstrapUrl!);
         else if (request.verb === "acquire") result = await selected.acquire(request.surface!, request.owner!, request.ttl!);
         else if (request.verb === "reserve-external") result = await selected.reserveExternal(request.surface!, request.owner!, request.ttl!, request.granted === true);
-        else if (request.verb === "capabilities") result = { verbs: ["reserve-external", "adopt-external", "release-grant", "acquire", "renew", "release", "reconcile", "touch", "maintenance"], grants: true, instances: ["downloads", ...instances.map(item => item.id)] };
+        else if (request.verb === "capabilities") result = { verbs: ["reserve-external", "adopt-external", "release-grant", "acquire", "renew", "release", "reconcile", "cleanup-blanks", "touch", "maintenance"], grants: true, instances: ["downloads", ...instances.map(item => item.id)] };
         else if (request.verb === "adopt-external") result = selected.adoptExternal(request.leaseId!, request.owner!, request.surface);
         else if (request.verb === "release-grant") result = await selected.releaseGrant(request.leaseId!);
         else if (request.verb === "register-external-target") result = await selected.registerExternalTarget(request.leaseId!, request.targetId!);

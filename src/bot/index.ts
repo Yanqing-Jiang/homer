@@ -17,7 +17,6 @@ import {
 import { registerApprovalHandlers, registerPlanApprovalHandlers, registerPlanApprovalCallbacks, registerPlanReviewCallbacks } from "./handlers/approval.js";
 import { registerQuickCommands, registerProposalCallbacks } from "./handlers/proposal-approval.js";
 import { registerOvernightCommands, handleOvernightMessage } from "./handlers/overnight.js";
-import { handleYouTubeUrl, initializeYouTubeHandler } from "./handlers/youtube.js";
 import { handleCallRequest } from "./handlers/phone-call.js";
 import { handleSmsRequest } from "./handlers/sms.js";
 import { registerCallFollowupHandlers } from "./handlers/call-followup.js";
@@ -189,7 +188,6 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
   registerCodePushApprovalHandlers(bot, stateManager);
 
   // Initialize YouTube URL handler
-  initializeYouTubeHandler(stateManager);
 
   // /start - help
   bot.command("start", async (ctx) => {
@@ -1224,14 +1222,6 @@ ${checksStr}`;
         logger.error({ error }, "Failed to acknowledge an MFA relay code (still withheld from the session)");
       }
       return;
-    }
-
-    // Check for bare YouTube URLs first — queue for overnight summary
-    try {
-      const wasYouTubeUrl = await handleYouTubeUrl(ctx, text);
-      if (wasYouTubeUrl) return;
-    } catch (error) {
-      logger.warn({ error }, "YouTube URL handling failed, falling back to normal flow");
     }
 
     // Check for phone call requests (e.g., "call +15550100 and tell him dinner's at 5:30")

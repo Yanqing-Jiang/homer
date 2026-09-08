@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { BrowserProcessGroups } from "./browser-process-groups.mjs";
+import { validateLeaseArgs } from "./agent-browser";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createConnection } from "node:net";
 import readline from "node:readline";
 
@@ -11,11 +15,16 @@ const socketPath = process.env.HOMER_BROWSER_CONTROL_SOCKET
   ?? `${homedir()}/Library/Application Support/Homer/cdp-state/browser-control.sock`;
 const statusPath = process.env.HOMER_BROWSER_STATUS_FILE
   ?? `${homedir()}/Library/Application Support/Homer/cdp-state/status.json`;
-const agentBrowser = process.env.HOMER_AGENT_BROWSER_BIN ?? "/opt/homebrew/bin/agent-browser";
+// Pinned in package.json (exact 0.37.0): the global npm binary is upgraded independently and may lag or leap.
+const pinnedAgentBrowser = join(dirname(fileURLToPath(import.meta.url)), "..", "node_modules", ".bin", "agent-browser");
+const agentBrowser = process.env.HOMER_AGENT_BROWSER_BIN ?? (existsSync(pinnedAgentBrowser) ? pinnedAgentBrowser : "/opt/homebrew/bin/agent-browser");
+// Match the existing macOS session directory; explicit selection keeps .target reads and children aligned.
+const socketDir = process.env.AGENT_BROWSER_SOCKET_DIR ?? join(homedir(), ".agent-browser");
+const browserEnv = { ...process.env, AGENT_BROWSER_SOCKET_DIR: socketDir };
 let cdpBase = "http://127.0.0.1:9222";
 const [command, ...args] = process.argv.slice(2);
 
-function usage() { throw new Error("usage: browserctl status [surface] | acquire <surface> <owner> <ttl-seconds> | acquire-external <agent.surface> <owner> <ttl-seconds> [--grant] | capabilities | release-grant <leaseId> | renew <leaseId> <ttl-seconds> | release <leaseId> | reconcile <surface> <origin[,origin...]> <bootstrapUrl> | touch <surface> | maintenance <on|off> [reason] | agent [agent.surface] [--ttl seconds] [--adopt <leaseId>] [--instance downloads|interactive] [--rpc | -- <workflow command...>]"); }
+function usage() { throw new Error("usage: browserctl status [surface] | cleanup-blanks [--instance downloads|interactive] | acquire <surface> <owner> <ttl-seconds> | acquire-external <agent.surface> <owner> <ttl-seconds> [--grant] | capabilities | release-grant <leaseId> | renew <leaseId> <ttl-seconds> | release <leaseId> [--close-target] | reconcile <surface> <origin[,origin...]> <bootstrapUrl> | keeper [--instance interactive] | touch <surface> | maintenance <on|off> [reason] | agent [agent.surface] [--ttl seconds] [--adopt <leaseId>] [--instance downloads|interactive] [--rpc | -- <workflow command...>]\n  broker verbs accept a trailing --instance <downloads|interactive>"); }
 
 async function readStatus(surface) {
   const now = Date.now();
@@ -81,7 +90,9 @@ const driverGroups = new BrowserProcessGroups(`${socketPath}.drivers.${process.p
 function runFile(file, fileArgs, options = {}) {
   return new Promise((resolve, reject) => {
     let stdout = "", stderr = "", timer;
-    const child = driverGroups.spawn(file, fileArgs, { env: options.env, stdio: ["ignore", "pipe", "pipe"] });
+    // No hard alarm here: long-running commands and sessions are allowed. The only deadline is the
+    // caller's own options.timeout (RPC requests carry their timeoutMs), enforced via driverGroups.stop.
+    const child = driverGroups.spawn(file, fileArgs, { env: options.env ?? browserEnv, stdio: ["ignore", "pipe", "pipe"] });
     child.stdout.on("data", data => { stdout += data; if (stdout.length > 32 * 1024 * 1024) { stopRequested = true; void driverGroups.stop(); } });
     child.stderr.on("data", data => { stderr += data; if (stderr.length > 32 * 1024 * 1024) { stopRequested = true; void driverGroups.stop(); } });
     if (options.timeout) timer = setTimeout(() => { stopRequested = true; void driverGroups.stop(); }, options.timeout);
@@ -95,13 +106,55 @@ function runFile(file, fileArgs, options = {}) {
 }
 // Closing the named daemon is cleanup, and remains allowed after command admission stops.
 function closeSession(session) {
-  return new Promise(resolve => execFile(agentBrowser, ["--session", session, "close"], { timeout: 10_000 }, () => resolve()));
+  return new Promise(resolve => {
+    // The native daemon inherits stdin; use /dev/null for cleanup as well as commands.
+    const child = spawn(agentBrowser, ["--session", session, "close"], { env: browserEnv, timeout: 10_000, stdio: "ignore" });
+    child.once("error", () => resolve()); child.once("close", () => resolve());
+  });
 }
 
 async function listPageTargets() {
   const response = await fetch(`${cdpBase}/json/list`);
   if (!response.ok) throw new Error(`CDP target list failed: HTTP ${response.status}`);
   return (await response.json()).filter((target) => target.type === "page");
+}
+
+const KEEPER_URL = "about:blank";
+const AGENT_MARKER_PREFIX = "about:blank#homer-agent-";
+function originOf(url) { try { return new URL(url).origin; } catch { return ""; } }
+/**
+ * Keeper policy (2026-09-07). The interactive Chrome idles with exactly one page: its launch
+ * page, `about:blank`. That page is adopted as the reconciled broker record `keeper.<instance>`
+ * so the broker owns it: it is held (never a candidate for another surface), it is not an
+ * `agent.*` record (never reclaimed as an abandoned agent tab), and it is never leased (it
+ * keeps neither Chrome nor an agent daemon alive). Reconcile re-adopts the same page by URL
+ * across daemon generations and sweeps extra plain blanks only when no reservation exists.
+ *
+ * This is broker ownership, not Chrome's pinned-tab UI: nothing here pins a tab in the tab strip.
+ *
+ * Guards keep it from ever becoming a broad null-origin sweep (`about:`, `data:`, `chrome://` and
+ * `file:` all share the null origin the reconciler groups by): skipped while Chrome is not
+ * running (the keeper is the launch page; do not launch Chrome to hold a blank), while an
+ * agent's setup is in flight, when the keeper tab was navigated away (a page someone is using
+ * is never closed), or when any other null-origin page is present.
+ */
+async function reconcileKeeper(instance) {
+  if (!instance || instance === "downloads") throw new Error("keeper is defined for the interactive instance only");
+  const surface = `keeper.${instance}`;
+  const skip = (reason) => ({ surface, instance, skipped: reason });
+  const status = await requestBroker({ verb: "status", instance });
+  if (status.state !== "ready") return skip(`interactive Chrome is ${status.state}; the keeper is its launch page`);
+  if (status.reservations?.length) return skip("agent setup in flight");
+  cdpBase = status.cdpEndpoint ?? cdpBase;
+  const pages = await listPageTargets();
+  const existing = (status.leases ?? []).find(record => record.surface === surface);
+  const held = existing ? pages.find(page => page.id === existing.targetId) : undefined;
+  if (held && held.url !== KEEPER_URL) return skip(`keeper tab ${held.id} was navigated to ${held.url}; left untouched`);
+  const foreign = pages.filter(page => originOf(page.url) === "null" && page.url !== KEEPER_URL && !page.url.startsWith(AGENT_MARKER_PREFIX));
+  if (foreign.length) return skip(`${foreign.length} other null-origin page(s) present (${foreign.map(page => page.url).join(", ").slice(0, 200)}); no sweep`);
+  const record = await requestBroker({ verb: "reconcile", surface, expectedOrigin: [KEEPER_URL], bootstrapUrl: KEEPER_URL, instance });
+  const after = await listPageTargets();
+  return { surface, instance, targetId: record.targetId, reused: Boolean(held && held.id === record.targetId), blanks: after.filter(page => page.url === KEEPER_URL).length, pages: after.length };
 }
 
 async function runChild(file, childArgs, env, input) {
@@ -139,6 +192,7 @@ async function runRpc(session, env) {
         ));
         commandArgs = ["fill", request.args[1], password];
       }
+      validateLeaseArgs(commandArgs, env);
       const stdout = await runFile(agentBrowser, ["--session", session, ...commandArgs], { env, timeout: request.timeoutMs ?? 120_000 });
       process.stdout.write(`${JSON.stringify({ id: request.id, ok: true, stdout })}\n`);
     } catch (error) {
@@ -187,16 +241,16 @@ async function runAgent(agentArgs) {
   const grant = explicitGrant ?? envGrant;
   // Short suffix: agent-browser session names become socket paths (103-byte
   // cap), and the default surface already carries a full UUID.
-  const session = `homer-${surface.replace(/[^a-zA-Z0-9_-]/g, "-")}-${randomUUID().slice(0, 8)}`;
+  const session = `homer-${randomUUID().slice(0, 8)}`;
   let leaseId;
   let targetId;
+  let marker;
   let renewTimer;
   let adoptedGrant = false;
   const stop = () => { stopRequested = true; void driverGroups.stop(); process.stdin.destroy(); };
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
   try {
-    let baselineTargetIds;
     let adopted = null;
     if (grant) {
       try {
@@ -220,26 +274,29 @@ async function runAgent(agentArgs) {
       cdpBase = adopted.cdpEndpoint ?? "http://127.0.0.1:9222";
       surface = adopted.surface ?? surface;
       adoptedGrant = adopted.granted === true;
-      baselineTargetIds = (await listPageTargets()).map((target) => target.id);
     } else {
       const reserved = await requestBroker({ verb: "reserve-external", surface, owner, ttl, ...(instance ? { instance } : {}) });
       instance = reserved.instance ?? "downloads";
       cdpBase = reserved.cdpEndpoint ?? "http://127.0.0.1:9222";
       leaseId = reserved.leaseId;
-      baselineTargetIds = reserved.baselineTargetIds;
     }
-    const baseline = new Set(baselineTargetIds);
-    await runFile(agentBrowser, ["--session", session, "connect", new URL(cdpBase).port], { timeout: 30_000 });
-    const marker = `about:blank#homer-agent-${randomUUID()}`;
-    await runFile(agentBrowser, ["--session", session, "tab", "new", marker], { timeout: 30_000 });
-    const created = (await listPageTargets()).filter((target) => !baseline.has(target.id));
-    if (created.length !== 1) throw new Error(`expected one new agent target, observed ${created.length}`);
-    targetId = created[0].id;
-    const currentUrl = (await runFile(agentBrowser, ["--session", session, "get", "url"], { timeout: 10_000 })).trim();
-    if (currentUrl !== marker || created[0].url !== marker) throw new Error("named session did not remain bound to its created target");
+    const port = new URL(cdpBase).port;
+    marker = `about:blank#homer-agent-${randomUUID()}`;
+    // `open` (not `tab new`): a fresh agent-browser daemon attached over --cdp creates its own
+    // about:blank page on connect, and `tab new` then created a SECOND page for the marker. The
+    // connect page was never bound or released, so every lease leaked one unmarked about:blank
+    // (7 by 2026-09-07 on the interactive Chrome). `open` navigates the connect page itself.
+    await runFile(agentBrowser, ["--session", session, "--cdp", port, "--pin-tab", "open", marker], { timeout: 30_000 });
+    // The pinned binary (>= 0.34) always writes <session>.target; its absence is a real failure, not a
+    // reason to guess from a target-list diff that is racy under concurrent sessions.
+    const binding = JSON.parse(await readFile(join(socketDir, `${session}.target`), "utf8"));
+    if (binding?.pinned !== true || !binding.targetId) throw new Error("agent-browser session target is not pinned");
+    const targets = await listPageTargets();
+    if (!targets.some(target => target.id === binding.targetId && target.url === marker)) throw new Error("named session did not remain bound to its created target");
+    targetId = binding.targetId;
     await requestBroker({ verb: "register-external-target", leaseId, targetId });
     if (!adoptedGrant) renewTimer = setInterval(() => { void requestBroker({ verb: "renew", leaseId, ttl }).catch((error) => { process.stderr.write(`browser lease renewal failed: ${error.message}\n`); stop(); }); }, Math.min(30_000, ttl * 500));
-    const env = { ...process.env, AGENT_BROWSER_SESSION: session, HOMER_BROWSER_SURFACE: surface, HOMER_BROWSER_TARGET_ID: targetId, HOMER_BROWSER_INSTANCE: instance, HOMER_CDP_HTTP: cdpBase };
+    const env = { ...browserEnv, PATH: `${dirname(fileURLToPath(import.meta.url))}:${process.env.PATH ?? ""}`, AGENT_BROWSER_CDP: port, AGENT_BROWSER_PIN_TAB: "1", AGENT_BROWSER_SESSION: session, HOMER_BROWSER_SURFACE: surface, HOMER_BROWSER_TARGET_ID: targetId, HOMER_BROWSER_INSTANCE: instance, HOMER_CDP_HTTP: cdpBase };
     const code = rpc ? await runRpc(session, env)
       : workflow.length ? await runChild(workflow[0], workflow.slice(1), env)
       : await runChild(agentBrowser, ["--session", session, "batch", "--bail"], env);
@@ -255,7 +312,19 @@ async function runAgent(agentArgs) {
     // Release our tab. When the lease came from a GRANT the broker keeps the holder's
     // reservation alive (it answers grantRetained), so the holder still has admission for
     // its next phase and the agent can be relaunched — the MFA-recovery flow depends on it.
+    if (leaseId && marker && !targetId) {
+      // Setup can fail after tab creation but before registration; reclaim only our marker.
+      const own = (await listPageTargets().catch(() => [])).filter(target => target.url === marker);
+      if (own.length === 1) targetId = own[0].id;
+    }
     if (leaseId) await requestBroker({ verb: "release", leaseId, closeTarget: Boolean(targetId), targetId }).catch(() => undefined);
+    // Every interactive session ends with exactly one broker-owned idle blank; never fatal.
+    if (leaseId && instance === "interactive") {
+      try {
+        const keeper = await reconcileKeeper(instance);
+        if (keeper.skipped) process.stderr.write(`keeper: ${keeper.skipped}\n`);
+      } catch (error) { process.stderr.write(`keeper reconcile failed: ${error.message}\n`); }
+    }
     process.removeListener("SIGTERM", stop);
     process.removeListener("SIGINT", stop);
   }
@@ -270,14 +339,22 @@ try {
     if (!result.ok) process.exitCode = 1;
   } else if (command === "agent") {
     process.exitCode = await runAgent(args);
+  } else if (command === "keeper" && (args.length === 0 || (args.length === 2 && args[0] === "--instance"))) {
+    process.stdout.write(`${JSON.stringify(await reconcileKeeper(args[1] ?? "interactive"))}\n`);
   } else {
     let request;
+    // Broker verbs default to the downloads instance; a trailing `--instance interactive` routes the
+    // same verb to the interactive broker (orphan-blank sweeps: reconcile, acquire, release --close-target).
+    let instance = null;
+    const at = args.indexOf("--instance");
+    if (at !== -1) { instance = args[at + 1]; if (!instance) usage(); args.splice(at, 2); }
     if (command === "acquire" && args.length === 3) request = { verb: command, surface: args[0], owner: args[1], ttl: Number(args[2]) };
     else if (command === "renew" && args.length === 2) request = { verb: command, leaseId: args[0], ttl: Number(args[1]) };
-    else if (command === "release" && args.length === 1) request = { verb: command, leaseId: args[0] };
+    else if (command === "release" && (args.length === 1 || (args.length === 2 && args[1] === "--close-target"))) request = { verb: command, leaseId: args[0], closeTarget: args[1] === "--close-target" };
     // Take an external agent reservation WITHOUT launching an agent, so a caller can reserve
     // the browser first and hand the leaseId to the agent as a grant (`agent --adopt`).
     else if (command === "capabilities" && args.length === 0) request = { verb: "capabilities" };
+    else if (command === "cleanup-blanks" && args.length === 0) request = { verb: "cleanup-blanks" };
     else if (command === "acquire-external" && (args.length === 3 || (args.length === 4 && args[3] === "--grant"))) request = { verb: "reserve-external", surface: args[0], owner: args[1], ttl: Number(args[2]), granted: args[3] === "--grant" };
     // Drop a granted reservation. Only the holder calls this; an adopter's `release` keeps it.
     else if (command === "release-grant" && args.length === 1) request = { verb: "release-grant", leaseId: args[0] };
@@ -285,6 +362,7 @@ try {
     else if (command === "touch" && args.length === 1) request = { verb: command, surface: args[0] };
     else if (command === "maintenance" && args.length >= 1 && ["on", "off"].includes(args[0])) request = { verb: command, enabled: args[0] === "on", reason: args.slice(1).join(" ") || "browserctl" };
     else usage();
+    if (instance) request.instance = instance;
     process.stdout.write(`${JSON.stringify(await requestBroker(request))}\n`);
   }
 } catch (error) {

@@ -49,7 +49,7 @@ export type KnownInternalHandler =
   | "bookmark_ingest" | "session_harvester" | "memory_embeddings" | "memory_reindex" | "weekly_consolidation"
   | "ideas_explore" | "nightly_memory" | "morning_review" | "nightly_code_push" | "db_backup" | "document_ingest"
   | "outcome_tracker" | "preference_updater" | "content_scraper" | "archive_verify" | "health_check"
-  | "architecture_updater" | "daemon_cleanup" | "session_maintenance" | "reminder_check" | "link_processor"
+  | "architecture_updater" | "daemon_cleanup" | "session_maintenance" | "reminder_check"
   | "telegram_registry_cleanup" | "docker_restart";
 
 export interface RegisteredJob {

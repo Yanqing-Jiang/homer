@@ -127,7 +127,7 @@ export interface ChromeSupervisorDeps {
  */
 export type ChromeOwnership = "launched" | "adopted" | "foreign" | "none";
 
-export const browserLeaseBroker = new BrowserLeaseBroker(new HttpBrowserTargetClient(CDP_PORT));
+export const browserLeaseBroker = new BrowserLeaseBroker(new HttpBrowserTargetClient(CDP_PORT), Date.now, false, 1);
 export async function drainLeases(): Promise<void> { await browserLeaseBroker.drainLeases(); }
 
 export class ResidentChromeSupervisor {
@@ -681,8 +681,8 @@ export async function reapResidentChromeOnFatalExit(kind: string): Promise<void>
  * Hand-off file for M8: the EXTERNAL holder this generation was leaving behind when it left
  * Chrome up for someone else. `beginGeneration()` clears both the records and the external
  * reservation, so without this the adopting generation believes nothing holds a browser
- * QC's agent-browser may still be driving — and the global agent-browser serialization that
- * exists for the 0.21.4 concurrent-rebinding hazard is silently gone.
+ * QC's agent-browser may still be driving — silently losing downloads capacity and target
+ * ownership accounting.
  *
  * It carries the whole holder (reservation AND `agent.*` lease records with their
  * `adopterOwner`), not just the reservation: a `browserctl agent` holder's reservation is
@@ -702,7 +702,7 @@ const ADOPTION_GRACE_MS = 10 * 60 * 1000;
 interface ExternalHolderHandoff {
   writtenAt?: number;
   kind?: string;
-  holder?: { reservation: ExternalReservation | null; records: TargetRecord[] };
+  holder?: { reservations?: ExternalReservation[]; reservation?: ExternalReservation | null; records: TargetRecord[] };
 }
 
 /** Returns true when a handoff was actually written, so callers can log the difference. */
@@ -720,7 +720,7 @@ export function writeExternalReservationHandoff(kind: string): boolean {
       { mode: 0o600 },
     );
     logger.warn(
-      { kind, reservationOwner: holder.reservation?.owner ?? null,
+      { kind, reservationOwners: holder.reservations.map(r => r.owner),
         records: holder.records.map((r) => ({ surface: r.surface, owner: r.owner, adopterOwner: r.adopterOwner ?? null })) },
       "External browser holder handed off to the next daemon generation",
     );
@@ -1400,7 +1400,7 @@ async function recycleLocked(port: number, headed: boolean): Promise<CDPHandle> 
 
 /**
  * Launch a dedicated lean-profile Chrome on its OWN port for jobs that must not
- * contend for the broker's globally serialized shared-:9222 agent lease (a
+ * contend for the broker's capacity-one shared-:9222 agent lease (a
  * long-running agent.* collector otherwise blocks them entirely). The caller
  * owns the returned handle and MUST call cleanup() — this Chrome is never
  * supervised, never adopted by the resident supervisor, and never touches

@@ -47,6 +47,7 @@ output/
 # Node runtime, operator bins, caches) stays local.
 /bin/*
 !/bin/browserctl
+!/bin/agent-browser
 !/bin/tmux
 # skills/: only the alias table and layout docs ship. Skills, commands, agents
 # and rendered views are generated per operator (see README "Skills").

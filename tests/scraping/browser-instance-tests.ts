@@ -31,7 +31,7 @@ test("expiry does not admit a new interactive driver while its former owner is a
   let now = 1000; const broker = new BrowserLeaseBroker(new Targets(), () => now, true);
   const old = await broker.reserveExternal("agent.old", `fixture:${process.pid}`, 1);
   now += 2000;
-  await assert.rejects(broker.reserveExternal("agent.new", `fixture:${process.pid}`, 60), /reserved/);
+  await assert.rejects(broker.reserveExternal("agent.new", `fixture:${process.pid}`, 60), /agent capacity/);
   await broker.release(String(old.leaseId));
   assert.ok((await broker.reserveExternal("agent.new", `fixture:${process.pid}`, 60)).leaseId);
 });

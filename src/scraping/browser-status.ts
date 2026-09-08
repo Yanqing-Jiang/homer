@@ -18,8 +18,9 @@ export type ChromeStatus = {
    * reservations until then — the one thing an operator cannot otherwise tell from the file.
    */
   adoptionGraceUntil: string | null;
-  /** The live external (agent-browser) reservation, if any. */
-  externalReservation: { surface: string; owner: string; expiresAt: string; granted: boolean } | null;
+  /** Pending reservations and grants; registered targets live in surfaces. */
+  externalReservations: { surface: string; owner: string; expiresAt: string; granted: boolean }[];
+  maxAgents: number;
   profilePath: string;
   /**
    * `restartDeferrals` counts heartbeat restarts the supervisor DEFERRED because an external

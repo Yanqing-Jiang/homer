@@ -545,7 +545,7 @@ test("restart generation invalidates prior targets and leases across processes",
   }
 });
 
-test("external agent target creation is serialized, registered exactly, and cleaned on release", async () => {
+test("capacity-one agent creation is bounded, registered exactly, and cleaned on release", async () => {
   const targets = new Map<string, { id: string; type: string; url: string; webSocketDebuggerUrl: string }>();
   const client: BrowserTargetClient = {
     list: async () => [...targets.values()],
@@ -555,13 +555,13 @@ test("external agent target creation is serialized, registered exactly, and clea
   const broker = new BrowserLeaseBroker(client);
   broker.beginGeneration(9);
   const first = await broker.reserveExternal("agent.test-one", "wrapper-one", 30) as { leaseId: string };
-  await assert.rejects(() => broker.reserveExternal("agent.test-two", "wrapper-two", 30), /creation is reserved/);
+  await assert.rejects(() => broker.reserveExternal("agent.test-two", "wrapper-two", 30), /agent capacity/);
   targets.set("external-1", { id: "external-1", type: "page", url: "about:blank#one", webSocketDebuggerUrl: "ws://test/external-1" });
   const registered = await broker.registerExternalTarget(first.leaseId, "external-1") as { targetId: string };
   assert.equal(registered.targetId, "external-1");
   await assert.rejects(
     () => broker.reserveExternal("agent.test-two", "wrapper-two", 30),
-    /agent-browser session is globally serialized/,
+    /agent capacity/,
   );
   await broker.release(first.leaseId, true);
   const second = await broker.reserveExternal("agent.test-two", "wrapper-two", 30) as { leaseId: string };
@@ -642,6 +642,7 @@ test("touch scheduler skips leases, recent human activity, and active backoff", 
 test("status publication uses sibling temp, fsync, and atomic rename", async () => {
   const dir = await mkdtemp(join(tmpdir(), "homer-status-test-")); const path = join(dir, "status.json");
   const status: ChromeStatus = { schema: 1, updatedAt: new Date(0).toISOString(), generation: 3, supervisorPid: 1, chromePid: 2,
+    ownership: "launched", degradedReason: null, adoptionGraceUntil: null, externalReservations: [], maxAgents: 1,
     profilePath: "/profile", cdp: { state: "ready", pages: 2, restartCount: 0, reason: null }, maintenance: { enabled: false, reason: null }, surfaces: {} };
   try {
     writeStatusAtomic(path, status);
@@ -654,6 +655,7 @@ test("browserctl status applies 90-second service and 8-hour surface staleness",
   const dir = await mkdtemp(join(tmpdir(), "homer-status-cli-test-")); const path = join(dir, "status.json");
   const now = Date.now();
   const status: ChromeStatus = { schema: 1, updatedAt: new Date(now).toISOString(), generation: 3, supervisorPid: 1, chromePid: 2,
+    ownership: "launched", degradedReason: null, adoptionGraceUntil: null, externalReservations: [], maxAgents: 1,
     profilePath: "/profile", cdp: { state: "ready", pages: 2, restartCount: 0, reason: null }, maintenance: { enabled: false, reason: null },
     surfaces: { "portal.alpha": { state: "authenticated", lastProbeAt: new Date(now - 7 * 60 * 60_000).toISOString(), lastOkAt: null, lastTouchAt: null, reason: null, targetId: "vc", lease: null } } };
   try {
@@ -675,4 +677,59 @@ test("browserctl status applies 90-second service and 8-hour surface staleness",
     assert.equal(staleSurface.code, 1);
     assert.match(JSON.parse(staleSurface.stdout).reasons.join(" "), /> 8h/);
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("capacity-three agents own distinct targets; releasing one leaves its siblings", async () => {
+  const targets = new Map<string, { id: string; type: string; url: string; webSocketDebuggerUrl: string }>();
+  let unblock: (() => void) | undefined;
+  let pause = false;
+  const broker = new BrowserLeaseBroker({
+    list: async () => { if (pause) await new Promise<void>(resolve => { unblock = resolve; }); return [...targets.values()]; },
+    create: async () => { throw new Error("not used"); },
+    close: async id => { targets.delete(id); },
+  }, Date.now, false, 3);
+  broker.beginGeneration(9);
+  const leases = await Promise.all(["a", "b", "c"].map(name => broker.reserveExternal(`agent.${name}`, `owner-${name}`, 60, name === "a")));
+  assert.equal(broker.externalLeaseCount(), 3);
+  assert.equal(broker.externalHolderSnapshot()?.reservations.length, 3);
+  await assert.rejects(broker.reserveExternal("agent.a", "duplicate", 60), /surface .* occupied or pending/);
+  await assert.rejects(broker.reserveExternal("agent.d", "fourth", 60), /agent capacity.*owner-a.*owner-b.*owner-c/);
+  for (const id of ["a", "b", "c"]) targets.set(id, { id, type: "page", url: `about:blank#${id}`, webSocketDebuggerUrl: `ws://fixture/${id}` });
+  broker.adoptExternal(String(leases[0]!.leaseId), "adopter-a", "agent.a");
+  await broker.registerExternalTarget(String(leases[0]!.leaseId), "a");
+  assert.equal(broker.externalLeaseCount(), 3, "a grant plus its tab consumes one slot");
+  await assert.rejects(broker.registerExternalTarget(String(leases[1]!.leaseId), "a"), /already owned/);
+  await Promise.all([1, 2].map(i => broker.registerExternalTarget(String(leases[i]!.leaseId), ["a", "b", "c"][i]!)));
+  await assert.rejects(broker.reserveExternal("agent.b", "duplicate", 60), /surface .* occupied or pending/);
+  await broker.release(String(leases[1]!.leaseId), true);
+  assert.deepEqual(broker.snapshot().map(r => r.targetId).sort(), ["a", "c"]);
+  assert.equal(broker.externalLeaseCount(), 2);
+  const pending = await broker.reserveExternal("agent.d", "owner-d", 60);
+  pause = true;
+  const stale = broker.registerExternalTarget(String(pending.leaseId), "b");
+  await broker.release(String(pending.leaseId));
+  unblock!();
+  await assert.rejects(stale, /unknown or expired external reservation/);
+  assert.equal(broker.externalLeaseCount(), 2);
+});
+
+test("registration cannot cross expiry or generation, including a retained grant's failed setup", async () => {
+  let now = 1000, unblock: (() => void) | undefined, pause = false;
+  const broker = new BrowserLeaseBroker({
+    list: async () => { if (pause) await new Promise<void>(resolve => { unblock = resolve; }); return [{ id: "t", type: "page", url: "about:blank", webSocketDebuggerUrl: "ws://t" }]; },
+    create: async () => { throw new Error("not used"); }, close: async () => {},
+  }, () => now);
+  for (const change of ["expiry", "generation", "grant-release"]) {
+    pause = false; broker.beginGeneration(1); now = 1000;
+    const lease = await broker.reserveExternal("agent.a", "owner", 1, change === "grant-release");
+    broker.adoptExternal(String(lease.leaseId), "adopter");
+    pause = true;
+    const pending = broker.registerExternalTarget(String(lease.leaseId), "t");
+    if (change === "expiry") now = 2001;
+    if (change === "generation") broker.beginGeneration(2);
+    if (change === "grant-release") await broker.release(String(lease.leaseId));
+    unblock!();
+    await assert.rejects(pending, /unknown or expired/);
+    assert.equal(broker.snapshot().length, 0);
+  }
 });

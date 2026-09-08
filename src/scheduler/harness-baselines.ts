@@ -11,11 +11,8 @@ export interface InternalJobHarnessBaseline extends HarnessSelection {
 }
 
 const HOME_DIR = process.env.HOME ?? process.cwd();
-const TMP_DIR = "/tmp";
 const CODEX_MODEL = "gpt-5.6-terra";
 const CONTENT_MODEL = "github-copilot/claude-opus-5";
-const CODEX_FALLBACK_MODEL = "gpt-5.6-terra";
-const LINK_PROCESS_TIMEOUT = 300_000;
 const PROJECT_DIR = PATHS.homerRoot;
 
 function codexStage(
@@ -34,25 +31,6 @@ function codexStage(
     },
   };
 }
-
-/** Shared Copilot Opus high primary + Terra high fallback for YouTube classify/analyze. */
-function youtubeStage(
-  timeoutOverride: number,
-): InternalHarnessCallProfile {
-  return {
-    executor: "opencode",
-    model: CONTENT_MODEL,
-    cwdOverride: HOME_DIR,
-    timeoutOverride,
-    fallbackChain: ["codex"],
-    fallbackModels: {
-      codex: CODEX_FALLBACK_MODEL,
-    },
-  };
-}
-
-const youtubeClassifyStage: InternalHarnessCallProfile = youtubeStage(900_000);
-const youtubeAnalyzeStage: InternalHarnessCallProfile = youtubeStage(300_000); // 5 min — Copilot Opus high analysis
 
 const PUBLIC_JOB_HARNESS_BASELINES = {
   "ideas-explore": {
@@ -86,20 +64,6 @@ const PUBLIC_JOB_HARNESS_BASELINES = {
         executorOptions: { opencode: { variant: "high", forceOpenCode: true, researchOnly: false } },
         fallbackChain: [],
       },
-    },
-  },
-  "link-processor": {
-    executor: "opencode",
-    model: CONTENT_MODEL,
-    stages: {
-      article: {
-        executor: "opencode",
-        model: CONTENT_MODEL,
-        cwdOverride: TMP_DIR,
-        timeoutOverride: LINK_PROCESS_TIMEOUT,
-      },
-      youtube_classify: youtubeClassifyStage,
-      youtube_analyze: youtubeAnalyzeStage,
     },
   },
   "nightly-code-push": {

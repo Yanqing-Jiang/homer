@@ -111,6 +111,7 @@
     "@types/blessed": "^0.1.25",
     "@types/node": "^24.0.0",
     "@types/nodemailer": "^8.0.1",
+    "agent-browser": "0.37.0",
     "tsx": "^4.22.3",
     "typescript": "^5.9.3"
   },
