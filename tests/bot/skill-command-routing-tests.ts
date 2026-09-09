@@ -41,7 +41,9 @@ function routeOf(text: string): "unknown-command" | "fresh-session" | "executor-
 
 test("both login commands are registered as skill commands", () => {
   const skills = getCommandsByCategory("skill").map((c) => c.name).sort();
-  assert.deepEqual(skills, ["/amc-login", "/vc-login"]);
+  assert.ok(skills.includes("/amc-login"));
+  assert.ok(skills.includes("/vc-login"));
+  assert.equal(new Set(skills).size, skills.length, "commands must not be duplicated");
   assert.equal(getCommand("/vc-login")?.skill, "vc-login");
   assert.equal(getCommand("/amc-login")?.skill, "amc-login");
   // Underscore aliases, because Telegram's own command menu dislikes hyphens.

@@ -126,10 +126,10 @@ export async function buildSchedulerContext(
     extraSections,
   } = options ?? {};
 
-  // Core: CLAUDE.md (Homer's soul)
-  const claudeMd = await readFileIfExists(PATHS.claudeMd);
-  if (!claudeMd) {
-    throw new Error("Cannot build scheduler context: CLAUDE.md missing");
+  // Core: AGENTS.md (Homer's soul)
+  const agentsMd = await readFileIfExists(PATHS.agentsMd);
+  if (!agentsMd) {
+    throw new Error("Cannot build scheduler context: AGENTS.md missing");
   }
 
   // Build sections array
@@ -140,9 +140,9 @@ export async function buildSchedulerContext(
 
   sections.push(`You are HOMER — ${OWNER.displayName}'s personal AI operating system.
 
-# CLAUDE.md (Homer's Soul & Operating Manual)
+# AGENTS.md (Homer's Soul & Operating Manual)
 
-${claudeMd}`);
+${agentsMd}`);
 
   // Canonical memory documents (memory_documents, not files)
   for (const { key, label } of CONTEXT_DOCUMENTS) {

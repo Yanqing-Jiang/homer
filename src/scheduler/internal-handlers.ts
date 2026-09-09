@@ -356,16 +356,19 @@ async function runHealthCheck(
     issues.push("🟡 GitHub: GH_TOKEN not set");
   }
 
-  try {
-    const claudeStatus = await getClaudeAuthStatus();
-    if (!claudeStatus.claudeBinaryExists) {
-      issues.push(`🔴 Claude: binary missing (${claudeStatus.claudePath})`);
+  // Claude credentials matter only after an explicit manual global selection.
+  if (ctx.stateManager.getHarnessDefault().executor === "claude") {
+    try {
+      const claudeStatus = await getClaudeAuthStatus();
+      if (!claudeStatus.claudeBinaryExists) {
+        issues.push(`🔴 Claude: binary missing (${claudeStatus.claudePath})`);
+      }
+      if (!claudeStatus.authAvailable) {
+        issues.push(`🔴 Claude: auth missing (no keychain item or token file at ${claudeStatus.tokenFilePath})`);
+      }
+    } catch {
+      issues.push("🔴 Claude: auth check failed");
     }
-    if (!claudeStatus.authAvailable) {
-      issues.push(`🔴 Claude: auth missing (no keychain item or token file at ${claudeStatus.tokenFilePath})`);
-    }
-  } catch {
-    issues.push("🔴 Claude: auth check failed");
   }
 
   try {
@@ -684,6 +687,20 @@ async function runHandler(
           if (result.fromTwitter > 0) parts.push(`${result.fromTwitter} from X`);
         }
         if (result.skipped > 0) parts.push(`${result.skipped} skipped`);
+        // errors[] is populated when the bookmarks page could not be read (lease
+        // refused, broker/Chrome error, auth wall). That is a failed run, never
+        // "no new bookmarks" — that line is reserved for a page that was read.
+        if (result.errors.length > 0) {
+          const error = result.errors.join("; ");
+          return buildResult(
+            job,
+            startedAt,
+            false,
+            parts.length > 0 ? `${parts.join(", ")} — then failed: ${error}` : `Bookmark scrape failed: ${error}`,
+            error,
+            { notificationIntent: "operational_status" }
+          );
+        }
         const output = parts.length > 0 ? parts.join(", ") : "No new bookmarks found";
         return buildResult(
           job,

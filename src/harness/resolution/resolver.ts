@@ -1,8 +1,7 @@
 /**
  * The single harness resolver. Every selection — scheduler, queue, runtime, router — flows
  * through this one function. Precedence is explicit and symmetric across scopes; a baseline
- * is a profile, never a selector. The system default is Claude so a missing DB selection
- * cannot silently route scheduled work through a subscription-backed OpenCode model.
+ * is a profile, never a selector. The system default is Codex; a missing DB selection must not restore a retired harness.
  */
 
 import type { CapabilityRequirement, HarnessId, OutputContract } from "../types.js";

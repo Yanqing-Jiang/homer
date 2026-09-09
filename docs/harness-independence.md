@@ -3,6 +3,13 @@
 **Added:** 2026-06-28
 **Status:** Active (cutover deployed 2026-06-28)
 
+## Current routing (2026-09-08)
+
+Codex is the main harness. Routine operations use Terra high; deep research/content use Astra
+high unless a job has another explicit Codex model/effort. Automatic non-Codex fallbacks are
+retired. B4 orchestration, research and validators use Astra high; B4 HTML rendering alone
+uses GitHub Copilot Opus high through OpenCode. Explicit manual harness choices remain available.
+
 ## Overview
 
 Homer is **harness-independent**: no feature, scheduled job, or skill is hardcoded to a
@@ -16,7 +23,7 @@ The five harnesses behind the spine:
 | Harness | Backing CLI | Typical model |
 |---|---|---|
 | `claude` | Claude Code | opus / opus[1m] |
-| `codex` | OpenAI Codex | gpt-5.5 |
+| `codex` | OpenAI Codex (primary) | Terra high / Astra high |
 | `opencode` | OpenCode | GLM 5.2 (`opencode-go/glm-5.2`), or provider-passthrough models |
 | `gemini` | Gemini CLI (often via OpenCode) | gemini-3.5-flash |
 | `kimi` | Kimi (via OpenCode) | kimi-k2.x |
@@ -77,7 +84,7 @@ The resolver walks scopes highest-precedence first and takes the first match:
 | `lane` | | per-lane pin | wired |
 | `job` | | **Jobs tab** per-job pin | **wired — primary lever** |
 | `global` | lowest | Jobs tab "switch all", kill-switch | wired |
-| `system-default` | floor | first registry harness | implicit |
+| `system-default` | floor | Codex | implicit |
 
 - **Per scheduled job:** pin any job to any harness+model independently via the Jobs tab. Job row
   beats global; un-pinned jobs follow global.
@@ -103,19 +110,18 @@ One canonical source, fanned out per harness. See `scripts/render-harness-assets
 
 ### Skills / slash commands
 
-A skill is authored once under `skills/skills/<id>/skill.md`. `render-harness-assets.ts --install`
+Canonical skill roots come from `~/.config/homer/skill-roots.json` (currently `~/homer-private`). A skill is authored under `skills/skills/<id>/skill.md` in that root. `render-harness-assets.ts --install`
 rewrites logical tool names to each harness's native tool names (via an alias table) and installs a
 harness-native copy:
 
 | Harness | Skill path | Command path |
 |---|---|---|
 | Claude | `~/.claude/skills/<id>/SKILL.md` | `~/.claude/commands/<id>.md` |
-| OpenCode | `~/.config/opencode/SKILLS.md` | `~/.config/opencode/command/<id>.md` |
+| OpenCode | `~/.config/opencode/skills/<id>/SKILL.md` | `~/.config/opencode/command/<id>.md` |
 | Codex | `~/.codex/skills/homer/<id>/SKILL.md` | (folded into skill body w/ slash note) |
 | plain | `skills/dist/plain/<id>.md` (scheduler `contextFiles`) | — |
 
-`npm run skills:check` fails the build if any rendered copy drifts from canonical, so they can't
-silently diverge. The `plain` variant is the harness-agnostic lowest common denominator that the
+`npm run skills:check` checks generated mirrors. `node --import tsx scripts/render-harness-assets.ts check --installed` also checks the installed harness copies. The `plain` variant is the harness-agnostic lowest common denominator that the
 scheduler injects as `contextFiles` for any harness.
 
 ### MCP & memory

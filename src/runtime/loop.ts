@@ -618,7 +618,7 @@ export class UnifiedRuntime {
     this.db.prepare(`
       INSERT INTO runs (id, intent_id, executor, status, started_at, attempt_number)
       VALUES (?, ?, ?, 'running', CURRENT_TIMESTAMP, 1)
-    `).run(runId, intent.id, intent.executorPreference || "claude");
+    `).run(runId, intent.id, intent.executorPreference || "codex");
 
     return runId;
   }

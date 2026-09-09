@@ -3,8 +3,7 @@ import { mkdirSync } from "fs";
 import * as readline from "readline";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
-import { executeKimiCLI } from "./kimi-cli.js";
-import { executeClaudeCommand } from "./claude.js";
+import { executeCodexCLI } from "./codex-cli.js";
 import { executeGeminiCLIDirect, GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { processRegistry } from "../process/registry.js";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
@@ -731,48 +730,34 @@ export async function executeOpenCodeWithFallback(
   const retryResult = await executeOpenCodeCLI(prompt, context, options);
   if (retryResult.exitCode === 0) return retryResult;
 
-  // Tier 2 fallback: all Flash/Google accounts exhausted — try Sonnet via Claude Code CLI
+  // Tier 2 fallback: all Flash/Google accounts exhausted — try Codex Terra high
   if (retryResult.exitCode === 2 || retryResult.exitCode === 3) {
-    logger.info("All Flash/Google accounts exhausted, falling back to Sonnet (Claude Code)");
+    logger.info("All Flash/Google accounts exhausted, falling back to Codex Terra high");
     try {
       const fullPrompt = context ? `${context}\n\n---\n\n${prompt}` : prompt;
-      const sonnetResult = await executeClaudeCommand(fullPrompt, {
+      const codexResult = await executeCodexCLI(fullPrompt, {
         cwd: options.cwd ?? getRuntimePaths().homeDir,
-        model: "sonnet",
+        model: "gpt-5.6-terra",
+        reasoningEffort: "high",
         timeout: options.timeout,
         signal: options.signal,
       });
-      if (sonnetResult.exitCode === 0) {
+      if (codexResult.exitCode === 0) {
         return {
-          output: sonnetResult.output,
+          output: codexResult.output,
           exitCode: 0,
-          duration: sonnetResult.duration,
-          executor: "claude",
-          sessionId: sonnetResult.claudeSessionId ?? "",
-          model: "claude-sonnet-4-6",
+          duration: codexResult.duration,
+          executor: "codex",
+          sessionId: codexResult.sessionId ?? "",
+          model: "gpt-5.6-terra",
           accountId: 0,
         } as OpenCodeCLIResult;
       }
     } catch (err) {
-      logger.warn({ err }, "Sonnet (Claude Code) fallback failed");
+      logger.warn({ err }, "Codex Terra high fallback failed");
     }
 
-    // Tier 3 emergency fallback: Kimi K2.5 (independent auth, native web tools)
-    logger.warn("Sonnet fallback also failed, using Kimi K2.5 emergency fallback");
-    const fullPrompt = context ? `${context}\n\n---\n\n${prompt}` : prompt;
-    const kimiResult = await executeKimiCLI(fullPrompt, "", {
-      timeout: options.timeout,
-      signal: options.signal,
-    });
-    return {
-      output: kimiResult.output,
-      exitCode: kimiResult.exitCode,
-      duration: kimiResult.duration,
-      executor: "kimi-cli",
-      sessionId: "",
-      model: "moonshot-ai/kimi-k2.5",
-      accountId: 0,
-    } as OpenCodeCLIResult;
+
   }
 
   return retryResult;

@@ -121,7 +121,7 @@ const COST_PER_1K_TOKENS: Record<string, { input: number; output: number }> = {
   "gemini-api": { input: 0.00025, output: 0.001 }, // $0.25/$1.00 per 1M (flash)
   "kimi": { input: 0, output: 0 },                 // Kimi CLI (Moonshot managed, free tier)
   "claude": { input: 0.003, output: 0.015 },       // Sonnet pricing
-  "codex": { input: 0.003, output: 0.015 },        // Uses Claude internally
+  "codex": { input: 0.003, output: 0.015 },        // Legacy estimate; subscription billing is tracked separately
 };
 
 export function estimateCost(
@@ -135,19 +135,19 @@ export function estimateCost(
 
 /**
  * Global default harness for generic auto-routing (migration 104 harness_default).
- * Conservative: any read failure falls back to "claude" so we never accidentally route
+ * Conservative: any read failure falls back to "codex" so we never accidentally route
  * to GLM when state is unreadable.
  */
 function getHarnessDefaultExecutor(): ExecutorType {
   try {
     const db = _db ?? (getRouterState(), _db);
-    if (!db) return "claude";
+    if (!db) return "codex";
     const row = db.prepare("SELECT executor FROM harness_default WHERE id = 1").get() as
-      | { executor: "claude" | "opencode" }
+      | { executor: ExecutorType }
       | undefined;
-    return row?.executor ?? "claude";
+    return row?.executor ?? "codex";
   } catch {
-    return "claude";
+    return "codex";
   }
 }
 
@@ -385,53 +385,10 @@ export function makeRoutingDecision(request: RoutingRequest): RoutingDecision {
     return { ...cached.decision, reason: `[cached] ${cached.decision.reason}` };
   }
 
-  // Deterministic fast-path for common patterns
-  const cliStatus = getGeminiCLIPoolStatus();
-  const weakExecutors = getWeakExecutors(taskType);
-  // "gemini" = Gemini 3.5 Flash research path (cheap/high-volume). Distinct from the
-  // "opencode" GLM-5.2 edit harness, which is reserved for explicit user-facing turns.
-  const defaultFallbackChain: ExecutorType[] = ["codex", "kimi", "gemini"]
-    .filter(e => !weakExecutors.has(e)) as ExecutorType[];
-  if (cliStatus.allExhausted) {
-    const idx = defaultFallbackChain.indexOf("gemini");
-    if (idx >= 0) defaultFallbackChain.splice(idx, 1);
-  }
-
-  // Use task-type heuristics (sync, no LLM call — fast path)
-  let executor: ExecutorType = "claude";
-  let reason = `${taskType} task`;
-
-  switch (taskType) {
-    case "discovery":
-      executor = cliStatus.allExhausted ? "kimi" : "gemini";
-      reason = "Discovery → free research executor";
-      break;
-    case "long-context":
-      executor = "kimi";
-      reason = "Long context → Kimi (large context window)";
-      break;
-    case "code-change":
-      executor = "claude";
-      reason = "Code changes → Claude (best code gen)";
-      break;
-    case "verification":
-      executor = "codex";
-      reason = "Verification → Codex (deep reasoning)";
-      break;
-    case "batch":
-      executor = cliStatus.allExhausted ? "kimi" : "gemini";
-      reason = "Batch → free executor (overnight)";
-      break;
-    default:
-      executor = harnessDefault;
-      reason = `General → harness default (${executor})`;
-  }
-
-  // Build fallback chain: remove primary from chain, keep others
-  const fallbackChain = defaultFallbackChain.filter(e => e !== executor);
-  if (!fallbackChain.includes("opencode") && executor !== "opencode") {
-    fallbackChain.unshift("opencode"); // Always have opencode as fallback (Claude CLI retired)
-  }
+  // Honor the live global choice; task heuristics must not restore retired harnesses.
+  const executor = harnessDefault;
+  const reason = `${taskType} → harness default (${executor})`;
+  const fallbackChain: ExecutorType[] = executor === "codex" ? [] : ["codex"];
 
   const decision: RoutingDecision = {
     executor,
@@ -478,7 +435,7 @@ function mapExecutorKindToType(executor: ExecutorKind): ExecutorType {
     case "kimi":
       return "kimi";
     default:
-      return "claude";
+      return "codex";
   }
 }
 
@@ -533,7 +490,7 @@ export async function executeWithRouting(
   const jobName = request.query.slice(0, 80);
 
   const chain = buildExecutorChain(decision);
-  const primary = chain[0] ?? "claude";
+  const primary = chain[0] ?? "codex";
 
   const runExecutor = async (
     executor: ExecutorKind,
@@ -841,9 +798,9 @@ export function mapSessionExecutorToRouting(
       return "kimi";
     case "chatgpt":
       // ChatGPT is handled via browser skill, not direct execution
-      // Fall back to Claude which can use the browser skill
-      return "claude";
+      // Fall back to Codex which can use the browser skill
+      return "codex";
     default:
-      return "claude";
+      return "codex";
   }
 }

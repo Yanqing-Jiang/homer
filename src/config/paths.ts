@@ -43,6 +43,7 @@ export const PATHS = {
   // ── Claude dir ──────────────────────────────────────────────
   claudeDir: claude,
   claudeMd: `${claude}/CLAUDE.md`,
+  agentsMd: `${runtimePaths.homeDir}/.codex/AGENTS.md`,
 
   // ── Homer root ─────────────────────────────────────────────
   homerRoot: homer,

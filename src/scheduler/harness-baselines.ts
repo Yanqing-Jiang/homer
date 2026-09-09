@@ -12,7 +12,7 @@ export interface InternalJobHarnessBaseline extends HarnessSelection {
 
 const HOME_DIR = process.env.HOME ?? process.cwd();
 const CODEX_MODEL = "gpt-5.6-terra";
-const CONTENT_MODEL = "github-copilot/claude-opus-5";
+const CONTENT_MODEL = "gpt-6-astra";
 const PROJECT_DIR = PATHS.homerRoot;
 
 function codexStage(
@@ -34,18 +34,18 @@ function codexStage(
 
 const PUBLIC_JOB_HARNESS_BASELINES = {
   "ideas-explore": {
-    executor: "opencode",
+    executor: "codex",
     model: CONTENT_MODEL,
     stages: {
       filter: codexStage(HOME_DIR, 180_000, "high"),
     },
   },
   "nightly-memory": {
-    executor: "opencode",
+    executor: "codex",
     model: CONTENT_MODEL,
     stages: {
       extract: {
-        executor: "opencode",
+        executor: "codex",
         model: CONTENT_MODEL,
         cwdOverride: HOME_DIR,
         timeoutOverride: 600_000,
@@ -53,15 +53,15 @@ const PUBLIC_JOB_HARNESS_BASELINES = {
     },
   },
   "weekly-memory-consolidation": {
-    executor: "opencode",
-    model: "github-copilot/claude-opus-5",
+    executor: "codex",
+    model: "gpt-6-astra",
     stages: {
       consolidate: {
-        executor: "opencode",
-        model: "github-copilot/claude-opus-5",
+        executor: "codex",
+        model: "gpt-6-astra",
         cwdOverride: HOME_DIR,
         timeoutOverride: 600_000,
-        executorOptions: { opencode: { variant: "high", forceOpenCode: true, researchOnly: false } },
+        executorOptions: { codex: { reasoningEffort: "high" } },
         fallbackChain: [],
       },
     },
@@ -88,7 +88,7 @@ const PUBLIC_JOB_HARNESS_BASELINES = {
     },
   },
   "content-scraper": {
-    executor: "opencode",
+    executor: "codex",
     model: CONTENT_MODEL,
     stages: {
       extract: codexStage(HOME_DIR, 180_000, "high"),

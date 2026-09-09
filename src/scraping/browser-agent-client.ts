@@ -13,6 +13,20 @@ export interface AgentBrowserSession {
   command(args: string[], timeoutMs?: number): Promise<string>;
 }
 
+/**
+ * Broker-managed Chrome instances. `downloads` is the resident :9222 Chrome
+ * (capacity 1, reserved for the Amazon portal collectors); `interactive` is the
+ * on-demand :9224 Chrome with the persistent Google/X/Unusual Whales profile.
+ */
+export type BrowserInstanceId = "downloads" | "interactive";
+
+export interface BrokeredAgentSessionOptions {
+  /** Broker instance to lease from; omitted = the broker default (downloads). */
+  instance?: BrowserInstanceId;
+  /** Per-run broker socket (DedicatedAgentSession); omitted = the daemon broker. */
+  socketPath?: string;
+}
+
 export class BrokeredAgentSession implements AgentBrowserSession {
   private readonly child: ChildProcess;
   private readonly pending = new Map<number, { resolve: (value: string) => void; reject: (error: Error) => void }>();
@@ -20,10 +34,10 @@ export class BrokeredAgentSession implements AgentBrowserSession {
   private readonly readyPromise: Promise<void>;
   private stderrTail = "";
 
-  constructor(surface?: string, signal?: AbortSignal, broker?: { instance: string; socketPath: string }) {
-    const args = ["agent", ...(surface ? [surface] : []), ...(broker ? ["--instance", broker.instance] : []), "--rpc"];
+  constructor(surface?: string, signal?: AbortSignal, broker: BrokeredAgentSessionOptions = {}) {
+    const args = ["agent", ...(surface ? [surface] : []), ...(broker.instance ? ["--instance", broker.instance] : []), "--rpc"];
     this.child = spawn("browserctl", args, { stdio: ["pipe", "pipe", "pipe"],
-      ...(broker ? { env: { ...process.env, HOMER_BROWSER_CONTROL_SOCKET: broker.socketPath } } : {}),
+      ...(broker.socketPath ? { env: { ...process.env, HOMER_BROWSER_CONTROL_SOCKET: broker.socketPath } } : {}),
     });
     this.child.stderr!.on("data", (chunk: Buffer) => {
       this.stderrTail = (this.stderrTail + chunk.toString()).slice(-500);
@@ -82,8 +96,23 @@ export class BrokeredAgentSession implements AgentBrowserSession {
   }
 }
 
-export async function withBrokeredAgentSession<T>(surface: string | undefined, operation: (session: BrokeredAgentSession) => Promise<T>, signal?: AbortSignal): Promise<T> {
-  const session = new BrokeredAgentSession(surface, signal);
+export interface WithBrokeredAgentSessionOptions extends BrokeredAgentSessionOptions {
+  signal?: AbortSignal;
+}
+
+/**
+ * Run `operation` under one `browserctl agent` lease on the daemon broker.
+ * `options.instance` selects the Chrome; callers that scrape non-Amazon sites
+ * must pass "interactive" — the default (downloads) is held for hours by the
+ * Amazon collectors and refuses everything else with "agent capacity 1 reached".
+ */
+export async function withBrokeredAgentSession<T>(
+  surface: string | undefined,
+  operation: (session: BrokeredAgentSession) => Promise<T>,
+  options: WithBrokeredAgentSessionOptions | AbortSignal = {},
+): Promise<T> {
+  const { signal, ...broker } = options instanceof AbortSignal ? { signal: options } : options;
+  const session = new BrokeredAgentSession(surface, signal, broker);
   try { return await operation(session); } finally { await session.close(); }
 }
 

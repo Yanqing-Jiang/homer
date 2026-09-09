@@ -1,3 +1,4 @@
+import { getSkillCommands } from "./skill-commands.js";
 /**
  * Unified Command Registry
  *
@@ -15,7 +16,7 @@ export type CommandCategory =
   | "search"     // Search commands
   | "system"     // System commands (status, debug, etc.)
   | "deprecated" // Deprecated commands with migration messages
-  | "skill"      // Runs a named Claude Code skill in the lane's session
+  | "skill"      // Runs a named installed skill in the lane's session
   | "utility";   // Other utilities
 
 export interface CommandDefinition {
@@ -48,11 +49,11 @@ export function skillInvocationQuery(skill: string, args = ""): string {
 }
 
 /**
- * Default opencode harness model (Grok 4.5 xhigh via the cursor provider) and the
+ * Explicit OpenCode default (Copilot Opus 5 for B4 HTML) and the
  * Claude rollback alias. Single source of truth for the "main harness" switch — see
  * the harness_default table + resolveDefaultExecutor() for the runtime default.
  */
-export const OPENCODE_DEFAULT_MODEL = "cursor/grok-4.5-xhigh";
+export const OPENCODE_DEFAULT_MODEL = "github-copilot/claude-opus-5";
 export const CLAUDE_ROLLBACK_MODEL = "opus[1m]";
 
 /**
@@ -64,7 +65,7 @@ export const EXECUTOR_MODELS: Record<ExecutorType, string | undefined> = {
   gemini: GEMINI_CLI_FLASH_MODEL, // Fast, cheap
   kimi: "kimi-k2-5",                // Kimi K2.5 via NVIDIA NIM
   chatgpt: undefined,               // Uses Claude + browser skill to access ChatGPT
-  opencode: OPENCODE_DEFAULT_MODEL, // cursor/grok-4.5-xhigh — the main harness model
+  opencode: OPENCODE_DEFAULT_MODEL, // Copilot Opus — explicit B4 HTML role
 };
 
 /**
@@ -90,7 +91,7 @@ export const COMMANDS: CommandDefinition[] = [
   {
     name: "/claude",
     category: "executor",
-    description: "Switch to Claude (default, tool use)",
+    description: "Switch to Claude Code explicitly",
     executor: "claude",
     model: "opus[1m]",
   },
@@ -155,10 +156,9 @@ export const COMMANDS: CommandDefinition[] = [
   {
     name: "/opencode",
     category: "executor",
-    description: "Switch to opencode (Grok 4.5 xhigh via cursor)",
+    description: "Switch to OpenCode Copilot Opus 5 (high)",
     executor: "opencode",
     model: OPENCODE_DEFAULT_MODEL,
-    aliases: ["/grok"],
   },
   {
     name: "/grok_high",
@@ -171,10 +171,12 @@ export const COMMANDS: CommandDefinition[] = [
   {
     name: "/open_opus",
     category: "executor",
-    description: "OpenCode with Cursor Claude Opus 4.8 (high, 1M)",
+    description: "OpenCode with GitHub Copilot Opus 5 (high)",
     executor: "opencode",
-    model: "cursor/claude-opus-4-8-high",
+    model: "github-copilot/claude-opus-5",
   },
+
+  ...getSkillCommands().filter((command) => !["/vc-login", "/amc-login"].includes(command.name)),
 
   // Search commands
   {
@@ -187,7 +189,7 @@ export const COMMANDS: CommandDefinition[] = [
   {
     name: "/harness",
     category: "system",
-    description: "Global default harness switch: /harness claude | /harness opencode",
+    description: "Global default harness switch: /harness codex",
   },
   {
     name: "/status",
@@ -247,9 +249,7 @@ export const COMMANDS: CommandDefinition[] = [
     description: "Quick-add a to-do — /todo <title> [P1|P2|P3] [W|L]",
   },
 
-  // Skill commands. Before 2026-09-01 these fell through to "Unknown command. Type /start
-  // for help." because they exist only as Claude Code skills, not as bot commands — so the
-  // MFA relay flow could only ever be started by typing a sentence.
+  // Login aliases retain the existing Telegram MFA-relay entry points.
   {
     name: "/vc-login",
     category: "skill",

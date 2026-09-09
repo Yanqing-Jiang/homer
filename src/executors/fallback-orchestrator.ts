@@ -23,8 +23,8 @@ export type ErrorType = "timeout" | "rate_limit" | "session_timeout" | "auth" | 
 // these named lists; upgrade when descriptors rank degradation targets without a hardcoded order.
 // Cursor-backed OpenCode models are retired from scheduled-job fallback (2026-08).
 // Claude Opus is supplied as the primary by selection; Codex/Gemini are independent fallbacks.
-export const DEFAULT_FALLBACK_ORDER: ExecutorKind[] = ["codex", "gemini"];
-export const MEMORY_FALLBACK_ORDER: ExecutorKind[] = ["gemini", "codex"];
+export const DEFAULT_FALLBACK_ORDER: ExecutorKind[] = ["codex"];
+export const MEMORY_FALLBACK_ORDER: ExecutorKind[] = ["codex"];
 
 export const FAILURE_DISABLE_THRESHOLD = 2;
 export const DISABLE_MS = 30 * 60 * 1000;

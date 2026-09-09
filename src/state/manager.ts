@@ -1845,7 +1845,7 @@ export class StateManager {
 
   /**
    * Read the global default harness (migration 104, one row id=1). Falls back to
-   * Claude Opus at medium effort if the row is somehow missing. Not cached:
+   * Codex Terra high if the row is somehow missing. Not cached:
    * a single indexed read, and the kill-switch must be visible across the daemon + MCP
    * processes that share this DB.
    */
@@ -1855,7 +1855,7 @@ export class StateManager {
       .get() as { executor: string; model: string | null } | undefined;
     // Fail-safe floor when the row is somehow missing (fresh DB pre-seed / corruption).
     if (!row || !isScheduledHarnessExecutor(row.executor)) {
-      return { executor: "claude", model: "opus[medium]" };
+      return { executor: "codex", model: getCatalogEntry("codex")?.defaultModel ?? "gpt-5.6-terra" };
     }
     return { executor: row.executor, model: row.model };
   }

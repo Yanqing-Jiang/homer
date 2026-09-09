@@ -33,6 +33,18 @@
     "./scheduler/harness-baselines.js": {
       "types": "./dist/scheduler/harness-baselines.d.ts",
       "import": "./dist/scheduler/harness-baselines.js"
+    },
+    "./commands/harness-catalog.js": {
+      "types": "./dist/commands/harness-catalog.d.ts",
+      "import": "./dist/commands/harness-catalog.js"
+    },
+    "./executors/codex-model.js": {
+      "types": "./dist/executors/codex-model.d.ts",
+      "import": "./dist/executors/codex-model.js"
+    },
+    "./commands/skill-commands.js": {
+      "types": "./dist/commands/skill-commands.d.ts",
+      "import": "./dist/commands/skill-commands.js"
     }
   },
   "engines": {

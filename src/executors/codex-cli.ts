@@ -6,38 +6,8 @@ import { processRegistry } from "../process/registry.js";
 
 const DEFAULT_TIMEOUT = 1800_000; // 30 minutes
 const KILL_GRACE_MS = 5_000;
-const CODEX_CLI_MODEL = "gpt-5.6-terra";
-
-export function resolveCodexModelVariant(
-  model: string | undefined,
-  reasoningEffort: string | undefined,
-): { model: string; reasoningEffort: string } {
-  switch (model) {
-    case undefined:
-    case "":
-    case CODEX_CLI_MODEL:
-      return { model: CODEX_CLI_MODEL, reasoningEffort: reasoningEffort ?? "high" };
-    // gpt-5.5-* retained as back-compat aliases for any stale selection rows/chains.
-    case "gpt-5.6-sol-medium":
-    case "gpt-5.5-medium":
-      return { model: "gpt-5.6-sol", reasoningEffort: "medium" };
-    case "gpt-5.6-sol-low":
-      return { model: "gpt-5.6-sol", reasoningEffort: "low" };
-    case "gpt-5.6-sol-xhigh":
-    case "gpt-5.5-xhigh":
-      return { model: "gpt-5.6-sol", reasoningEffort: "xhigh" };
-    case "gpt-5.5":
-      return { model: "gpt-5.6-sol", reasoningEffort: reasoningEffort ?? "high" };
-    case "gpt-5.6-luna-max":
-      return { model: "gpt-5.6-luna", reasoningEffort: "max" };
-    case "gpt-5.6-terra-max":
-      return { model: "gpt-5.6-terra", reasoningEffort: "max" };
-    case "gpt-6-astra-low":
-      return { model: "gpt-6-astra", reasoningEffort: "low" };
-    default:
-      return { model, reasoningEffort: reasoningEffort ?? "high" };
-  }
-}
+import { resolveCodexModelVariant } from "./codex-model.js";
+export { resolveCodexModelVariant } from "./codex-model.js";
 
 export interface CodexCLIOptions {
   cwd: string;
@@ -48,6 +18,8 @@ export interface CodexCLIOptions {
   reasoningEffort?: string;
   /** Keep read-only advisors from changing local state. */
   readOnly?: boolean;
+  /** Enable Codex's native `web_search` tool (`codex exec --search`) for public-web research. */
+  webSearch?: boolean;
   /** One browserctl lease around the complete nested browser workflow. */
   browserAgent?: boolean;
   browserInstance?: "downloads" | "interactive";
@@ -171,6 +143,8 @@ export async function executeCodexCLI(
 
     args.push("-m", codexVariant.model);
     args.push("-c", `model_reasoning_effort="${codexVariant.reasoningEffort}"`);
+    // `--search` is a global flag of the top-level `codex` command, so it must precede `exec`.
+    if (options.webSearch) args.unshift("--search");
 
     // `--` ends clap option parsing so prompts starting with `-`/`--`/`---`
     // (e.g. skill files with YAML front-matter) are treated as positional.

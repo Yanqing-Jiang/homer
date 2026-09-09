@@ -5,7 +5,10 @@
  * ~/memory/decisions/2026-05-26-reverted-opencli-back-to-agent-browser.md.
  *
  * Architecture:
- *   - `browserctl agent` lease wrapper over Chrome DevTools Protocol (port 9222)
+ *   - `browserctl agent --instance <i>` lease wrapper over Chrome DevTools Protocol.
+ *     Non-Amazon surfaces (X, Medium, LinkedIn, ...) lease the on-demand
+ *     `interactive` Chrome (:9224); the resident `downloads` Chrome (:9222) is
+ *     reserved for the Amazon portal collectors — see SCRAPE_SURFACE_INSTANCES.
  *   - Each scrape is a script file under ./scrape-scripts/, read + minified
  *     to a single-line expression and run via `agent-browser eval`
  *   - Each workflow gets a unique named agent-browser session and broker lease
@@ -18,7 +21,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { BrokeredAgentSession, withBrokeredAgentSession } from "../scraping/browser-agent-client.js";
+import { BrokeredAgentSession, withBrokeredAgentSession, type BrowserInstanceId } from "../scraping/browser-agent-client.js";
 import { logger } from "../utils/logger.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -167,6 +170,44 @@ export interface ScrapeOptions {
 }
 
 // ============================================
+// SURFACE → BROKER INSTANCE
+// ============================================
+
+/**
+ * Which broker-managed Chrome a scrape surface leases. Only the Amazon portal
+ * collectors belong on `downloads` (its single lease is held by them for hours);
+ * everything else — X, Medium, LinkedIn, ad-hoc `agent.<uuid>` surfaces — uses
+ * `interactive`, which the broker starts on demand and idle-stops.
+ */
+export const SCRAPE_SURFACE_INSTANCES: Readonly<Record<string, BrowserInstanceId>> = {
+  "agent.x": "interactive",
+  "agent.medium": "interactive",
+  "agent.linkedin": "interactive",
+  "agent.abvp": "downloads",
+  "agent.vendor-central": "downloads",
+  "agent.ox": "downloads",
+  "agent.amc": "downloads",
+};
+
+export const DEFAULT_SCRAPE_INSTANCE: BrowserInstanceId = "interactive";
+
+/** Broker instance for a surface; unknown/undefined surfaces default to interactive. */
+export function scrapeInstanceForSurface(surface: string | undefined): BrowserInstanceId {
+  if (!surface) return DEFAULT_SCRAPE_INSTANCE;
+  return SCRAPE_SURFACE_INSTANCES[surface] ?? DEFAULT_SCRAPE_INSTANCE;
+}
+
+/** Surface for a target URL, so its lease lands on the right instance. */
+export function scrapeSurfaceForUrl(url: string): string | undefined {
+  let host = "";
+  try { host = new URL(url).hostname.toLowerCase(); } catch { return undefined; }
+  if (host === "x.com" || host.endsWith(".x.com") || host === "twitter.com" || host.endsWith(".twitter.com")) return "agent.x";
+  if (host === "medium.com" || host.endsWith(".medium.com")) return "agent.medium";
+  if (host === "linkedin.com" || host.endsWith(".linkedin.com")) return "agent.linkedin";
+  return undefined;
+}
+
+// ============================================
 // SERIALIZATION MUTEX
 // ============================================
 
@@ -283,7 +324,9 @@ export async function connectScrapeBackend(signal?: AbortSignal): Promise<void> 
 
 export async function isScrapeBackendHealthy(): Promise<boolean> {
   try {
-    await withBrokeredAgentSession(undefined, (session) => session.command(["eval", "1+1"], 5_000));
+    // Probe the instance the scrapers actually use; the downloads lease is
+    // normally held by an Amazon collector and would answer "capacity reached".
+    await withBrokeredAgentSession("agent.scrape-health", (session) => session.command(["eval", "1+1"], 5_000), { instance: DEFAULT_SCRAPE_INSTANCE });
     return true;
   } catch {
     return false;
@@ -316,10 +359,10 @@ async function openAndEval<T>({ url, scriptName, timeoutMs, signal, postOpen }: 
   if (agentSession.getStore()) {
     return runOpenAndEval<T>({ url, scriptName, timeoutMs, signal, postOpen }, queueStart);
   }
-  const surface = url.includes("x.com") ? "agent.x" : url.includes("medium.com") ? "agent.medium" : undefined;
+  const surface = scrapeSurfaceForUrl(url);
   return withScrapeLock(() => withBrokeredAgentSession(surface, (session) => agentSession.run(session, () =>
     runOpenAndEval<T>({ url, scriptName, timeoutMs, signal, postOpen }, queueStart),
-  ), signal));
+  ), { signal, instance: scrapeInstanceForSurface(surface) }));
 }
 
 /**
@@ -329,10 +372,12 @@ async function openAndEval<T>({ url, scriptName, timeoutMs, signal, postOpen }: 
  * serialized by the broker, so the callback must NOT spawn its own browserctl
  * agent workflow (e.g. executeBrowserScrape) — that reserve would fail while the
  * shared lease is held. Re-entrant: an existing ambient session is reused.
+ * The lease lands on the instance mapped for `surface` (interactive unless the
+ * surface is an Amazon portal); a lease refusal rejects with browserctl's reason.
  */
 export async function withSharedScrapeSession<T>(surface: string, fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   if (agentSession.getStore()) return fn();
-  return withScrapeLock(() => withBrokeredAgentSession(surface, (session) => agentSession.run(session, fn), signal));
+  return withScrapeLock(() => withBrokeredAgentSession(surface, (session) => agentSession.run(session, fn), { signal, instance: scrapeInstanceForSurface(surface) }));
 }
 
 async function runOpenAndEval<T>({ url, scriptName, timeoutMs, signal, postOpen }: OpenAndEvalArgs, queueStart: number): Promise<ScrapeResult<T>> {
@@ -617,7 +662,7 @@ export async function fetchLinkedInTimeline(_limit = 10, options?: ScrapeOptions
   const { buildLinkedInTopPostPrompt } = await import("../scraping/browser-prompts.js");
   const timeoutMs = options?.timeout ?? 600_000;
   try {
-    const r = await executeBrowserScrape(buildLinkedInTopPostPrompt(), "", { timeout: timeoutMs, signal: options?.signal, browserInstance: "downloads" });
+    const r = await executeBrowserScrape(buildLinkedInTopPostPrompt(), "", { timeout: timeoutMs, signal: options?.signal, browserInstance: scrapeInstanceForSurface("agent.linkedin") });
     const rawOut = (r.output ?? "").trim();
 
     if (r.exitCode !== 0) {

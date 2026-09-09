@@ -368,13 +368,20 @@ function cmdRender(install: boolean, onlyIds?: string[]) {
   if (install) console.log("Installed into harness-native home directories.");
 }
 
-function cmdCheck(): number {
+function cmdCheck(installed = false): number {
   const { roots, configured } = loadRoots();
   const { files } = renderAll(roots, configured);
   const drift: string[] = [];
   for (const f of files) {
     const onDisk = existsSync(f.path) ? readFileSync(f.path) : null;
     if (!onDisk || Buffer.compare(onDisk, asBuffer(f.content)) !== 0) drift.push(f.path.replace(HOME, "~"));
+  }
+  if (installed) {
+    for (const f of files) {
+      if (!f.installPath) continue;
+      const actual = existsSync(f.installPath) ? readFileSync(f.installPath) : null;
+      if (!actual || Buffer.compare(actual, asBuffer(f.content)) !== 0) drift.push(`INSTALLED ${homePath(f.installPath)}`);
+    }
   }
   // Also flag committed files with no canonical source (stale).
   const expected = new Set(files.map((f) => f.path));
@@ -404,9 +411,9 @@ try {
     if (onlyAt !== -1 && !rest[onlyAt + 1]) throw new Error("--only requires comma-separated asset ids");
     cmdRender(rest.includes("--install"), onlyAt === -1 ? undefined : rest[onlyAt + 1]!.split(","));
   }
-  else if (cmd === "check") process.exit(cmdCheck());
+  else if (cmd === "check") process.exit(cmdCheck(rest.includes("--installed")));
   else if (cmd === "list") cmdList();
-  else { console.error("usage: render-harness-assets.ts <render [--install] [--only id,id] | check | list>"); process.exit(2); }
+  else { console.error("usage: render-harness-assets.ts <render [--install] [--only id,id] | check [--installed] | list>"); process.exit(2); }
 } catch (e) {
   console.error(`render-harness-assets: ${e instanceof Error ? e.message : e}`);
   process.exit(1);

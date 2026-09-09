@@ -10,7 +10,7 @@ import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import { runWithFallbackChain, DEFAULT_FALLBACK_ORDER, type ExecutorKind } from "./fallback-orchestrator.js";
 import { writeChainTrace } from "./trace-writer.js";
-import { getCatalogEntry, getClaudeDefaultModel, validateHarnessSelection } from "../commands/index.js";
+import { getCatalogEntry, validateHarnessSelection } from "../commands/index.js";
 import { buildConversationContext, CONTEXT_DEFAULTS, type ContextSource } from "./context-builder.js";
 
 export type CLIExecutor = "claude" | "gemini" | "codex" | "kimi" | "chatgpt" | "opencode";
@@ -266,11 +266,11 @@ export class CLIRunManager {
     const laneExecutor = params.executor ?? executorState?.executor ?? this.stateManager.resolveDefaultExecutor();
     const laneModel = params.model ?? executorState?.model ?? defaultModelFor(laneExecutor);
 
-    // GLM-5.2 (opencode) is text-only: route image-bearing turns to Claude (vision) for THIS
+    // GLM-5.2 (opencode) is text-only: route image-bearing turns to Codex Astra (vision) for THIS
     // turn only — the lane's persisted executor/model stay opencode and its session is untouched.
     const imageOverride = laneExecutor === "opencode" && laneModel?.includes("/glm-") === true && hasImageAttachment(params.attachments);
-    const executor = imageOverride ? "claude" : laneExecutor;
-    const model = imageOverride ? getClaudeDefaultModel(params.lane) : laneModel;
+    const executor = imageOverride ? "codex" : laneExecutor;
+    const model = imageOverride ? "gpt-6-astra" : laneModel;
 
     // Resume the session for the *resolved* executor+model from the session map (never blindly
     // from executor_state.session_id, which may belong to a different executor). Image-override

@@ -16,9 +16,9 @@ export type WritingPlatform = "medium" | "linkedin" | "x";
 const HOME = getRuntimePaths().homeDir;
 
 const SKILL_PATHS: Record<WritingPlatform, string> = {
-  medium: `${HOME}/.claude/skills/write-medium/SKILL.md`,
-  linkedin: `${HOME}/.claude/skills/write-linkedin/SKILL.md`,
-  x: `${HOME}/.claude/skills/write-x/SKILL.md`,
+  medium: `${HOME}/.codex/skills/homer/write-medium/SKILL.md`,
+  linkedin: `${HOME}/.codex/skills/homer/write-linkedin/SKILL.md`,
+  x: `${HOME}/.codex/skills/homer/write-x/SKILL.md`,
 };
 
 function extractPlatformSection(markdown: string, platform: WritingPlatform): string | null {

@@ -45,6 +45,8 @@ const CATALOG: Record<CatalogExecutor, HarnessCatalogEntry> = {
     modelMode: "catalog",
     defaultModel: "opus[1m]",
     models: [
+      { id: "fable[medium]", label: "Fable (medium)" },
+      { id: "fable[high]", label: "Fable (high)" },
       { id: "opus[1m]", label: "Opus 1M", default: true },
       { id: "opus[high]", label: "Opus (high effort)" },
       { id: "opus[medium]", label: "Opus (medium effort)" },
@@ -58,7 +60,8 @@ const CATALOG: Record<CatalogExecutor, HarnessCatalogEntry> = {
     modelMode: "catalog",
     defaultModel: OPENCODE_DEFAULT_MODEL,
     models: [
-      { id: "cursor/grok-4.5-xhigh", label: "Cursor Grok 4.5 (xhigh)", default: true },
+      { id: "cursor/grok-4.5-xhigh", label: "Cursor Grok 4.5 (xhigh)" },
+      { id: "cursor/claude-fable-5-medium", label: "Cursor Fable (medium)" },
       { id: "cursor/grok-4.5-high", label: "Cursor Grok 4.5 (high)" },
       { id: "cursor/grok-4.5-medium", label: "Cursor Grok 4.5 (medium)" },
       { id: "cursor/grok-4.5-fast-xhigh", label: "Cursor Grok 4.5 Fast (xhigh)" },
@@ -74,7 +77,7 @@ const CATALOG: Record<CatalogExecutor, HarnessCatalogEntry> = {
       { id: "opencode-go-2/kimi-k2.7-code", label: "Kimi K2.7 Code (account 2)" },
       { id: "opencode-go/deepseek-v4-flash", label: "DeepSeek V4 Flash" },
       { id: "github-copilot/claude-opus-4.8", label: "GitHub Copilot Opus 4.8 (high)" },
-      { id: "github-copilot/claude-opus-5", label: "GitHub Copilot Opus 5" },
+      { id: "github-copilot/claude-opus-5", label: "GitHub Copilot Opus 5 (high)", default: true },
     ],
   },
   gemini: {

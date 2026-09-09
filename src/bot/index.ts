@@ -200,7 +200,7 @@ export function createBot(stateManager: StateManager, runManager: CLIRunManager)
       "H.O.M.E.R ready.\n\n" +
         `*Current executor:* ${currentExecutor}\n\n` +
         "*Executor Commands:* (persistent)\n" +
-        "/claude - Claude (default)\n" +
+        "/codex - Codex (default)\n" +
         "/open_flash - OpenCode + Gemini Flash\n" +
         "/open_opus - OpenCode + Claude Opus\n" +
         "/codex - Codex (deep reasoning)\n" +
@@ -1536,7 +1536,7 @@ async function handleNewExecution(
 
   // Get current executor state
   const executorState = stateManager.getCurrentExecutor(lane);
-  const currentExecutor = executorState?.executor || "claude";
+  const currentExecutor = executorState?.executor || "codex";
 
   // Determine if this is a new session
   const isNewSession = parsed.isNewSession;

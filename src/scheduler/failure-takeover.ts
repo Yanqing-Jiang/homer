@@ -234,7 +234,7 @@ Diagnose why, and decide the best course of action.
 <failed_job>
   <id>${job.config.id}</id>
   <name>${job.config.name}</name>
-  <executor>${job.config.executor ?? "claude"}</executor>
+  <executor>${job.config.executor ?? "codex"}</executor>
   <handler>${job.config.handler ?? "N/A"}</handler>
   <cron>${job.config.cron}</cron>
   <query>${truncate(job.config.query, 2000)}</query>
@@ -510,7 +510,7 @@ export async function runFailureTakeover(params: {
             { capability: "tools.shell", required: true, reason: "run build/retry" },
           ]
         : [{ capability: "text.generate", required: true, reason: "diagnose-only report" }];
-      for (const harness of ["codex", "claude"] as const) {
+      const harness = "codex";
         try {
           const result = await executeResolvedHarness({
             source: "scheduler",
@@ -518,9 +518,7 @@ export async function runFailureTakeover(params: {
             prompt: decisionPrompt,
             scope: { jobId },
             cwd,
-            explicit: { harness, ...(harness === "codex" ? {
-              model: needsAutoFix ? "gpt-5.6-terra-max" : "gpt-5.6-terra",
-            } : {}) },
+            explicit: { harness, model: needsAutoFix ? "gpt-5.6-terra-max" : "gpt-5.6-terra" },
             requiredCapabilities,
             timeoutMs: Math.max(remainingMs(), 0),
             signal: deadlineController.signal,
@@ -530,7 +528,6 @@ export async function runFailureTakeover(params: {
           const msg = error instanceof Error ? error.message : String(error);
           logger.error({ jobId, harness, error: msg }, "Takeover decision session failed");
         }
-      }
       return null;
     };
 
@@ -608,7 +605,7 @@ export async function runFailureTakeover(params: {
       }
       const output = decisionOutcome.value;
       if (output === null) {
-        logger.error({ jobId, attempt }, "Takeover decision session unavailable (codex + claude both failed)");
+        logger.error({ jobId, attempt }, "Takeover decision session unavailable (codex failed)");
         break; // fall through to escalation
       }
       lastOutput = output;
@@ -693,7 +690,7 @@ export async function runFailureTakeover(params: {
       fallbackLogs,
       allowAutoFix: false,
       escalationMode: true,
-      availableHarnesses: ["claude", "codex", "gemini", "kimi", "opencode"],
+      availableHarnesses: ["codex"],
     });
 
     // Deadline-raced like every other phase: an abort-ignoring harness must not
