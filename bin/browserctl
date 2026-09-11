@@ -24,7 +24,7 @@ const browserEnv = { ...process.env, AGENT_BROWSER_SOCKET_DIR: socketDir };
 let cdpBase = "http://127.0.0.1:9222";
 const [command, ...args] = process.argv.slice(2);
 
-function usage() { throw new Error("usage: browserctl status [surface] | cleanup-blanks [--instance downloads|interactive] | acquire <surface> <owner> <ttl-seconds> | acquire-external <agent.surface> <owner> <ttl-seconds> [--grant] | capabilities | release-grant <leaseId> | renew <leaseId> <ttl-seconds> | release <leaseId> [--close-target] | reconcile <surface> <origin[,origin...]> <bootstrapUrl> | keeper [--instance interactive] | touch <surface> | maintenance <on|off> [reason] | agent [agent.surface] [--ttl seconds] [--adopt <leaseId>] [--instance downloads|interactive] [--rpc | -- <workflow command...>]\n  broker verbs accept a trailing --instance <downloads|interactive>"); }
+function usage() { throw new Error("usage: browserctl status [surface] | cleanup-blanks [--instance downloads|interactive] | recover --instance interactive | acquire <surface> <owner> <ttl-seconds> | acquire-external <agent.surface> <owner> <ttl-seconds> [--grant] | capabilities | release-grant <leaseId> | renew <leaseId> <ttl-seconds> | release <leaseId> [--close-target] | reconcile <surface> <origin[,origin...]> <bootstrapUrl> | keeper [--instance interactive] | touch <surface> | maintenance <on|off> [reason] | agent [agent.surface] [--ttl seconds] [--adopt <leaseId>] [--instance downloads|interactive] [--rpc | -- <workflow command...>]\n  broker verbs accept a trailing --instance <downloads|interactive>"); }
 
 async function readStatus(surface) {
   const now = Date.now();
@@ -77,7 +77,8 @@ function requestBroker(request) {
       if (!output.includes("\n")) return;
       try {
         const response = JSON.parse(output.slice(0, output.indexOf("\n")));
-        if (!response.ok) reject(new Error(response.error)); else resolve(response.result);
+        // Keep the human message first (callers match on it); the stable code follows for scripts.
+        if (!response.ok) reject(Object.assign(new Error(response.code ? `${response.error} [${response.code}]` : response.error), { code: response.code })); else resolve(response.result);
       } catch (error) { reject(error); }
       socket.end();
     });
@@ -355,6 +356,8 @@ try {
     // the browser first and hand the leaseId to the agent as a grant (`agent --adopt`).
     else if (command === "capabilities" && args.length === 0) request = { verb: "capabilities" };
     else if (command === "cleanup-blanks" && args.length === 0) request = { verb: "cleanup-blanks" };
+    // Close popups orphaned by finished sessions plus disposable blanks; protected pages are reported, never closed.
+    else if (command === "recover" && args.length === 0) request = { verb: "recover" };
     else if (command === "acquire-external" && (args.length === 3 || (args.length === 4 && args[3] === "--grant"))) request = { verb: "reserve-external", surface: args[0], owner: args[1], ttl: Number(args[2]), granted: args[3] === "--grant" };
     // Drop a granted reservation. Only the holder calls this; an adopter's `release` keeps it.
     else if (command === "release-grant" && args.length === 1) request = { verb: "release-grant", leaseId: args[0] };

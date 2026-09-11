@@ -8,6 +8,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { promisify } from "node:util";
+import { RotatingLogSink } from "./log-sink.mjs";
 
 const execFileAsync = promisify(execFile);
 const childCommand = process.argv[2] ?? process.execPath;
@@ -52,10 +53,18 @@ function positiveInt(name, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+// The daemon's stdout/stderr are piped through these sinks (not inherited from launchd), so a
+// newsyslog rename no longer strands its output in a deleted inode. Same file names as before:
+// the TUI and the fatal handler point people at logs/stdout.log.
+const logsDir = process.env.HOMER_LOGS_DIR ?? path.join(cwd, "logs");
+const stdoutSink = new RotatingLogSink(path.join(logsDir, "stdout.log"));
+const stderrSink = new RotatingLogSink(path.join(logsDir, "stderr.log"));
 function log(message, fields = {}) {
-  process.stdout.write(`${JSON.stringify({
+  const line = `${JSON.stringify({
     time: new Date().toISOString(), component: "homer-supervisor", message, ...fields,
-  })}\n`);
+  })}\n`;
+  process.stdout.write(line);
+  stdoutSink.write(line);
 }
 
 process.on("SIGHUP", () => {
@@ -326,8 +335,10 @@ async function main() {
   while (!stopping) {
     const startedAt = Date.now();
     const child = spawn(childCommand, childArgs, {
-      cwd, env: { ...process.env, HOMER_SUPERVISED: "1" }, stdio: "inherit",
+      cwd, env: { ...process.env, HOMER_SUPERVISED: "1" }, stdio: ["inherit", "pipe", "pipe"],
     });
+    child.stdout?.on("data", (chunk) => stdoutSink.write(chunk));
+    child.stderr?.on("data", (chunk) => stderrSink.write(chunk));
     child.on("error", (error) => log("failed to spawn daemon", { error: error.message }));
     log("daemon started", { pid: child.pid });
 

@@ -21,6 +21,17 @@ export function browserDriverAlive(owner: string | null | undefined, socketPath 
   } catch (error) { return (error as NodeJS.ErrnoException).code !== "ENOENT"; }
 }
 interface CdpTarget { id: string; type: string; url: string; webSocketDebuggerUrl: string }
+/**
+ * `Target.getTargets` view of a page. `openerId` names the page that opened this one and is
+ * dropped by Chrome once that opener closes; `openerFrameId` (the opener's main frame, which
+ * Chrome numbers with the opener's target id) survives the opener. Both are read so a popup
+ * can be attributed to its lease while the lease lives AND recognised as an orphan after.
+ */
+export interface CdpTargetInfo { id: string; type: string; url: string; openerId?: string; openerFrameId?: string }
+/** A refusal with a stable machine-readable code; the message is unchanged for humans and regexes. */
+export class BrokerError extends Error {
+  constructor(readonly code: string, message: string) { super(message); this.name = "BrokerError"; }
+}
 export interface TargetRecord {
   surface: string; generation: number; targetId: string; expectedOrigins: string[]; currentUrl: string;
   lastVerifiedUrl: string; owner: string | null; leaseId: string | null; leaseExpiresAt: number | null; lastActivityAt: number;
@@ -57,7 +68,11 @@ export interface ExternalReservation {
   /** The `browserctl-agent:<pid>` that most recently adopted this grant, if any. */
   adopterOwner?: string | null;
 }
-export interface BrowserTargetClient { list(): Promise<CdpTarget[]>; create(url: string): Promise<CdpTarget>; close(targetId: string): Promise<void> }
+export interface BrowserTargetClient {
+  list(): Promise<CdpTarget[]>; create(url: string): Promise<CdpTarget>; close(targetId: string): Promise<void>;
+  /** Opener attribution for every page; optional because the HTTP `/json/list` view lacks it. */
+  inspect?(): Promise<CdpTargetInfo[]>;
+}
 export class HttpBrowserTargetClient implements BrowserTargetClient {
   constructor(private readonly port = 9222) {}
   async list(): Promise<CdpTarget[]> {
@@ -73,6 +88,28 @@ export class HttpBrowserTargetClient implements BrowserTargetClient {
   async close(targetId: string): Promise<void> {
     const response = await fetch(`http://127.0.0.1:${this.port}/json/close/${encodeURIComponent(targetId)}`);
     if (!response.ok) throw new Error(`CDP target close failed: HTTP ${response.status}`);
+  }
+  /** One short browser-level CDP call; never attaches to a page, so it cannot pause a driver's tab. */
+  async inspect(): Promise<CdpTargetInfo[]> {
+    const version = await (await fetch(`http://127.0.0.1:${this.port}/json/version`)).json() as { webSocketDebuggerUrl?: string };
+    if (!version.webSocketDebuggerUrl) throw new Error("CDP /json/version has no webSocketDebuggerUrl");
+    const socket = new WebSocket(version.webSocketDebuggerUrl);
+    try {
+      return await new Promise<CdpTargetInfo[]>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Target.getTargets timed out")), 5_000);
+        socket.onerror = () => { clearTimeout(timer); reject(new Error("CDP browser socket failed")); };
+        socket.onopen = () => socket.send(JSON.stringify({ id: 1, method: "Target.getTargets" }));
+        socket.onmessage = (event) => {
+          clearTimeout(timer);
+          try {
+            const reply = JSON.parse(String(event.data)) as { result?: { targetInfos?: Array<{ targetId: string; type: string; url: string; openerId?: string; openerFrameId?: string }> }; error?: { message?: string } };
+            if (reply.error) throw new Error(reply.error.message ?? "Target.getTargets failed");
+            resolve((reply.result?.targetInfos ?? []).filter((info) => info.type === "page")
+              .map((info) => ({ id: info.targetId, type: info.type, url: info.url, openerId: info.openerId, openerFrameId: info.openerFrameId })));
+          } catch (error) { reject(error); }
+        };
+      });
+    } finally { try { socket.close(); } catch { /* already closed */ } }
   }
 }
 function originOf(url: string): string { try { return new URL(url).origin; } catch { return ""; } }
@@ -214,7 +251,7 @@ export class BrowserLeaseBroker {
       if (surface === "human.general" && !owner.startsWith("human:")) throw new Error("automation cannot acquire human.general");
       const record = this.records.get(surface);
       if (!record || record.generation !== this.generation) throw new Error(`surface ${surface} is not reconciled`);
-      if (record.leaseId) throw new Error(`surface ${surface} is leased by ${record.owner}`);
+      if (record.leaseId) throw new BrokerError("SURFACE_LEASED", `surface ${surface} is leased by ${record.owner}`);
       this.inFlightAcquires++;
       try {
         const live = (await this.targets.list()).find((target) => target.id === record.targetId);
@@ -244,19 +281,19 @@ export class BrowserLeaseBroker {
     // The startup self-test is the ONLY thing that clears a degradation, so it must not be refused
     // by it — otherwise one failed test (a dead agent pid holding a lease, 2026-09-01) locked the
     // broker degraded for good.
-    if (this.degradedReason && !options.bypassDegraded) throw new Error(`agent-browser automation degraded: ${this.degradedReason}`);
-    if (this.draining) throw new Error("broker is draining leases");
+    if (this.degradedReason && !options.bypassDegraded) throw new BrokerError("DEGRADED", `agent-browser automation degraded: ${this.degradedReason}`);
+    if (this.draining) throw new BrokerError("DRAINING", "broker is draining leases");
     const graceUntil = this.adoptionGraceUntil();
     if (graceUntil !== null) {
-      throw new Error(`agent target creation is reserved by the adopted browser's previous holder until ${new Date(graceUntil).toISOString()} (adoption grace)`);
+      throw new BrokerError("ADOPTION_GRACE", `agent target creation is reserved by the adopted browser's previous holder until ${new Date(graceUntil).toISOString()} (adoption grace)`);
     }
-    if (!surface.startsWith("agent.")) throw new Error("external agent surfaces must start with agent.");
+    if (!surface.startsWith("agent.")) throw new BrokerError("BAD_SURFACE", "external agent surfaces must start with agent.");
     if (this.records.get(surface)?.leaseId || [...this.externalReservations.values()].some(r => r.surface === surface)) {
-      throw new Error(`surface ${surface} is already occupied or pending`);
+      throw new BrokerError("SURFACE_OCCUPIED", `surface ${surface} is already occupied or pending`);
     }
     if (this.externalLeaseCount() >= this.maxAgents) {
       const owners = [...this.externalReservations.values(), ...this.records.values()].filter(r => r.leaseId).map(r => r.owner);
-      throw new Error(`agent capacity ${this.maxAgents} reached; reserved by active owners: ${[...new Set(owners)].join(", ")}`);
+      throw new BrokerError("CAPACITY", `agent capacity ${this.maxAgents} reached; reserved by active owners: ${[...new Set(owners)].join(", ")}`);
     }
     // Take the baseline BEFORE publishing the reservation. Published first, a targets.list()
     // failure returned no leaseId to the caller while the broker kept the reservation — the
@@ -366,7 +403,7 @@ export class BrowserLeaseBroker {
     const bound = [...this.records.values()].find((candidate) => candidate.leaseId === leaseId);
     const reservation = this.externalReservations.get(leaseId);
     if (bound && reservation?.granted) {
-      if (closeTarget) { await this.targets.close(bound.targetId); this.records.delete(bound.surface); }
+      if (closeTarget) { await this.closeFamily(bound.targetId, bound.surface); this.records.delete(bound.surface); }
       else this.clearLease(bound);
       // The adopter is gone; the grant is not. Forgetting the adopter keeps a stale, already-dead
       // pid from being the thing a later reclaim decision is made on.
@@ -377,7 +414,7 @@ export class BrowserLeaseBroker {
     if (reservation) {
       if (closeTarget && externalTargetId) {
         if ([...this.records.values()].some(record => record.targetId === externalTargetId)) throw new Error("external target is already owned by another record");
-        await this.targets.close(externalTargetId);
+        await this.closeFamily(externalTargetId, reservation.surface);
       }
       // Setup can fail before registration; release the adopter, never its holder's grant.
       if (reservation.granted) this.externalReservations.set(leaseId, { ...reservation, adopterOwner: null });
@@ -387,11 +424,110 @@ export class BrowserLeaseBroker {
     }
     const record = this.byLease(leaseId);
     if (closeTarget) {
-      await this.targets.close(record.targetId);
+      await this.closeFamily(record.targetId, record.surface);
       this.records.delete(record.surface);
     } else this.clearLease(record);
     this.transition();
     return { leaseId, released: true };
+  }
+  /**
+   * Pages reachable from `rootId` through opener links (a `target=_blank` click, a popup), never
+   * one another record owns. Computed BEFORE the root closes: Chrome drops `openerId` once the
+   * opener is gone, and a sibling lease's tab is excluded by ownership, not by URL.
+   */
+  private async descendantsOf(rootId: string): Promise<string[]> {
+    if (!this.targets.inspect) return [];
+    let infos: CdpTargetInfo[];
+    try { infos = await this.targets.inspect(); } catch (err) { logger.warn({ err, rootId }, "Target inspection failed; closing the root tab only"); return []; }
+    const owned = new Set([...this.records.values()].map((record) => record.targetId));
+    const found: string[] = [];
+    let frontier = new Set([rootId]);
+    while (frontier.size) {
+      const next = new Set<string>();
+      for (const info of infos) {
+        if (info.id === rootId || owned.has(info.id) || found.includes(info.id)) continue;
+        if (frontier.has(info.openerId ?? "") || frontier.has(info.openerFrameId ?? "")) { found.push(info.id); next.add(info.id); }
+      }
+      frontier = next;
+    }
+    return found;
+  }
+  /** Close a lease's tab and every popup it spawned. The root close is awaited and may throw; descendants are best effort. */
+  private async closeFamily(rootId: string, surface: string): Promise<void> {
+    const family = await this.descendantsOf(rootId);
+    await this.targets.close(rootId);
+    for (const targetId of family) {
+      try { await this.targets.close(targetId); logger.info({ surface, rootId, targetId }, "Closed a popup descended from a released lease tab"); }
+      catch (err) { logger.warn({ err, surface, rootId, targetId }, "Failed to close a lease descendant tab"); }
+    }
+  }
+  /**
+   * Pages no record owns, classified. `orphan` means a popup whose opener chain ends at a page
+   * that no longer exists: a finished session's leftover. A page with no opener (a human's new
+   * tab, a restored tab) or one descending from a live page is NOT an orphan and is protected.
+   */
+  async unknownPages(): Promise<Array<CdpTargetInfo & { orphan: boolean }>> {
+    let listed: CdpTargetInfo[] | null = null;
+    if (this.targets.inspect) { try { listed = await this.targets.inspect(); } catch (err) { logger.warn({ err }, "Target inspection failed; unknown pages are all protected"); } }
+    if (!listed) listed = (await this.targets.list()).map((target) => ({ id: target.id, type: target.type, url: target.url }));
+    const owned = new Set([...this.records.values()].map((record) => record.targetId));
+    const byId = new Map(listed.map((info) => [info.id, info]));
+    const orphan = (info: CdpTargetInfo, depth = 0): boolean => {
+      const opener = info.openerId ?? info.openerFrameId;
+      if (!opener || depth > 16) return false;
+      if (owned.has(opener)) return false;
+      const parent = byId.get(opener);
+      return parent ? orphan(parent, depth + 1) : true;
+    };
+    return listed.filter((info) => !owned.has(info.id) && !isBlankTarget(info.url)).map((info) => ({ ...info, orphan: orphan(info) }));
+  }
+  /** Close proven orphans only; everything else unknown stays open and is reported as protected. */
+  async recoverOrphans(): Promise<{ closed: Array<{ id: string; url: string }>; protected: Array<{ id: string; url: string }> }> {
+    return this.withSurfaceLock("__external_admission", async () => {
+      const pages = await this.unknownPages();
+      const closed: Array<{ id: string; url: string }> = [];
+      for (const page of pages) {
+        if (!page.orphan) continue;
+        try { await this.targets.close(page.id); closed.push({ id: page.id, url: page.url }); logger.info({ targetId: page.id, url: page.url.slice(0, 160) }, "Closed an orphan popup left by a finished session"); }
+        catch (err) { logger.warn({ err, targetId: page.id }, "Failed to close an orphan popup"); }
+      }
+      return { closed, protected: pages.filter((page) => !page.orphan).map((page) => ({ id: page.id, url: page.url })) };
+    });
+  }
+  /**
+   * A long-lived, never-leased tab (e.g. `pinned.unusualwhales`) that keeps its Chrome resident.
+   * Idempotent: a live record wins; otherwise the previous generation's tab, then an unowned
+   * ROOT page on the allowed origin (never a popup, never another record's tab); else a new tab.
+   * No sweeping of look-alike pages, unlike surface reconcile.
+   */
+  async ensurePinned(surface: string, expectedOrigins: string[], bootstrapUrl: string): Promise<TargetRecord> {
+    if (!surface.startsWith("pinned.")) throw new Error("pinned surfaces must start with pinned.");
+    const allowed = [...new Set(expectedOrigins.map((origin) => new URL(origin).origin))];
+    const run = this.reconcileLock.then(async () => {
+      const listed = await this.targets.list();
+      const existing = this.records.get(surface);
+      if (existing?.generation === this.generation && listed.some((target) => target.id === existing.targetId)) return { ...existing };
+      const owned = new Set([...this.records.values()].filter((record) => record.surface !== surface).map((record) => record.targetId));
+      let infos: CdpTargetInfo[] | null = null;
+      if (this.targets.inspect) { try { infos = await this.targets.inspect(); } catch { infos = null; } }
+      const isRoot = (id: string) => { const info = infos?.find((row) => row.id === id); return !info || (!info.openerId && !info.openerFrameId); };
+      const previousId = this.previousTargets.get(surface);
+      const adopted = listed.find((target) => target.id === previousId && allowed.includes(originOf(target.url)))
+        ?? listed.find((target) => !owned.has(target.id) && allowed.includes(originOf(target.url)) && isRoot(target.id));
+      const target = adopted ?? await this.targets.create(bootstrapUrl);
+      if (adopted) logger.info({ surface, targetId: adopted.id, url: adopted.url }, "Adopted an existing tab as a pinned surface");
+      else logger.info({ surface, targetId: target.id }, "Created a pinned surface tab");
+      const record: TargetRecord = { surface, generation: this.generation, targetId: target.id, expectedOrigins: allowed, currentUrl: target.url, lastVerifiedUrl: target.url, owner: null, leaseId: null, leaseExpiresAt: null, lastActivityAt: this.now() };
+      this.records.set(surface, record);
+      this.transition();
+      return { ...record };
+    });
+    this.reconcileLock = run.then(() => undefined, () => undefined);
+    return run;
+  }
+  /** Records of this generation whose surface starts with `prefix` (no target liveness check; sync). */
+  recordsWithPrefix(prefix: string): TargetRecord[] {
+    return [...this.records.values()].filter((record) => record.surface.startsWith(prefix) && record.generation === this.generation).map((record) => ({ ...record }));
   }
   /** Broker maintenance, serialized against target adoption and external admission. */
   async cleanupBlanks(automatic = false): Promise<{ closed: string[]; remaining: number; deferred: boolean }> {
@@ -702,7 +838,7 @@ export class BrowserLeaseBroker {
     while (this.pendingCloses.length > 0) {
       const pending = this.pendingCloses.shift()!;
       try {
-        await this.targets.close(pending.targetId);
+        await this.closeFamily(pending.targetId, pending.surface);
         logger.info(pending, "Closed the tab of a reclaimed agent lease");
       } catch (err) {
         logger.warn({ err, ...pending }, "Failed to close the tab of a reclaimed agent lease");
@@ -778,11 +914,13 @@ export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenanc
     });
     const respond = async () => {
       socket.pause();
+      let touched: BrowserControlInstance | undefined;
       try {
         const request = JSON.parse(input.slice(0, input.indexOf("\n"))) as ControlRequest;
         const byLease = request.leaseId ? instances.find(item => item.broker.hasLease(request.leaseId!)) : undefined;
         const instanceId = request.instance ?? byLease?.id ?? "downloads";
         const instance = instances.find(item => item.id === instanceId);
+        touched = instance;
         if (instanceId !== "downloads" && !instance) throw new Error("unknown browser instance");
         if (byLease && byLease.id !== instanceId) throw new Error("lease instance mismatch");
         if (instance && instance.id !== "downloads" && request.leaseId && broker.hasLease(request.leaseId)) throw new Error("lease instance mismatch");
@@ -791,10 +929,17 @@ export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenanc
         let result: unknown;
         if (request.verb === "status" && instance) result = await instance.status();
         else if (request.verb === "cleanup-blanks") result = await selected.cleanupBlanks();
+        else if (request.verb === "recover") {
+          // Interactive only: the downloads Chrome's tabs are the portal collectors' and are never swept.
+          if (!instance || instance.id === "downloads") throw new BrokerError("UNSUPPORTED", "recover is defined for the interactive instance only; downloads tabs are never swept");
+          const orphans = await selected.recoverOrphans();
+          const blanks = await selected.cleanupBlanks();
+          result = { ...orphans, blanks: blanks.closed, blanksDeferred: blanks.deferred };
+        }
         else if (request.verb === "reconcile") result = await selected.reconcile(request.surface!, request.expectedOrigin!, request.bootstrapUrl!);
         else if (request.verb === "acquire") result = await selected.acquire(request.surface!, request.owner!, request.ttl!);
         else if (request.verb === "reserve-external") result = await selected.reserveExternal(request.surface!, request.owner!, request.ttl!, request.granted === true);
-        else if (request.verb === "capabilities") result = { verbs: ["reserve-external", "adopt-external", "release-grant", "acquire", "renew", "release", "reconcile", "cleanup-blanks", "touch", "maintenance"], grants: true, instances: ["downloads", ...instances.map(item => item.id)] };
+        else if (request.verb === "capabilities") result = { verbs: ["reserve-external", "adopt-external", "release-grant", "acquire", "renew", "release", "reconcile", "cleanup-blanks", "recover", "touch", "maintenance"], grants: true, errorCodes: true, instances: ["downloads", ...instances.map(item => item.id)] };
         else if (request.verb === "adopt-external") result = selected.adoptExternal(request.leaseId!, request.owner!, request.surface);
         else if (request.verb === "release-grant") result = await selected.releaseGrant(request.leaseId!);
         else if (request.verb === "register-external-target") result = await selected.registerExternalTarget(request.leaseId!, request.targetId!);
@@ -807,11 +952,15 @@ export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenanc
           if (!request.enabled) selected.resume();
           result = { enabled: Boolean(request.enabled), reason: request.enabled ? request.reason ?? "browserctl" : null };
         } else throw new Error(`unknown verb: ${request.verb}`);
-        instance?.changed();
         if (result && typeof result === "object") result = { ...result, instance: instanceId, cdpEndpoint: instance?.endpoint ?? "http://127.0.0.1:9222" };
         socket.end(`${JSON.stringify({ ok: true, result })}\n`);
       } catch (error) {
-        socket.end(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`);
+        const code = error instanceof BrokerError ? error.code : undefined;
+        socket.end(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error), ...(code ? { code } : {}) })}\n`);
+      } finally {
+        // A refused admission used to skip this, which cancelled the interactive idle timer
+        // that ready() had cleared: one refusal could keep an idle Chrome resident for good.
+        try { touched?.changed(); } catch { /* status-only */ }
       }
     };
   });
