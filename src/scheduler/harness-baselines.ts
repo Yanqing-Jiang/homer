@@ -13,6 +13,8 @@ export interface InternalJobHarnessBaseline extends HarnessSelection {
 const HOME_DIR = process.env.HOME ?? process.cwd();
 const CODEX_MODEL = "gpt-5.6-terra";
 const CONTENT_MODEL = "gpt-6-astra";
+// Scraping-related jobs run on Astra at low effort (Yanqing, 2026-09-11).
+const SCRAPE_MODEL = "gpt-6-astra-low";
 const PROJECT_DIR = PATHS.homerRoot;
 
 function codexStage(
@@ -89,9 +91,15 @@ const PUBLIC_JOB_HARNESS_BASELINES = {
   },
   "content-scraper": {
     executor: "codex",
-    model: CONTENT_MODEL,
+    model: SCRAPE_MODEL,
     stages: {
-      extract: codexStage(HOME_DIR, 180_000, "high"),
+      extract: {
+        executor: "codex",
+        model: SCRAPE_MODEL,
+        cwdOverride: HOME_DIR,
+        timeoutOverride: 180_000,
+        executorOptions: { codex: { reasoningEffort: "low" } },
+      },
     },
   },
   "health-check": {
