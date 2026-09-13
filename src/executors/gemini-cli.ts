@@ -19,6 +19,10 @@ import { processRegistry } from "../process/registry.js";
 
 export const GEMINI_CLI_FLASH_MODEL = "gemini-3-flash-preview";
 export const GEMINI_CLI_PRO_MODEL = "gemini-3.1-pro-preview";
+/** Edit-capable Antigravity specialist. This is deliberately separate from research defaults. */
+export const GEMINI_CLI_SPECIALIST_MODEL = "gemini-3.8-flash-high";
+/** Every edit or writing specialist run gets at least 15 minutes, including revisions. */
+export const GEMINI_CLI_SPECIALIST_MIN_TIMEOUT_MS = 15 * 60 * 1_000;
 export const PRO_TOKEN_SOFT_LIMIT = 800_000;
 
 /** Sole Antigravity account wired into the local keychain (from the environment). */
@@ -32,24 +36,36 @@ const AGY_MODEL_ALIASES: Record<string, string> = {
 export interface GeminiCLIDirectOptions {
   /** Caller-requested model. Legacy model IDs are mapped to Antigravity slugs. */
   model?: string;
-  /** Per-call timeout (ms). Outer kill budget = timeout + 30s grace. */
+  /** Per-call timeout (ms). Research preserves its 30s outer grace. */
   timeout?: number;
   signal?: AbortSignal;
   cwd?: string;
-  /** Legacy: agy has no -o flag, silently ignored. Documented for stable callsites. */
+  /** Legacy research option; specialist invocations always request the agy JSON envelope. */
   outputFormat?: "text" | "json" | "stream-json";
-  /** Legacy role hint. Not forwarded to agy. */
-  role?: "research";
+  /** Research keeps its existing defaults; specialist enables the bounded edit agent. */
+  role?: "research" | "specialist";
+  /** Reasoning effort accepted by agy. Specialist defaults to high. */
+  effort?: "low" | "medium" | "high";
   /** Homer run identifier; propagated into ProcessRegistry. */
   runId?: string;
 }
 
 export interface GeminiCLIDirectResult extends ExecutorResult {
+  /** Model the caller requested, before compatibility alias resolution. */
+  requestedModel: string;
+  /** Model passed to agy after compatibility alias resolution. */
+  resolvedModel: string;
   model: string;
   accountEmail?: string;
+  /** Present when the specialist returns its JSON conversation identifier. */
+  sessionId?: string;
+  /** Usage information returned by agy without reinterpretation. */
+  usage?: unknown;
+  /** Structured terminal status returned by agy. */
+  status?: string;
 }
 
-type ScheduledGeminiResearchOptions = Omit<GeminiCLIDirectOptions, "model">;
+type ScheduledGeminiResearchOptions = Omit<GeminiCLIDirectOptions, "model" | "role" | "effort">;
 
 function sanitizeGeminiOutput(text: string): string {
   return text
@@ -78,6 +94,27 @@ function buildOutput(stdout: string, stderr: string, exitCode: number, command: 
   return cleanOut || cleanErr || `${command} exited with code ${exitCode}`;
 }
 
+type AgySpecialistResult = {
+  conversation_id?: unknown;
+  status?: unknown;
+  response?: unknown;
+  usage?: unknown;
+};
+
+function parseAgySpecialistResult(stdout: string): AgySpecialistResult | undefined {
+  const clean = sanitizeGeminiOutput(stdout);
+  if (!clean) return undefined;
+
+  try {
+    const parsed = JSON.parse(clean) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as AgySpecialistResult
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Token estimator preserved for downstream callers (e.g. Pro soft-limit gating). */
 export function estimateTokenCount(text: string): number {
   return Math.ceil(text.length / 4);
@@ -93,12 +130,35 @@ export async function executeGeminiCLIDirect(
     signal,
     cwd = "/tmp",
     runId,
+    role,
+    effort,
   } = options;
 
   const startTime = Date.now();
   const command = resolveAgyBin();
   const agyModel = resolveAgyModel(model);
-  const outerTimeoutMs = timeout + 30_000;
+  const specialist = role === "specialist";
+  // The specialist needs enough time for substantive writing and revision.
+  // Keep caller-requested longer deadlines, but never permit a shorter one.
+  const effectiveTimeoutMs = specialist
+    ? Math.max(timeout, GEMINI_CLI_SPECIALIST_MIN_TIMEOUT_MS)
+    : timeout;
+  // Research retains its established extra outer grace. The specialist CLI's
+  // --timeout-ms is an actual caller deadline, so it can be cancelled promptly.
+  const outerTimeoutMs = specialist ? effectiveTimeoutMs : timeout + 30_000;
+
+  if (specialist && signal?.aborted) {
+    return {
+      output: "Cancelled",
+      exitCode: 130,
+      duration: Date.now() - startTime,
+      executor: "gemini-cli",
+      requestedModel: model,
+      resolvedModel: agyModel,
+      model,
+      accountEmail: AGY_ACCOUNT_EMAIL,
+    };
+  }
 
   logger.debug(
     {
@@ -107,20 +167,32 @@ export async function executeGeminiCLIDirect(
       backend: "agy",
       accountEmail: AGY_ACCOUNT_EMAIL,
       promptLength: prompt.length,
-      timeoutMs: timeout,
+      timeoutMs: effectiveTimeoutMs,
       runId,
+      role,
+      effort,
     },
     "Executing Gemini via agy",
   );
 
   return new Promise<GeminiCLIDirectResult>((resolve) => {
-    const args = [
-      "--dangerously-skip-permissions",
-      "--model",
-      agyModel,
-      "-p",
-      prompt,
-    ];
+    const args = specialist
+      ? [
+          "--agent", "homer-specialist",
+          "--model", agyModel,
+          "--effort", effort ?? "high",
+          "--mode", "accept-edits",
+          "--sandbox",
+          "--output-format", "json",
+          "--print-timeout", `${Math.ceil(effectiveTimeoutMs / 1_000)}s`,
+          "-p", prompt,
+        ]
+      : [
+          "--dangerously-skip-permissions",
+          "--model", agyModel,
+          "-p",
+          prompt,
+        ];
 
     const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],
@@ -143,6 +215,7 @@ export async function executeGeminiCLIDirect(
     let stderr = "";
     let timedOut = false;
     let aborted = false;
+    let stopping = false;
     let settled = false;
     let timeoutId: NodeJS.Timeout | undefined;
     let killTimer: NodeJS.Timeout | undefined;
@@ -162,6 +235,8 @@ export async function executeGeminiCLIDirect(
     };
 
     const requestStop = (reason: "timeout" | "abort") => {
+      if (stopping) return;
+      stopping = true;
       if (reason === "timeout") timedOut = true;
       if (reason === "abort") aborted = true;
       killGroup("SIGTERM");
@@ -187,20 +262,79 @@ export async function executeGeminiCLIDirect(
 
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
+      if (child.pid) processRegistry.touch(child.pid);
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
 
     child.on("close", (code) => {
-      const exitCode = code ?? (aborted ? 130 : timedOut ? 4 : 1);
+      if (specialist && aborted) {
+        finish({
+          output: "Cancelled",
+          exitCode: 130,
+          duration: Date.now() - startTime,
+          executor: "gemini-cli",
+          requestedModel: model,
+          resolvedModel: agyModel,
+          model,
+          accountEmail: AGY_ACCOUNT_EMAIL,
+        });
+        return;
+      }
+      if (specialist && timedOut) {
+        finish({
+          output: "Timeout",
+          exitCode: 124,
+          duration: Date.now() - startTime,
+          executor: "gemini-cli",
+          requestedModel: model,
+          resolvedModel: agyModel,
+          model,
+          accountEmail: AGY_ACCOUNT_EMAIL,
+        });
+        return;
+      }
+
+      const processExitCode = code ?? (aborted ? 130 : timedOut ? 4 : 1);
+      const structured = specialist ? parseAgySpecialistResult(stdout) : undefined;
+      let exitCode = processExitCode;
+      let output = buildOutput(stdout, stderr, exitCode, command);
+      let sessionId: string | undefined;
+      let usage: unknown;
+      let status: string | undefined;
+
+      if (specialist) {
+        if (!structured) {
+          if (exitCode === 0) exitCode = 1;
+          output = "agy returned an invalid JSON specialist result";
+        } else {
+          status = typeof structured.status === "string" ? structured.status : undefined;
+          sessionId = typeof structured.conversation_id === "string" ? structured.conversation_id : undefined;
+          usage = structured.usage;
+          if (status !== "SUCCESS") {
+            if (exitCode === 0) exitCode = 1;
+            output = `agy returned non-success specialist status: ${status ?? "missing"}`;
+          } else if (typeof structured.response !== "string") {
+            if (exitCode === 0) exitCode = 1;
+            output = "agy specialist result is missing a string response";
+          } else if (exitCode === 0) {
+            output = structured.response;
+          }
+        }
+      }
       finish({
-        output: buildOutput(stdout, stderr, exitCode, command),
+        output,
         exitCode,
         duration: Date.now() - startTime,
         executor: "gemini-cli",
+        requestedModel: model,
+        resolvedModel: agyModel,
         model,
         accountEmail: AGY_ACCOUNT_EMAIL,
+        sessionId,
+        usage,
+        status,
       });
     });
 
@@ -210,6 +344,8 @@ export async function executeGeminiCLIDirect(
         exitCode: 1,
         duration: Date.now() - startTime,
         executor: "gemini-cli",
+        requestedModel: model,
+        resolvedModel: agyModel,
         model,
         accountEmail: AGY_ACCOUNT_EMAIL,
       });
@@ -224,7 +360,7 @@ export async function executeGeminiFlashResearch(
   return executeGeminiCLIDirect(prompt, {
     ...options,
     model: GEMINI_CLI_FLASH_MODEL,
-    role: options.role ?? "research",
+    role: "research",
   });
 }
 
@@ -235,6 +371,26 @@ export async function executeGeminiProResearch(
   return executeGeminiCLIDirect(prompt, {
     ...options,
     model: GEMINI_CLI_PRO_MODEL,
-    role: options.role ?? "research",
+    role: "research",
+  });
+}
+
+/**
+ * Invoke the bounded edit-capable Antigravity specialist. It has no provider
+ * fallback: callers receive agy's terminal status, model, usage, and session.
+ */
+export async function executeGeminiSpecialist(
+  prompt: string,
+  options: Omit<GeminiCLIDirectOptions, "role" | "model" | "effort"> & {
+    model?: string;
+    effort?: "low" | "medium" | "high";
+  } = {},
+): Promise<GeminiCLIDirectResult> {
+  return executeGeminiCLIDirect(prompt, {
+    ...options,
+    model: options.model ?? GEMINI_CLI_SPECIALIST_MODEL,
+    role: "specialist",
+    effort: options.effort ?? "high",
+    timeout: options.timeout ?? GEMINI_CLI_SPECIALIST_MIN_TIMEOUT_MS,
   });
 }

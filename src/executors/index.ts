@@ -33,8 +33,10 @@ export {
   executeGeminiCLIDirect,
   executeGeminiFlashResearch,
   executeGeminiProResearch,
+  executeGeminiSpecialist,
   GEMINI_CLI_FLASH_MODEL,
   GEMINI_CLI_PRO_MODEL,
+  GEMINI_CLI_SPECIALIST_MODEL,
   type GeminiCLIDirectOptions,
   type GeminiCLIDirectResult,
 } from "./gemini-cli.js";
