@@ -13,8 +13,8 @@ import { executeCodexCLI } from "./codex-cli.js";
 import { executeOpenCodeCLI, type OpenCodeCLIOptions, type OpenCodeCLIResult } from "./opencode-cli.js";
 import { logger } from "../utils/logger.js";
 
-// Browser-scrape Gemini fallback runs on opencode Flash 3.5 (High), driving agent-browser.
-const FLASH_FALLBACK_MODEL = "google/gemini-3.5-flash";
+// Browser-scrape Gemini fallback runs on opencode Flash 3.8 (High), driving agent-browser.
+const FLASH_FALLBACK_MODEL = "google/gemini-3.8-flash";
 
 // Reserve part of the total budget for the existing fallback.
 const PRIMARY_TIMEOUT_RATIO = 0.9;
