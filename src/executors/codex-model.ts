@@ -11,6 +11,8 @@ export function resolveCodexModelVariant(
     case CODEX_CLI_MODEL:
       return { model: CODEX_CLI_MODEL, reasoningEffort: reasoningEffort ?? "high" };
     // gpt-5.5-* retained as back-compat aliases for any stale selection rows/chains.
+    case "gpt-6-sol-medium":
+      return { model: "gpt-6-sol", reasoningEffort: "medium" };
     case "gpt-5.6-sol-medium":
     case "gpt-5.5-medium":
       return { model: "gpt-5.6-sol", reasoningEffort: "medium" };
@@ -22,8 +24,10 @@ export function resolveCodexModelVariant(
     case "gpt-5.6-sol-high":
     case "gpt-5.5":
       return { model: "gpt-5.6-sol", reasoningEffort: reasoningEffort ?? "high" };
+    // gpt-5.6-luna-max retained as a back-compat alias for any stale selection rows/chains.
     case "gpt-5.6-luna-max":
-      return { model: "gpt-5.6-luna", reasoningEffort: "max" };
+    case "gpt-6-luna-max":
+      return { model: "gpt-6-luna", reasoningEffort: "max" };
     case "gpt-5.6-terra-max":
       return { model: "gpt-5.6-terra", reasoningEffort: "max" };
     case "gpt-6-astra-low":
@@ -32,4 +36,3 @@ export function resolveCodexModelVariant(
       return { model, reasoningEffort: reasoningEffort ?? "high" };
   }
 }
-

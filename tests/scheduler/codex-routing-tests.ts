@@ -7,8 +7,17 @@ import { executeCodexCLI } from "../../src/executors/codex-cli.js";
 import { executeBrowserScrape } from "../../src/executors/browser-scrape.js";
 import { executeResolvedHarness } from "../../src/harness/dispatch.js";
 import { createInMemoryHarnessSelectionStore } from "../../src/harness/resolution/store.js";
+import { validateHarnessSelection } from "../../src/commands/harness-catalog.js";
 
 test("Codex routing reaches the child process with model, effort, lease and read-only boundaries", async () => {
+  assert.deepEqual(
+    validateHarnessSelection({ executor: "codex", model: "gpt-6-sol", scope: "scheduled-job" }),
+    { ok: true, executor: "codex", model: "gpt-6-sol" },
+  );
+  assert.deepEqual(
+    validateHarnessSelection({ executor: "codex", model: "gpt-6-sol-medium", scope: "scheduled-job" }),
+    { ok: true, executor: "codex", model: "gpt-6-sol-medium" },
+  );
   const dir = mkdtempSync(join(tmpdir(), "codex-routing-"));
   const oldPath = process.env.PATH;
   const fake = `#!/usr/bin/env node
@@ -21,10 +30,12 @@ process.stdout.write(JSON.stringify({type:'item.completed',item:{type:'agent_mes
   try {
     for (const [selection, base, effort] of [
       [undefined, "gpt-5.6-terra", "high"],
-      ["gpt-5.6-luna-max", "gpt-5.6-luna", "max"],
+      ["gpt-6-luna-max", "gpt-6-luna", "max"],
+      ["gpt-5.6-luna-max", "gpt-6-luna", "max"],
       ["gpt-5.6-terra-max", "gpt-5.6-terra", "max"],
       ["gpt-6-astra", "gpt-6-astra", "high"],
       ["gpt-6-astra-low", "gpt-6-astra", "low"],
+      ["gpt-6-sol-medium", "gpt-6-sol", "medium"],
       ["gpt-5.6-sol-medium", "gpt-5.6-sol", "medium"],
     ]) {
       const result = await executeCodexCLI("---literal prompt", {
@@ -39,6 +50,13 @@ process.stdout.write(JSON.stringify({type:'item.completed',item:{type:'agent_mes
       assert.ok(args.includes(`model_reasoning_effort="${effort}"`));
       assert.deepEqual(args.slice(-2), ["--", "---literal prompt"]);
     }
+    const rawSol = await executeCodexCLI("---literal prompt", {
+      cwd: dir, model: "gpt-6-sol", reasoningEffort: "medium", timeout: 5000,
+    });
+    assert.equal(rawSol.exitCode, 0);
+    const rawSolArgs = JSON.parse(rawSol.output);
+    assert.equal(rawSolArgs[rawSolArgs.indexOf("-m") + 1], "gpt-6-sol");
+    assert.ok(rawSolArgs.includes('model_reasoning_effort="medium"'));
     const scrape = await executeBrowserScrape("read page", "", { timeout: 5000, browserInstance: "interactive" });
     const args = JSON.parse(scrape.output);
     assert.deepEqual(args.slice(0, 5), ["agent", "--instance", "interactive", "--", "codex"]);

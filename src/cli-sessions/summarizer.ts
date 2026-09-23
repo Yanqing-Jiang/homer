@@ -96,7 +96,7 @@ ${conversationText}`;
     prompt,
     timeoutMs: 900_000,
     signal,
-    explicit: explicit ?? { harness: "codex", model: "gpt-5.6-luna-max" },
+    explicit: explicit ?? { harness: "codex", model: "gpt-6-luna-max" },
   });
 
   if (result.exitCode !== 0) {

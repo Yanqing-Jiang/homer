@@ -108,9 +108,11 @@ const CATALOG: Record<CatalogExecutor, HarnessCatalogEntry> = {
     models: [
       { id: "gpt-5.6-terra", label: "GPT-5.6 Terra (high)", default: true },
       { id: "gpt-5.6-terra-max", label: "GPT-5.6 Terra (max)" },
-      { id: "gpt-5.6-luna-max", label: "GPT-5.6 Luna (max)" },
+      { id: "gpt-6-luna-max", label: "GPT-6 Luna (max)" },
       { id: "gpt-6-astra", label: "GPT-6 Astra" },
       { id: "gpt-6-astra-low", label: "GPT-6 Astra (low)" },
+      { id: "gpt-6-sol", label: "GPT-6 Sol" },
+      { id: "gpt-6-sol-medium", label: "GPT-6 Sol (medium)" },
       { id: "gpt-5.6-sol", label: "GPT-5.6 Sol (high)" },
       { id: "gpt-5.6-sol-medium", label: "GPT-5.6 Sol (medium)" },
       { id: "gpt-5.6-sol-xhigh", label: "GPT-5.6 Sol (xhigh)" },

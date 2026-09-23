@@ -190,6 +190,8 @@ export async function executeGeminiCLIDirect(
       : [
           "--dangerously-skip-permissions",
           "--model", agyModel,
+          ...(effort ? ["--effort", effort] : []),
+          "--print-timeout", `${Math.ceil(effectiveTimeoutMs / 1_000)}s`,
           "-p",
           prompt,
         ];

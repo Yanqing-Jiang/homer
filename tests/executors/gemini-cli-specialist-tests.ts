@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { executeGeminiSpecialist } from "../../src/executors/gemini-cli.js";
+import { executeGeminiCLIDirect, executeGeminiSpecialist } from "../../src/executors/gemini-cli.js";
 
 function makeFakeAgy(dir: string): { bin: string; argsFile: string } {
   const bin = join(dir, "agy");
@@ -42,6 +42,20 @@ async function withFakeAgy<T>(
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+test("news research pins Flash 3.8 high and forwards its CLI deadline", { concurrency: false }, async () => {
+  await withFakeAgy({ rawOutput: '{"items":[]}' }, async (argsFile) => {
+    const result = await executeGeminiCLIDirect("public news", {
+      model: "gemini-3.8-flash-high", effort: "high", role: "research", timeout: 420_000, cwd: tmpdir(),
+    });
+    assert.deepEqual(JSON.parse(readFileSync(argsFile, "utf8")), [
+      "--dangerously-skip-permissions", "--model", "gemini-3.8-flash-high",
+      "--effort", "high", "--print-timeout", "420s", "-p", "public news",
+    ]);
+    assert.equal(result.resolvedModel, "gemini-3.8-flash-high");
+    assert.equal(result.exitCode, 0);
+  });
+});
 
 test("specialist uses the bounded agy contract and returns structured fields", { concurrency: false }, async () => {
   const result = await withFakeAgy({
