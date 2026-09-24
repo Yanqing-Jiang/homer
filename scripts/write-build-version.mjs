@@ -52,6 +52,12 @@ for (const file of files) {
   maxSourceMtimeMs = Math.max(maxSourceMtimeMs, file.mtimeMs);
   hash.update(`${file.path}\0${file.size}\0${file.mtimeMs}\n`);
 }
+// .env is read only at startup, so a config-only change (e.g. a remote/local browser host switch)
+// must still make `npm run deploy` restart instead of completing as a same-build no-op.
+try {
+  const env = statSync(path.join(root, ".env"));
+  hash.update(`.env\0${env.size}\0${Math.round(env.mtimeMs)}\n`);
+} catch { /* no .env */ }
 
 const stamp = {
   sha: git("git rev-parse --short HEAD", "unknown"),

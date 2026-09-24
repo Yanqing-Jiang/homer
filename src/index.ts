@@ -30,7 +30,8 @@ import { staleMapCleaner } from "./utils/stale-map-cleaner.js";
 import { processRegistry } from "./process/registry.js";
 import { SessionTimeoutManager } from "./process/timeout-manager.js";
 import { cleanupScheduler } from "./process/cleanup-scheduler.js";
-import { browserLeaseBroker, reapResidentChromeOnFatalExit, residentChromeSupervisor, RESIDENT_CDP_PROFILE } from "./scraping/chrome-launcher.js";
+import { setRemoteBrowserHost, setRemoteIsolatedPorts } from "./scraping/remote-chrome.js";
+import { browserLeaseBroker, reapResidentChromeOnFatalExit, residentChromeSupervisor, residentProfileLabel, useRemoteResidentChrome } from "./scraping/chrome-launcher.js";
 import { InteractiveBrowser } from "./scraping/interactive-browser.js";
 import { startBrowserControlServer, stopBrowserControlServer } from "./scraping/browser-control.js";
 import { BrowserStatusService } from "./scraping/browser-status.js";
@@ -119,6 +120,14 @@ async function main(): Promise<void> {
   const timeoutManager = new SessionTimeoutManager();
   timeoutManager.start();
   cleanupScheduler.init(stateManager.getDb());
+  // Remote mode: both resident Chromes run on another machine behind the SSH tunnel (same ports).
+  const remoteBrowser = (instance: "downloads" | "interactive") => config.browser.remoteHost && config.browser.remoteInstances.includes(instance) ? config.browser.remoteHost : null;
+  const remoteDownloads = remoteBrowser("downloads");
+  if (remoteDownloads) useRemoteResidentChrome(remoteDownloads);
+  if (config.browser.remoteHost && config.browser.remoteIsolatedPorts.length) {
+    setRemoteBrowserHost(config.browser.remoteHost);
+    setRemoteIsolatedPorts(config.browser.remoteIsolatedPorts);
+  }
   residentChromeSupervisor.start();
   registerShutdownTask(() => residentChromeSupervisor.stop());
   // Crash-only: SIGTERM the Chrome WE launched (bounded), unless the lease ledger shows
@@ -131,7 +140,7 @@ async function main(): Promise<void> {
       adoptionGraceUntil: (() => { const at = browserLeaseBroker.adoptionGraceUntil(); return at ? new Date(at).toISOString() : null; })(),
       externalReservations: browserLeaseBroker.externalReservationSummary().map(r => ({ ...r, expiresAt: new Date(r.expiresAt).toISOString() })),
       maxAgents: browserLeaseBroker.maxAgents,
-      profilePath: RESIDENT_CDP_PROFILE,
+      profilePath: residentProfileLabel(),
       cdp: {
         state: status.cdp.state, pages: status.cdp.pages, restartCount: status.cdp.restartCount, restartDeferrals: status.cdp.restartDeferrals,
         // F9: while maintenance is on the supervisor neither probes nor relaunches, and the
@@ -148,9 +157,19 @@ async function main(): Promise<void> {
   residentChromeSupervisor.setTransitionHandler(publishBrowserStatus);
   browserStatus.start(); registerShutdownTask(() => browserStatus.stop());
   const stewardship = new SessionStewardship(browserLeaseBroker, browserStatus);
-  const interactiveBrowser = new InteractiveBrowser();
+  const remoteInteractive = remoteBrowser("interactive");
+  const interactiveBrowser = remoteInteractive ? InteractiveBrowser.remote(remoteInteractive) : new InteractiveBrowser();
   await interactiveBrowser.initialize().catch(error => logger.warn({ error }, "Interactive browser unavailable; downloads and Homer remain independent"));
   registerShutdownTask(() => interactiveBrowser.shutdown());
+  if (remoteInteractive) {
+    // Pinned tabs are otherwise re-opened only when a driver arrives; a remote Chrome is always up,
+    // so keep them present (and adopt its restarts) on a timer too.
+    const pinnedKeeper = setInterval(() => {
+      interactiveBrowser.ready().catch(error => logger.debug({ error: String(error) }, "Interactive pinned-tab upkeep skipped"));
+    }, 5 * 60_000);
+    pinnedKeeper.unref();
+    registerShutdownTask(() => clearInterval(pinnedKeeper));
+  }
   const browserControlServer = startBrowserControlServer(
     browserLeaseBroker,
     (enabled, reason) => residentChromeSupervisor.setMaintenance(enabled, reason),

@@ -10,6 +10,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createConnection } from "node:net";
 import readline from "node:readline";
+import { cleanupUploads, stageUploadArgs } from "./browser-file-transfer.mjs";
 
 const socketPath = process.env.HOMER_BROWSER_CONTROL_SOCKET
   ?? `${homedir()}/Library/Application Support/Homer/cdp-state/browser-control.sock`;
@@ -194,7 +195,8 @@ async function runRpc(session, env) {
         commandArgs = ["fill", request.args[1], password];
       }
       validateLeaseArgs(commandArgs, env);
-      const stdout = await runFile(agentBrowser, ["--session", session, ...commandArgs], { env, timeout: request.timeoutMs ?? 120_000 });
+      const staged = await stageUploadArgs(commandArgs, env);
+      const stdout = await runFile(agentBrowser, ["--session", session, ...staged], { env, timeout: request.timeoutMs ?? 120_000 });
       process.stdout.write(`${JSON.stringify({ id: request.id, ok: true, stdout })}\n`);
     } catch (error) {
       process.stdout.write(`${JSON.stringify({ id: (() => { try { return JSON.parse(line).id; } catch { return undefined; } })(), ok: false, error: error.message })}\n`);
@@ -248,6 +250,7 @@ async function runAgent(agentArgs) {
   let marker;
   let renewTimer;
   let adoptedGrant = false;
+  let agentEnv;
   const stop = () => { stopRequested = true; void driverGroups.stop(); process.stdin.destroy(); };
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
@@ -297,7 +300,10 @@ async function runAgent(agentArgs) {
     targetId = binding.targetId;
     await requestBroker({ verb: "register-external-target", leaseId, targetId });
     if (!adoptedGrant) renewTimer = setInterval(() => { void requestBroker({ verb: "renew", leaseId, ttl }).catch((error) => { process.stderr.write(`browser lease renewal failed: ${error.message}\n`); stop(); }); }, Math.min(30_000, ttl * 500));
-    const env = { ...browserEnv, PATH: `${dirname(fileURLToPath(import.meta.url))}:${process.env.PATH ?? ""}`, AGENT_BROWSER_CDP: port, AGENT_BROWSER_PIN_TAB: "1", AGENT_BROWSER_SESSION: session, HOMER_BROWSER_SURFACE: surface, HOMER_BROWSER_TARGET_ID: targetId, HOMER_BROWSER_INSTANCE: instance, HOMER_CDP_HTTP: cdpBase };
+    const status = instance === "downloads" ? (await readStatus()).status : await requestBroker({ verb: "status", instance });
+    const remoteHost = (status?.profile ?? status?.profilePath)?.match(/^([^:]+):homer-chrome@/)?.[1];
+    const env = { ...browserEnv, PATH: `${dirname(fileURLToPath(import.meta.url))}:${process.env.PATH ?? ""}`, AGENT_BROWSER_CDP: port, AGENT_BROWSER_PIN_TAB: "1", AGENT_BROWSER_SESSION: session, HOMER_BROWSER_SURFACE: surface, HOMER_BROWSER_TARGET_ID: targetId, HOMER_BROWSER_INSTANCE: instance, HOMER_CDP_HTTP: cdpBase, ...(remoteHost ? { HOMER_BROWSER_REMOTE_HOST: remoteHost } : {}) };
+    agentEnv = env;
     const code = rpc ? await runRpc(session, env)
       : workflow.length ? await runChild(workflow[0], workflow.slice(1), env)
       : await runChild(agentBrowser, ["--session", session, "batch", "--bail"], env);
@@ -319,6 +325,7 @@ async function runAgent(agentArgs) {
       if (own.length === 1) targetId = own[0].id;
     }
     if (leaseId) await requestBroker({ verb: "release", leaseId, closeTarget: Boolean(targetId), targetId }).catch(() => undefined);
+    if (agentEnv) await cleanupUploads(agentEnv).catch(error => process.stderr.write(`upload cleanup deferred: ${error.message}\n`));
     // Every interactive session ends with exactly one broker-owned idle blank; never fatal.
     if (leaseId && instance === "interactive") {
       try {

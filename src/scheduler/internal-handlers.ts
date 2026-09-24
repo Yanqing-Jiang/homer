@@ -423,8 +423,19 @@ async function runHealthCheck(
     logger.warn({ error: err }, "Process monitoring in health handler failed");
   }
 
-  // Chrome service owns CDP/session interpretation and alert transition state.
+  // Chrome service owns CDP/session interpretation and alert transition state. While the
+  // remote browser watchdog is failing over or back, it owns the
+  // outage and alerts only if the Mac backup fails too.
+  const browserConf = path.join(getRuntimePaths().homeDir, ".config", "homer-browser");
+  let browserOutageHandled = false;
   try {
+    const watch = JSON.parse(readFileSync(path.join(browserConf, "watch-state.json"), "utf8"));
+    browserOutageHandled = Number(watch.suppressHealthUntil) * 1000 > now;
+  } catch { /* no watchdog state: report normally */ }
+  // switch-browser-host.sh holds this deadline while it moves the browsers between hosts.
+  try { browserOutageHandled ||= Number(readFileSync(path.join(browserConf, "switching-until"), "utf8")) * 1000 > now; } catch { /* not switching */ }
+  if (browserOutageHandled) logger.info("Chrome service checks skipped: remote browser watchdog is handling a browser outage");
+  else try {
     const status = JSON.parse(readFileSync(BROWSER_STATUS_PATH, "utf8"));
     const ageMs = now - Date.parse(status.updatedAt);
     if (!Number.isFinite(ageMs) || ageMs > 90_000) issues.push(`🔴 Chrome service: stale status.json (${Number.isFinite(ageMs) ? `${Math.round(ageMs / 1000)}s` : "invalid timestamp"})`);

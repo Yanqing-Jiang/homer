@@ -32,6 +32,7 @@ import {
   type SingletonDecision,
   type SingletonEnvironment,
 } from "./chrome-orphan.js";
+import { RemoteChromeChild, isRemoteIsolatedPort, launchRemoteIsolatedChrome, remoteBrowserHost, setRemoteBrowserHost } from "./remote-chrome.js";
 
 const CDP_PORT = 9222;
 const CDP_PROFILE_PREFIX = "/tmp/chrome-cdp-profile-";
@@ -115,6 +116,8 @@ export interface ChromeSupervisorDeps {
   clearTimer: (timer: ReturnType<typeof setTimeout>) => void;
   heartbeatMs: number;
   backoffMs: readonly number[];
+  /** Chrome runs on another machine and outlives this daemon; stop() only hands live holders on. */
+  remote?: boolean;
 }
 
 /**
@@ -204,6 +207,13 @@ export class ResidentChromeSupervisor {
     this.clearTimers();
     const child = this.child;
     this.child = undefined;
+    if (this.deps.remote) {
+      (child as { detach?: () => void } | undefined)?.detach?.();
+      let liveLeases = 0;
+      try { liveLeases = this.deps.externalLeases?.() ?? 0; } catch { liveLeases = 0; }
+      if (liveLeases > 0) this.deps.onLeaveForAdoption?.("deliberate-shutdown-remote");
+      return;
+    }
     // F2: key on the Chrome this daemon is RESPONSIBLE FOR, not on the one it spawned. Both
     // exit paths used to read `this.child`, which is undefined for an adopted Chrome — so a
     // generation running on an adopted browser returned here silently, wrote no handoff, and
@@ -558,7 +568,29 @@ export class ResidentChromeSupervisor {
 }
 
 const generationPath = join(dirname(RESIDENT_CDP_PROFILE), "chrome-cdp-generation");
-export const residentChromeSupervisor = new ResidentChromeSupervisor({
+const sharedSupervisorDeps = {
+  probe: () => probeCdp(CDP_PORT),
+  ensurePage: () => ensurePageTarget(CDP_PORT),
+  nextGeneration: () => {
+    let current = 0;
+    try { current = Number.parseInt(readFileSync(generationPath, "utf8"), 10) || 0; } catch { /* first launch */ }
+    const next = current + 1;
+    writeFileSync(generationPath, `${next}\n`, { mode: 0o600 });
+    browserLeaseBroker.beginGeneration(next);
+    return next;
+  },
+  drainLeases,
+  observeTargets: () => browserLeaseBroker.observeTargets(),
+  externalLeases: () => browserLeaseBroker.externalLeaseCount(),
+  onLeaveForAdoption: (kind: string) => { writeExternalReservationHandoff(kind); },
+  onCleanLaunch: () => discardExternalReservationHandoff("clean launch"),
+  setTimer: (callback: () => void, delayMs: number) => setTimeout(callback, delayMs),
+  clearTimer: (timer: ReturnType<typeof setTimeout>) => clearTimeout(timer),
+  heartbeatMs: CDP_HEARTBEAT_MS,
+  backoffMs: CDP_RESTART_BACKOFF_MS,
+};
+export let residentChromeSupervisor = new ResidentChromeSupervisor({
+  ...sharedSupervisorDeps,
   spawnChrome: () => spawn(CHROME_PATH, [
     "--remote-debugging-address=127.0.0.1",
     `--remote-debugging-port=${CDP_PORT}`,
@@ -583,23 +615,11 @@ export const residentChromeSupervisor = new ResidentChromeSupervisor({
     // launch has zero page targets; heartbeatNow seeds the first one via ensurePage.
     "--no-startup-window",
   ], { stdio: "ignore" }),
-  probe: () => probeCdp(CDP_PORT),
-  ensurePage: () => ensurePageTarget(CDP_PORT),
   cdpPortOccupied: () => isCDPAvailable(CDP_PORT),
   ensureProfile: () => {
     mkdirSync(RESIDENT_CDP_PROFILE, { recursive: true, mode: 0o700 });
     chmodSync(RESIDENT_CDP_PROFILE, 0o700);
   },
-  nextGeneration: () => {
-    let current = 0;
-    try { current = Number.parseInt(readFileSync(generationPath, "utf8"), 10) || 0; } catch { /* first launch */ }
-    const next = current + 1;
-    writeFileSync(generationPath, `${next}\n`, { mode: 0o600 });
-    browserLeaseBroker.beginGeneration(next);
-    return next;
-  },
-  drainLeases,
-  observeTargets: () => browserLeaseBroker.observeTargets(),
   inspectOwner: () => classifyPortOwner(
     inspectPortListeners(CDP_PORT),
     // selfPid: a survivor parented by THIS daemon is an in-place orphan, adoptable (F8).
@@ -611,15 +631,37 @@ export const residentChromeSupervisor = new ResidentChromeSupervisor({
     profileLockPid: readProfileLockPid(RESIDENT_CDP_PROFILE),
   }),
   terminateOrphan: (pid) => terminatePidBounded(pid, { timeoutMs: 5_000 }),
-  externalLeases: () => browserLeaseBroker.externalLeaseCount(),
-  onLeaveForAdoption: (kind) => writeExternalReservationHandoff(kind),
   onAdopt: (pid) => restoreExternalHolderAfterAdoption(pid),
-  onCleanLaunch: () => discardExternalReservationHandoff("clean launch"),
-  setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
-  clearTimer: (timer) => clearTimeout(timer),
-  heartbeatMs: CDP_HEARTBEAT_MS,
-  backoffMs: CDP_RESTART_BACKOFF_MS,
 });
+
+const remoteIdentityPath = join(BROWSER_CONTROL_STATE_DIR, "remote-downloads-identity");
+/**
+ * Supervise the downloads Chrome on `sshHost` (a systemd service there) instead of spawning one.
+ * Call before start(). The remote Chrome survives daemon restarts, so when the next generation
+ * sees the SAME browser id it restores the external holder the previous generation handed off.
+ */
+export function useRemoteResidentChrome(sshHost: string): void {
+  setRemoteBrowserHost(sshHost);
+  residentChromeSupervisor = new ResidentChromeSupervisor({
+    ...sharedSupervisorDeps,
+    remote: true,
+    ensureProfile: () => {},
+    spawnChrome: () => new RemoteChromeChild("downloads", CDP_PORT, (id) => {
+      let previous = "";
+      try { previous = readFileSync(remoteIdentityPath, "utf8").trim(); } catch { /* first contact */ }
+      try { mkdirSync(dirname(remoteIdentityPath), { recursive: true, mode: 0o700 }); writeFileSync(remoteIdentityPath, `${id}\n`, { mode: 0o600 }); }
+      catch (err) { logger.warn({ err }, "Remote Chrome identity could not be recorded"); }
+      if (previous === id && existsSync(EXTERNAL_HANDOFF_PATH)) void restoreExternalHolderAfterAdoption(0);
+      else discardExternalReservationHandoff(previous === id ? "no holder was handed off" : "remote Chrome is a new browser");
+    }),
+  });
+}
+
+/** What status.json names as the resident profile. */
+export function residentProfileLabel(): string {
+  const host = remoteBrowserHost();
+  return host ? `${host}:homer-chrome@downloads` : RESIDENT_CDP_PROFILE;
+}
 
 export function isResidentChromeSupervisionActive(): boolean {
   return residentChromeSupervisor.isActive();
@@ -648,6 +690,11 @@ export async function reapResidentChromeOnFatalExit(kind: string): Promise<void>
   const chromePid = status.chromePid;
   const launchedPid = residentChromeSupervisor.launchedChromePid();
   const externalLeases = browserLeaseBroker.externalLeaseCount();
+  if (remoteBrowserHost()) {
+    const handedOff = externalLeases > 0 && writeExternalReservationHandoff(`${kind}-remote`);
+    logger.error({ kind, externalLeases, handedOff }, "Fatal exit: resident Chrome is remote and keeps running");
+    return;
+  }
   const decision = decideExitChromeAction({ deliberate: false, chromePid, externalLeases });
   if (decision.action === "none") {
     logger.warn({ kind, reason: decision.reason }, "Fatal exit: no resident Chrome to reap");
@@ -1410,6 +1457,15 @@ async function recycleLocked(port: number, headed: boolean): Promise<CDPHandle> 
 export async function launchIsolatedCdp(port: number, opts: { headed?: boolean } = {}): Promise<CDPHandle> {
   if (port === CDP_PORT) throw new Error("launchIsolatedCdp must not target the shared CDP port");
   const headed = opts.headed ?? true;
+  if (isRemoteIsolatedPort(port)) {
+    if (await isCDPAvailable(port)) throw new Error(`isolated CDP port ${port} is already in use`);
+    const handle = launchRemoteIsolatedChrome(port);
+    if (!(await waitForCDP(port))) {
+      handle.cleanup();
+      throw new Error(`remote isolated Chrome did not become CDP-ready on port ${port}`);
+    }
+    return handle;
+  }
   return withCdpLock(async () => {
     if (await isCDPAvailable(port)) {
       logger.warn({ port }, "Isolated CDP port occupied — recycling leftover Homer Chrome");

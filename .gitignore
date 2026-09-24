@@ -48,6 +48,7 @@ output/
 /bin/*
 !/bin/browserctl
 !/bin/agent-browser
+!/bin/browser-file-transfer.mjs
 !/bin/tmux
 # skills/: only the alias table and layout docs ship. Skills, commands, agents
 # and rendered views are generated per operator (see README "Skills").
@@ -207,4 +208,3 @@ workspaces/
 /src/state/migrations/089_outbound_call_intents.sql
 /src/state/migrations/096_drop_idea_index.sql
 /src/scripts/ranking-eval-golden.json
-

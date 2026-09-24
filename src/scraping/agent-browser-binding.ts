@@ -23,6 +23,7 @@ export async function runAgentBrowserBindingSelfTest(broker: BrowserLeaseBroker 
   const pinned = join(PATHS.homerRoot, "node_modules", ".bin", "agent-browser");
   const binary = process.env.HOMER_AGENT_BROWSER_BIN ?? (existsSync(pinned) ? pinned : "/opt/homebrew/bin/agent-browser");
   const sessions: Array<{ session: string; marker: string; leaseId: string; targetId?: string; started?: boolean }> = [];
+  const { AGENT_BROWSER_CDP: _inheritedCdp, AGENT_BROWSER_PIN_TAB: _inheritedPin, ...cleanupEnv } = process.env;
   const run = (session: string, args: string[]): Promise<string> => new Promise((resolve, reject) => {
     // Boot-time self-test only: a bounded spawn timeout keeps a hung CLI from stalling daemon start.
     // Real agent sessions (browserctl) carry no such deadline.
@@ -33,6 +34,15 @@ export async function runAgentBrowserBindingSelfTest(broker: BrowserLeaseBroker 
     child.stdout.on("data", chunk => { stdout += chunk; }); child.stderr.on("data", chunk => { stderr += chunk; });
     child.once("error", reject);
     child.once("close", code => code === 0 ? resolve(stdout.trim()) : reject(new Error(`agent-browser binding command failed (${code}): ${stderr}`)));
+  });
+  // `agent-browser --cdp` launches before every command, including `close`.  Cleanup must only
+  // address the already-named daemon; retrying its broken CDP attachment leaves it alive.
+  const closeSession = (session: string): Promise<void> => new Promise(resolve => {
+    const child = spawn(binary, ["--session", session, "close"], {
+      env: { ...cleanupEnv, AGENT_BROWSER_SOCKET_DIR: socketDir }, stdio: "ignore", timeout: 10_000,
+    });
+    child.once("error", () => resolve());
+    child.once("close", () => resolve());
   });
   try {
     // Reserve both slots before creating either tab; a partially admitted test must defer cleanly.
@@ -66,14 +76,14 @@ export async function runAgentBrowserBindingSelfTest(broker: BrowserLeaseBroker 
     }));
     for (const result of checks) if (result.status === "rejected") throw result.reason;
     if (sessions.length > 1) {
-      await run(sessions[0]!.session, ["close"]);
+      await closeSession(sessions[0]!.session);
       await broker.release(sessions[0]!.leaseId, true, sessions[0]!.targetId);
       if (await run(sessions[1]!.session, ["get", "url"]) !== sessions[1]!.marker) throw new Error("closing a session disturbed its sibling");
     }
     return "passed";
   } finally {
     for (const row of sessions) {
-      if (row.started) await run(row.session, ["close"]).catch(() => undefined);
+      if (row.started) await closeSession(row.session);
       // Also recover a uniquely marked tab when setup failed before reading its binding file.
       if (row.started && !row.targetId) row.targetId = (await targets.list().catch(() => [])).find(target => target.url === row.marker)?.id;
       await broker.release(row.leaseId, Boolean(row.targetId), row.targetId).catch(() => undefined);

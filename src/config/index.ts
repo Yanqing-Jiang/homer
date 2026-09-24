@@ -77,6 +77,14 @@ const configSchema = z.object({
     phoneNumber: z.string().default(""),
     apiKeySid: z.string().default(""),
   }),
+  browser: z.object({
+    // SSH alias of the machine running the resident Chromes (e.g. "browser-host"); empty = local Chrome.
+    remoteHost: z.string().default(""),
+    // Which resident instances run on remoteHost; the rest stay local (staged cutover).
+    remoteInstances: z.array(z.enum(["downloads", "interactive"])).default(["downloads", "interactive"]),
+    // CDP ports of per-run isolated Chromes (launchIsolatedCdp) that run on remoteHost instead.
+    remoteIsolatedPorts: z.array(z.coerce.number().int()).default([]),
+  }),
   features: z.object({}).default({}),
   logLevel: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
 });
@@ -158,6 +166,11 @@ function loadConfig(): Config {
       authToken: process.env.TWILIO_AUTH_TOKEN ?? "",
       phoneNumber: process.env.TWILIO_PHONE_NUMBER ?? "",
       apiKeySid: process.env.TWILIO_API_KEY_SID ?? "",
+    },
+    browser: {
+      remoteHost: process.env.HOMER_BROWSER_REMOTE_HOST?.trim() ?? "",
+      remoteInstances: process.env.HOMER_BROWSER_REMOTE_INSTANCES?.split(",").map(name => name.trim()).filter(Boolean),
+      remoteIsolatedPorts: process.env.HOMER_BROWSER_REMOTE_ISOLATED_PORTS?.split(",").map(port => port.trim()).filter(Boolean),
     },
     features: {},
     logLevel: process.env.LOG_LEVEL ?? "info",

@@ -2,6 +2,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stageUploadArgs } from "./browser-file-transfer.mjs";
 
 /** Shared with browserctl RPC: a lease owns one session and one immutable CDP target. */
 export function validateLeaseArgs(args, env = process.env) {
@@ -32,7 +33,7 @@ export function validateLeaseArgs(args, env = process.env) {
 
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    const args = process.argv.slice(2);
+    const args = await stageUploadArgs(process.argv.slice(2), process.env);
     validateLeaseArgs(args);
     const pinned = join(dirname(fileURLToPath(import.meta.url)), "..", "node_modules", ".bin", "agent-browser");
     const binary = process.env.HOMER_AGENT_BROWSER_BIN ?? (existsSync(pinned) ? pinned : "/opt/homebrew/bin/agent-browser");
