@@ -1,5 +1,5 @@
 /**
- * Remote resident Chromes (a remote host behind the SSH tunnel): identity is the per-launch browser
+ * Remote resident Chromes (a browser host behind the SSH tunnel): identity is the per-launch browser
  * id from /json/version, never a local pid. A fake CDP HTTP endpoint stands in for the tunnel.
  */
 import "../helpers/no-telegram.js";

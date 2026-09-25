@@ -1,15 +1,16 @@
 /**
- * Auto-commit ~/homer/ code changes nightly and push to GitHub without
- * Telegram approval.
+ * Nightly local snapshots of the Homer checkouts.
  *
  *   1. If the working tree has changes → `git add -A` + Codex-generated commit.
- *   2. If there are unpushed commits → `git push origin main` (with retries).
+ *   2. Only repositories with push: true then run `git push origin main` (with retries).
  *
+ * The public homer repository is snapshotted locally but never pushed from here:
+ * publication is a deliberate, scanned release (scripts/publication-guard.mjs).
  * The private overlay checkout (HOMER_PRIVATE_ROOT, see src/private-overlay.ts) is
- * committed the same way but never pushed: it has no remote and must not get one.
+ * committed the same way and never pushed: it has no remote and must not get one.
  * For the public repository, staged paths are checked against the overlay's link
  * table and a deny-list before committing, so a .gitignore regression can never
- * publish overlay files or symlinks.
+ * snapshot overlay files or symlinks into it.
  */
 
 import { execSync, spawn } from "child_process";
@@ -38,7 +39,7 @@ interface CodePushRepo {
 
 function codePushRepos(): CodePushRepo[] {
   const repos: CodePushRepo[] = [
-    { name: "homer", dir: PROJECT_DIR, push: true, guardPrivatePaths: true },
+    { name: "homer", dir: PROJECT_DIR, push: false, guardPrivatePaths: true },
     { name: "homer-web", dir: process.env.HOMER_WEB_PROJECT_DIR ?? join(dirname(PROJECT_DIR), "homer-web"), push: true, guardPrivatePaths: false },
   ];
   const overlay = getPrivateOverlay();

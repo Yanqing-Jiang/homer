@@ -1,0 +1,11 @@
+#!/bin/sh
+# Pre-push publication guard. Install: cp scripts/git-hooks/pre-push .git/hooks/pre-push
+# Hooks are shared by every worktree of this repository, so the guard is always taken from the
+# main checkout. Anything missing fails closed: no push leaves without a clean scan.
+common=$(git rev-parse --path-format=absolute --git-common-dir) || exit 1
+root=$(dirname "$common")
+guard="$root/scripts/publication-guard.mjs"
+node="$root/bin/node"
+[ -x "$node" ] || node=$(command -v node) || { echo "pre-push: node not found; refusing push" >&2; exit 1; }
+[ -f "$guard" ] || { echo "pre-push: $guard missing; refusing push" >&2; exit 1; }
+exec "$node" "$guard" pre-push "$@"

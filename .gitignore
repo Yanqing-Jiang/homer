@@ -160,13 +160,13 @@ workspaces/
 
 # --- Personal subsystems: kept locally, excluded from public repo (purged 2026-06-10) ---
 /src/job-hunt/
-/src/meetings/
-/src/telephony/
+/src/meetings
+/src/telephony
 /src/discovery/
 /src/scraping/
-/src/overnight/
+/src/overnight
 /src/youtube/
-/src/memory/
+/src/memory
 /src/scheduler/jobs/job-hunt-discover.ts
 /src/scheduler/jobs/job-hunt-email-monitor.ts
 /src/scheduler/jobs/job-hunt-followup.ts
