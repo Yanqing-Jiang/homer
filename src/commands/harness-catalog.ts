@@ -78,6 +78,7 @@ const CATALOG: Record<CatalogExecutor, HarnessCatalogEntry> = {
       { id: "opencode-go/deepseek-v4-flash", label: "DeepSeek V4 Flash" },
       { id: "github-copilot/claude-opus-4.8", label: "GitHub Copilot Opus 4.8 (high)" },
       { id: "github-copilot/claude-opus-5", label: "GitHub Copilot Opus 5 (high)", default: true },
+      { id: "github-copilot/claude-opus-5.5", label: "GitHub Copilot Opus 5.5 (high)" },
     ],
   },
   gemini: {

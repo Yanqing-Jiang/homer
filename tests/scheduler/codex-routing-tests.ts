@@ -22,6 +22,7 @@ test("Codex routing reaches the child process with model, effort, lease and read
   const oldPath = process.env.PATH;
   const fake = `#!/usr/bin/env node
 process.stdout.write(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:JSON.stringify(process.argv.slice(2))}})+'\\n');
+process.stdout.write(JSON.stringify({type:'text',part:{text:JSON.stringify(process.argv.slice(2))}})+'\\n');
 `;
   for (const name of ["codex", "browserctl"]) {
     const path = join(dir, name); writeFileSync(path, fake); chmodSync(path, 0o755);
@@ -59,9 +60,8 @@ process.stdout.write(JSON.stringify({type:'item.completed',item:{type:'agent_mes
     assert.ok(rawSolArgs.includes('model_reasoning_effort="medium"'));
     const scrape = await executeBrowserScrape("read page", "", { timeout: 5000, browserInstance: "interactive" });
     const args = JSON.parse(scrape.output);
-    assert.deepEqual(args.slice(0, 5), ["agent", "--instance", "interactive", "--", "codex"]);
-    assert.equal(args[args.indexOf("-m") + 1], "gpt-5.6-terra");
-    assert.ok(args.includes('model_reasoning_effort="high"'));
+    assert.deepEqual(args.slice(0, 6), ["agent", "--instance", "interactive", "--", "opencode", "run"]);
+    assert.equal(args[args.indexOf("-m") + 1], "github-copilot/claude-opus-5.5#high");
 
     const advisor = await executeResolvedHarness({
       source: "system", mode: "runtime-turn", prompt: "diagnose only", cwd: dir, timeoutMs: 5000,

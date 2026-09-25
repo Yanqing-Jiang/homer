@@ -11,6 +11,7 @@ import { existsSync } from "node:fs";
 import { createConnection } from "node:net";
 import readline from "node:readline";
 import { cleanupUploads, stageUploadArgs } from "./browser-file-transfer.mjs";
+import { inspectPageTargets, ownedPopups, verifyLease } from "./browser-owned-popups.mjs";
 
 const socketPath = process.env.HOMER_BROWSER_CONTROL_SOCKET
   ?? `${homedir()}/Library/Application Support/Homer/cdp-state/browser-control.sock`;
@@ -86,6 +87,25 @@ function requestBroker(request) {
     socket.on("error", reject);
     socket.on("close", () => { if (!output) reject(new Error("broker closed without a response")); });
   });
+}
+
+// A daemon restart takes the broker away for seconds while the browser, this lease's tab and
+// the lease itself (restored by the next broker generation) all survive. Only these failures
+// mean "no broker is answering yet"; any other reply is the broker's verdict and is final.
+const BROKER_OUTAGE_GRACE_MS = 5 * 60_000;
+function brokerUnavailable(error) {
+  return ["ENOENT", "ECONNREFUSED", "ECONNRESET", "EPIPE", "RESTORING"].includes(error?.code) || error?.message === "broker closed without a response";
+}
+async function requestBrokerAcrossRestart(request, active = () => true) {
+  const deadline = Date.now() + BROKER_OUTAGE_GRACE_MS;
+  for (let delay = 500, warned = false; ; delay = Math.min(delay * 2, 5_000)) {
+    try { return await requestBroker(request); }
+    catch (error) {
+      if (!brokerUnavailable(error) || !active() || Date.now() + delay > deadline) throw error;
+      if (!warned) { warned = true; process.stderr.write(`browser broker unavailable for ${request.verb} (${error.message}); retrying up to ${BROKER_OUTAGE_GRACE_MS / 60_000} min\n`); }
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
 }
 
 const driverGroups = new BrowserProcessGroups(`${socketPath}.drivers.${process.pid}.json`);
@@ -170,8 +190,29 @@ async function runChild(file, childArgs, env, input) {
 
 let stopRequested = false;
 
-async function runRpc(session, env) {
+async function runRpc(session, env, identity) {
   const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  const popupEnabled = identity.instance !== "downloads";
+  let selectedId = identity.rootId;
+  const bindingId = async () => {
+    const binding = JSON.parse(await readFile(join(socketDir, `${session}.target`), "utf8"));
+    if (binding?.pinned !== true || !binding.targetId) throw new Error("agent-browser session lost its pinned target");
+    return binding.targetId;
+  };
+  const inspect = async () => {
+    const status = await requestBrokerAcrossRestart({ verb: "status", instance: identity.instance });
+    const popups = ownedPopups(status, await inspectPageTargets(identity.cdpEndpoint), identity);
+    return { status, popups };
+  };
+  const restoreRoot = async () => {
+    const { status } = await inspect();
+    verifyLease(status, identity);
+    if (await bindingId() !== identity.rootId) {
+      await runFile(agentBrowser, ["--session", session, "tab", identity.rootId], { env, timeout: 15_000 });
+      if (await bindingId() !== identity.rootId) throw new Error("root tab restoration did not bind the lease target");
+    }
+    selectedId = identity.rootId;
+  };
   process.stdout.write(`${JSON.stringify({ ready: true, session })}\n`);
   for await (const line of rl) {
     if (stopRequested) break;
@@ -179,6 +220,41 @@ async function runRpc(session, env) {
     try {
       const request = JSON.parse(line);
       if (!Array.isArray(request.args)) throw new Error("rpc request requires args array");
+      if (request.args[0] === "popup") {
+        if (!popupEnabled) throw new Error("popup routing requires an interactive broker instance");
+        const [_, verb, ref] = request.args;
+        if (verb === "list" && request.args.length === 2) {
+          const { popups } = await inspect();
+          process.stdout.write(`${JSON.stringify({ id: request.id, ok: true, popups, selectedTargetId: selectedId, rootTargetId: identity.rootId })}\n`);
+          continue;
+        }
+        if (verb === "root" && request.args.length === 2) {
+          await restoreRoot();
+          process.stdout.write(`${JSON.stringify({ id: request.id, ok: true, selectedTargetId: selectedId })}\n`);
+          continue;
+        }
+        if (verb === "select" && request.args.length === 3 && typeof ref === "string" && ref) {
+          const { popups } = await inspect();
+          if (!popups.some(row => row.id === ref)) throw new Error("popup is not a live descendant of this lease root");
+          if (await bindingId() !== selectedId) throw new Error("agent-browser binding changed outside broker popup routing");
+          await runFile(agentBrowser, ["--session", session, "tab", ref], { env, timeout: 15_000 });
+          if (await bindingId() !== ref) throw new Error("popup switch bound the wrong target");
+          const after = await inspect();
+          if (!after.popups.some(row => row.id === ref)) throw new Error("popup ownership changed during switch");
+          selectedId = ref;
+          process.stdout.write(`${JSON.stringify({ id: request.id, ok: true, selectedTargetId: selectedId })}\n`);
+          continue;
+        }
+        throw new Error("popup RPC requires list, select <targetId>, or root");
+      }
+      if (popupEnabled) {
+        const before = await inspect();
+        if (selectedId !== identity.rootId && !before.popups.some(row => row.id === selectedId)) {
+          await restoreRoot();
+          throw new Error("selected popup closed or lost lease ancestry; restored root");
+        }
+        if (await bindingId() !== selectedId) throw new Error("agent-browser binding changed outside broker popup routing");
+      }
       let commandArgs = request.args;
       // Keep portal credentials out of RPC transcripts.  A caller may request a fill
       // from a named macOS Keychain item; only the browser child receives its value.
@@ -190,15 +266,34 @@ async function runRpc(session, env) {
           "/usr/bin/security",
           ["find-generic-password", "-s", String(request.keychainService), "-w"],
           { encoding: "utf8", maxBuffer: 16 * 1024 },
-          (error, stdout) => error ? reject(error) : resolve(stdout.replace(/\\r?\\n$/, "")),
+          (error, stdout) => error ? reject(error) : resolve(stdout.replace(/\r?\n$/, "")),
         ));
         commandArgs = ["fill", request.args[1], password];
       }
       validateLeaseArgs(commandArgs, env);
       const staged = await stageUploadArgs(commandArgs, env);
+      if (popupEnabled) {
+        const admitted = await inspect();
+        if (selectedId !== identity.rootId && !admitted.popups.some(row => row.id === selectedId)) {
+          await restoreRoot();
+          throw new Error("selected popup closed or lost lease ancestry before command; restored root");
+        }
+        if (await bindingId() !== selectedId) throw new Error("agent-browser binding changed before command");
+      }
       const stdout = await runFile(agentBrowser, ["--session", session, ...staged], { env, timeout: request.timeoutMs ?? 120_000 });
-      process.stdout.write(`${JSON.stringify({ id: request.id, ok: true, stdout })}\n`);
+      let restoredRoot = false;
+      if (popupEnabled) {
+        const after = await inspect();
+        if (selectedId !== identity.rootId && !after.popups.some(row => row.id === selectedId)) {
+          await restoreRoot();
+          restoredRoot = true;
+        }
+        if (await bindingId() !== selectedId) throw new Error("agent-browser binding changed during command");
+      }
+      process.stdout.write(`${JSON.stringify({ id: request.id, ok: true, stdout, ...(restoredRoot ? { restoredRoot: true } : {}) })}\n`);
     } catch (error) {
+      // A failed action may have closed its popup; return to the immutable lease root when safe.
+      if (popupEnabled) try { await restoreRoot(); } catch { /* lease loss must remain a hard refusal */ }
       process.stdout.write(`${JSON.stringify({ id: (() => { try { return JSON.parse(line).id; } catch { return undefined; } })(), ok: false, error: error.message })}\n`);
     }
   }
@@ -298,18 +393,25 @@ async function runAgent(agentArgs) {
     const targets = await listPageTargets();
     if (!targets.some(target => target.id === binding.targetId && target.url === marker)) throw new Error("named session did not remain bound to its created target");
     targetId = binding.targetId;
-    await requestBroker({ verb: "register-external-target", leaseId, targetId });
-    if (!adoptedGrant) renewTimer = setInterval(() => { void requestBroker({ verb: "renew", leaseId, ttl }).catch((error) => { process.stderr.write(`browser lease renewal failed: ${error.message}\n`); stop(); }); }, Math.min(30_000, ttl * 500));
-    const status = instance === "downloads" ? (await readStatus()).status : await requestBroker({ verb: "status", instance });
+    const registered = await requestBrokerAcrossRestart({ verb: "register-external-target", leaseId, targetId, instance });
+    let renewing = false;
+    if (!adoptedGrant) renewTimer = setInterval(() => {
+      if (renewing) return;
+      renewing = true;
+      void requestBrokerAcrossRestart({ verb: "renew", leaseId, ttl, instance }, () => renewTimer !== undefined)
+        .catch((error) => { if (renewTimer === undefined) return; process.stderr.write(`browser lease renewal failed: ${error.message}\n`); stop(); })
+        .finally(() => { renewing = false; });
+    }, Math.min(30_000, ttl * 500));
+    const status = instance === "downloads" ? (await readStatus()).status : await requestBrokerAcrossRestart({ verb: "status", instance });
     const remoteHost = (status?.profile ?? status?.profilePath)?.match(/^([^:]+):homer-chrome@/)?.[1];
     const env = { ...browserEnv, PATH: `${dirname(fileURLToPath(import.meta.url))}:${process.env.PATH ?? ""}`, AGENT_BROWSER_CDP: port, AGENT_BROWSER_PIN_TAB: "1", AGENT_BROWSER_SESSION: session, HOMER_BROWSER_SURFACE: surface, HOMER_BROWSER_TARGET_ID: targetId, HOMER_BROWSER_INSTANCE: instance, HOMER_CDP_HTTP: cdpBase, ...(remoteHost ? { HOMER_BROWSER_REMOTE_HOST: remoteHost } : {}) };
     agentEnv = env;
-    const code = rpc ? await runRpc(session, env)
+    const code = rpc ? await runRpc(session, env, { leaseId, rootId: targetId, surface, owner, generation: registered.generation, instance, cdpEndpoint: cdpBase })
       : workflow.length ? await runChild(workflow[0], workflow.slice(1), env)
       : await runChild(agentBrowser, ["--session", session, "batch", "--bail"], env);
     return stopRequested ? 143 : code;
   } finally {
-    if (renewTimer) clearInterval(renewTimer);
+    if (renewTimer) { clearInterval(renewTimer); renewTimer = undefined; }
     await closeSession(session);
     if (!await driverGroups.stop()) {
       process.stderr.write("browser command group has not exited; retaining lease and wrapper as an admission fence\n");
@@ -324,7 +426,7 @@ async function runAgent(agentArgs) {
       const own = (await listPageTargets().catch(() => [])).filter(target => target.url === marker);
       if (own.length === 1) targetId = own[0].id;
     }
-    if (leaseId) await requestBroker({ verb: "release", leaseId, closeTarget: Boolean(targetId), targetId }).catch(() => undefined);
+    if (leaseId) await requestBrokerAcrossRestart({ verb: "release", leaseId, closeTarget: Boolean(targetId), targetId, instance }).catch(() => undefined);
     if (agentEnv) await cleanupUploads(agentEnv).catch(error => process.stderr.write(`upload cleanup deferred: ${error.message}\n`));
     // Every interactive session ends with exactly one broker-owned idle blank; never fatal.
     if (leaseId && instance === "interactive") {

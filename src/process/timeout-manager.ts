@@ -3,7 +3,7 @@
  *
  * Features:
  * - Enforcement enabled by default (PROCESS_TIMEOUT_ENFORCE=0 to disable)
- * - LLM triage via Codex Terra high before killing executor processes > 30min
+ * - LLM triage via OpenCode Opus 5.5 high before killing executor processes > 30min
  * - Hard kill ceiling: any process > 45min killed immediately regardless of LLM
  * - Circuit breaker: max 3 LLM triage calls per hour
  * - Piggybacks processRegistry.tickSnapshot() for DB persistence
@@ -164,7 +164,7 @@ export class SessionTimeoutManager {
   }
 
   /**
-   * LLM triage: ask Codex Terra whether to kill, extend, or escalate.
+   * LLM triage: ask OpenCode Opus 5.5 whether to kill, extend, or escalate.
    */
   private async triageBeforeKill(record: ProcessRecord, ageMs: number): Promise<void> {
     this.triagePending.add(record.pid);
@@ -234,8 +234,11 @@ Rules:
     try {
       const result = await executeResolvedHarness({
         source: "system", mode: "runtime-turn", prompt,
-        explicit: { harness: "codex", model: "gpt-5.6-terra" },
-        baselineProfile: { invocation: { readOnly: true, reasoningEffort: "high" } },
+        explicit: { harness: "opencode", model: "github-copilot/claude-opus-5.5" },
+        baselineProfile: {
+          executorOptions: { opencode: { forceOpenCode: true, researchOnly: true } },
+          invocation: { reasoningEffort: "high" },
+        },
         cwd: runtimePaths.homeDir, timeoutMs: TRIAGE_TIMEOUT_MS,
       });
       if (result.exitCode === 0) {

@@ -501,7 +501,7 @@ export async function runFailureTakeover(params: {
     const cwd = "/tmp/homer-takeover";
     mkdirSync(cwd, { recursive: true });
 
-    // Run one LLM decision session. Pinned to Codex; falls back to Claude if Codex is down.
+    // Run one LLM decision session, pinned to OpenCode Copilot Opus 5.5 high.
     const runDecisionSession = async (decisionPrompt: string, needsAutoFix: boolean): Promise<string | null> => {
       const requiredCapabilities: CapabilityRequirement[] = needsAutoFix
         ? [
@@ -510,7 +510,7 @@ export async function runFailureTakeover(params: {
             { capability: "tools.shell", required: true, reason: "run build/retry" },
           ]
         : [{ capability: "text.generate", required: true, reason: "diagnose-only report" }];
-      const harness = "codex";
+      const harness = "opencode";
         try {
           const result = await executeResolvedHarness({
             source: "scheduler",
@@ -518,7 +518,11 @@ export async function runFailureTakeover(params: {
             prompt: decisionPrompt,
             scope: { jobId },
             cwd,
-            explicit: { harness, model: needsAutoFix ? "gpt-5.6-terra-max" : "gpt-5.6-terra" },
+            explicit: { harness, model: "github-copilot/claude-opus-5.5" },
+            baselineProfile: {
+              executorOptions: { opencode: { forceOpenCode: true, researchOnly: false } },
+              invocation: { reasoningEffort: "high" },
+            },
             requiredCapabilities,
             timeoutMs: Math.max(remainingMs(), 0),
             signal: deadlineController.signal,

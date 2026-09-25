@@ -129,6 +129,10 @@ async function main(): Promise<void> {
     setRemoteIsolatedPorts(config.browser.remoteIsolatedPorts);
   }
   residentChromeSupervisor.start();
+  // Shutdown tasks run in registration order. The control socket closes FIRST, so no lease
+  // changes after the handoff below is written and the next generation restores exactly it.
+  let browserControlServer: ReturnType<typeof startBrowserControlServer> | null = null;
+  registerShutdownTask(() => browserControlServer ? Promise.race([stopBrowserControlServer(browserControlServer), new Promise<void>(resolve => setTimeout(resolve, 3_000).unref())]) : undefined);
   registerShutdownTask(() => residentChromeSupervisor.stop());
   // Crash-only: SIGTERM the Chrome WE launched (bounded), unless the lease ledger shows
   // a live external holder — then leave it up for the next generation to adopt.
@@ -170,14 +174,13 @@ async function main(): Promise<void> {
     pinnedKeeper.unref();
     registerShutdownTask(() => clearInterval(pinnedKeeper));
   }
-  const browserControlServer = startBrowserControlServer(
+  browserControlServer = startBrowserControlServer(
     browserLeaseBroker,
     (enabled, reason) => residentChromeSupervisor.setMaintenance(enabled, reason),
     undefined,
     (surface) => stewardship.touch(surface, true),
     [interactiveBrowser],
   );
-  registerShutdownTask(() => stopBrowserControlServer(browserControlServer));
   /**
    * Bring the browser up, but NEVER let it decide whether Homer runs.
    *

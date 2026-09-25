@@ -10,7 +10,7 @@
 import "../helpers/no-telegram.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BrowserLeaseBroker } from "../../src/scraping/browser-control.js";
+import { BrowserLeaseBroker, RESTORED_LEASE_GRACE_MS } from "../../src/scraping/browser-control.js";
 
 type Target = { id: string; url: string; webSocketDebuggerUrl?: string };
 
@@ -161,12 +161,14 @@ test("a record whose tab is gone is not resurrected as a phantom lease", async (
   assert.equal(empty.externalLeaseCount(), 0);
 });
 
-test("restore refuses an expired holder, a dead holder, or a live conflict", async () => {
+test("restore gives a lapsed live holder a renewal grace; refuses a dead holder or a live conflict", async () => {
   const broker = brokerWith([]);
   broker.beginGeneration(1);
   const base = { surface: "agent.vc-query-detail", owner: HOLDER, leaseId: "L", granted: true };
 
-  assert.equal((await broker.restoreExternalHolder({ reservation: { ...base, expiresAt: Date.now() - 1 }, records: [] })).reservation, false, "expired");
+  // The snapshot is taken after expireLeases, so this lapsed while no broker could take a renew.
+  assert.equal((await broker.restoreExternalHolder({ reservation: { ...base, expiresAt: Date.now() - 1 }, records: [] })).reservation, true, "lapsed during the outage");
+  assert.ok(broker.externalReservationSummary()[0]!.expiresAt >= Date.now() + RESTORED_LEASE_GRACE_MS - 1_000, "and renewable again");
   assert.equal(
     (await broker.restoreExternalHolder({ reservation: { ...base, owner: DEAD_AGENT, adopterOwner: DEAD_AGENT, expiresAt: Date.now() + 60_000 }, records: [] })).reservation,
     false,
@@ -323,18 +325,19 @@ test("a failed target list during restore reports unknown, never holders-gone", 
   assert.equal(result.records, 0);
 });
 
-test("a live holder whose lease lapsed is unknown, not gone", async () => {
+test("a live holder whose lease lapsed during the outage is restored with a grace", async () => {
   const broker = brokerWith([{ id: "t1", url: `${VC}/q`, webSocketDebuggerUrl: "ws://x/1" }]);
   broker.beginGeneration(2);
   const record = {
     surface: "agent.vc-query-detail", generation: 1, targetId: "t1", expectedOrigins: [VC],
     currentUrl: `${VC}/q`, lastVerifiedUrl: `${VC}/q`, owner: AGENT, leaseId: "L",
-    // A swallowed `browserctl renew` failure: the agent is alive, its lease is not.
+    // The agent kept running; its renew had no broker to reach while the daemon restarted.
     leaseExpiresAt: Date.now() - 1_000, lastActivityAt: Date.now(), adopterOwner: AGENT,
   };
   const result = await broker.restoreExternalHolder({ reservation: null, records: [record] });
-  assert.equal(result.outcome, "unknown");
-  assert.equal(result.unresolvedLiveHolders, 1);
+  assert.equal(result.outcome, "restored");
+  assert.ok(broker.snapshot()[0]!.leaseExpiresAt! >= Date.now() + RESTORED_LEASE_GRACE_MS - 1_000);
+  assert.equal(broker.renew("L", 60).leaseId, "L");
 });
 
 test("a live holder whose tab is gone is unknown, not gone", async () => {

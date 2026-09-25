@@ -19,8 +19,13 @@ test('missing Chrome retains live expired owner on restart and recovers only aft
     await controller.initialize();
     await assert.rejects(controller.ready(), /previous driver/);
     assert.equal((await controller.status() as {state:string}).state, 'quarantined');
+    // A live driver's renew meanwhile is "not restored yet" (retryable), never "unknown lease".
+    assert.equal(controller.broker.restoring(), true);
+    assert.throws(() => controller.broker.renew('old', 60), (error: Error & {code?: string}) => error.code === 'RESTORING');
     const exited = once(worker, 'exit'); worker.kill(); await exited;
     assert.equal((await controller.status() as {state:string}).state, 'idle');
+    assert.equal(controller.broker.restoring(), false);
+    assert.throws(() => controller.broker.renew('old', 60), /unknown or expired lease/);
   } finally { worker.kill(); controller.shutdown(); rmSync(dir,{recursive:true,force:true}); }
 });
 

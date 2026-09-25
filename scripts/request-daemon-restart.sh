@@ -34,28 +34,48 @@ if [[ ! "$supervisor_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$supervisor_pid" 2>/dev/n
   exit 1
 fi
 
-# A daemon restart cycles the browser broker and destroys every active
-# agent-browser lease mid-run (bit twice on 2026-08-18: a portal data pull and
-# a cross-session job-application flow). Refuse while any unexpired lease is
-# live; fail open if the broker itself cannot report (a restart may be the fix).
+# A running `browserctl agent` rides out a restart: it keeps its tab, retries the broker for
+# up to 5 min, and the next broker generation restores its lease from the handoff. Refuse only
+# for leases that cannot survive: any holder other than a browserctl agent (daemon jobs,
+# stewardship touches, Python collectors renewing through plain `browserctl renew`), and agents
+# started before the current bin/browserctl, which predate the retry. Both instances are
+# checked; fail open if the broker itself cannot report (a restart may be the fix).
+# DEBT: "predates the retry" is judged by process start vs bin/browserctl mtime, so ANY later edit
+# to bin/browserctl makes already-running agents refuse a restart (conservative). Upgrade to a
+# client-advertised protocol version on reserve-external if that ever blocks a restart falsely.
 if [[ "$FORCE" != "1" ]]; then
-  active_leases="$("$HOMER_ROOT/bin/browserctl" status 2>/dev/null | node -e '
-    let raw = "";
-    process.stdin.on("data", (c) => (raw += c));
-    process.stdin.on("end", () => {
-      try {
-        const surfaces = JSON.parse(raw)?.status?.surfaces ?? {};
-        const now = Date.now();
-        const live = Object.entries(surfaces)
-          .filter(([, s]) => s?.lease?.expiresAt && Date.parse(s.lease.expiresAt) > now)
-          .map(([name, s]) => `${name} (owner=${s.lease.owner} expires=${s.lease.expiresAt})`);
-        process.stdout.write(live.join("; "));
-      } catch { /* unreadable broker state: stay silent, fail open */ }
-    });
-  ' || true)"
+  active_leases="$(node - "$HOMER_ROOT/bin/browserctl" <<'NODE' 2>/dev/null || true
+const { execFileSync } = require("node:child_process");
+const { statSync } = require("node:fs");
+const browserctl = process.argv[2];
+const now = Date.now();
+const read = (args) => { try { return JSON.parse(execFileSync(browserctl, args, { encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "ignore"] })); } catch (error) { try { return JSON.parse(error.stdout); } catch { return null; } } };
+const clientMtime = statSync(browserctl).mtimeMs;
+const agentPid = (owner) => /^browserctl-agent:(\d+)(?::|$)/.exec(owner ?? "")?.[1];
+const survives = (owner, adopter) => [owner, adopter].filter(Boolean).every((name) => {
+  const pid = agentPid(name);
+  if (!pid) return false;
+  try { return Date.parse(execFileSync("/bin/ps", ["-o", "lstart=", "-p", pid], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim()) >= clientMtime - 1_000; }
+  catch { return true; } // exited: nothing left to interrupt
+});
+const live = [];
+const note = (instance, surface, owner, adopter, expiresAt) => {
+  const at = typeof expiresAt === "number" ? expiresAt : Date.parse(expiresAt);
+  if (!(at > now) || survives(owner, adopter)) return;
+  live.push(`${instance}:${surface} (owner=${owner}${adopter ? ` adopter=${adopter}` : ""} expires=${new Date(at).toISOString()})`);
+};
+const downloads = read(["status"])?.status;
+for (const [surface, s] of Object.entries(downloads?.surfaces ?? {})) if (s?.lease) note("downloads", surface, s.lease.owner, null, s.lease.expiresAt);
+for (const r of downloads?.externalReservations ?? []) note("downloads", r.surface, r.owner, r.adopterOwner, r.expiresAt);
+const interactive = read(["status", "--instance", "interactive"]);
+for (const r of interactive?.leases ?? []) if (r.leaseId) note("interactive", r.surface, r.owner, r.adopterOwner, r.leaseExpiresAt);
+for (const r of interactive?.reservations ?? []) note("interactive", r.surface, r.owner, r.adopterOwner, r.expiresAt);
+process.stdout.write([...new Set(live)].join("; "));
+NODE
+)"
   if [[ -n "$active_leases" ]]; then
-    echo "refuse: active browser lease(s): $active_leases" >&2
-    echo "        A restart would kill these in-flight agent runs. Wait for lease expiry or pass --force." >&2
+    echo "refuse: browser lease(s) that would not survive a restart: $active_leases" >&2
+    echo "        Wait for them to finish or pass --force." >&2
     exit 3
   fi
 fi

@@ -23,7 +23,7 @@ import { PATHS } from "../../config/paths.js";
 import { uploadBlob, listBlobs, deleteBlob } from "../../integrations/azure-blob.js";
 
 const DB_PATH = PATHS.db;
-const BACKUP_DIR = join(PATHS.homerRoot, "backups");
+const BACKUP_DIR = PATHS.homerBackups;
 
 // GFS retention policies
 const DAILY_RETENTION_DAYS = 90;
@@ -191,6 +191,9 @@ export async function runDbBackup(): Promise<{
   try {
     if (!existsSync(DB_PATH)) {
       return { success: false, output: "", error: "homer.db not found" };
+    }
+    if (!existsSync(PATHS.depotSentinel)) {
+      return { success: false, output: "", error: `Depot not mounted (${PATHS.depotSentinel} missing); backup not written` };
     }
 
     // 0700/0600 throughout: a backup is a byte-identical copy of the live DB,

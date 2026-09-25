@@ -2,13 +2,13 @@
  * Downloadable visual evidence for YouTube reviews.
  *
  * Videos are deliberately kept separate from transcripts: a scheduled cleanup
- * removes only downloaded video payloads after 30 days, while manifests and
- * extracted PNG evidence remain available as durable review notes.
+ * removes each evidence set (video payload, manifest, PNG frames and contact
+ * sheets) 30 days after acquisition. Evidence lives on Depot.
  */
 
 import { spawn } from "node:child_process";
 import {
-  existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync,
+  existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, statSync,
   unlinkSync, writeFileSync,
 } from "node:fs";
 import type { Stats } from "node:fs";
@@ -18,7 +18,7 @@ import { PATHS } from "../config/paths.js";
 export const VIDEO_EVIDENCE_RETENTION_DAYS = 30;
 export const VIDEO_EVIDENCE_FRAME_INTERVAL_SECONDS = 30;
 export const VIDEO_EVIDENCE_MAX_FRAMES = 48;
-export const VIDEO_EVIDENCE_ROOT = join(PATHS.homerData, "youtube-video-evidence");
+export const VIDEO_EVIDENCE_ROOT = PATHS.youtubeVideoEvidence;
 
 export interface VideoEvidenceFrame {
   timestampSec: number;
@@ -74,6 +74,7 @@ export interface PruneVideoEvidenceResult {
   videoPayloadsRemoved: number;
   partialsRemoved: number;
   skippedSymlinks: number;
+  evidenceSetsRemoved: number;
 }
 
 function assertVideoId(videoId: string): void {
@@ -341,6 +342,9 @@ export async function prepareVideoEvidence(
   assertVideoId(videoId);
   if (!Number.isFinite(durationSec) || durationSec < 0) throw new Error("durationSec must be a non-negative number");
   const root = options.root ?? VIDEO_EVIDENCE_ROOT;
+  if (!options.root && !existsSync(PATHS.depotSentinel)) {
+    throw new Error(`Depot not mounted (${PATHS.depotSentinel} missing); video evidence not written`);
+  }
   ensureDirectory(root);
   const dir = directoryFor(root, videoId);
   ensureDirectory(dir);
@@ -394,11 +398,11 @@ export async function prepareVideoEvidence(
   return toResult(dir, manifestPath, acquisition);
 }
 
-/** Remove only expired managed video payloads and yt-dlp partials. */
+/** Remove expired video payloads, partials and whole evidence sets (30d). */
 export function pruneExpiredVideoEvidence(options: PruneVideoEvidenceOptions = {}): PruneVideoEvidenceResult {
   const root = options.root ?? VIDEO_EVIDENCE_ROOT;
   const now = options.now ?? new Date();
-  const result: PruneVideoEvidenceResult = { expiredAcquisitions: 0, videoPayloadsRemoved: 0, partialsRemoved: 0, skippedSymlinks: 0 };
+  const result: PruneVideoEvidenceResult = { expiredAcquisitions: 0, videoPayloadsRemoved: 0, partialsRemoved: 0, skippedSymlinks: 0, evidenceSetsRemoved: 0 };
   if (!regularDirectory(root)) return result;
   for (const videoId of readdirSync(root)) {
     if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) continue;
@@ -426,6 +430,16 @@ export function pruneExpiredVideoEvidence(options: PruneVideoEvidenceOptions = {
       if (!manifestExists && isManagedPayload(name) && isOlderThanRetention(dir, name, now) && safeUnlink(dir, name)) result.videoPayloadsRemoved++;
       if (manifestExists && !referencedPayloads.has(name) && isManagedPayload(name)
         && isOlderThanRetention(dir, name, now) && safeUnlink(dir, name)) result.videoPayloadsRemoved++;
+    }
+    // Only files the manifest names are removed; unmanaged files keep the
+    // directory alive.
+    if (manifest.acquisitions.length > 0
+      && manifest.acquisitions.every((entry) => isExpiredAcquisition(entry, now))) {
+      for (const entry of manifest.acquisitions) {
+        for (const file of [...entry.contactSheetFiles, ...entry.frames.map((frame) => frame.file)]) safeUnlink(dir, file);
+      }
+      if (safeUnlink(dir, "manifest.json")) result.evidenceSetsRemoved++;
+      try { rmdirSync(dir); } catch { /* unmanaged files remain */ }
     }
   }
   return result;

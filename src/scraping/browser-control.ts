@@ -6,6 +6,10 @@ import { logger } from "../utils/logger.js";
 export const BROWSER_CONTROL_STATE_DIR = "/Users/yj/Library/Application Support/Homer/cdp-state";
 export const BROWSER_CONTROL_SOCKET = join(BROWSER_CONTROL_STATE_DIR, "browser-control.sock");
 export const BROWSER_STATUS_PATH = join(BROWSER_CONTROL_STATE_DIR, "status.json");
+/** Upper bound on how long a restarted broker treats an unknown lease as "not restored yet". */
+export const BROKER_RESTORE_WINDOW_MS = 5 * 60_000;
+/** A restored lease that lapsed while no broker was listening gets this long to be renewed. */
+export const RESTORED_LEASE_GRACE_MS = 2 * 60_000;
 /** A killed lease wrapper is not gone while its persisted driver groups survive. */
 export function browserDriverAlive(owner: string | null | undefined, socketPath = BROWSER_CONTROL_SOCKET): boolean {
   const match = owner?.match(/^browserctl-agent:(\d+)(?::|$)/);
@@ -136,6 +140,8 @@ export class BrowserLeaseBroker {
   private externalReservations = new Map<string, ExternalReservation>();
   /** See setAdoptionGrace — set only after adopting a Chrome whose holder we cannot see. */
   private adoptionGrace: { until: number; reason: string } | null = null;
+  /** See setRestoring — while set, a lease this broker does not know may still be restored. */
+  private restoringUntil: number | null = null;
   /** Tabs abandoned by a reclaimed adopter, closed by a serialized sweep — see queueTargetClose. */
   private pendingCloses: Array<{ targetId: string; surface: string }> = [];
   private closeSweep: Promise<void> = Promise.resolve();
@@ -178,6 +184,8 @@ export class BrowserLeaseBroker {
     if (!allowed.includes(new URL(bootstrapUrl).origin)) throw new Error("bootstrapUrl origin is not allowed");
     const run = this.reconcileLock.then(async () => {
       if (this.draining) throw new Error("broker is draining leases");
+      // An unregistered tab may still be a previous generation's lease; never adopt or sweep it.
+      if (this.restoring()) throw this.restoringError();
       this.inFlightReconciles++;
       try {
         const existing = this.records.get(surface);
@@ -325,9 +333,7 @@ export class BrowserLeaseBroker {
   adoptExternal(leaseId: string, owner: string, surface?: string): Record<string, unknown> {
     this.expireLeases();
     const reservation = this.externalReservations.get(leaseId);
-    if (!reservation || reservation.leaseId !== leaseId) {
-      throw new Error("unknown or expired external reservation");
-    }
+    if (!reservation || reservation.leaseId !== leaseId) throw this.unknownLease("unknown or expired external reservation");
     if (surface && surface !== reservation.surface) {
       throw new Error(`grant is bound to surface ${reservation.surface}, not ${surface}`);
     }
@@ -357,7 +363,12 @@ export class BrowserLeaseBroker {
 
   async registerExternalTarget(leaseId: string, targetId: string): Promise<Record<string, unknown>> {
     const reservation = this.externalReservations.get(leaseId);
-    if (!reservation || reservation.leaseId !== leaseId) throw new Error("unknown or expired external reservation");
+    if (!reservation || reservation.leaseId !== leaseId) {
+      // A registration retried across a daemon restart may already have landed.
+      const registered = [...this.records.values()].find(record => record.leaseId === leaseId && record.targetId === targetId);
+      if (registered) return { leaseId, generation: this.generation, targetId, currentUrl: registered.currentUrl };
+      throw this.unknownLease("unknown or expired external reservation");
+    }
     const generation = this.generation;
     const surface = reservation.surface;
     const live = (await this.targets.list()).find((target) => target.id === targetId);
@@ -535,7 +546,7 @@ export class BrowserLeaseBroker {
       const run = this.reconcileLock.then(async () => {
         const generation = this.generation;
         const blocked = () => this.draining || generation !== this.generation
-          || this.adoptionGraceUntil() !== null || this.externalReservations.size > 0
+          || this.adoptionGraceUntil() !== null || this.restoring() || this.externalReservations.size > 0
           || (automatic && this.externalLeaseCount() > 0);
         const initial = await this.targets.list();
         if (blocked()) return { closed: [], remaining: initial.length, deferred: true };
@@ -643,6 +654,11 @@ export class BrowserLeaseBroker {
    *
    * Only restores a record whose target is still open, so a tab that died with the old
    * generation cannot resurrect as a phantom lease.
+   *
+   * A lease that lapsed while no broker was listening is restored with RESTORED_LEASE_GRACE_MS
+   * to spare: the snapshot is taken after `expireLeases`, so any expiry it carries happened
+   * during the outage, when the holder's renew had nowhere to go. A dead holder's agent tab is
+   * closed through the reclaim path instead of being left for the life of the browser.
    */
   async restoreExternalHolder(
     snapshot: { reservations?: ExternalReservation[]; reservation?: ExternalReservation | null; records: TargetRecord[] },
@@ -653,12 +669,12 @@ export class BrowserLeaseBroker {
     let restoredRecords = 0;
     /**
      * F1: entries we could NOT restore even though their process is demonstrably alive —
-     * an expired lease under a live agent (a swallowed `browserctl renew` failure), a tab
-     * that happened to be closed at this instant, or a surface already occupied. "Restored
+     * a tab that happened to be closed at this instant, or a surface already occupied. "Restored
      * nothing" must never be reported as "nothing is holding this browser".
      */
     let unresolvedLiveHolders = 0;
     let listFailed = false;
+    let abandoned = false;
 
     // Read the old singleton shape once; every subsequent snapshot writes the array.
     for (const r of snapshot.reservations ?? (snapshot.reservation ? [snapshot.reservation] : [])) {
@@ -667,8 +683,8 @@ export class BrowserLeaseBroker {
         const existing = this.externalReservations.get(r.leaseId);
         const conflict = [...this.externalReservations.values()].some(row => row.surface === r.surface && row.leaseId !== r.leaseId)
           || Boolean(this.records.get(r.surface)?.leaseId && this.records.get(r.surface)?.leaseId !== r.leaseId);
-        if ((!existing || existing.surface === r.surface) && !conflict && r.surface.startsWith("agent.") && (r.expiresAt > this.now() || this.fenceLiveAgentExpiry)) {
-          this.externalReservations.set(r.leaseId, { ...r, owner: live });
+        if ((!existing || existing.surface === r.surface) && !conflict && r.surface.startsWith("agent.")) {
+          this.externalReservations.set(r.leaseId, { ...r, owner: live, expiresAt: this.restoredExpiry(Math.max(r.expiresAt, existing?.expiresAt ?? 0)) });
           restoredReservation = true;
           liveOwners.push(live);
         } else {
@@ -691,23 +707,30 @@ export class BrowserLeaseBroker {
       const liveTargetIds = new Set(listed.map((target) => target.id));
       for (const record of snapshot.records) {
         const live = this.liveIdentity(record.owner, record.adopterOwner ?? null);
-        if (!live) continue; // the holder really is gone
-        if (listFailed) { unresolvedLiveHolders++; continue; }
+        if (listFailed) { if (live) unresolvedLiveHolders++; continue; }
+        if (!live) {
+          // The holder really is gone; its agent tab is nobody's now.
+          if (record.surface.startsWith("agent.") && liveTargetIds.has(record.targetId)
+            && ![...this.records.values()].some(row => row.targetId === record.targetId)) { this.queueTargetClose(record.targetId, record.surface); abandoned = true; }
+          continue;
+        }
         const existing = this.records.get(record.surface);
         if ((existing && (existing.leaseId !== record.leaseId || existing.targetId !== record.targetId))
           || [...this.records.values()].some(row => row.surface !== record.surface && row.targetId === record.targetId)
           || !record.leaseId
-          || (!this.fenceLiveAgentExpiry && record.leaseExpiresAt !== null && record.leaseExpiresAt <= this.now())
           || !liveTargetIds.has(record.targetId)) {
           unresolvedLiveHolders++;
           continue;
         }
-        this.records.set(record.surface, { ...record, owner: live, generation: this.generation });
+        const leaseExpiresAt = record.leaseExpiresAt === null ? null : this.restoredExpiry(Math.max(record.leaseExpiresAt, existing?.leaseExpiresAt ?? 0));
+        this.records.set(record.surface, { ...record, owner: live, generation: this.generation, leaseExpiresAt });
         restoredRecords++;
         liveOwners.push(live);
       }
     }
 
+    // Settled before returning, so nothing adopts a dead holder's tab while its close is pending.
+    if (abandoned) await this.closeSweep;
     if (restoredReservation || restoredRecords > 0) this.transition();
     const outcome: RestoreExternalHolderResult["outcome"] = listFailed || unresolvedLiveHolders > 0
       ? "unknown" : restoredReservation || restoredRecords > 0 ? "restored" : "holders-gone";
@@ -753,6 +776,21 @@ export class BrowserLeaseBroker {
     this.adoptionGrace = until > this.now() ? { until, reason } : null;
     this.transition();
   }
+  /**
+   * Set by a new daemon generation from startup until its predecessor's handoff is restored (or
+   * found unusable). The browser and every external driver outlive the daemon, so until then a
+   * lease this broker does not know is "not restored yet", not "gone": renew/register/release
+   * answer RESTORING, which browserctl retries, and reconcile/sweeps leave unregistered tabs alone.
+   */
+  setRestoring(until: number | null): void { this.restoringUntil = until !== null && until > this.now() ? until : null; }
+  restoring(): boolean {
+    if (this.restoringUntil !== null && this.restoringUntil <= this.now()) this.restoringUntil = null;
+    return this.restoringUntil !== null;
+  }
+  private restoringError(): BrokerError {
+    return new BrokerError("RESTORING", "broker is restoring the previous daemon generation's browser leases; retry shortly");
+  }
+  private unknownLease(message: string): Error { return this.restoring() ? this.restoringError() : new Error(message); }
   /** Read-only reservations for status publication; grants and pending setup both matter. */
   externalReservationSummary(): ExternalReservation[] {
     this.expireLeases();
@@ -771,12 +809,13 @@ export class BrowserLeaseBroker {
       if (this.surfaceLocks.get(surface) === tail) this.surfaceLocks.delete(surface);
     }
   }
+  private restoredExpiry(expiresAt: number): number { return Math.max(expiresAt, this.now() + RESTORED_LEASE_GRACE_MS); }
   private expiry(ttl: number): number {
     if (!Number.isFinite(ttl) || ttl <= 0 || ttl > 86_400) throw new Error("ttl must be > 0 and <= 86400 seconds"); return this.now() + ttl * 1_000;
   }
   private byLease(leaseId: string): TargetRecord {
     const record = [...this.records.values()].find((candidate) => candidate.leaseId === leaseId);
-    if (!record) throw new Error("unknown or expired lease");
+    if (!record) throw this.unknownLease("unknown or expired lease");
     return record;
   }
   private activeLeaseCount(): number {
@@ -925,6 +964,9 @@ export function startBrowserControlServer(broker: BrowserLeaseBroker, maintenanc
         if (byLease && byLease.id !== instanceId) throw new Error("lease instance mismatch");
         if (instance && instance.id !== "downloads" && request.leaseId && broker.hasLease(request.leaseId)) throw new Error("lease instance mismatch");
         if (instance && ["reserve-external", "reconcile", "acquire", "adopt-external"].includes(request.verb)) await instance.ready();
+        // ready() is where a restarted instance re-attempts restoring its previous drivers; a
+        // driver's own renew/register/release is what should drive that forward.
+        if (instance?.broker.restoring() && ["renew", "release", "register-external-target"].includes(request.verb)) await instance.ready().catch(() => undefined);
         const selected = instance?.broker ?? broker;
         let result: unknown;
         if (request.verb === "status" && instance) result = await instance.status();

@@ -178,23 +178,24 @@ ${scheduleContent.slice(0, 3000)}
 
 Return a 2-sentence summary of what changed.`;
 
-    logger.info("[ArchitectureUpdater] Running architecture analysis (Codex)");
+    logger.info("[ArchitectureUpdater] Running architecture analysis (OpenCode Opus 5.5)");
 
     // DELIBERATE PIN: architecture analysis is an event-triggered, quality-critical deep-reasoning
     // task that rewrites architecture.md. It is NOT in schedule.json, so it can't be managed from
-    // the Jobs tab — a seeded DB row would be an un-clearable hidden pin. We pin Codex/gpt-5.6-sol
-    // explicitly (visible, behavior-neutral) instead. This is the one job intentionally immune to
+    // the Jobs tab — a seeded DB row would be an un-clearable hidden pin. We pin OpenCode Copilot
+    // Opus 5.5 high explicitly (visible, behavior-neutral) instead. This is the one job intentionally immune to
     // switch-all. DEBT: if architecture-updater becomes schedulable/UI-visible, replace this pin
     // with a seeded job row so switch-all can move it.
     const result = await executeResolvedHarness({
       source: "scheduler",
       mode: "scheduler-job",
       prompt,
-      explicit: { harness: "codex", model: "gpt-5.6-terra" },
+      explicit: { harness: "opencode", model: "github-copilot/claude-opus-5.5" },
       baselineProfile: {
         cwdOverride: HOMER_DIR,
         timeoutOverride: 1_200_000, // 20 min
-        executorOptions: { codex: { reasoningEffort: "high" } },
+        executorOptions: { opencode: { forceOpenCode: true, researchOnly: false } },
+        invocation: { reasoningEffort: "high" },
       },
       requiredCapabilities: [
         { capability: "code.edit", required: true, reason: "rewrite architecture.md" },

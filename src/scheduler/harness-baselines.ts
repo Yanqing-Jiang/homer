@@ -11,25 +11,21 @@ export interface InternalJobHarnessBaseline extends HarnessSelection {
 }
 
 const HOME_DIR = process.env.HOME ?? process.cwd();
-const CODEX_MODEL = "gpt-5.6-terra";
+// Former Terra jobs run on OpenCode Copilot Opus 5.5 high (Yanqing, 2026-09-24).
+const OPUS_MODEL = "github-copilot/claude-opus-5.5";
 const CONTENT_MODEL = "gpt-6-astra";
 // Scraping-related jobs run on Astra at low effort (Yanqing, 2026-09-11).
 const SCRAPE_MODEL = "gpt-6-astra-low";
 const PROJECT_DIR = PATHS.homerRoot;
 
-function codexStage(
-  cwdOverride: string,
-  timeoutOverride: number,
-  reasoningEffort: "high" = "high",
-): InternalHarnessCallProfile {
-  const model = CODEX_MODEL;
+function opusStage(cwdOverride: string | undefined, timeoutOverride: number): InternalHarnessCallProfile {
   return {
-    executor: "codex",
-    model,
+    executor: "opencode",
+    model: OPUS_MODEL,
     cwdOverride,
     timeoutOverride,
     executorOptions: {
-      codex: { reasoningEffort },
+      opencode: { variant: "high", forceOpenCode: true, researchOnly: false },
     },
   };
 }
@@ -39,7 +35,7 @@ const PUBLIC_JOB_HARNESS_BASELINES = {
     executor: "codex",
     model: CONTENT_MODEL,
     stages: {
-      filter: codexStage(HOME_DIR, 180_000, "high"),
+      filter: opusStage(HOME_DIR, 180_000),
     },
   },
   "nightly-memory": {
@@ -69,8 +65,8 @@ const PUBLIC_JOB_HARNESS_BASELINES = {
     },
   },
   "nightly-code-push": {
-    executor: "codex",
-    model: CODEX_MODEL,
+    executor: "opencode",
+    model: OPUS_MODEL,
     stages: {
       // 90s, not 600s: a nicer commit message must never consume the whole job
       // budget — generateCommitMessage falls back to a generic message on timeout.
@@ -79,14 +75,14 @@ const PUBLIC_JOB_HARNESS_BASELINES = {
       // budget (watchdog at 330s) before any git work; upgrade to a job-wide
       // allowance derived from remaining time when nightly-code-push hits its
       // watchdog with both repos dirty.
-      push: codexStage(PROJECT_DIR, 90_000, "high"),
+      push: opusStage(PROJECT_DIR, 90_000),
     },
   },
   "outcome-tracker": {
-    executor: "codex",
-    model: CODEX_MODEL,
+    executor: "opencode",
+    model: OPUS_MODEL,
     stages: {
-      analyze: codexStage(HOME_DIR, 120_000, "high"),
+      analyze: opusStage(HOME_DIR, 120_000),
     },
   },
   "content-scraper": {
@@ -103,14 +99,10 @@ const PUBLIC_JOB_HARNESS_BASELINES = {
     },
   },
   "health-check": {
-    executor: "codex",
-    model: CODEX_MODEL,
+    executor: "opencode",
+    model: OPUS_MODEL,
     stages: {
-      triage: {
-        executor: "codex",
-        model: CODEX_MODEL,
-        timeoutOverride: 30_000,
-      },
+      triage: opusStage(undefined, 30_000),
     },
   },
 } satisfies Record<string, InternalJobHarnessBaseline>;

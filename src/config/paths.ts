@@ -29,9 +29,8 @@ export const PATHS = {
   patterns: `${mem}/patterns.md`,
 
   // Memory subdirectories with a live writer. Phase 6 retired the rest:
-  // daily/, plans/, backups/ and youtube/ are archived under
-  // ~/homer/backups/phase6-md-final/ and their content is DB-authoritative
-  // (session_summaries, memory_documents, youtube_videos). The folders the
+  // daily/, plans/, backups/ and youtube/ were retired; their content is
+  // DB-authoritative (session_summaries, memory_documents, youtube_videos). The folders the
   // indexer still scans are declared in MEMORY_SCAN_DIRS (src/memory/indexer.ts).
   meetings: `${mem}/meetings`,
   scrapes: `${mem}/scrapes`,
@@ -55,4 +54,11 @@ export const PATHS = {
 
   // ── Archive ───────────────────────────────────────────────
   archive: archive,
+
+  // ── Depot (cold external SSD) ─────────────────────────────
+  // Writers must check the sentinel first: a missing sentinel means the disk
+  // is not mounted and nothing may be written under /Volumes/Depot.
+  depotSentinel: "/Volumes/Depot/.depot-root",
+  homerBackups: "/Volumes/Depot/Homer_backups",
+  youtubeVideoEvidence: "/Volumes/Depot/youtube-video-evidence",
 } as const;

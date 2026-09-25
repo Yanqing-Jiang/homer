@@ -49,6 +49,7 @@ output/
 !/bin/browserctl
 !/bin/agent-browser
 !/bin/browser-file-transfer.mjs
+!/bin/browser-owned-popups.mjs
 !/bin/tmux
 # skills/: only the alias table and layout docs ship. Skills, commands, agents
 # and rendered views are generated per operator (see README "Skills").

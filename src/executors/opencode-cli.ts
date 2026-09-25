@@ -3,7 +3,6 @@ import { mkdirSync } from "fs";
 import * as readline from "readline";
 import type { ExecutorResult } from "./types.js";
 import { logger } from "../utils/logger.js";
-import { executeCodexCLI } from "./codex-cli.js";
 import { executeGeminiCLIDirect, GEMINI_CLI_FLASH_MODEL } from "./gemini-cli.js";
 import { processRegistry } from "../process/registry.js";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
@@ -49,7 +48,7 @@ export interface OpenCodeCLIOptions {
   cwd?: string;
   /** OpenCode agent mode: "build" (default) or "plan" */
   agent?: string;
-  /** Provider-specific reasoning-effort variant passed to opencode as --variant
+  /** Provider-specific reasoning-effort variant, appended to the model as `#variant`
    *  (e.g. "high", "max"). Omitted → opencode uses the model's default variant. */
   variant?: string;
   /** Bypass the legacy Gemini-CLI (agy) redirect and run Google/Flash/Pro models
@@ -187,8 +186,9 @@ function splitCursorVariantSuffix(model?: string): { model?: string; variant?: s
  * Initial stall cut-off is 10s for fast hung-stream retry; post-tool stays
  * longer (forced recovery disabled there). Wait-notice stays off (0).
  */
-function opencodeChildEnv(model?: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+function opencodeChildEnv(model: string | undefined, cwd: string): NodeJS.ProcessEnv {
+  // opencode 2.x resolves its project directory from $PWD, not the OS cwd.
+  const env: NodeJS.ProcessEnv = { ...process.env, PWD: cwd };
   if (!usesCursorProvider(model)) {
     delete env.OPENCODE_CURSOR_STALL_TIMEOUT_MS;
     delete env.OPENCODE_CURSOR_STALL_TIMEOUT_POST_TOOL_MS;
@@ -262,7 +262,7 @@ async function executeOpenCodeCLIOnce(
   // DeepSeek V4 Pro is only worth its premium at max reasoning effort (it's our
   // high-quality synthesis model — see eval 2026-06-22), so default it to --variant max
   // unless a caller explicitly overrides. Other models keep their opencode default.
-  const effectiveVariant = variant ?? suffixVariant ?? (model === "opencode-go/deepseek-v4-pro" ? "max" : model === "github-copilot/claude-opus-5" ? "high" : undefined);
+  const effectiveVariant = variant ?? suffixVariant ?? (model === "opencode-go/deepseek-v4-pro" ? "max" : model === "github-copilot/claude-opus-5" || model === "github-copilot/claude-opus-5.5" ? "high" : undefined);
 
   // opencode-go/* models (GLM, DeepSeek, MiniMax, …) are first-class Zen models and must
   // never be diverted to the legacy Gemini CLI — guards against "deepseek-v4-pro" matching
@@ -314,16 +314,14 @@ async function executeOpenCodeCLIOnce(
     const args: string[] = [
       "run",
       fullMessage,
-      ...(model ? ["-m", model] : []),
-      ...(effectiveVariant ? ["--variant", effectiveVariant] : []),
+      // opencode 2.x: effort rides on the model id as `provider/model#variant`; the project
+      // dir is the spawn cwd (`--dir` was removed).
+      ...(model ? ["-m", effectiveVariant ? `${model}#${effectiveVariant}` : model] : []),
       "--format", "json",
-      // Pin opencode's project dir to the OS cwd: opencode has its own project-dir
-      // semantics, so set both to keep edits/session storage scoped to the same place.
-      "--dir", effectiveCwd,
       ...(agent ? ["--agent", agent] : []),
       // Autonomous Homer turns: auto-approve tool permissions so edit-capable turns
       // don't stall waiting for an interactive prompt that never comes.
-      ...(yolo ? ["--dangerously-skip-permissions"] : []),
+      ...(yolo ? ["--auto"] : []),
       // Resume a prior opencode session for multi-turn continuity. cli-runner clears a
       // stale session id and retries fresh on "Session not found" (opencode -s fails hard).
       ...(resume ? ["-s", resume] : []),
@@ -337,7 +335,7 @@ async function executeOpenCodeCLIOnce(
       stdio: ["ignore", "pipe", "pipe"],
       cwd: effectiveCwd,
       detached: true, // own process group so SIGTERM kills all children
-      env: opencodeChildEnv(model),
+      env: opencodeChildEnv(model, effectiveCwd),
     });
 
     // Register with process lifecycle management
@@ -730,34 +728,17 @@ export async function executeOpenCodeWithFallback(
   const retryResult = await executeOpenCodeCLI(prompt, context, options);
   if (retryResult.exitCode === 0) return retryResult;
 
-  // Tier 2 fallback: all Flash/Google accounts exhausted — try Codex Terra high
+  // Tier 2 fallback: all Flash/Google accounts exhausted — try Copilot Opus 5.5 high
   if (retryResult.exitCode === 2 || retryResult.exitCode === 3) {
-    logger.info("All Flash/Google accounts exhausted, falling back to Codex Terra high");
-    try {
-      const fullPrompt = context ? `${context}\n\n---\n\n${prompt}` : prompt;
-      const codexResult = await executeCodexCLI(fullPrompt, {
-        cwd: options.cwd ?? getRuntimePaths().homeDir,
-        model: "gpt-5.6-terra",
-        reasoningEffort: "high",
-        timeout: options.timeout,
-        signal: options.signal,
-      });
-      if (codexResult.exitCode === 0) {
-        return {
-          output: codexResult.output,
-          exitCode: 0,
-          duration: codexResult.duration,
-          executor: "codex",
-          sessionId: codexResult.sessionId ?? "",
-          model: "gpt-5.6-terra",
-          accountId: 0,
-        } as OpenCodeCLIResult;
-      }
-    } catch (err) {
-      logger.warn({ err }, "Codex Terra high fallback failed");
-    }
-
-
+    logger.info("All Flash/Google accounts exhausted, falling back to Copilot Opus 5.5 high");
+    const opusResult = await executeOpenCodeCLI(prompt, context, {
+      ...options,
+      model: "github-copilot/claude-opus-5.5",
+      variant: "high",
+      forceOpenCode: true,
+    });
+    if (opusResult.exitCode === 0) return opusResult;
+    logger.warn({ exitCode: opusResult.exitCode }, "Copilot Opus 5.5 high fallback failed");
   }
 
   return retryResult;
@@ -786,15 +767,14 @@ export async function* streamOpenCodeCLI(
   const args: string[] = [
     "run",
     fullMessage,
-    "-m", model!,
-    ...(variant ? ["--variant", variant] : []),
+    "-m", variant ? `${model}#${variant}` : model!,
     "--format", "json",
   ];
 
   const child = spawn("opencode", args, {
     stdio: ["ignore", "pipe", "pipe"], // see the stdin note at the primary spawn site
     cwd: cwd || runtimeHome,
-    env: opencodeChildEnv(model),
+    env: opencodeChildEnv(model, cwd || runtimeHome),
   });
 
   // Register with process lifecycle management

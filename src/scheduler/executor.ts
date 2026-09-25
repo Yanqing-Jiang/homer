@@ -17,7 +17,7 @@ import {
 /**
  * Lazy read-only connection to read the global harness default (migration 104) without
  * spinning up a full StateManager (which would re-run migrations). Conservative: any
- * failure → Codex Terra at high effort. Connection lives for the daemon lifetime.
+ * failure → OpenCode Copilot Opus 5.5 high. Connection lives for the daemon lifetime.
  */
 let _harnessDb: Database.Database | null = null;
 function harnessDefault(): { executor: ExecutorKind; model: string | null } {
@@ -29,9 +29,9 @@ function harnessDefault(): { executor: ExecutorKind; model: string | null } {
     if (row?.executor && isExecutorKind(row.executor)) {
       return { executor: row.executor, model: row.model };
     }
-    return { executor: "codex", model: "gpt-5.6-terra" };
+    return { executor: "opencode", model: "github-copilot/claude-opus-5.5" };
   } catch {
-    return { executor: "codex", model: "gpt-5.6-terra" };
+    return { executor: "opencode", model: "github-copilot/claude-opus-5.5" };
   }
 }
 

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pruneExpiredVideoEvidence } from "../src/youtube/video-evidence.js";
 
-const OLD = "2026-01-01T00:00:00.000Z";
+const OLD = "2026-07-01T00:00:00.000Z";
 const FUTURE = "2027-01-01T00:00:00.000Z";
 
 function manifest(videoId: string, expiresAt: string, videoFile: string) {
@@ -17,7 +17,7 @@ function manifest(videoId: string, expiresAt: string, videoFile: string) {
   }] });
 }
 
-test("video evidence pruning removes only expired managed payloads and partials", () => {
+test("expired evidence sets lose managed files while unmanaged files and fresh partials stay", () => {
   const root = mkdtempSync(join(tmpdir(), "homer-video-evidence-"));
   try {
     const oldId = "abcdefghijk";
@@ -38,10 +38,10 @@ test("video evidence pruning removes only expired managed payloads and partials"
     writeFileSync(join(oldDir, "notes.txt"), "must stay");
 
     const result = pruneExpiredVideoEvidence({ root, now: new Date("2026-09-13T00:00:00.000Z") });
-    assert.deepEqual(result, { expiredAcquisitions: 1, videoPayloadsRemoved: 1, partialsRemoved: 1, skippedSymlinks: 0 });
-    assert.equal(readFileSync(join(oldDir, "manifest.json"), "utf8"), manifest(oldId, OLD, oldVideo));
-    assert.equal(readFileSync(join(oldDir, "frame-kept.png"), "utf8"), "frame");
-    assert.equal(readFileSync(join(oldDir, "contact-sheet-kept.png"), "utf8"), "sheet");
+    assert.deepEqual(result, { expiredAcquisitions: 1, videoPayloadsRemoved: 1, partialsRemoved: 1, skippedSymlinks: 0, evidenceSetsRemoved: 1 });
+    assert.equal(existsSync(join(oldDir, "manifest.json")), false);
+    assert.equal(existsSync(join(oldDir, "frame-kept.png")), false);
+    assert.equal(existsSync(join(oldDir, "contact-sheet-kept.png")), false);
     assert.equal(readFileSync(join(oldDir, "notes.txt"), "utf8"), "must stay");
     assert.equal(readFileSync(join(oldDir, "video-20260912T000000Z.mp4.part"), "utf8"), "fresh partial");
     assert.equal(readFileSync(join(recentDir, recentVideo), "utf8"), "video");
@@ -119,4 +119,25 @@ test("video evidence pruning refuses a symlinked manifest without touching its p
     rmSync(root, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
   }
+});
+
+test("evidence directories are removed once expired sets leave them empty", () => {
+  const root = mkdtempSync(join(tmpdir(), "homer-video-evidence-"));
+  try {
+    const stale = "2026-06-01T00:00:00.000Z";
+    const cleanId = "abcdefghijk";
+    const keptId = "lmnopqrstuv";
+    for (const id of [cleanId, keptId]) {
+      const dir = join(root, id);
+      mkdirSync(dir);
+      writeFileSync(join(dir, "manifest.json"), manifest(id, stale, "video-20260601T000000Z.mp4").replace(OLD, stale));
+      writeFileSync(join(dir, "frame-kept.png"), "frame");
+      writeFileSync(join(dir, "contact-sheet-kept.png"), "sheet");
+    }
+    writeFileSync(join(root, keptId, "notes.txt"), "must stay");
+    const result = pruneExpiredVideoEvidence({ root, now: new Date("2026-09-13T00:00:00.000Z") });
+    assert.equal(result.evidenceSetsRemoved, 2);
+    assert.equal(existsSync(join(root, cleanId)), false);
+    assert.deepEqual(readdirSync(join(root, keptId)), ["notes.txt"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

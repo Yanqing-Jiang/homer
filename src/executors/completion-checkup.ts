@@ -1,5 +1,4 @@
 import { executeOpenCodeCLI } from "./opencode-cli.js";
-import { executeCodexCLI } from "./codex-cli.js";
 import { executeKimiCLI } from "./kimi-cli.js";
 import type { ExecutorKind } from "./fallback-orchestrator.js";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
@@ -73,12 +72,12 @@ async function runCheckupWithExecutor(
       return res.exitCode === 0 ? res.output : null;
     }
     if (executor === "codex") {
-      const res = await executeCodexCLI(prompt, {
+      const res = await executeOpenCodeCLI(prompt, "", {
         cwd: runtimePaths.homeDir,
         timeout: 300000,
-        model: "gpt-5.6-terra",
-        reasoningEffort: "high",
-        readOnly: true,
+        model: "github-copilot/claude-opus-5.5",
+        variant: "high",
+        forceOpenCode: true,
       });
       return res.exitCode === 0 ? res.output : null;
     }

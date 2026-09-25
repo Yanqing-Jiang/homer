@@ -68,7 +68,8 @@ export class BrokeredAgentSession implements AgentBrowserSession {
     }
   }
 
-  async command(args: string[], timeoutMs = 120_000): Promise<string> {
+  /** `keychainService` makes browserctl fill `fill <selector>` from that Keychain item. */
+  async command(args: string[], timeoutMs = 120_000, keychainService?: string): Promise<string> {
     await this.readyPromise;
     const id = this.nextId++;
     return await new Promise<string>((resolve, reject) => {
@@ -79,7 +80,7 @@ export class BrokeredAgentSession implements AgentBrowserSession {
         return;
       }
       this.pending.set(id, { resolve, reject });
-      this.child.stdin.write(`${JSON.stringify({ id, args, timeoutMs })}\n`, (err) => {
+      this.child.stdin.write(`${JSON.stringify({ id, args, timeoutMs, ...(keychainService ? { keychainService } : {}) })}\n`, (err) => {
         if (err) {
           this.pending.delete(id);
           reject(err);

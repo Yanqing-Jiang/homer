@@ -13,6 +13,7 @@ import { logger } from "../utils/logger.js";
 import { processRegistry } from "../process/registry.js";
 import { getRuntimePaths } from "../utils/runtime-paths.js";
 import {
+  BROKER_RESTORE_WINDOW_MS,
   BROWSER_CONTROL_STATE_DIR,
   BrowserLeaseBroker,
   HttpBrowserTargetClient,
@@ -646,14 +647,25 @@ export function useRemoteResidentChrome(sshHost: string): void {
     ...sharedSupervisorDeps,
     remote: true,
     ensureProfile: () => {},
-    spawnChrome: () => new RemoteChromeChild("downloads", CDP_PORT, (id) => {
-      let previous = "";
-      try { previous = readFileSync(remoteIdentityPath, "utf8").trim(); } catch { /* first contact */ }
-      try { mkdirSync(dirname(remoteIdentityPath), { recursive: true, mode: 0o700 }); writeFileSync(remoteIdentityPath, `${id}\n`, { mode: 0o600 }); }
-      catch (err) { logger.warn({ err }, "Remote Chrome identity could not be recorded"); }
-      if (previous === id && existsSync(EXTERNAL_HANDOFF_PATH)) void restoreExternalHolderAfterAdoption(0);
-      else discardExternalReservationHandoff(previous === id ? "no holder was handed off" : "remote Chrome is a new browser");
-    }),
+    spawnChrome: () => {
+      // Hold the previous generation's leases open until the browser's identity is known:
+      // its drivers kept running through the restart and are renewing against this broker.
+      if (existsSync(EXTERNAL_HANDOFF_PATH)) {
+        const until = Date.now() + BROKER_RESTORE_WINDOW_MS;
+        browserLeaseBroker.setAdoptionGrace(until, "restoring the previous daemon generation's browser leases");
+        browserLeaseBroker.setRestoring(until);
+      }
+      return new RemoteChromeChild("downloads", CDP_PORT, (id) => {
+        let previous = "";
+        try { previous = readFileSync(remoteIdentityPath, "utf8").trim(); } catch { /* first contact */ }
+        try { mkdirSync(dirname(remoteIdentityPath), { recursive: true, mode: 0o700 }); writeFileSync(remoteIdentityPath, `${id}\n`, { mode: 0o600 }); }
+        catch (err) { logger.warn({ err }, "Remote Chrome identity could not be recorded"); }
+        if (previous === id && existsSync(EXTERNAL_HANDOFF_PATH)) { void restoreExternalHolderAfterAdoption(0); return; }
+        discardExternalReservationHandoff(previous === id ? "no holder was handed off" : "remote Chrome is a new browser");
+        browserLeaseBroker.setRestoring(null);
+        browserLeaseBroker.setAdoptionGrace(0, "no handoff to restore");
+      });
+    },
   });
 }
 
@@ -794,6 +806,9 @@ export function discardExternalReservationHandoff(reason: string): void {
  * contention vs sickness defer instead of alerting.
  */
 export async function restoreExternalHolderAfterAdoption(chromePid: number): Promise<void> {
+  try { await restoreHandoff(chromePid); } finally { browserLeaseBroker.setRestoring(null); }
+}
+async function restoreHandoff(chromePid: number): Promise<void> {
   let handoff: ExternalHolderHandoff | null = null;
   try {
     if (existsSync(EXTERNAL_HANDOFF_PATH)) {
@@ -812,6 +827,7 @@ export async function restoreExternalHolderAfterAdoption(chromePid: number): Pro
   );
   if (fresh && handoff?.holder) {
     const restored = await browserLeaseBroker.restoreExternalHolder(handoff.holder);
+    if (restored.outcome !== "unknown") browserLeaseBroker.setAdoptionGrace(0, "external holder handoff resolved");
     if (restored.outcome === "restored") {
       logger.warn(
         { chromePid, ...restored },

@@ -27,7 +27,7 @@ const { downloadBlob, listBlobs, getBlobProperties } = await import("../integrat
 const { AGE_IDENTITY_PATH, OFFSITE_PREFIX, offsiteBlobName, resolveAgeBinary } =
   await import("../scheduler/jobs/db-backup.js");
 
-const BACKUP_DIR = join(PATHS.homerRoot, "backups");
+const BACKUP_DIR = PATHS.homerBackups;
 const WORK_DIR = join(PATHS.homerData, "tmp", "restore-drill");
 
 function sha256(filePath: string): string {
