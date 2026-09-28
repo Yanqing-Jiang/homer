@@ -5,6 +5,7 @@ A personal AI daemon that turns several agent CLIs into one addressable assistan
 with persistent memory, scheduled jobs, and chat, phone and MCP entry points.</p>
 
 <p align="center">
+<a href="https://yanqing.app/homer/"><b>Explore Homer on yanqing.app</b></a> ·
 <a href="#what-a-clone-can-and-cannot-do"><b>Read this first</b></a> ·
 <a href="docs/harness-independence.md"><b>How routing works</b></a> ·
 <a href="#skills">Write a skill</a> ·
