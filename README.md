@@ -21,17 +21,10 @@ This repository is the **shell**: the daemon framework, scheduler, executors, br
 
 ```mermaid
 flowchart LR
-  TG[Telegram bot] --> D
-  PH[Twilio SMS / ElevenLabs calls] --> D
-  MCP[MCP stdio server] --> D
-  CRON["schedule.json jobs"] --> D
-  D(("Homer daemon<br/>launchd + supervisor")) --> H{"Harness spine<br/>per-job selection"}
-  H --> C1[codex]
-  H --> C2[claude]
-  H --> C3[opencode]
-  H --> C4[gemini / agy]
-  H --> C5[kimi]
-  D --- DB[("homer.db<br/>SQLite + FTS5")]
+  IN["Telegram · phone · MCP<br/>Scheduled jobs"] --> D["Homer daemon<br/>launchd + supervisor"]
+  D --> H["Per-job routing"]
+  H --> CL["Codex · Claude · OpenCode<br/>Gemini / agy · Kimi"]
+  D --- DB[("Shared memory<br/>SQLite + FTS5")]
   D --- BR["browserctl<br/>leased Chrome instances"]
 ```
 
