@@ -1,141 +1,147 @@
-# Homer
+<h1 align="center">Homer</h1>
 
-**Hybrid Orchestration for Multi-model Execution and Routing.**
+<p align="center"><b>Hybrid Orchestration for Multi-model Execution and Routing.</b><br>
+A personal AI daemon that turns several agent CLIs into one addressable assistant<br>
+with persistent memory, scheduled jobs, and chat, phone and MCP entry points.</p>
 
-Homer is a personal AI assistant daemon — a 24/7 process that turns Claude Code, Codex, Gemini, and Kimi into a single addressable agent with persistent memory, scheduled jobs, multi-channel input (Telegram, telephony, MCP), and an opinionated retrieval system.
+<p align="center">
+<a href="#what-a-clone-can-and-cannot-do"><b>Read this first</b></a> ·
+<a href="docs/harness-independence.md"><b>How routing works</b></a> ·
+<a href="#skills">Write a skill</a> ·
+<a href="docs/telephony.md">Telephony</a>
+</p>
 
-This repository is the **shell**: the daemon framework, scheduler, executors, browser broker, telephony server and the tooling around them. Everything specific to one operator — their skills, scheduled jobs for their own portals and data, personal bins and configs — lives in a separate, unpublished checkout that plugs in through the [private overlay](#private-overlay). You generate your own skills and jobs; nothing here assumes who you are.
+---
 
-> ⚠️ **This is a personal system published as reference, not a product.** It runs on one Mac mini against one human's memory, inbox and tools. Several subsystems the daemon imports (memory extraction, meetings, telephony internals, scraping pipelines, YouTube processing) are still kept out of the public snapshot — see the "Personal subsystems" block at the end of `.gitignore` — so **a clone of this repository does not compile on its own yet**; treat it as a reference for building your own. Interfaces, schema and tools change without notice.
+## The idea
+
+Coding agents such as Claude Code, Codex, OpenCode, Gemini (through `agy`) and Kimi are each good at something, and Homer maintains shared continuity across them. It is the process that stays up between sessions. It runs 24/7 on one Mac under launchd, keeps a SQLite memory, runs jobs on a cron schedule, and chooses which CLI handles each job from a database table rather than from hard-coded calls.
+
+This repository is the **shell**: the daemon framework, scheduler, executors, browser broker, skill renderer and the tooling around them. Everything specific to one operator, such as their skills, their jobs, personal bins and configs, lives in a separate unpublished checkout that plugs in through the [private overlay](#private-overlay).
+
+```mermaid
+flowchart LR
+  TG[Telegram bot] --> D
+  PH[Twilio SMS / ElevenLabs calls] --> D
+  MCP[MCP stdio server] --> D
+  CRON["schedule.json jobs"] --> D
+  D(("Homer daemon<br/>launchd + supervisor")) --> H{"Harness spine<br/>per-job selection"}
+  H --> C1[codex]
+  H --> C2[claude]
+  H --> C3[opencode]
+  H --> C4[gemini / agy]
+  H --> C5[kimi]
+  D --- DB[("homer.db<br/>SQLite + FTS5")]
+  D --- BR["browserctl<br/>leased Chrome instances"]
+```
+
+## What a clone can and cannot do
+
+This is a personal system published as a reference, not a product. It runs on one Mac mini against one person's memory, inbox and tools. Interfaces, schema and tools change without notice.
+
+**A public clone does not build on its own.** Several subsystems the daemon imports are kept out of the public snapshot and listed in the "Personal subsystems" block at the end of [`.gitignore`](.gitignore). Examples:
+
+| Missing from this repo | Imported by |
+|---|---|
+| `src/memory/` | `src/index.ts`, `src/mcp/server.ts` |
+| `src/telephony/` (including the `/health` server) | `src/index.ts` |
+| `src/mcp/tools/memory.ts`, `src/mcp/tools/calls.ts` | `src/mcp/server.ts` |
+| `bin/browser-process-groups.mjs` | `bin/browserctl` |
+
+`npm run check` and `npm test` also call `test:abvp`, which runs a test script inside the private overlay (`${HOMER_PRIVATE_ROOT:-../homer-private}`).
+
+What you can do with a clone:
+
+1. Read the architecture: [`src/scheduler/`](src/scheduler), [`src/executors/`](src/executors), [`src/harness/`](src/harness), [`src/state/migrations/`](src/state/migrations).
+2. Borrow the patterns: harness-independent job routing ([`docs/harness-independence.md`](docs/harness-independence.md)), the launchd supervisor ([`scripts/daemon-supervisor.mjs`](scripts/daemon-supervisor.mjs)), the private-overlay loader ([`src/private-overlay.ts`](src/private-overlay.ts)) and the skill renderer ([`scripts/render-harness-assets.ts`](scripts/render-harness-assets.ts)).
+3. Use it as the base for your own daemon, supplying the missing modules yourself.
 
 ## What it does
 
-- Runs as a launchd daemon on macOS (`gui/$(id -u)/com.homer.daemon`) under a resident supervisor with a single-instance flock and crash-safe restart.
-- Exposes the agent through three entry points — Telegram bot (Grammy), telephony webhooks (Twilio SMS + ElevenLabs Conversational AI), and an MCP stdio server for Claude Code.
-- Schedules cron jobs from hot-reloadable `schedule.json` files; internal handlers, CLI-driven skills, and overlay-supplied jobs share one registry and one harness-selection table.
-- Stores operational claims (facts, decisions, lessons, commitments) in a SQLite + FTS5 + vector knowledge store with a 2-tier memory model (canonical DB + live `~/memory/*.md`).
-- Routes deep reasoning to Codex CLI, web-search research to Gemini (`agy`), long-context to Kimi, and everything else to Claude, with per-job fallback chains.
-- Brokers one resident Chrome (CDP) between agents through `bin/browserctl` leases, with session stewardship for whatever authenticated surfaces the overlay declares.
+| Area | What the code does | Where |
+|---|---|---|
+| Process | Runs as the launchd agent `com.homer.daemon` under a resident supervisor with a single-instance lock and restart requests | [`config/`](config), [`scripts/install-daemon.sh`](scripts/install-daemon.sh), [`src/daemon/`](src/daemon) |
+| Entry points | Telegram bot (grammY), telephony webhooks (Twilio SMS, ElevenLabs Conversational AI), and an MCP stdio server | [`src/bot/`](src/bot), [`docs/telephony.md`](docs/telephony.md), [`src/mcp/`](src/mcp) |
+| Scheduling | Cron jobs from hot-reloaded `schedule.json` files. Internal handlers, CLI-run skills and overlay jobs share one registry | [`src/scheduler/registry.ts`](src/scheduler/registry.ts) |
+| Routing | Each job's harness and model is resolved at call time from a database table plus per-job baselines. Switching a job between CLIs is a data change | [`docs/harness-independence.md`](docs/harness-independence.md), [`src/scheduler/harness-baselines.ts`](src/scheduler/harness-baselines.ts) |
+| Memory | Claims such as facts, decisions and lessons live in SQLite with FTS5. Canonical documents live in `~/memory/*.md` | [`src/state/`](src/state) (the memory service itself is private) |
+| Browser | Resident Chrome instances shared between agents through `bin/browserctl` leases, with session stewardship for surfaces the overlay declares | [`bin/browserctl`](bin/browserctl); broker implementation is private |
 
-## Stack
+**Stack:** Node.js 24+ ([`.node-version`](.node-version)), TypeScript ESM, `better-sqlite3`, Zod, grammY, Fastify (telephony only), Playwright, `@modelcontextprotocol/sdk`, Anthropic/OpenAI/Google SDKs, Azure Blob for media. The full list is in [`package.json`](package.json).
 
-- **Runtime:** Node.js 24+, TypeScript (ESM), Fastify (telephony only), Grammy, `better-sqlite3`, Zod
-- **State:** Local SQLite (`homer.db`) with FTS5 and a vector chunk store
-- **Storage:** Azure Blob for media; macOS Keychain for OAuth
-- **LLMs:** Anthropic SDK, OpenAI SDK, Google Generative AI; CLI wrappers around `claude`, `codex`, `agy`, `kimi`
-- **Browser:** Playwright and a CDP lease broker over one resident Chrome
-- **MCP:** `@modelcontextprotocol/sdk` stdio server registering memory, blob, session, call, and todo tools
-- **Telephony:** ElevenLabs Conversational AI + Twilio phone number, fronted by Cloudflare Tunnel (see [`docs/telephony.md`](docs/telephony.md))
+## Running it (full tree only)
 
-## Repository layout
-
-```
-src/
-├── bot/             # Telegram handlers
-├── cli-sessions/    # Bridge Claude Code sessions into the daemon
-├── executors/       # Wrappers around Claude / Codex / Gemini / Kimi CLIs
-├── harness/         # Harness-independent capability resolution
-├── mcp/             # MCP stdio server
-├── scheduler/       # Cron jobs, registry, harness baselines, failure takeover
-├── scraping/        # Browser broker, session stewardship, agent-browser helpers
-├── state/           # SQLite migrations + StateManager singleton
-├── private-overlay.ts   # Loader for the operator's private overlay (optional)
-└── private/         # (symlink, untracked) the overlay's sources when installed
-bin/browserctl       # CLI for the browser lease broker
-config/              # *.template launchd plists rendered at install time
-scripts/             # Build, install, restart, overlay, skill rendering
-skills/aliases/      # Logical -> harness-native MCP tool alias table
-docs/                # telephony.md, harness-independence.md
-```
-
-## Quick Start
-
-### Prerequisites
-
-- macOS (the daemon is launchd-based)
-- Node.js 24+ (`brew install node`)
-- Xcode Command Line Tools — `xcode-select --install` (needed for native deps `better-sqlite3` and `fs-ext`)
-- Optional for chat: a Telegram bot token from [@BotFather](https://t.me/BotFather) and your numeric chat ID from [@userinfobot](https://t.me/userinfobot)
-- Optional for telephony: [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) (`cloudflared`), a Twilio phone number, and an ElevenLabs Conversational AI agent — see [`docs/telephony.md`](docs/telephony.md)
-
-### 1. Clone and configure
+These steps assume you have the private subsystems listed above, or your own replacements for them. They require macOS, Node.js 24+ and the Xcode Command Line Tools (`xcode-select --install`) for the native `better-sqlite3` and `fs-ext` builds.
 
 ```bash
 git clone https://github.com/Yanqing-Jiang/homer.git ~/homer
 cd ~/homer
-
 cp .env.example .env
 npm install
 npm run build
-npm run typecheck
+npm start                                  # foreground run
+curl -fsS http://127.0.0.1:3000/health     # from a second terminal
 ```
 
-Fill in the **operator identity** block of `.env` (`OWNER_DISPLAY_NAME`, `OWNER_PHONE`, `OWNER_SITE`, `OWNER_GOOGLE_ACCOUNT`, ...): prompts, alerts and integrations read the operator's name and accounts from the environment only. Credentials can stay empty for the first boot; with empty `TELEGRAM_BOT_TOKEN` or `ALLOWED_CHAT_ID`, Homer skips Telegram polling and keeps local services running. The first daemon boot creates:
+Fill in the operator identity block of `.env` (`OWNER_DISPLAY_NAME`, `OWNER_PHONE`, `OWNER_SITE`, `OWNER_GOOGLE_ACCOUNT` and related values). Prompts, alerts and integrations read the operator's name and accounts only from the environment. Credentials may stay empty for a first boot. If `TELEGRAM_BOT_TOKEN` or `ALLOWED_CHAT_ID` is empty, Telegram polling is skipped. The first boot creates `~/homer/data/homer.db`, `~/homer/logs/`, and the canonical files under `~/memory/`.
 
-```text
-~/homer/data/homer.db
-~/homer/logs/
-~/memory/{me.md,work.md,preferences.md,tools.md,patterns.md,session-bootstrap.md,schedule.json}
-```
-
-### 2. Run once interactively
+To install it as a login agent:
 
 ```bash
-npm start
-```
-
-In another terminal:
-
-```bash
-curl -fsS http://127.0.0.1:3000/health
-```
-
-Stop the foreground process with `Ctrl-C` after verifying health.
-
-### 3. Install with launchd
-
-```bash
-bash scripts/install-daemon.sh
-```
-
-`install-daemon.sh` renders `~/Library/LaunchAgents/com.homer.daemon.plist` from `config/com.homer.daemon.plist.template`, substituting the home directory, user, group and managed Node binary — so it works on any account. Secrets are loaded by the daemon from `.env` via dotenv; never put them in the plist.
-
-Verify:
-
-```bash
+bash scripts/install-daemon.sh             # renders ~/Library/LaunchAgents/com.homer.daemon.plist from the template
 launchctl print gui/$(id -u)/com.homer.daemon
-tail -f ~/homer/logs/stdout.log
-curl -fsS http://127.0.0.1:3000/health
 ```
 
-### Other entry points
+The daemon loads secrets from `.env` through dotenv. Never put them in the plist.
 
-```bash
-npm run mcp                   # MCP stdio server (for Claude Code)
-npm run tui                   # blessed-based TUI dashboard
-npm run restart               # request a daemon restart through the supervisor
-npm run deploy                # build, smoke-test, restart, wait for the new build
-npm run private:status        # show private-overlay links (if an overlay is installed)
-```
+| Command | Does |
+|---|---|
+| `npm run mcp` | Starts the MCP stdio server |
+| `npm run tui` | Opens the blessed terminal dashboard |
+| `npm run restart` | Asks the supervisor for a restart |
+| `npm run deploy` | Runtime check, build, smoke test, supervisor test, restart, then waits for the new build |
+| `npm run private:status` | Shows private-overlay links |
+| `npm run check` | Typecheck, build, skill drift, harness lint and conformance, plus overlay tests |
+
+## Environment
+
+<details>
+<summary>Environment variable reference</summary>
+
+The full, commented list is in [`.env.example`](.env.example). Which values you need depends on the surfaces you enable.
+
+| Variable | Purpose | Needed for |
+|---|---|---|
+| `OWNER_DISPLAY_NAME`, `OWNER_FULL_NAME`, `OWNER_PHONE`, `OWNER_SITE`, `OWNER_GOOGLE_ACCOUNT` | Operator identity for prompts, alerts and OAuth integrations | recommended |
+| `TELEGRAM_BOT_TOKEN`, `ALLOWED_CHAT_ID` | Telegram bot and single-user allowlist | Telegram |
+| `OPENAI_API_KEY`, `MOONSHOT_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` | Model providers and embeddings | jobs using those providers |
+| `TELEPHONY_ENABLED`, `TELEPHONY_HOST`, `TELEPHONY_PORT` | Local HTTP server with `/health` (default `127.0.0.1:3000`) | local health check |
+| `TELEPHONY_PUBLIC_URL` | Public origin Twilio uses for signature validation (`HOMER_API_URL` is an accepted alias) | public telephony |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` | Twilio SMS and outbound calls | Twilio |
+| `ELEVEN_LABS_API_KEY`, `ELEVENLABS_AGENT_ID`, `ELEVENLABS_PHONE_NUMBER_ID`, `ELEVENLABS_WEBHOOK_SECRET` | ElevenLabs Conversational AI and post-call webhooks | ElevenLabs |
+| `AZURE_STORAGE_CONNECTION_STRING` | Blob storage for media | blob tools |
+| `HOMER_HOME`, `HOMER_ROOT`, `DATABASE_PATH`, `MEMORY_PATH`, `LOGS_PATH` | Override local state locations | optional |
+| `HOMER_PRIVATE_ROOT` | Private overlay checkout. An empty value disables it | optional |
+
+</details>
 
 ## Skills
 
-Skills are not shipped. Homer only ships the **skill layout** and the renderer that fans one canonical skill out to every harness (Claude Code, OpenCode, Codex, plus a plain view the scheduler injects as `contextFiles`). You write your own.
+No skills are shipped. Homer ships only the skill layout and a renderer that fans one canonical skill out to Claude Code, OpenCode and Codex, plus a plain view the scheduler can inject as `contextFiles`.
 
-### Layout
-
-A skill root is any directory with this shape (this repository's `skills/` is the reference for the alias table only):
-
-```
+```text
 <root>/skills/
-├── aliases/mcp-tools.yaml     # logical tool -> harness-native MCP tool name (copy skills/aliases/mcp-tools.yaml)
-├── skills/<id>/skill.md       # one directory per skill; optional config.json / scripts/ beside it
+├── aliases/mcp-tools.yaml     # logical tool -> harness-native MCP tool name
+├── skills/<id>/skill.md       # one directory per skill
 ├── commands/<id>.md           # slash commands (kind: command)
 └── agents/<id>.md             # sub-agent definitions (kind: agent)
-<root>/generated/harness/      # renderer output (claude/, opencode/, codex/, plain/) — never hand-edit
+<root>/generated/harness/      # renderer output (claude/, opencode/, codex/, plain/); never hand-edit
 ```
 
-Each `skill.md` starts with YAML frontmatter, then the body. The minimum:
+<details>
+<summary>Skill template and installation commands</summary>
+
+A minimal `skill.md`:
 
 ```markdown
 ---
@@ -149,8 +155,8 @@ triggers:
   slash:
     - /morning-brief
 execution:
-  disableModelInvocation: false   # true = never auto-invoked by a model, only by slash trigger
-  schedulerSafe: true             # may be run unattended by the scheduler
+  disableModelInvocation: false   # true = only a slash trigger may run it
+  schedulerSafe: true             # may run unattended from the scheduler
 tools:
   logical:
     - memory.context
@@ -161,102 +167,44 @@ harness:
   codex: { emitSkill: true }
 ---
 
-Instructions for the agent go here. Refer to MCP tools by their logical
-name with a macro, e.g. {{tool:memory.search}}; the renderer rewrites it to
+Instructions for the agent go here. Refer to MCP tools by logical name,
+e.g. {{tool:memory.search}}; the renderer rewrites it to
 mcp__homer-memory__memory_search for Claude and memory_search for the others.
 ```
 
-`id` must match the directory name. Reference MCP tools by the **logical** names defined in `aliases/mcp-tools.yaml`; the renderer substitutes each harness's native tool name.
-
-### Rendering and installing
-
-Point the renderer at your skill root(s) with `~/.config/homer/skill-roots.json`:
-
-```json
-{ "roots": ["/path/to/my-skills"] }
-```
-
-Roots are scanned in order; the first root supplies `aliases/mcp-tools.yaml`; an entry may be `{ "path": "...", "exclude": ["skill-id"] }` to skip ids. Without this file the renderer treats this repository as the single root. Then:
+`id` must match the directory name. Logical tool names come from [`skills/aliases/mcp-tools.yaml`](skills/aliases/mcp-tools.yaml). List your skill roots in `~/.config/homer/skill-roots.json` as `{ "roots": ["/path/to/my-skills"] }`. Roots are scanned in order, and the first one supplies the alias table. An entry may be `{ "path": "...", "exclude": ["skill-id"] }`. Without that file, the renderer treats this repository as the only root.
 
 ```bash
-npm run skills:render            # write <root>/generated/harness/{claude,opencode,codex,plain}/...
-npm run skills:check             # fail if generated views drift from canonical (CI gate)
-npm run skills:install           # render + copy into ~/.claude, ~/.config/opencode, ~/.codex
-tsx scripts/render-harness-assets.ts list
+npm run skills:render     # write <root>/generated/harness/{claude,opencode,codex,plain}/...
+npm run skills:check      # fail if generated views drift from canonical
+npm run skills:install    # render, then copy into ~/.claude, ~/.config/opencode, ~/.codex
 ```
 
-Scheduled jobs that run a skill reference its plain view, e.g. `contextFiles: ["<root>/generated/harness/plain/morning-brief.md"]` in `schedule.json`.
+</details>
 
 ## Private overlay
 
-Operator-specific code — jobs for your own portals and data, browser surfaces to keep signed in, personal bins, launchd/tmux configs, one-off scripts — lives in a separate checkout that is never published. The daemon discovers it through `HOMER_PRIVATE_ROOT` (or the sibling directory `../homer-private`) and its `homer-overlay.json` manifest:
+Operator-specific code lives in a separate checkout that is never published. The daemon finds it through `HOMER_PRIVATE_ROOT`, or through the sibling directory `../homer-private`, and reads its `homer-overlay.json` manifest:
 
 | Manifest key | What it does |
 |---|---|
-| `links` | `{ target, link }` pairs symlinked into this tree by `scripts/private-overlay.mjs link` (run automatically by `npm run build`). Conventional links: `src -> src/private`, `tests -> tests/private`, `scripts -> scripts/private`, individual `bin/<tool>` files, `skills/{skills,commands,dist}`, `generated`. All of these paths are git-ignored here and rejected by the nightly push job. |
-| `jobs` | Registry entries (same shape as `src/scheduler/registry.ts`) for the overlay's scheduled jobs; their handler files live in `<overlay>/src/scheduler/jobs/`. |
-| `handlersModule` | Module under `<overlay>/src` exporting `handlers: Record<handlerName, PrivateJobHandler>` (contract in `src/scheduler/private-job-contract.ts`). Any `handler` in `schedule.json` the daemon does not implement itself is dispatched here. |
-| `harnessBaselines` | Per-job executor/model baselines merged into `INTERNAL_JOB_HARNESS_BASELINES`. |
-| `stewardshipSurfacesModule` | Module exporting `SURFACES` (see `StewardshipSurface` in `src/scraping/session-stewardship.ts`): the authenticated tabs the resident Chrome keeps alive. Without it, stewardship is idle. |
-| `smokeModules` | Extra compiled modules `scripts/smoke-test.mjs` must import before a restart. |
+| `links` | `{ target, link }` pairs symlinked into this tree by `scripts/private-overlay.mjs link`, which `npm run build` runs automatically. These paths are git-ignored here |
+| `jobs` | Registry entries for the overlay's scheduled jobs, in the same shape as [`src/scheduler/registry.ts`](src/scheduler/registry.ts) |
+| `handlersModule` | Module exporting `handlers: Record<handlerName, PrivateJobHandler>`. The contract is in [`src/scheduler/private-job-contract.ts`](src/scheduler/private-job-contract.ts) |
+| `harnessBaselines` | Per-job executor and model baselines merged into the public ones |
+| `stewardshipSurfacesModule` | Module exporting `SURFACES`, the authenticated tabs the resident Chrome keeps alive. The session-stewardship implementation is private |
+| `smokeModules` | Extra compiled modules that [`scripts/smoke-test.mjs`](scripts/smoke-test.mjs) must import before a restart |
 
-Overlay sources under `src/` are compiled by this repository's build (their relative imports are written as if they lived at `src/private/...`); the private checkout has no build of its own. Overlay tests and scripts run as entry files through the symlink, so they import via `../../homer/...` relative to their real location and run with `NODE_OPTIONS=--preserve-symlinks`.
+This repository compiles the overlay's `src/` through the `src/private` symlink. The private checkout has no build of its own. Overlay tests and scripts run through the symlink with `NODE_OPTIONS=--preserve-symlinks`.
 
-## Environment
+## Interfaces in brief
 
-The full list is in [`.env.example`](.env.example). The credentials you actually need depend on which surfaces you enable.
+**MCP tools.** In this repository, the `homer-memory` server registers `todo_*` tools ([`src/mcp/tools/todos.ts`](src/mcp/tools/todos.ts)), `blob_*` tools ([`blob.ts`](src/mcp/tools/blob.ts)), and `session_archive`, `thread_load`, `outcome_check` and `preference_query` ([`sessions.ts`](src/mcp/tools/sessions.ts)). The memory tools (`memory_context`, `memory_search`, `memory_promote`, …) and `call_person` come from the private modules.
 
-| Variable | Purpose | Required |
-|---|---|---|
-| `OWNER_DISPLAY_NAME`, `OWNER_FULL_NAME`, `OWNER_PHONE`, `OWNER_SITE`, `OWNER_GOOGLE_ACCOUNT` | Operator identity used in prompts, alerts and OAuth integrations | recommended |
-| `TELEGRAM_BOT_TOKEN`, `ALLOWED_CHAT_ID` | Telegram bot + single-user allowlist | only for Telegram |
-| `OPENAI_API_KEY` / `MOONSHOT_API_KEY` / `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` | Model providers and embeddings | only for jobs using those providers |
-| `HOMER_HOME`, `HOMER_ROOT`, `DATABASE_PATH`, `MEMORY_PATH`, `LOGS_PATH` | Override local state locations | no |
-| `HOMER_PRIVATE_ROOT` | Private overlay checkout (empty disables) | no |
-| `AZURE_STORAGE_CONNECTION_STRING` | Blob storage for media | only for blob tools |
-| `TELEPHONY_PUBLIC_URL` | Public origin Twilio uses for signature validation | only for public telephony |
-| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` | Twilio SMS + outbound calls | only for Twilio |
-| `ELEVEN_LABS_API_KEY`, `ELEVENLABS_AGENT_ID`, `ELEVENLABS_PHONE_NUMBER_ID`, `ELEVENLABS_WEBHOOK_SECRET` | ElevenLabs ConvAI + post-call webhooks | only for ElevenLabs |
+**Scheduled jobs.** `~/memory/schedule.json` and the work lane's `schedule.json` are watched and hot-reloaded. A job either names an internal `handler` ([`src/scheduler/internal-handlers.ts`](src/scheduler/internal-handlers.ts) or the overlay) or runs a CLI harness with a skill's plain view as context. The registry is checked against the loaded schedules at boot.
 
-`HOMER_API_URL` is accepted as a backward-compatible alias for `TELEPHONY_PUBLIC_URL`.
-
-## Memory model
-
-Two tiers, deliberately kept separate:
-
-| Tier | Source | Used for |
-|---|---|---|
-| **Canonical** | `homer.db` (`knowledge_claims` + FTS5) and `~/memory/*.md` | Ground truth for every claim Homer makes |
-| **Live** | `memory_context` MCP call | Real-time freshness check before answering status/goals/plans |
-
-Operational claims (fact / decision / question / insight / commitment / lesson / hypothesis) live in the DB and are searchable through `knowledge_claims_fts`. Only `preference` claims are mirrored to markdown.
-
-## MCP tools (highlights)
-
-Registered against Claude Code over stdio:
-
-- `memory_context`, `memory_search` (ranked recall, plus `mode='fetch'` for a whole-document read of a canonical doc), `memory_promote`, `memory_remove`, `memory_suggest`
-- `todo_save`, `todo_list`, `todo_start_chat`
-- `blob_upload`, `blob_download`, `blob_list`, `blob_get_content`, `blob_properties`
-- `call_person`, `outcome_check`, `preference_query`, `thread_load`, `session_archive`
-
-## Scheduled jobs
-
-`schedule.json` files at `~/memory/schedule.json` and `~/work/schedule.json` are watched and hot-reloaded. A job either names an internal `handler` (implemented in `src/scheduler/internal-handlers.ts` or supplied by the overlay) or runs a CLI harness with a skill's plain view as context. `src/scheduler/registry.ts` is the single source of truth and is validated against the loaded schedules at boot.
-
-## Telephony
-
-Homer's only public HTTP surface. Two webhook routes plus `/health`, all behind a Cloudflare Tunnel:
-
-- `POST /webhooks/elevenlabs/call-complete` — HMAC-SHA256 signed, persists transcript to disk before 200, processes summary in background
-- `POST /webhooks/twilio/sms` — HMAC-SHA1 signed, replies with empty TwiML, forwards SMS to Telegram
-
-Architecture diagram, env-var table, Cloudflare/Twilio/ElevenLabs setup, signature-validation curl recipes, and troubleshooting are in [`docs/telephony.md`](docs/telephony.md).
-
-## Tests
-
-`npm test` runs the typecheck, build, skill-drift, harness-lint and conformance checks plus the browser-broker test. Operator fixture tests live in the private overlay.
+**Telephony.** This is the only public HTTP surface: `/health`, a signed ElevenLabs call-complete webhook, and a signed Twilio SMS webhook, all behind Cloudflare Tunnel. The architecture, setup and signature-test recipes are in [`docs/telephony.md`](docs/telephony.md).
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT. See [`LICENSE`](LICENSE).
